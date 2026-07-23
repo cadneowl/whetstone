@@ -1,0 +1,10 @@
+diff --git a/src/handlers/charge.rs b/src/handlers/charge.rs
+--- a/src/handlers/charge.rs
++++ b/src/handlers/charge.rs
+@@ -40,5 +40,6 @@ impl ChargeHandler {
+     pub fn charge(&self, id: u64) -> Response {
+-        let row = self.db.get(id);
++        let row = self.db.get(id).unwrap();
+         Response::ok(row)
+     }
+ }

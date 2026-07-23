@@ -1,0 +1,9 @@
+[
+  {
+    "iid": 812,
+    "title": "Charge handler: propagate DB error",
+    "web_url": "https://gitlab.acme.com/acme/payments/-/merge_requests/812",
+    "merged_at": "2026-06-01T10:00:00.000Z",
+    "diff_refs": {"base_sha": "base123", "head_sha": "head456", "start_sha": "base123"}
+  }
+]

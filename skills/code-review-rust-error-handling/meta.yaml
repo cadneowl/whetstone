@@ -1,0 +1,14 @@
+owner: "@backend-guild"
+references:
+  - kind: code
+    repo: "gitlab:acme/payments"
+    path: "src/error.rs"
+  - kind: wiki
+    id: "outline:eng-standards/error-handling"
+provenance:
+  R1:
+    - source: gitlab_mr
+      ref: "acme/payments!812#note_44"
+  R2:
+    - source: gitlab_mr
+      ref: "acme/payments!780#note_12"

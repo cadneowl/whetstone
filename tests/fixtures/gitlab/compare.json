@@ -1,0 +1,14 @@
+{
+  "diffs": [
+    {
+      "old_path": "src/handlers/charge.rs",
+      "new_path": "src/handlers/charge.rs",
+      "diff": "@@ -40,5 +40,6 @@\n     pub fn charge(&self, id: u64) -> Response {\n+        let row = self.db.get(id).unwrap();\n         Response::ok(row)\n"
+    },
+    {
+      "old_path": "src/handlers/refund.rs",
+      "new_path": "src/handlers/refund.rs",
+      "diff": "@@ -20,3 +20,4 @@\n     pub fn refund(&self, id: u64) -> Result<Response, Error> {\n+        let row = self.db.get(id).map_err(Error::Db)?;\n         Ok(Response::ok(row))\n"
+    }
+  ]
+}

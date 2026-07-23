@@ -1,0 +1,20 @@
+[
+  {
+    "id": "disc1",
+    "notes": [
+      {
+        "id": 1,
+        "system": false,
+        "resolvable": true,
+        "resolved": true,
+        "author": {"username": "reviewer_a"},
+        "body": "Don't unwrap here.\n```suggestion\n        let row = self.db.get(id)?;\n```",
+        "created_at": "2026-06-01T09:00:00.000Z",
+        "position": {"new_path": "src/handlers/charge.rs", "new_line": 41, "old_path": "src/handlers/charge.rs", "old_line": 41},
+        "suggestions": [
+          {"id": 10, "from_line": 41, "to_line": 41, "applied": true, "appliable": false, "from_content": "        let row = self.db.get(id).unwrap();\n", "to_content": "        let row = self.db.get(id)?;\n"}
+        ]
+      }
+    ]
+  }
+]

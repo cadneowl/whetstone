@@ -1,0 +1,7 @@
+[
+  {
+    "old_path": "src/handlers/charge.rs",
+    "new_path": "src/handlers/charge.rs",
+    "diff": "@@ -40,5 +40,6 @@ impl ChargeHandler {\n     pub fn charge(&self, id: u64) -> Response {\n-        let row = self.db.get(id);\n+        let row = self.db.get(id).unwrap();\n         Response::ok(row)\n     }\n }\n"
+  }
+]

@@ -1,0 +1,8 @@
+diff --git a/src/handlers/charge_test.rs b/src/handlers/charge_test.rs
+--- a/src/handlers/charge_test.rs
++++ b/src/handlers/charge_test.rs
+@@ -10,3 +10,4 @@ mod tests {
+     #[test]
+     fn charges_ok() {
++        let row = db().get(1).unwrap();
+     }

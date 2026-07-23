@@ -1,0 +1,29 @@
+[
+  {
+    "id": "disc2",
+    "notes": [
+      {
+        "id": 2,
+        "system": false,
+        "resolvable": true,
+        "resolved": true,
+        "author": {"username": "reviewer_b"},
+        "body": "Consider logging the charge id for traceability.",
+        "created_at": "2026-06-01T09:05:00.000Z",
+        "position": {"new_path": "src/handlers/charge.rs", "new_line": 42}
+      }
+    ]
+  },
+  {
+    "id": "disc3",
+    "notes": [
+      {
+        "id": 3,
+        "system": true,
+        "author": {"username": "system"},
+        "body": "changed the description",
+        "created_at": "2026-06-01T09:06:00.000Z"
+      }
+    ]
+  }
+]

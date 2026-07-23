@@ -1,0 +1,22 @@
+[
+  {
+    "finding": {"path": "src/handlers/charge.rs", "line": 41, "severity": "warning", "message": "unwrap() on the DB result can panic on a normal error path"},
+    "expectation": {"where": {"path": "src/handlers/charge.rs", "line_range": [40, 45]}, "semantic": "unwrap on the DB result can panic on a normal error path"},
+    "is_match": true
+  },
+  {
+    "finding": {"path": "src/handlers/charge.rs", "line": 41, "severity": "info", "message": "consider renaming the variable `row` to something more descriptive"},
+    "expectation": {"where": {"path": "src/handlers/charge.rs", "line_range": [40, 45]}, "semantic": "unwrap on the DB result can panic on a normal error path"},
+    "is_match": false
+  },
+  {
+    "finding": {"path": "src/auth/session.rs", "line": 88, "severity": "error", "message": "the auth token is written to the info log in plaintext"},
+    "expectation": {"where": {"path": "src/auth/session.rs", "line_range": [85, 90]}, "semantic": "a secret/token is logged, leaking it into log storage"},
+    "is_match": true
+  },
+  {
+    "finding": {"path": "src/auth/session.rs", "line": 88, "severity": "info", "message": "the length of the token is logged for debugging"},
+    "expectation": {"where": {"path": "src/auth/session.rs", "line_range": [85, 90]}, "semantic": "a secret/token value is logged, leaking it into log storage"},
+    "is_match": false
+  }
+]

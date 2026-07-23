@@ -1,0 +1,16 @@
+id: error-mapped-question-mark
+kind: should_not_flag
+repo: "gitlab:acme/payments"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/payments!805"
+  human_signal: "error mapped and propagated with ?; approved clean"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: src/handlers/refund.rs
+      line_range: [20, 25]
+    semantic: "error is mapped and propagated with ?, so there is nothing to flag"
+    pattern: "unwrap"

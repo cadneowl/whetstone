@@ -1,0 +1,8 @@
+diff --git a/src/handlers/refund.rs b/src/handlers/refund.rs
+--- a/src/handlers/refund.rs
++++ b/src/handlers/refund.rs
+@@ -20,3 +20,4 @@ impl RefundHandler {
+     pub fn refund(&self, id: u64) -> Result<Response, Error> {
++        let row = self.db.get(id).map_err(Error::Db)?;
+         Ok(Response::ok(row))
+     }
