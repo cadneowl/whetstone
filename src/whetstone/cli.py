@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from pydantic import BaseModel
 
 from whetstone.core.gate import GateConfig
 from whetstone.core.loader import load_skill, load_skills
 from whetstone.domain.skill import Skill
-from whetstone.llm.anthropic_client import DEFAULT_MODEL, AnthropicClient
+from whetstone.llm.base import LLMClient
+from whetstone.llm.factory import PRESETS, build_llm_client
 from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.registry import available_providers
 from whetstone.service import (
@@ -27,10 +29,40 @@ eval_app = typer.Typer(help="Score skills and gate skill changes.")
 corpus_app = typer.Typer(help="Turn GitLab MR history into candidate eval cases.")
 skills_app = typer.Typer(help="Inspect the skill registry.")
 providers_app = typer.Typer(help="Inspect provider plugins.")
+llm_app = typer.Typer(help="Choose and health-check the model backend (cloud or local).")
 app.add_typer(eval_app, name="eval")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(skills_app, name="skills")
 app.add_typer(providers_app, name="providers")
+app.add_typer(llm_app, name="llm")
+
+# Shared LLM-selection options, so `eval run` and `eval gate` pick a backend the same way.
+_LLM_HELP = (
+    "Model backend: anthropic (default), openai, or a local runner — ollama / lmstudio / vllm / "
+    "llamacpp. Env: WHETSTONE_LLM."
+)
+LlmOpt = Annotated[str | None, typer.Option("--llm", help=_LLM_HELP)]
+ModelOpt = Annotated[
+    str | None, typer.Option("--model", help="Model id (env: WHETSTONE_LLM_MODEL)")
+]
+BaseUrlOpt = Annotated[
+    str | None,
+    typer.Option("--base-url", help="OpenAI-compatible base URL (env: WHETSTONE_LLM_BASE_URL)"),
+]
+KeyEnvOpt = Annotated[
+    str | None,
+    typer.Option("--api-key-env", help="Name of the env var holding the API key, if the server "
+                 "needs one (env: WHETSTONE_LLM_API_KEY_ENV)"),
+]
+
+
+def _client(llm: str | None, model: str | None, base_url: str | None, key_env: str | None) -> (
+    LLMClient
+):
+    try:
+        return build_llm_client(llm, model=model, base_url=base_url, api_key_env=key_env)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _dry_summary(skill: Skill) -> str:
@@ -63,7 +95,10 @@ def _resolve_skill_dir(
 @eval_app.command("run")
 def eval_run(
     skill: Annotated[Path, typer.Option("--skill", help="Path to a skill folder")],
-    model: Annotated[str, typer.Option()] = DEFAULT_MODEL,
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
     effort: Annotated[str, typer.Option()] = "high",
     trials: Annotated[int, typer.Option(min=1)] = 1,
     dry_run: Annotated[
@@ -73,14 +108,16 @@ def eval_run(
 ) -> None:
     """Run a skill's eval set through the LLM reviewer + judge and print the score.
 
-    `--dry-run` loads and validates the skill and prints a summary without calling the model
-    (no credentials or token spend) — a cheap wiring check.
+    Runs against any backend (see `--llm`): Anthropic by default, or a local model such as Qwen on
+    Ollama/LM Studio. `--dry-run` loads and validates the skill and prints a summary without calling
+    the model (no credentials or token spend) — a cheap wiring check.
     """
     sk = load_skill(skill)
     if dry_run:
         typer.echo(_dry_summary(sk))
         return
-    score = run_eval(sk, AnthropicClient(model), trials=trials, reviewer_effort=effort)
+    client = _client(llm, model, base_url, api_key_env)
+    score = run_eval(sk, client, trials=trials, reviewer_effort=effort)
     typer.echo(score.model_dump_json(indent=2) if json_out else format_score(score))
 
 
@@ -98,7 +135,10 @@ def eval_gate(
     skill_path: Annotated[
         str | None, typer.Option("--skill-path", help="Skill path within the repo")
     ] = None,
-    model: Annotated[str, typer.Option()] = DEFAULT_MODEL,
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
     trials: Annotated[int, typer.Option(min=1)] = 1,
     recall_tol: Annotated[float, typer.Option()] = 0.0,
     fp_tol: Annotated[float, typer.Option()] = 0.0,
@@ -124,7 +164,7 @@ def eval_gate(
         outcome = gate_skills(
             base_skill,
             candidate_skill,
-            AnthropicClient(model),
+            _client(llm, model, base_url, api_key_env),
             cfg=GateConfig(recall_tol=recall_tol, fp_tol=fp_tol),
             trials=trials,
         )
@@ -191,6 +231,46 @@ def providers_list() -> None:
     """List available provider plugins."""
     for name in sorted(available_providers()):
         typer.echo(name)
+
+
+@llm_app.command("list")
+def llm_list() -> None:
+    """List the model-backend presets (`--llm` values) and their default endpoints."""
+    for name in sorted(PRESETS):
+        p = PRESETS[name]
+        target = p.base_url or "(SDK default)"
+        typer.echo(f"{name:<10} {p.label:<26} {target}")
+
+
+class _Ping(BaseModel):
+    ok: bool
+    note: str
+
+
+@llm_app.command("check")
+def llm_check(
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+) -> None:
+    """Send one tiny structured request to verify a backend is reachable and returns valid JSON.
+
+    Handy for confirming a local model is wired up, e.g.:
+    `whetstone llm check --llm ollama --model qwen2.5-coder:7b`
+    """
+    client = _client(llm, model, base_url, api_key_env)
+    try:
+        ping = client.structured(
+            "You are a health check.",
+            "Reply with ok=true and note set to the single word 'ready'.",
+            _Ping,
+            effort="low",
+        )
+    except Exception as exc:  # noqa: BLE001 - surface any backend/parse failure as a clean message
+        typer.echo(f"FAIL: {type(exc).__name__}: {exc}")
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"OK: backend returned ok={ping.ok} note={ping.note!r}")
 
 
 if __name__ == "__main__":

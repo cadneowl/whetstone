@@ -80,7 +80,7 @@ src/whetstone/
   core/         The harness. loader · matching · scoring · gate · harness
   reviewer/     Reviewer protocol + LLMReviewer + PatternReviewer (test double)
   judge/        Judge protocol + LLMJudge + DeterministicJudge (test double)
-  llm/          LLMClient protocol + AnthropicClient (real) + FakeLLMClient (test)
+  llm/          LLMClient protocol + factory · AnthropicClient · OpenAICompatibleClient (local) · FakeLLMClient (test)
   providers/    Capability protocols + registry + gitlab/ adapter + fake/ provider
   corpus/       MR history → candidate eval cases (human-promoted)
   meta_eval/    Validate a judge against human-labeled pairs
@@ -321,15 +321,19 @@ whetstone <group> --help
 
 ### `whetstone eval run`
 
-Run a skill's eval set through the LLM reviewer + judge and print the score. **Requires Anthropic
-credentials** (it calls the model).
+Run a skill's eval set through the LLM reviewer + judge and print the score. Calls a model — Anthropic
+by default, or any local/OpenAI-compatible backend via `--llm` (see [The LLM layer](#the-llm-layer)).
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--skill PATH` | *(required)* | Skill folder to score. |
-| `--model TEXT` | `claude-opus-4-8` | Model id for both reviewer and judge. |
-| `--effort TEXT` | `high` | Reviewer effort: `low`/`medium`/`high`/`xhigh`/`max`. |
+| `--llm TEXT` | `anthropic` | Backend preset: `anthropic`, `openai`, `ollama`, `lmstudio`, `vllm`, `llamacpp` (env `WHETSTONE_LLM`). |
+| `--model TEXT` | preset default | Model id (env `WHETSTONE_LLM_MODEL`). Required for local/OpenAI backends. |
+| `--base-url TEXT` | preset default | OpenAI-compatible endpoint (env `WHETSTONE_LLM_BASE_URL`) — point at a remote box. |
+| `--api-key-env TEXT` | preset default | Name of the env var holding the API key, if the server needs one. |
+| `--effort TEXT` | `high` | Reviewer effort: `low`/`medium`/`high`/`xhigh`/`max` (Anthropic only). |
 | `--trials INT` | `1` | Trials per eval case (≥1); >1 surfaces variance. |
+| `--dry-run` | off | Validate & summarize the skill; **no model call**, no credentials. |
 | `--json` | off | Emit the full `SkillScore` as JSON instead of a summary. |
 
 ```bash
@@ -351,14 +355,21 @@ Skill code-review-rust-error-handling v1  (k=5)
 Compare a candidate skill folder against a baseline. **Exits non-zero if the candidate regresses** —
 drop it into CI on the skills repo.
 
+Each side is a skill folder (`--base`/`--candidate`) **or** a git ref (`--base-ref`/`--candidate-ref`
+with `--repo`/`--skill-path`) — e.g. gate a branch against `main`. Backend selection matches
+`eval run`.
+
 | Option | Default | Meaning |
 |---|---|---|
-| `--base PATH` | *(required)* | Baseline skill folder. |
-| `--candidate PATH` | *(required)* | Candidate skill folder. |
-| `--model TEXT` | `claude-opus-4-8` | Model id. |
+| `--base PATH` | — | Baseline skill folder. |
+| `--candidate PATH` | — | Candidate skill folder. |
+| `--base-ref TEXT` / `--candidate-ref TEXT` | — | Git refs to gate instead of folders (needs `--repo`/`--skill-path`). |
+| `--repo PATH` / `--skill-path TEXT` | `.` / — | Repo and skill path within it, for the `--*-ref` modes. |
+| `--llm` / `--model` / `--base-url` / `--api-key-env` | preset | Backend selection — same as `eval run`. |
 | `--trials INT` | `1` | Trials per case. |
 | `--recall-tol FLOAT` | `0.0` | Allowed recall drop. |
 | `--fp-tol FLOAT` | `0.0` | Allowed false-positive-rate rise. |
+| `--dry-run` | off | Validate both sides; **no model call**. |
 | `--json` | off | Emit the full `GateOutcome` as JSON. |
 
 ```bash
@@ -438,6 +449,29 @@ List registered provider plugins (no options).
 whetstone providers list
 # fake
 # gitlab
+```
+
+### `whetstone llm list`
+
+List the model-backend presets (the `--llm` values) and their default endpoints (no options).
+
+```bash
+whetstone llm list
+# anthropic  Anthropic (cloud, default) (SDK default)
+# ollama     Ollama                     http://localhost:11434/v1
+# lmstudio   LM Studio                  http://localhost:1234/v1
+# ...
+```
+
+### `whetstone llm check`
+
+Send **one tiny structured request** to confirm a backend is reachable and returns valid JSON —
+the fastest way to validate a local model is wired up. Takes the same `--llm`/`--model`/`--base-url`/
+`--api-key-env` options as `eval run`. Exits `0` on success, `1` with a `FAIL:` line on any error.
+
+```bash
+whetstone llm check --llm ollama --model qwen2.5-coder:7b
+# OK: backend returned ok=True note='ready'
 ```
 
 ---
@@ -600,6 +634,66 @@ client = AnthropicClient(model="claude-opus-4-8", max_tokens=8192)
 Credentials resolve from the environment (`ANTHROPIC_API_KEY`) or an `ant auth login` profile — see
 the [Anthropic docs](https://platform.claude.com/docs).
 
+### `OpenAICompatibleClient` (local & OpenAI-compatible)
+
+`llm/openai_client.py`. Talks to **any OpenAI-compatible `/v1/chat/completions` endpoint** over the
+`httpx` already in the tree — no extra dependency. This is the path for **local models** (a Raspberry
+Pi or a workstation running Qwen, Llama, etc.) via Ollama, LM Studio, llama.cpp server, vLLM, or
+LocalAI — and for OpenAI itself.
+
+Local models follow schemas less reliably than a frontier model, so structured output is hardened:
+the target JSON Schema is embedded in the system prompt, `response_format` requests a JSON object
+(dropped automatically if the server rejects it), and the reply is parsed, schema-validated, and
+**retried with the validation error fed back** until it conforms. Temperature is `0` for stability.
+
+You rarely construct it directly — use the factory below.
+
+### Choosing a backend — `build_llm_client` and `--llm`
+
+`llm/factory.py` is the one convenient seam for picking a backend, cloud or local. Every field
+resolves **arg → environment variable → preset default**:
+
+```python
+from whetstone.llm.factory import build_llm_client
+
+build_llm_client()                                     # Anthropic (default)
+build_llm_client("ollama", model="qwen2.5-coder:7b")   # local Qwen via Ollama
+build_llm_client("lmstudio", model="qwen2.5-coder-7b-instruct")
+build_llm_client("ollama", model="qwen2.5-coder:7b",
+                 base_url="http://raspberrypi.local:11434/v1")  # a remote Pi
+```
+
+Presets (see `whetstone llm list`): `anthropic` (default), `openai`, and the local runners `ollama`,
+`lmstudio`, `vllm`, `llamacpp`. Override any preset's `base_url` to reach another host.
+
+From the CLI, `eval run` and `eval gate` take the same options:
+
+```bash
+# Score a skill against a local Qwen served by Ollama
+whetstone eval run --skill skills/code-review-rust-error-handling \
+  --llm ollama --model qwen2.5-coder:7b
+
+# Point at a Raspberry Pi on the LAN
+whetstone eval run --skill skills/... --llm ollama \
+  --model qwen2.5-coder:7b --base-url http://raspberrypi.local:11434/v1
+```
+
+Or configure it once via environment, and every command uses it with no flags:
+
+```bash
+export WHETSTONE_LLM=ollama
+export WHETSTONE_LLM_MODEL=qwen2.5-coder:7b
+export WHETSTONE_LLM_BASE_URL=http://raspberrypi.local:11434/v1   # optional; preset default otherwise
+whetstone eval run --skill skills/...
+```
+
+Verify a backend is reachable and returns valid JSON before running a real eval:
+
+```bash
+whetstone llm check --llm ollama --model qwen2.5-coder:7b
+# OK: backend returned ok=True note='ready'   (exit 0; exit 1 + FAIL on any error)
+```
+
 ### `FakeLLMClient` (test)
 
 `llm/fake_client.py`. A handler maps `(system, user, schema) → schema instance`. It records every
@@ -743,6 +837,10 @@ Aim for a **balanced set** — enough `should_catch` cases to measure recall and
 | Variable | Used by | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `AnthropicClient` | Anthropic credentials (or use an `ant auth login` profile). |
+| `WHETSTONE_LLM` | `build_llm_client` | Backend preset when `--llm` is omitted: `anthropic` (default), `openai`, `ollama`, `lmstudio`, `vllm`, `llamacpp`. |
+| `WHETSTONE_LLM_MODEL` | `build_llm_client` | Model id when `--model` is omitted (required for local/OpenAI backends). |
+| `WHETSTONE_LLM_BASE_URL` | `build_llm_client` | OpenAI-compatible endpoint when `--base-url` is omitted — e.g. a remote Pi. |
+| `WHETSTONE_LLM_API_KEY_ENV` | `build_llm_client` | Name of the env var holding the API key, if the backend needs one. |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
 | `WHETSTONE_LIVE_LLM` | `tests/live/` | Set to `1` to run the opt-in live-model tests. |
 
