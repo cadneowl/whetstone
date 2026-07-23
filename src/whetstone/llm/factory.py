@@ -3,6 +3,7 @@ choosing a model backend, cloud or local.
 
     build_llm_client("ollama", model="qwen2.5-coder:7b")           # local Pi/desktop via Ollama
     build_llm_client("lmstudio", model="qwen2.5-coder-7b-instruct")
+    build_llm_client("codex", model="...", base_url="http://pi:8080/v1")  # any custom harness
     build_llm_client()                                             # Anthropic (default)
 
 Every field resolves in the order: explicit arg → environment variable → preset default. So a whole
@@ -54,9 +55,16 @@ PRESETS: dict[str, Preset] = {
         kind="openai", base_url="http://localhost:8080/v1", default_key="llamacpp",
         label="llama.cpp server",
     ),
+    # A first-class slot for any OpenAI-compatible harness that isn't one of the above — a custom
+    # server on a Pi, a "codex" endpoint, an internal gateway. No base_url or key env is assumed, so
+    # nothing (like a stray OPENAI_API_KEY) is ever sent unless you name a key env yourself.
+    "custom": Preset(kind="openai", label="Custom OpenAI-compatible endpoint"),
 }
 
 LOCAL_PRESETS = ("ollama", "lmstudio", "vllm", "llamacpp")
+
+# Aliases resolve to the generic custom slot — so `--llm openai-compatible` / `--llm pi` etc. work.
+_CUSTOM_ALIASES = {"custom", "openai-compatible", "openai_compatible", "compatible"}
 
 
 def build_llm_client(
@@ -66,19 +74,27 @@ def build_llm_client(
     base_url: str | None = None,
     api_key: str | None = None,
     api_key_env: str | None = None,
+    timeout: float | None = None,
 ) -> LLMClient:
     """Construct an `LLMClient` for a provider preset, resolving each field from arg → env → preset.
 
     provider: one of ``PRESETS`` (default ``anthropic``, or ``WHETSTONE_LLM``). The local presets
     (ollama / lmstudio / vllm / llamacpp) and ``openai`` are OpenAI-compatible; override any
-    base_url to reach a remote box. ``api_key_env`` names the env var holding the key (local
-    runners don't need one — a harmless placeholder is sent).
+    base_url to reach a remote box.
+
+    **Custom harnesses.** Any name that isn't a known preset is accepted as a custom
+    OpenAI-compatible endpoint **as long as a base URL is supplied** (``--base-url`` /
+    ``WHETSTONE_LLM_BASE_URL``); the name is then just a label. So a Raspberry Pi server or a
+    ``codex`` gateway is reachable with ``--llm codex --base-url http://host:8080/v1 --model ...``,
+    with no code change. Without a base URL an unknown name is treated as a typo and rejected.
+
+    ``api_key_env`` names the env var holding the key; custom/local endpoints assume none, so no
+    ``Authorization`` header is sent unless you ask for one. ``timeout`` (or
+    ``WHETSTONE_LLM_TIMEOUT``, seconds) raises the per-request budget for slow local hardware.
     """
     name = (provider or os.getenv("WHETSTONE_LLM") or "anthropic").lower()
-    preset = PRESETS.get(name)
-    if preset is None:
-        valid = ", ".join(sorted(PRESETS))
-        raise ValueError(f"unknown LLM provider {name!r}; choose one of: {valid}")
+    resolved_base = base_url or os.getenv("WHETSTONE_LLM_BASE_URL")
+    preset = _resolve_preset(name, resolved_base)
 
     resolved_model = model or os.getenv("WHETSTONE_LLM_MODEL")
 
@@ -89,8 +105,8 @@ def build_llm_client(
 
     from whetstone.llm.openai_client import OpenAICompatibleClient
 
-    resolved_base = base_url or os.getenv("WHETSTONE_LLM_BASE_URL") or preset.base_url
-    if not resolved_base:
+    endpoint = resolved_base or preset.base_url
+    if not endpoint:
         raise ValueError(
             f"provider {name!r} needs a base URL (--base-url or WHETSTONE_LLM_BASE_URL)"
         )
@@ -100,7 +116,28 @@ def build_llm_client(
             "e.g. qwen2.5-coder:7b"
         )
     key = api_key or _resolve_key(api_key_env, preset)
-    return OpenAICompatibleClient(model=resolved_model, base_url=resolved_base, api_key=key)
+    resolved_timeout = timeout if timeout is not None else _env_timeout()
+    if resolved_timeout is None:
+        return OpenAICompatibleClient(model=resolved_model, base_url=endpoint, api_key=key)
+    return OpenAICompatibleClient(
+        model=resolved_model, base_url=endpoint, api_key=key, timeout=resolved_timeout
+    )
+
+
+def _resolve_preset(name: str, base_url: str | None) -> Preset:
+    if name in _CUSTOM_ALIASES:
+        return PRESETS["custom"]
+    preset = PRESETS.get(name)
+    if preset is not None:
+        return preset
+    # Unknown name: an explicit endpoint means "a custom harness called <name>"; otherwise a typo.
+    if base_url:
+        return Preset(kind="openai", label=f"custom ({name})")
+    valid = ", ".join(sorted(PRESETS))
+    raise ValueError(
+        f"unknown LLM provider {name!r}; choose one of: {valid} — or pass a base URL "
+        "(--base-url / WHETSTONE_LLM_BASE_URL) to use it as a custom OpenAI-compatible endpoint"
+    )
 
 
 def _resolve_key(api_key_env: str | None, preset: Preset) -> str | None:
@@ -108,3 +145,15 @@ def _resolve_key(api_key_env: str | None, preset: Preset) -> str | None:
     if env_name:
         return os.getenv(env_name) or preset.default_key
     return preset.default_key
+
+
+def _env_timeout() -> float | None:
+    raw = os.getenv("WHETSTONE_LLM_TIMEOUT")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"WHETSTONE_LLM_TIMEOUT must be a number of seconds, got {raw!r}"
+        ) from exc

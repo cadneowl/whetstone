@@ -238,8 +238,11 @@ def llm_list() -> None:
     """List the model-backend presets (`--llm` values) and their default endpoints."""
     for name in sorted(PRESETS):
         p = PRESETS[name]
-        target = p.base_url or "(SDK default)"
-        typer.echo(f"{name:<10} {p.label:<26} {target}")
+        if p.base_url:
+            target = p.base_url
+        else:
+            target = "(SDK default)" if p.kind == "anthropic" else "(set --base-url)"
+        typer.echo(f"{name:<10} {p.label:<30} {target}")
 
 
 class _Ping(BaseModel):

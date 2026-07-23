@@ -30,9 +30,55 @@ def test_env_vars_select_backend_with_no_args(monkeypatch: pytest.MonkeyPatch) -
     assert client._model == "qwen2.5-coder-7b-instruct"
 
 
-def test_unknown_provider_raises_with_choices() -> None:
+def test_unknown_provider_without_endpoint_raises_with_choices() -> None:
     with pytest.raises(ValueError, match="unknown LLM provider"):
         build_llm_client("gpt5-turbo-local")
+
+
+def test_unknown_provider_with_base_url_is_a_custom_harness() -> None:
+    # A custom harness (a Pi server, a "codex" gateway) is reachable by name + endpoint, no preset.
+    client = build_llm_client("codex", model="codex-mini", base_url="http://pi.local:8080/v1")
+    assert isinstance(client, OpenAICompatibleClient)
+    assert client._base == "http://pi.local:8080/v1"
+    assert client._model == "codex-mini"
+
+
+def test_custom_preset_requires_a_base_url() -> None:
+    with pytest.raises(ValueError, match="needs a base URL"):
+        build_llm_client("custom", model="whatever")
+
+
+def test_custom_alias_builds_openai_client() -> None:
+    client = build_llm_client(
+        "openai-compatible", model="m", base_url="http://box:9000/v1"
+    )
+    assert isinstance(client, OpenAICompatibleClient)
+
+
+def test_custom_endpoint_sends_no_auth_header_without_a_key_env() -> None:
+    # Guard the credential-leak footgun: a custom endpoint must not receive a stray OPENAI_API_KEY.
+    client = build_llm_client("custom", model="m", base_url="http://box:9000/v1")
+    assert "Authorization" not in client._client.headers
+
+
+def test_custom_endpoint_uses_named_key_env() -> None:
+    client = build_llm_client(
+        "custom", model="m", base_url="http://box:9000/v1", api_key_env="MY_GATEWAY_TOKEN"
+    )
+    # env var unset -> no key resolved -> still no header (fails closed, no crash)
+    assert "Authorization" not in client._client.headers
+
+
+def test_timeout_from_env_is_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WHETSTONE_LLM_TIMEOUT", "600")
+    client = build_llm_client("ollama", model="qwen2.5-coder:7b")
+    assert client._client.timeout.read == 600.0
+
+
+def test_bad_timeout_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WHETSTONE_LLM_TIMEOUT", "slow")
+    with pytest.raises(ValueError, match="WHETSTONE_LLM_TIMEOUT"):
+        build_llm_client("ollama", model="qwen2.5-coder:7b")
 
 
 def test_openai_compatible_requires_a_model(monkeypatch: pytest.MonkeyPatch) -> None:

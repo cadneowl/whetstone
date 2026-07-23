@@ -327,7 +327,7 @@ by default, or any local/OpenAI-compatible backend via `--llm` (see [The LLM lay
 | Option | Default | Meaning |
 |---|---|---|
 | `--skill PATH` | *(required)* | Skill folder to score. |
-| `--llm TEXT` | `anthropic` | Backend preset: `anthropic`, `openai`, `ollama`, `lmstudio`, `vllm`, `llamacpp` (env `WHETSTONE_LLM`). |
+| `--llm TEXT` | `anthropic` | Backend preset: `anthropic`, `openai`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `custom` (env `WHETSTONE_LLM`). Any other name + `--base-url` = a custom harness. |
 | `--model TEXT` | preset default | Model id (env `WHETSTONE_LLM_MODEL`). Required for local/OpenAI backends. |
 | `--base-url TEXT` | preset default | OpenAI-compatible endpoint (env `WHETSTONE_LLM_BASE_URL`) — point at a remote box. |
 | `--api-key-env TEXT` | preset default | Name of the env var holding the API key, if the server needs one. |
@@ -457,9 +457,10 @@ List the model-backend presets (the `--llm` values) and their default endpoints 
 
 ```bash
 whetstone llm list
-# anthropic  Anthropic (cloud, default) (SDK default)
-# ollama     Ollama                     http://localhost:11434/v1
-# lmstudio   LM Studio                  http://localhost:1234/v1
+# anthropic  Anthropic (cloud, default)        (SDK default)
+# custom     Custom OpenAI-compatible endpoint (set --base-url)
+# ollama     Ollama                            http://localhost:11434/v1
+# lmstudio   LM Studio                         http://localhost:1234/v1
 # ...
 ```
 
@@ -639,7 +640,7 @@ the [Anthropic docs](https://platform.claude.com/docs).
 `llm/openai_client.py`. Talks to **any OpenAI-compatible `/v1/chat/completions` endpoint** over the
 `httpx` already in the tree — no extra dependency. This is the path for **local models** (a Raspberry
 Pi or a workstation running Qwen, Llama, etc.) via Ollama, LM Studio, llama.cpp server, vLLM, or
-LocalAI — and for OpenAI itself.
+LocalAI — for **custom harnesses** (a bespoke server, an internal gateway) — and for OpenAI itself.
 
 Local models follow schemas less reliably than a frontier model, so structured output is hardened:
 the target JSON Schema is embedded in the system prompt, `response_format` requests a JSON object
@@ -663,8 +664,37 @@ build_llm_client("ollama", model="qwen2.5-coder:7b",
                  base_url="http://raspberrypi.local:11434/v1")  # a remote Pi
 ```
 
-Presets (see `whetstone llm list`): `anthropic` (default), `openai`, and the local runners `ollama`,
-`lmstudio`, `vllm`, `llamacpp`. Override any preset's `base_url` to reach another host.
+Presets (see `whetstone llm list`): `anthropic` (default), `openai`, the local runners `ollama`,
+`lmstudio`, `vllm`, `llamacpp`, and a generic `custom` slot. Override any preset's `base_url` to
+reach another host.
+
+#### Custom harnesses (a Pi server, a `codex` gateway, anything OpenAI-compatible)
+
+Any name that **isn't** a known preset is accepted as a custom OpenAI-compatible harness **as long as
+you supply a base URL** — the name is then just a label. So a bespoke server has access with no code
+change:
+
+```bash
+whetstone llm check --llm codex --model codex-mini --base-url http://pi.local:8080/v1
+whetstone eval run  --skill skills/... --llm pi --model qwen2.5-coder:7b \
+  --base-url http://raspberrypi.local:11434/v1
+```
+
+```python
+build_llm_client("codex", model="codex-mini", base_url="http://pi.local:8080/v1")
+build_llm_client("custom", model="...", base_url="http://gateway.internal/v1")
+```
+
+Two safety properties for custom harnesses:
+
+- **No credential leak.** The `custom` slot (and any unrecognized name) assumes **no** API key, so a
+  stray `OPENAI_API_KEY` in your environment is **never** sent to your box. If your gateway needs a
+  token, name the env var holding it: `--api-key-env MY_GATEWAY_TOKEN`.
+- **Typos still fail loudly.** An unknown name *without* a base URL is treated as a typo and rejected
+  with the list of valid presets — you don't silently hit the wrong endpoint.
+
+Slow hardware? Raise the per-request timeout (a Pi running a 7B model can take minutes):
+`--llm ollama ... ` with `WHETSTONE_LLM_TIMEOUT=600` (seconds), or `build_llm_client(..., timeout=600)`.
 
 From the CLI, `eval run` and `eval gate` take the same options:
 
@@ -837,10 +867,11 @@ Aim for a **balanced set** — enough `should_catch` cases to measure recall and
 | Variable | Used by | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `AnthropicClient` | Anthropic credentials (or use an `ant auth login` profile). |
-| `WHETSTONE_LLM` | `build_llm_client` | Backend preset when `--llm` is omitted: `anthropic` (default), `openai`, `ollama`, `lmstudio`, `vllm`, `llamacpp`. |
-| `WHETSTONE_LLM_MODEL` | `build_llm_client` | Model id when `--model` is omitted (required for local/OpenAI backends). |
-| `WHETSTONE_LLM_BASE_URL` | `build_llm_client` | OpenAI-compatible endpoint when `--base-url` is omitted — e.g. a remote Pi. |
+| `WHETSTONE_LLM` | `build_llm_client` | Backend preset when `--llm` is omitted: `anthropic` (default), `openai`, `ollama`, `lmstudio`, `vllm`, `llamacpp`, `custom` — or any custom-harness label. |
+| `WHETSTONE_LLM_MODEL` | `build_llm_client` | Model id when `--model` is omitted (required for local/OpenAI/custom backends). |
+| `WHETSTONE_LLM_BASE_URL` | `build_llm_client` | OpenAI-compatible endpoint when `--base-url` is omitted — e.g. a remote Pi or custom harness. |
 | `WHETSTONE_LLM_API_KEY_ENV` | `build_llm_client` | Name of the env var holding the API key, if the backend needs one. |
+| `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Per-request timeout in seconds for OpenAI-compatible backends (raise it for slow local hardware). |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
 | `WHETSTONE_LIVE_LLM` | `tests/live/` | Set to `1` to run the opt-in live-model tests. |
 
