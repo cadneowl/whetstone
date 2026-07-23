@@ -51,11 +51,13 @@ def build_candidates(
         anchor = _anchor(thread)
         if anchor is None:
             continue
-        saw_diff_feedback = True
         path, line_range = anchor
         file = reviewed.change.file(path)
         if file is None:
+            # The thread anchors to a file not in this change (e.g. stale diff refs). Don't treat it
+            # as diff feedback, so the clean-merge fallback can still fire.
             continue
+        saw_diff_feedback = True
 
         applied = bool(thread.suggestion and thread.suggestion.applied)
         semantic = thread.comments[0].body if thread.comments else ""

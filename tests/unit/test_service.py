@@ -17,7 +17,7 @@ from whetstone.domain.review import (
 )
 from whetstone.llm import FakeLLMClient
 from whetstone.providers.fake.provider import FakeProvider
-from whetstone.reviewer.llm_reviewer import _LLMFinding, _LLMFindingList
+from whetstone.reviewer.llm_reviewer import LLMFinding, LLMFindingList
 from whetstone.service import (
     format_gate,
     format_score,
@@ -33,24 +33,24 @@ FAKE_REPO = RepoRef.parse("gitlab:acme/payments")
 def _flag_handler(flag_tests: bool):
     """Build a fake-LLM handler: flags unwrap in the handler file, optionally also in test files."""
 
-    from whetstone.judge.llm_judge import _Verdict
+    from whetstone.judge.llm_judge import JudgeVerdict
 
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        if schema is _Verdict:  # judge call — fake always agrees
-            return _Verdict(matched=True, confidence=1.0, reason="same issue")
+        if schema is JudgeVerdict:  # judge call — fake always agrees
+            return JudgeVerdict(matched=True, confidence=1.0, reason="same issue")
         # reviewer call — emit a finding on the file actually under review
         if "charge_test.rs" in user:
             if not flag_tests:
-                return _LLMFindingList(findings=[])
-            return _LLMFindingList(
+                return LLMFindingList(findings=[])
+            return LLMFindingList(
                 findings=[
-                    _LLMFinding(path="src/handlers/charge_test.rs", line=12, message="unwrap")
+                    LLMFinding(path="src/handlers/charge_test.rs", line=12, message="unwrap")
                 ]
             )
         if "refund.rs" in user:
-            return _LLMFindingList(findings=[])
-        return _LLMFindingList(
-            findings=[_LLMFinding(path="src/handlers/charge.rs", line=41, message="unwrap panics")]
+            return LLMFindingList(findings=[])
+        return LLMFindingList(
+            findings=[LLMFinding(path="src/handlers/charge.rs", line=41, message="unwrap panics")]
         )
 
     return handler

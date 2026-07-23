@@ -89,6 +89,20 @@ def test_general_comment_without_position_is_skipped_and_yields_clean_signal() -
     assert cands[0].confidence == 0.3
 
 
+def test_thread_on_missing_file_falls_back_to_clean_merge() -> None:
+    # The only thread anchors to a file NOT in the change (e.g. stale diff refs). It must not
+    # suppress the clean-merge fallback — the change's files should still yield should_not_flag.
+    stray = ReviewThread(
+        comments=[ReviewComment(author="rev", body="unwrap")],
+        suggestion=Suggestion(
+            path="src/other/gone.rs", line_range=(5, 5), proposed="?", applied=True
+        ),
+    )
+    cands = build_candidates(_reviewed([stray]), [RUST_SKILL])
+    assert [c.kind for c in cands] == ["should_not_flag"]
+    assert cands[0].change.file("src/handlers/charge.rs") is not None
+
+
 def test_clean_merge_yields_should_not_flag_per_file() -> None:
     cands = build_candidates(_reviewed([]), [RUST_SKILL])
     assert len(cands) == 1

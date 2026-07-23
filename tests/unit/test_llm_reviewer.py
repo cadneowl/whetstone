@@ -12,7 +12,7 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.skill import Skill
 from whetstone.judge import DeterministicJudge
 from whetstone.llm import FakeLLMClient
-from whetstone.reviewer.llm_reviewer import LLMReviewer, _LLMFinding, _LLMFindingList
+from whetstone.reviewer.llm_reviewer import LLMFinding, LLMFindingList, LLMReviewer
 
 SKILL_DIR = Path(__file__).resolve().parents[2] / "skills" / "code-review-rust-error-handling"
 REPO = RepoRef.parse("gitlab:acme/payments")
@@ -38,9 +38,9 @@ def _change() -> CodeChange:
 
 def test_reviewer_converts_llm_findings_to_domain_findings() -> None:
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        return _LLMFindingList(
+        return LLMFindingList(
             findings=[
-                _LLMFinding(
+                LLMFinding(
                     path="src/handlers/charge.rs",
                     line=41,
                     severity="error",
@@ -60,6 +60,7 @@ def test_reviewer_converts_llm_findings_to_domain_findings() -> None:
     assert f.line == 41
     assert f.severity is Severity.error
     assert f.rule_id == "R1"
+    assert f.confidence == 0.9
 
 
 def test_reviewer_prompt_carries_skill_body_and_diff() -> None:
@@ -68,7 +69,7 @@ def test_reviewer_prompt_carries_skill_body_and_diff() -> None:
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
         captured["system"] = system
         captured["user"] = user
-        return _LLMFindingList(findings=[])
+        return LLMFindingList(findings=[])
 
     client = FakeLLMClient(handler)
     LLMReviewer(client).review(_skill(), _change())
@@ -82,9 +83,9 @@ def test_reviewer_plugs_into_run_skill() -> None:
     # A finding only for the handler file → should_catch passes, should_not_flag cases stay clean.
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
         if "charge_test.rs" in user or "refund.rs" in user:
-            return _LLMFindingList(findings=[])
-        return _LLMFindingList(
-            findings=[_LLMFinding(path="src/handlers/charge.rs", line=41, message="unwrap")]
+            return LLMFindingList(findings=[])
+        return LLMFindingList(
+            findings=[LLMFinding(path="src/handlers/charge.rs", line=41, message="unwrap")]
         )
 
     score = run_skill(_skill(), LLMReviewer(FakeLLMClient(handler)), DeterministicJudge())

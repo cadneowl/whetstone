@@ -64,46 +64,45 @@ class CodeChange(BaseModel):
 def parse_unified_diff(
     text: str, repo: RepoRef, base_ref: str = "", head_ref: str = ""
 ) -> CodeChange:
-    """Parse a unified diff into a CodeChange, capturing added lines with new-file line numbers.
+    """Parse a unified diff into a CodeChange.
 
-    Deliberately minimal: handles ``diff --git`` / ``---`` / ``+++`` headers and ``@@`` hunks,
-    tracks the new-file line counter across context/added lines, and ignores removed lines for
-    numbering. Sufficient for eval-case fixtures; not a full patch applier.
+    Splits the diff into per-file segments and delegates hunk parsing to `parse_hunk_added_lines`,
+    capturing each file's raw (headerless) hunk text into `FileChange.raw_diff` so the change can be
+    serialized back to a faithful diff — context and removed lines included, not just added lines.
+    Handles ``diff --git`` / ``---`` / ``+++`` headers; deliberately not a full patch applier.
     """
     files: list[FileChange] = []
     current: FileChange | None = None
-    new_line = 0
+    hunk_lines: list[str] = []
+    pending_old: str | None = None
+
+    def flush() -> None:
+        if current is not None:
+            body = "\n".join(hunk_lines)
+            if body:
+                body += "\n"
+            current.raw_diff = body
+            current.added = parse_hunk_added_lines(body)
 
     for raw in text.splitlines():
         if raw.startswith("diff --git"):
-            current = None
+            flush()
+            current, hunk_lines, pending_old = None, [], None
             continue
         if raw.startswith("--- "):
+            flush()
+            current, hunk_lines = None, []
             old = raw[4:].strip()
-            old_path = None if old == "/dev/null" else _strip_prefix(old)
-            current = FileChange(path="", old_path=old_path)
+            pending_old = None if old == "/dev/null" else _strip_prefix(old)
             continue
         if raw.startswith("+++ "):
-            new = raw[4:].strip()
-            if current is None:
-                current = FileChange(path="")
-            current.path = _strip_prefix(new)
+            current = FileChange(path=_strip_prefix(raw[4:].strip()), old_path=pending_old)
             files.append(current)
+            hunk_lines = []
             continue
-        if raw.startswith("@@"):
-            m = _HUNK_RE.match(raw)
-            if m:
-                new_line = int(m.group(1))
-            continue
-        if current is None:
-            continue
-        if raw.startswith("+") and not raw.startswith("+++"):
-            current.added.append(AddedLine(line=new_line, content=raw[1:]))
-            new_line += 1
-        elif raw.startswith("-") and not raw.startswith("---"):
-            continue  # removed line: does not advance new-file counter
-        else:
-            new_line += 1  # context line
+        if current is not None:
+            hunk_lines.append(raw)
+    flush()
 
     return CodeChange(repo=repo, base_ref=base_ref, head_ref=head_ref, files=files)
 
@@ -122,13 +121,15 @@ def parse_hunk_added_lines(text: str) -> list[AddedLine]:
             if m:
                 new_line = int(m.group(1))
             continue
+        if raw.startswith("\\"):
+            continue  # "\ No newline at end of file" — metadata, not a content line
         if raw.startswith("+") and not raw.startswith("+++"):
             added.append(AddedLine(line=new_line, content=raw[1:]))
             new_line += 1
         elif raw.startswith("-") and not raw.startswith("---"):
-            continue
+            continue  # removed line: does not advance the new-file counter
         else:
-            new_line += 1
+            new_line += 1  # context line
     return added
 
 

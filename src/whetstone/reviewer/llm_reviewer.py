@@ -11,7 +11,9 @@ from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
 
 
-class _LLMFinding(BaseModel):
+class LLMFinding(BaseModel):
+    """The structured shape the reviewer model returns per finding."""
+
     path: str
     line: int | None = None
     severity: Literal["info", "warning", "error"] = "warning"
@@ -20,8 +22,8 @@ class _LLMFinding(BaseModel):
     confidence: float = 0.5
 
 
-class _LLMFindingList(BaseModel):
-    findings: list[_LLMFinding]
+class LLMFindingList(BaseModel):
+    findings: list[LLMFinding]
 
 
 class LLMReviewer:
@@ -40,7 +42,7 @@ class LLMReviewer:
         result = self._client.structured(
             _system_prompt(skill),
             _user_prompt(change),
-            _LLMFindingList,
+            LLMFindingList,
             effort=self._effort,
         )
         return [
@@ -51,6 +53,7 @@ class LLMReviewer:
                 line=f.line,
                 severity=Severity.parse(f.severity),
                 message=f.message,
+                confidence=f.confidence,
             )
             for f in result.findings
         ]

@@ -31,6 +31,19 @@ def test_retries_on_500_then_succeeds() -> None:
         assert _http().get_json("/ping") == [1, 2]
 
 
+def test_retry_after_http_date_does_not_crash() -> None:
+    # Retry-After may be an HTTP-date (spec-legal). float() would raise; the client must fall back
+    # to backoff and still succeed on retry rather than crashing.
+    with respx.mock() as router:
+        router.get(url__regex=r".*/ping").mock(
+            side_effect=[
+                httpx.Response(429, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}),
+                httpx.Response(200, json={"ok": True}),
+            ]
+        )
+        assert _http().get_json("/ping") == {"ok": True}
+
+
 def test_paginate_walks_x_next_page() -> None:
     def effect(request: httpx.Request) -> httpx.Response:
         page = request.url.params.get("page", "1")

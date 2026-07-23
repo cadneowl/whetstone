@@ -8,7 +8,9 @@ from whetstone.judge.base import Match
 from whetstone.llm.base import Effort, LLMClient
 
 
-class _Verdict(BaseModel):
+class JudgeVerdict(BaseModel):
+    """The structured shape the judge model returns."""
+
     matched: bool
     confidence: float
     reason: str
@@ -29,7 +31,7 @@ class LLMJudge:
         verdict = self._client.structured(
             _SYSTEM,
             _user_prompt(finding, expectation),
-            _Verdict,
+            JudgeVerdict,
             effort=self._effort,
         )
         return Match(matched=verdict.matched, confidence=verdict.confidence, reason=verdict.reason)

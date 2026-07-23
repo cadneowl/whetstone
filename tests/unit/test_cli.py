@@ -40,6 +40,29 @@ def test_corpus_promote_copies_case_files(tmp_path: Path) -> None:
     assert (promoted / "change.diff").is_file()
 
 
+def test_eval_run_dry_run_needs_no_credentials() -> None:
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    result = runner.invoke(app, ["eval", "run", "--skill", skill, "--dry-run"])
+    assert result.exit_code == 0
+    assert "code-review-rust-error-handling" in result.stdout
+    assert "3 eval case" in result.stdout
+
+
+def test_eval_gate_dry_run_dir_mode() -> None:
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    result = runner.invoke(
+        app, ["eval", "gate", "--base", skill, "--candidate", skill, "--dry-run"]
+    )
+    assert result.exit_code == 0
+    assert "base:" in result.stdout
+    assert "candidate:" in result.stdout
+
+
+def test_eval_gate_requires_a_source() -> None:
+    result = runner.invoke(app, ["eval", "gate", "--dry-run"])
+    assert result.exit_code != 0  # neither --base/--candidate nor a git ref given
+
+
 def test_help_lists_subcommands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0

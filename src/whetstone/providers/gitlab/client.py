@@ -9,6 +9,18 @@ import httpx
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+def _retry_after_seconds(header: str | None, attempt: int) -> float:
+    """Backoff delay: honor a numeric `Retry-After` (seconds); ignore an HTTP-date form (the spec
+    allows it, GitLab doesn't send it) and fall back to exponential-ish backoff instead of crashing.
+    """
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    return 0.1 * attempt
+
+
 class GitLabHttp:
     """Thin GitLab API v4 HTTP layer: auth, retry/backoff on rate-limits, and page walking.
 
@@ -43,8 +55,7 @@ class GitLabHttp:
             resp = self._client.request(method, self._url(path), params=params)
             if resp.status_code in RETRY_STATUS and attempt < self._max_retries:
                 attempt += 1
-                retry_after = float(resp.headers.get("retry-after", 0.0)) or 0.1 * attempt
-                self._sleep(retry_after)
+                self._sleep(_retry_after_seconds(resp.headers.get("retry-after"), attempt))
                 continue
             return resp
 

@@ -6,7 +6,7 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import Expectation
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region
-from whetstone.judge.llm_judge import LLMJudge, _Verdict
+from whetstone.judge.llm_judge import JudgeVerdict, LLMJudge
 from whetstone.llm import FakeLLMClient
 
 FINDING = Finding(
@@ -22,7 +22,7 @@ EXPECT = Expectation(
 
 def test_judge_maps_verdict_to_match() -> None:
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        return _Verdict(matched=True, confidence=0.9, reason="same issue at same location")
+        return JudgeVerdict(matched=True, confidence=0.9, reason="same issue at same location")
 
     m = LLMJudge(FakeLLMClient(handler)).match(FINDING, EXPECT)
     assert m.matched is True
@@ -32,7 +32,7 @@ def test_judge_maps_verdict_to_match() -> None:
 
 def test_judge_reports_non_match() -> None:
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        return _Verdict(matched=False, confidence=0.7, reason="different concern")
+        return JudgeVerdict(matched=False, confidence=0.7, reason="different concern")
 
     m = LLMJudge(FakeLLMClient(handler)).match(FINDING, EXPECT)
     assert m.matched is False
@@ -43,7 +43,7 @@ def test_judge_prompt_includes_both_sides_and_uses_medium_effort() -> None:
 
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
         captured["user"] = user
-        return _Verdict(matched=True, confidence=1.0, reason="ok")
+        return JudgeVerdict(matched=True, confidence=1.0, reason="ok")
 
     client = FakeLLMClient(handler)
     LLMJudge(client).match(FINDING, EXPECT)

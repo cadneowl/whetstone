@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.enums import Severity
@@ -37,13 +38,19 @@ def load_skill(path: str | Path) -> Skill:
     )
     references = [Reference(**r) for r in meta.get("references", [])]
 
+    raw_version = fm.get("version", 1)
+    try:
+        version = int(raw_version)
+    except (TypeError, ValueError) as e:
+        raise SkillLoadError(f"{path}: 'version' must be an integer, got {raw_version!r}") from e
+
     eval_cases = _load_eval_cases(path / "eval_cases", skill_id)
 
     return Skill(
         id=skill_id,
         name=str(fm.get("name", "")),
         description=str(fm.get("description", "")),
-        version=int(fm.get("version", 1)),
+        version=version,
         body=body.strip(),
         triggers=triggers,
         references=references,
@@ -59,7 +66,12 @@ def _load_eval_cases(cases_dir: Path, skill_id: str) -> list[EvalCase]:
         case_file = case_dir / "case.yaml"
         if not case_file.is_file():
             continue
-        cases.append(_load_eval_case(case_dir, skill_id))
+        try:
+            cases.append(_load_eval_case(case_dir, skill_id))
+        except SkillLoadError:
+            raise
+        except (ValidationError, KeyError, ValueError) as e:
+            raise SkillLoadError(f"{case_dir}: invalid eval case: {e}") from e
     return cases
 
 

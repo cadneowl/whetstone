@@ -32,6 +32,37 @@ def test_removed_lines_do_not_advance_new_counter() -> None:
     assert change.files[0].added_line_numbers() == [41]
 
 
+def test_captures_raw_diff_faithfully() -> None:
+    # The parsed change must round-trip back to a diff that still has the CONTEXT and REMOVED lines,
+    # not just the added ones — the reviewer needs that context.
+    change = parse_unified_diff(DIFF, repo=REPO)
+    file = change.file("src/handlers/charge.rs")
+    assert file is not None
+    assert "-        let row = self.db.get(id);" in file.raw_diff  # removed line preserved
+    assert "pub fn charge" in file.raw_diff  # context preserved
+
+    rebuilt = parse_unified_diff(change.to_unified_diff(), repo=REPO)
+    assert rebuilt.file("src/handlers/charge.rs").added_line_numbers() == [41]  # type: ignore[union-attr]
+    assert "-        let row = self.db.get(id);" in change.to_unified_diff()
+
+
+def test_backslash_no_newline_marker_does_not_shift_line_numbers() -> None:
+    # `\ No newline at end of file` sits mid-hunk (after the removed line, before the added ones).
+    # It must NOT advance the new-file counter, or the added lines shift from [1, 2] to [2, 3].
+    diff = """\
+diff --git a/x.py b/x.py
+--- a/x.py
++++ b/x.py
+@@ -1,1 +1,2 @@
+-a
+\\ No newline at end of file
++a
++b
+"""
+    change = parse_unified_diff(diff, repo=REPO)
+    assert change.file("x.py").added_line_numbers() == [1, 2]  # type: ignore[union-attr]
+
+
 def test_multi_file_diff() -> None:
     multi = DIFF + """\
 diff --git a/src/handlers/refund.rs b/src/handlers/refund.rs
