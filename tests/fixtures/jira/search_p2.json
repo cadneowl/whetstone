@@ -1,0 +1,18 @@
+{
+  "issues": [
+    {
+      "id": "10990",
+      "key": "PAY-990",
+      "fields": {
+        "summary": "Add a refund receipt endpoint",
+        "issuetype": {"name": "Story"},
+        "priority": {"name": "Medium"},
+        "labels": [],
+        "components": [],
+        "resolution": {"name": "Done"},
+        "resolutiondate": "2026-06-10T14:00:00.000+0000",
+        "description": "Plain-text description, as Jira Server returns it."
+      }
+    }
+  ]
+}

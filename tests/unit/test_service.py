@@ -5,9 +5,11 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from whetstone.core.gate import GateConfig, gate
 from whetstone.core.loader import load_skill
 from whetstone.domain.change import CodeChange, FileChange, parse_hunk_added_lines
-from whetstone.domain.refs import RepoRef
+from whetstone.domain.eval_model import EvalCase, Expectation, Provenance
+from whetstone.domain.refs import Region, RepoRef
 from whetstone.domain.review import (
     MergeRequestRef,
     ReviewComment,
@@ -15,6 +17,7 @@ from whetstone.domain.review import (
     ReviewThread,
     Suggestion,
 )
+from whetstone.domain.skill import Skill
 from whetstone.llm import FakeLLMClient
 from whetstone.providers.fake.provider import FakeProvider
 from whetstone.reviewer.llm_reviewer import LLMFinding, LLMFindingList
@@ -22,8 +25,10 @@ from whetstone.service import (
     format_gate,
     format_score,
     gate_skills,
+    precision_evidence,
     pull_corpus,
     run_eval,
+    union_cases,
 )
 
 SKILL_DIR = Path(__file__).resolve().parents[2] / "skills" / "code-review-rust-error-handling"
@@ -88,6 +93,111 @@ def test_gate_skills_end_to_end_with_one_client() -> None:
     assert outcome.base.recall == 1.0
 
 
+# --- the gate scores both sides over the union of their cases ------------------
+
+_UNWRAP_DIFF = "@@ -40,2 +40,3 @@\n     ctx\n+    let row = db.get(id).unwrap();\n"
+
+
+def _catch_case(case_id: str, path: str) -> EvalCase:
+    change = CodeChange(
+        repo=FAKE_REPO,
+        files=[
+            FileChange(
+                path=path, added=parse_hunk_added_lines(_UNWRAP_DIFF), raw_diff=_UNWRAP_DIFF
+            )
+        ],
+    )
+    return EvalCase(
+        id=case_id,
+        kind="should_catch",
+        change=change,
+        expect=[
+            Expectation(id="e1", must="appear", where=Region(path=path, line_range=(41, 41)))
+        ],
+    )
+
+
+def _flags_only(path: str):
+    """A reviewer that catches exactly one file's unwrap and is blind to every other."""
+    from whetstone.judge.llm_judge import JudgeVerdict
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        if schema is JudgeVerdict:
+            return JudgeVerdict(matched=True, confidence=1.0, reason="same issue")
+        if path in user:
+            return LLMFindingList(
+                findings=[LLMFinding(path=path, line=41, message="unwrap panics")]
+            )
+        return LLMFindingList(findings=[])
+
+    return handler
+
+
+def test_union_cases_prefers_the_candidates_copy() -> None:
+    base = Skill(id="s", eval_cases=[_catch_case("shared", "src/old.rs")])
+    candidate = Skill(id="s", eval_cases=[_catch_case("shared", "src/new.rs")])
+    cases = union_cases(base, candidate)
+    # One case, and it is the candidate's — an eval case edited alongside the guidance is the
+    # version both sides must answer.
+    assert [c.id for c in cases] == ["shared"]
+    assert cases[0].change.files[0].path == "src/new.rs"
+
+
+def test_promoting_a_case_that_documents_a_known_miss_is_not_a_regression() -> None:
+    """The corpus loop's whole output is cases the reviewer currently fails.
+
+    Scoring each side over its own case set made the candidate's pooled recall drop against a
+    baseline that never had to answer the new case, so the gate rejected exactly the change
+    `corpus pull` exists to produce.
+    """
+    known = _catch_case("known", "src/known.rs")
+    fresh = _catch_case("newly-documented", "src/missed.rs")
+    base = Skill(id="s", version=1, body="guidance", eval_cases=[known])
+    candidate = Skill(id="s", version=2, body="guidance", eval_cases=[known, fresh])
+
+    outcome = gate_skills(base, candidate, FakeLLMClient(_flags_only("src/known.rs")))
+
+    assert outcome.result.passed
+    # Both sides answered both cases, and both miss the new one — so it is not a regression.
+    assert [c.case_id for c in outcome.base.cases] == ["known", "newly-documented"]
+    assert outcome.base.recall == 0.5 and outcome.candidate.recall == 0.5
+    assert outcome.result.regressed_cases == []
+
+
+def test_a_real_regression_still_fails_under_union_scoring() -> None:
+    known = _catch_case("known", "src/known.rs")
+    base = Skill(id="s", version=1, body="guidance", eval_cases=[known])
+    candidate = Skill(id="s", version=2, body="worse guidance", eval_cases=[known])
+
+    # The candidate is scored by a reviewer that catches nothing, standing in for guidance that
+    # stopped working; the union must not blunt that.
+    outcome = gate_skills(base, candidate, FakeLLMClient(_flags_only("src/known.rs")))
+    assert outcome.result.passed  # same client both sides — sanity check on the fixture
+
+    blind = gate(
+        outcome.base,
+        run_eval(candidate, FakeLLMClient(_flags_only("src/nothing.rs"))),
+    )
+    assert not blind.passed
+    assert blind.regressed_cases == ["known"]
+
+
+def test_targeted_case_must_be_fixed_end_to_end() -> None:
+    fresh = _catch_case("newly-documented", "src/missed.rs")
+    base = Skill(id="s", version=1, body="guidance", eval_cases=[fresh])
+    candidate = Skill(id="s", version=2, body="guidance", eval_cases=[fresh])
+
+    outcome = gate_skills(
+        base,
+        candidate,
+        FakeLLMClient(_flags_only("src/known.rs")),
+        cfg=GateConfig(targeted_cases=["newly-documented"]),
+    )
+    assert not outcome.result.passed
+    assert outcome.result.unfixed_cases == ["newly-documented"]
+    assert "Gate: FAIL" in format_gate(outcome)
+
+
 def _reviewed() -> ReviewedChange:
     diff = "@@ -40,5 +40,6 @@\n     x\n+        let row = db.get(id).unwrap();\n"
     change = CodeChange(
@@ -114,8 +224,59 @@ def test_pull_corpus_over_fake_provider() -> None:
     fake = FakeProvider()
     fake.add_review(_reviewed())
     candidates = pull_corpus(fake, "acme/payments", datetime(2026, 1, 1))
-    assert len(candidates) == 1
-    assert candidates[0].kind == "should_catch"
+    # The applied suggestion, plus the accepted fix it implies.
+    assert [c.kind for c in candidates] == ["should_catch", "should_not_flag"]
+
+
+# --- how well a skill's precision cases are evidenced ---------------------------
+
+
+def _noflag(case_id: str, signal: str | None) -> EvalCase:
+    case = _catch_case(case_id, "src/x.rs")
+    case.kind = "should_not_flag"
+    case.provenance = Provenance(source="gitlab_mr", human_signal=signal)
+    return case
+
+
+def test_precision_evidence_separates_confirmed_from_silence() -> None:
+    """`fp_rate` averages over negatives of very different worth; the mix has to be visible.
+
+    A declined suggestion and an accepted fix record decisions a human actually made. A clean merge
+    records only that nobody commented — which is not the same as there being nothing to flag, and
+    a corpus made of those measures how quiet the reviewer is as much as how precise it is.
+    """
+    skill = Skill(
+        id="s",
+        eval_cases=[
+            _catch_case("a-catch", "src/a.rs"),  # positives are not counted at all
+            _noflag("declined", "suggestion declined"),
+            _noflag("accepted-fix", "suggested fix applied"),
+            _noflag("quiet-1", "merged clean"),
+            _noflag("quiet-2", "merged clean"),
+            _noflag("quiet-3", "merged clean"),
+        ],
+    )
+    assert precision_evidence(skill) == {"confirmed": 2, "silence": 3, "unclassified": 0}
+
+
+def test_hand_written_cases_are_unclassified_not_guessed_at() -> None:
+    # A case someone wrote deliberately may be the best evidence in the set or the weakest.
+    skill = Skill(id="s", eval_cases=[_noflag("hand", None), _noflag("odd", "something else")])
+    assert precision_evidence(skill) == {"confirmed": 0, "silence": 0, "unclassified": 2}
+
+
+def test_a_skill_with_no_precision_cases_reports_zeroes() -> None:
+    skill = Skill(id="s", eval_cases=[_catch_case("a", "src/a.rs")])
+    assert precision_evidence(skill) == {"confirmed": 0, "silence": 0, "unclassified": 0}
+
+
+def test_the_evidence_mix_reaches_the_index_row(tmp_path: Path) -> None:
+    from whetstone.runs import RunStore
+    from whetstone.service import skill_summaries
+
+    skill = Skill(id="s", eval_cases=[_noflag("quiet", "merged clean")])
+    summary = skill_summaries([skill], RunStore(tmp_path / "runs"))[0]
+    assert summary.precision_evidence["silence"] == 1
 
 
 def test_format_helpers() -> None:

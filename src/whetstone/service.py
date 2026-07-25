@@ -15,9 +15,21 @@ from pydantic import BaseModel
 
 from whetstone.core.gate import GateConfig, GateResult, gate
 from whetstone.core.harness import EventSink, run_skill_recorded
-from whetstone.corpus.builder import pull_candidates
+from whetstone.corpus.builder import (
+    DEFAULT_MAX_CLEAN_FILES,
+    DEFAULT_MAX_DEFECT_FILES,
+    pull_candidates,
+    pull_defect_candidates,
+)
 from whetstone.corpus.model import CandidateCase
-from whetstone.domain.eval_model import EvalCase, EvalKind, Provenance
+from whetstone.domain.eval_model import (
+    EVIDENCE_CONFIRMED,
+    EVIDENCE_SILENCE,
+    EVIDENCE_UNCLASSIFIED,
+    EvalCase,
+    EvalKind,
+    Provenance,
+)
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunRecord, skill_hash
 from whetstone.domain.score import SkillScore
@@ -25,7 +37,7 @@ from whetstone.domain.skill import Skill
 from whetstone.judge.llm_judge import LLMJudge
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.counting import CountingClient
-from whetstone.providers.base import ReviewConnector
+from whetstone.providers.base import IssueConnector, ReviewConnector
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
 
@@ -108,6 +120,17 @@ def record_eval(
     )
 
 
+def union_cases(base: Skill, candidate: Skill) -> list[EvalCase]:
+    """Every case either side commits, keyed by id — the candidate's copy wins on a collision.
+
+    The candidate is the newer content: if a case was edited alongside the guidance, its edited form
+    is the one both sides must answer.
+    """
+    by_id = {c.id: c for c in base.eval_cases}
+    by_id.update({c.id: c for c in candidate.eval_cases})
+    return [by_id[case_id] for case_id in sorted(by_id)]
+
+
 def gate_skills(
     base: Skill,
     candidate: Skill,
@@ -116,9 +139,23 @@ def gate_skills(
     cfg: GateConfig | None = None,
     trials: int = 1,
 ) -> GateOutcome:
-    """Score a base and candidate version of a skill and apply the regression gate."""
-    base_score = run_eval(base, client, trials=trials)
-    candidate_score = run_eval(candidate, client, trials=trials)
+    """Score a base and candidate version of a skill and apply the regression gate.
+
+    Both sides are scored over the **union** of their eval cases, so the only thing that varies
+    between the two runs is the guidance. Scoring each side over its own case set instead made the
+    corpus loop self-defeating: promoting a case that documents a known miss lowered the candidate's
+    pooled recall against a baseline that never had to answer it, and the gate read that as a
+    regression — failing exactly the change the corpus builder exists to produce.
+
+    Note for whoever adds run recording here: the two skills scored below carry a case set that
+    exists in neither commit, so their `skill_hash` matches nothing in git. Store one and the
+    console's stale-version detection has a phantom to reason about.
+    """
+    cases = union_cases(base, candidate)
+    base_score = run_eval(base.model_copy(update={"eval_cases": cases}), client, trials=trials)
+    candidate_score = run_eval(
+        candidate.model_copy(update={"eval_cases": cases}), client, trials=trials
+    )
     result = gate(base_score, candidate_score, cfg)
     return GateOutcome(result=result, base=base_score, candidate=candidate_score)
 
@@ -128,10 +165,34 @@ def pull_corpus(
     project: str,
     since: datetime,
     skills: list[Skill] | None = None,
+    *,
+    max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
 ) -> list[CandidateCase]:
     """Walk a GitLab project's reviewed changes into candidate eval cases for human promotion."""
     repo = RepoRef.parse(f"gitlab:{project}")
-    return pull_candidates(connector, repo, since, skills)
+    return pull_candidates(connector, repo, since, skills, max_clean_files=max_clean_files)
+
+
+def pull_defects(
+    reviews: ReviewConnector,
+    issues: IssueConnector,
+    project: str,
+    tracker_project: str,
+    since: datetime,
+    skills: list[Skill] | None = None,
+    *,
+    max_files: int = DEFAULT_MAX_DEFECT_FILES,
+) -> list[CandidateCase]:
+    """Pair a tracker's resolved defects with the merge requests that fixed them.
+
+    `project` is the forge path (`acme/payments`); `tracker_project` is the tracker's key (`PAY`).
+    They are separate arguments because they are separate systems that happen to describe the same
+    work, and plenty of organizations do not name them the same thing.
+    """
+    repo = RepoRef.parse(f"gitlab:{project}")
+    return pull_defect_candidates(
+        reviews, issues, repo, tracker_project, since, skills, max_files=max_files
+    )
 
 
 # --- read models (what the console and `runs`/`report` commands display) -------
@@ -163,6 +224,9 @@ class SkillSummary(BaseModel):
     latest: RunSummary | None = None
     recall_trend: list[float] = []  # oldest → newest
     stale_version: bool = False
+    # `should_not_flag` cases by evidence strength — see `precision_evidence`. Carried on the index
+    # row because "is this skill's precision score worth anything?" should not need a click.
+    precision_evidence: dict[str, int] = {}
 
 
 class CaseHistoryEntry(BaseModel):
@@ -180,6 +244,7 @@ class SkillDetail(BaseModel):
     rules: list[str] = []
     untested_rules: list[str] = []
     has_runs: bool = False
+    precision_evidence: dict[str, int] = {}
 
 
 class CaseDetail(BaseModel):
@@ -198,6 +263,25 @@ def rule_ids(skill: Skill) -> list[str]:
     """Rule identifiers a skill declares, from its guidance body and its meta.yaml provenance."""
     found = set(_RULE_RE.findall(skill.body)) | set(skill.provenance)
     return sorted(found)
+
+
+def precision_evidence(skill: Skill) -> dict[str, int]:
+    """How a skill's `should_not_flag` cases are justified, by strength of evidence.
+
+    `fp_rate` is a single number averaged over every negative case, and those cases are not equally
+    trustworthy. A case built from a declined suggestion or an accepted fix records something a
+    human actually decided. A case built from a clean merge records only that nobody commented,
+    which is not the same as there being nothing to flag — so a corpus dominated by those measures
+    how quiet the reviewer is at least as much as how precise it is.
+
+    The inference cannot be repaired, so the mix is reported instead of hidden. A skill whose
+    precision rests entirely on silence is one whose `fp_rate` should be read with suspicion.
+    """
+    counts = {EVIDENCE_CONFIRMED: 0, EVIDENCE_SILENCE: 0, EVIDENCE_UNCLASSIFIED: 0}
+    for case in skill.eval_cases:
+        if case.kind == "should_not_flag":
+            counts[case.provenance.evidence] += 1
+    return counts
 
 
 def untested_rules(skill: Skill, record: RunRecord | None) -> list[str]:
@@ -259,6 +343,7 @@ def _skill_summary(skill: Skill, store: RunStore, *, trend: int) -> SkillSummary
         latest=latest,
         recall_trend=[s.recall for s in reversed(history)],
         stale_version=bool(latest and latest.id in stale),
+        precision_evidence=precision_evidence(skill),
     )
 
 
@@ -272,6 +357,7 @@ def skill_detail(skill: Skill, store: RunStore, *, runs: int = 20) -> SkillDetai
         rules=rule_ids(skill),
         untested_rules=untested_rules(skill, latest),
         has_runs=latest is not None,
+        precision_evidence=precision_evidence(skill),
     )
 
 
@@ -351,6 +437,8 @@ def format_gate(outcome: GateOutcome) -> str:
     ]
     if r.regressed_cases:
         lines.append(f"  regressed cases: {', '.join(r.regressed_cases)}")
+    if r.fixed_cases:
+        lines.append(f"  fixed cases: {', '.join(r.fixed_cases)}")
     for reason in r.reasons:
         lines.append(f"  - {reason}")
     return "\n".join(lines)

@@ -14,8 +14,16 @@ from pydantic import BaseModel, StringConstraints
 
 from whetstone.candidates import CandidateEntry, CandidateStore, Decision, new_decision
 from whetstone.config import Config
-from whetstone.gitio import Author, Batch, pending_batch, write_and_commit
-from whetstone.promote import CaseEdits, PreparedCase, edits_from, prepare
+from whetstone.gitio import (
+    Author,
+    Batch,
+    GitError,
+    pending_batch,
+    read_at,
+    ref_exists,
+    write_and_commit,
+)
+from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
 from whetstone.ui.deps import ConfigDep, Principal, PrincipalDep, Writable
 from whetstone.ui.errors import Misconfigured, NotFound
 
@@ -103,7 +111,7 @@ def preview_promotion(
     is still editing, instead of after the commit.
     """
     entry = _load(config, candidate_id)
-    return prepare(entry, request.edits, skills_root=_relative_skills_root(config))
+    return _prepare(config, entry, request.edits, get_batch(config).branch)
 
 
 @router.post("/{candidate_id}/promote", response_model=PromoteResponse, dependencies=[Writable])
@@ -114,9 +122,9 @@ def promote(
     principal: PrincipalDep,
 ) -> PromoteResponse:
     entry = _load(config, candidate_id)
-    prepared = prepare(entry, request.edits, skills_root=_relative_skills_root(config))
-
     batch = get_batch(config)
+    prepared = _prepare(config, entry, request.edits, batch.branch)
+
     commit = write_and_commit(
         config.skills_repo,
         prepared.files,
@@ -171,6 +179,34 @@ def undo(candidate_id: str, config: ConfigDep) -> QueueItem:
     store.clear_decision(candidate_id)
     entry = store.load(candidate_id)
     return QueueItem(entry=entry, edits=edits_from(entry))
+
+
+def _prepare(
+    config: Config, entry: CandidateEntry, edits: CaseEdits, branch: str
+) -> PreparedCase:
+    """Validate the edits against the state the commit would actually land on."""
+    meta = (
+        _meta_yaml(config, edits.skill_id, branch)
+        if edits.rule_id and edits.skill_id
+        else None
+    )
+    return prepare(entry, edits, skills_root=_relative_skills_root(config), meta_yaml=meta)
+
+
+def _meta_yaml(config: Config, skill_id: str, branch: str) -> str | None:
+    """The skill's `meta.yaml` as it stands on the batch branch, falling back to the working tree.
+
+    Reading the branch is what makes a second promotion in one session additive: the provenance the
+    first one recorded exists only there, and starting from the working-tree copy would drop it.
+    """
+    if ref_exists(config.skills_repo, branch):
+        relative = f"{_relative_skills_root(config)}/{skill_id}/{META_FILE}"
+        try:
+            return read_at(config.skills_repo, branch, relative)
+        except GitError:
+            return None  # the branch exists but this skill has no metadata yet
+    path = config.skills_root / skill_id / META_FILE
+    return path.read_text(encoding="utf-8") if path.is_file() else None
 
 
 def _author(config: Config, principal: Principal) -> Author | None:

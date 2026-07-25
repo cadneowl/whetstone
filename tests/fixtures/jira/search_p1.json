@@ -1,0 +1,36 @@
+{
+  "nextPageToken": "page-2-token",
+  "issues": [
+    {
+      "id": "10812",
+      "key": "PAY-812",
+      "fields": {
+        "summary": "Charge handler panics when the DB row is missing",
+        "issuetype": {"name": "Bug"},
+        "priority": {"name": "High"},
+        "labels": ["backend", "regression"],
+        "components": [{"name": "payments"}],
+        "resolution": {"name": "Done"},
+        "resolutiondate": "2026-06-02T09:15:00.000+0000",
+        "description": {
+          "type": "doc",
+          "version": 1,
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {"type": "text", "text": "Any charge for a deleted account returns a 500. "},
+                {"type": "text", "text": "unwrap()", "marks": [{"type": "code"}]},
+                {"type": "text", "text": " on the DB lookup panics instead of propagating."}
+              ]
+            },
+            {
+              "type": "paragraph",
+              "content": [{"type": "text", "text": "Seen 41 times in the last hour."}]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

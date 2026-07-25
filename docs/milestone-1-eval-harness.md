@@ -13,8 +13,13 @@ historical GitLab MRs — before we build anything that auto-edits skills. Every
 - The **regression gate**: compare skill V_old vs V_new → pass/fail with tolerances.
 - CLI-first, thin API. Full test suite (unit, fakes, contract/conformance, golden, meta-eval).
 
-**Explicitly out of scope for M1:** distillation, proposal generation, Jira/wiki connectors,
+**Explicitly out of scope for M1:** distillation, proposal generation, wiki connectors,
 webhooks, auto-merge, dashboards. (Designed for, not built.)
+
+> **Amended.** A Jira connector *was* built, against this original scope line. The reasoning is
+> ADR-006: recall is the harder half of the gate to evidence, review history only labels what a
+> reviewer caught, and a shipped defect is the one kind of labelled *miss* available. That makes it
+> a measurement-quality question, which is this milestone's subject. Wiki connectors remain out.
 
 **Definition of done**
 - `whetstone eval run --skill <id>` produces a reproducible score report from committed eval cases.
@@ -441,7 +446,9 @@ GitLab history; 7–8 turn on the real reviewer/judge with guardrails.
 - **Judge trust.** If the LLM judge is weak, every score is noise. Mitigated by meta-eval gate (§10f);
   start with a tight deterministic pre-filter + narrow semantic judging.
 - **Corpus bias.** History over-represents what humans *did* comment on; silent misses aren't labeled.
-  Accept for M1 (recall is measured against known catches); note it, revisit with synthetic cases.
+  ~~Accept for M1~~ — **addressed**: tracker defects are labelled misses (ADR-006), and applied
+  suggestions now also yield their accepted fix as a confirmed negative (ADR-007). What remains is
+  the clean-merge inference, which is now reported rather than averaged in silently.
 - **Nondeterminism vs a binary gate.** Handled via K-trials + tolerance bands + caching; document the
   bands so a "fail" is real, not variance.
 - **GitLab suggestion coverage.** Not all valuable feedback is a structured suggestion; free-text

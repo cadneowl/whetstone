@@ -365,6 +365,24 @@ function FormPane({
         />
       </Field>
 
+      <Field label="Evidence for rule">
+        {/* Optional. Set it and the source MR is filed under that rule in the skill's meta.yaml,
+            in the same commit — the only record of why a piece of guidance exists, and the thing
+            nobody remembers to update in a follow-up. */}
+        <input
+          value={edits.rule_id}
+          onChange={(e) => onChange({ ...edits, rule_id: e.target.value.toUpperCase() })}
+          disabled={readOnly}
+          placeholder="R1 — optional"
+          className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
+        />
+        <p className="mt-1 text-xs text-muted">
+          {edits.rule_id
+            ? `Cites ${candidate.provenance.ref ?? 'this MR'} as evidence for ${edits.rule_id}.`
+            : 'Leave empty if this case tests the skill without justifying one rule.'}
+        </p>
+      </Field>
+
       <Field label="Region">
         <p className="mb-1 font-mono text-xs break-all">{edits.path}</p>
         {/* Typed entry as well as dragging: dragging is faster, but it is mouse-only and imprecise

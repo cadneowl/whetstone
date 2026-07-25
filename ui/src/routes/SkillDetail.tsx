@@ -85,6 +85,9 @@ export function SkillDetail() {
                 <Muted>none</Muted>
               )}
             </Field>
+            <Field label="Precision evidence">
+              <PrecisionEvidence counts={data.precision_evidence} />
+            </Field>
             <Field label="References">
               {skill.references.length === 0 ? (
                 <Muted>none</Muted>
@@ -101,6 +104,31 @@ export function SkillDetail() {
           </dl>
         </Tabs.Content>
       </Tabs.Root>
+    </div>
+  )
+}
+
+function PrecisionEvidence({ counts }: { counts: Record<string, number> }) {
+  const confirmed = counts.confirmed ?? 0
+  const silence = counts.silence ?? 0
+  const unclassified = counts.unclassified ?? 0
+  const total = confirmed + silence + unclassified
+  if (total === 0) return <Muted>no should-not-flag cases</Muted>
+
+  return (
+    <div className="space-y-1">
+      <p>
+        {confirmed} confirmed · {silence} from silence
+        {unclassified > 0 && ` · ${unclassified} hand-written`}
+      </p>
+      {/* fp_rate averages over all of these. A case built from a clean merge only establishes that
+          nobody commented, which is not the same as there being nothing to flag — so a skill whose
+          precision rests mostly on those has an fp_rate that measures quietness as much as skill. */}
+      {silence > confirmed && (
+        <Badge tone="warn" title="fp_rate is mostly measuring that nobody commented">
+          precision rests on silence
+        </Badge>
+      )}
     </div>
   )
 }

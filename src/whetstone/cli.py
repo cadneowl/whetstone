@@ -14,11 +14,14 @@ from pydantic import BaseModel
 from whetstone.config import load_config
 from whetstone.core.gate import GateConfig
 from whetstone.core.loader import load_skill, load_skills
+from whetstone.corpus.builder import DEFAULT_MAX_CLEAN_FILES, DEFAULT_MAX_DEFECT_FILES
+from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
 from whetstone.domain.run import RunEvent, RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, build_llm_client, resolve_backend
 from whetstone.providers.gitlab.provider import GitLabConnector
+from whetstone.providers.jira.provider import JiraConnector
 from whetstone.providers.registry import available_providers
 from whetstone.report import render_run_html, render_run_text
 from whetstone.runs import RunStore, stale_version_ids
@@ -26,7 +29,9 @@ from whetstone.service import (
     format_gate,
     format_score,
     gate_skills,
+    precision_evidence,
     pull_corpus,
+    pull_defects,
     record_eval,
 )
 from whetstone.vcs import export_tree
@@ -198,6 +203,13 @@ def eval_gate(
     # override `[gate]` in whetstone.toml rather than silently shadowing it with its own default.
     recall_tol: Annotated[float | None, typer.Option(help="Allowed recall drop")] = None,
     fp_tol: Annotated[float | None, typer.Option(help="Allowed false-positive rise")] = None,
+    targeted: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--targeted",
+            help="Case id this change must fix (repeatable). The gate fails unless it passes.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate both sides; no model call")
     ] = False,
@@ -207,11 +219,18 @@ def eval_gate(
 
     Each side is a skill folder (`--base`/`--candidate`) OR a git ref (`--base-ref` /
     `--candidate-ref` with `--repo` and `--skill-path`) — e.g. gate a branch against `main`.
+
+    Both sides are scored over the union of their eval cases, so adding a case that documents a
+    known miss is not itself a regression. Pass `--targeted <case-id>` (repeatable) to require the
+    change to actually fix something rather than merely avoid breaking anything.
     """
     defaults = load_config().gate
     tolerances = GateConfig(
         recall_tol=recall_tol if recall_tol is not None else defaults.recall_tol,
         fp_tol=fp_tol if fp_tol is not None else defaults.fp_tol,
+        # Not read from `[gate]`: which cases a change must fix is a property of that change, not a
+        # repo-wide default that would silently apply to every later gate run.
+        targeted_cases=list(targeted or []),
     )
     base_dir, base_tmp = _resolve_skill_dir(base, base_ref, repo, skill_path)
     cand_dir, cand_tmp = _resolve_skill_dir(candidate, candidate_ref, repo, skill_path)
@@ -245,21 +264,80 @@ def corpus_pull(
     out: Annotated[Path, typer.Option(help="Directory to write candidate cases")],
     token_env: Annotated[str, typer.Option()] = "GITLAB_TOKEN",
     skills_root: Annotated[Path | None, typer.Option(help="Skills root, for routing")] = None,
+    max_clean_files: Annotated[
+        int,
+        typer.Option(
+            min=0, help="Max should_not_flag candidates to sample from one comment-free MR"
+        ),
+    ] = DEFAULT_MAX_CLEAN_FILES,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Rewrite undecided candidates that already exist"),
+    ] = False,
+    jira_url: Annotated[
+        str | None, typer.Option(help="Jira base URL — enables the escaped-defect signal")
+    ] = None,
+    jira_project: Annotated[
+        str | None, typer.Option(help="Jira project key, e.g. PAY")
+    ] = None,
+    jira_email: Annotated[
+        str | None,
+        typer.Option(help="Jira Cloud account email (omit for a Server/DC bearer token)"),
+    ] = None,
+    jira_token_env: Annotated[str, typer.Option()] = "JIRA_TOKEN",
+    max_defect_files: Annotated[
+        int, typer.Option(min=0, help="Max candidates to sample from one defect fix")
+    ] = DEFAULT_MAX_DEFECT_FILES,
 ) -> None:
-    """Pull reviewed MRs into candidate eval cases for a human to review and promote."""
+    """Pull reviewed MRs into candidate eval cases for a human to review and promote.
+
+    Safe to re-run over an overlapping `--since` window: a candidate a person has already promoted
+    or rejected is never rewritten, and by default neither is one already sitting in the queue.
+
+    With `--jira-url` and `--jira-project`, resolved defects are paired with the merge requests that
+    fixed them and each fix is reversed into the change that introduced it — the strongest recall
+    signal available, since it is a case review demonstrably missed.
+    """
     from whetstone.corpus.builder import write_candidate
 
     connector = GitLabConnector.from_config({"base_url": base_url, "token_env": token_env})
     skills = load_skills(skills_root) if skills_root else []
-    candidates = pull_corpus(connector, project, since, skills)
+    candidates = pull_corpus(connector, project, since, skills, max_clean_files=max_clean_files)
 
+    if bool(jira_url) != bool(jira_project):
+        raise typer.BadParameter("--jira-url and --jira-project must be given together")
+    if jira_url and jira_project:
+        tracker = JiraConnector.from_config(
+            {"base_url": jira_url, "token_env": jira_token_env, "email": jira_email or ""}
+        )
+        defects = pull_defects(
+            connector, tracker, project, jira_project, since, skills, max_files=max_defect_files
+        )
+        typer.echo(f"{len(defects)} candidate(s) from resolved {jira_project} defects")
+        candidates.extend(defects)
+
+    written = decided = existing = 0
     for c in candidates:
         case_dir = out / c.id
+        if (case_dir / "decision.json").is_file():
+            # Someone already ruled on this one. Rewriting it would revive a rejected candidate as
+            # a fresh-looking case, or replace text a promoter is part-way through editing.
+            decided += 1
+            continue
+        if case_dir.is_dir() and not refresh:
+            existing += 1
+            continue
         write_candidate(c, case_dir)
         (case_dir / "candidate.json").write_text(c.model_dump_json(indent=2), encoding="utf-8")
+        written += 1
         skill = c.suggested_skill or "(unrouted)"
         typer.echo(f"{c.id}  [{c.kind}]  conf={c.confidence:.2f}  -> {skill}")
-    typer.echo(f"{len(candidates)} candidate(s) written to {out}")
+
+    typer.echo(f"{written} candidate(s) written to {out}")
+    if existing:
+        typer.echo(f"{existing} already in the queue (use --refresh to rewrite)")
+    if decided:
+        typer.echo(f"{decided} already decided, left untouched")
 
 
 @corpus_app.command("promote")
@@ -282,9 +360,18 @@ def corpus_promote(
 def skills_list(
     root: Annotated[Path, typer.Option(help="Skills root folder")] = Path("skills"),
 ) -> None:
-    """List skills and their eval-case counts."""
+    """List skills, their eval-case counts, and how well their precision cases are evidenced."""
     for s in load_skills(root):
         typer.echo(f"{s.id}  v{s.version}  ({len(s.eval_cases)} eval cases)")
+        evidence = precision_evidence(s)
+        silence, confirmed = evidence[EVIDENCE_SILENCE], evidence[EVIDENCE_CONFIRMED]
+        if silence and silence > confirmed:
+            # `fp_rate` averages over these, so a corpus of mostly-silence negatives measures how
+            # quiet the reviewer is as much as how precise it is. Worth saying out loud.
+            typer.echo(
+                f"    ⚠ {silence} of {silence + confirmed + evidence['unclassified']} "
+                "precision case(s) rest on nobody having commented"
+            )
 
 
 @runs_app.command("list")

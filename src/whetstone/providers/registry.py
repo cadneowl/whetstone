@@ -12,8 +12,9 @@ def _builders() -> dict[str, type[_ConfigBuildable]]:
     # Imported lazily to avoid a circular import (providers -> registry -> providers).
     from whetstone.providers.fake.provider import FakeProvider
     from whetstone.providers.gitlab.provider import GitLabConnector
+    from whetstone.providers.jira.provider import JiraConnector
 
-    return {"fake": FakeProvider, "gitlab": GitLabConnector}
+    return {"fake": FakeProvider, "gitlab": GitLabConnector, "jira": JiraConnector}
 
 
 def available_providers() -> set[str]:

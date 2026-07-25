@@ -420,6 +420,11 @@ export interface components {
             /** Path */
             path: string;
             /**
+             * Rule Id
+             * @default
+             */
+            rule_id: string;
+            /**
              * Semantic
              * @default
              */
@@ -1194,6 +1199,13 @@ export interface components {
              */
             has_runs: boolean;
             /**
+             * Precision Evidence
+             * @default {}
+             */
+            precision_evidence: {
+                [key: string]: number;
+            };
+            /**
              * Rules
              * @default []
              */
@@ -1270,6 +1282,13 @@ export interface components {
              * @default
              */
             owner: string;
+            /**
+             * Precision Evidence
+             * @default {}
+             */
+            precision_evidence: {
+                [key: string]: number;
+            };
             /**
              * Recall Trend
              * @default []
