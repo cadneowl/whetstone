@@ -27,16 +27,19 @@ See [`docs/milestone-1-eval-harness.md`](docs/milestone-1-eval-harness.md) for t
 6. [Scoring model](#scoring-model)
 7. [The regression gate](#the-regression-gate)
 8. [CLI reference](#cli-reference)
-9. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
-10. [Providers & the plugin architecture](#providers--the-plugin-architecture)
-11. [The corpus builder](#the-corpus-builder)
-12. [The LLM layer](#the-llm-layer)
-13. [Reviewers & judges](#reviewers--judges)
-14. [Meta-evaluation (validating the judge)](#meta-evaluation-validating-the-judge)
-15. [Testing](#testing)
-16. [Extending Whetstone](#extending-whetstone)
-17. [Environment variables](#environment-variables)
-18. [Repository layout](#repository-layout)
+9. [Run records & reports](#run-records--reports)
+10. [The console (`whetstone ui`)](#the-console-whetstone-ui)
+11. [Configuration (`whetstone.toml`)](#configuration-whetstonetoml)
+12. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
+13. [Providers & the plugin architecture](#providers--the-plugin-architecture)
+14. [The corpus builder](#the-corpus-builder)
+15. [The LLM layer](#the-llm-layer)
+16. [Reviewers & judges](#reviewers--judges)
+17. [Meta-evaluation (validating the judge)](#meta-evaluation-validating-the-judge)
+18. [Testing](#testing)
+19. [Extending Whetstone](#extending-whetstone)
+20. [Environment variables](#environment-variables)
+21. [Repository layout](#repository-layout)
 
 ---
 
@@ -76,7 +79,7 @@ judge) both have `Fake` implementations, so the entire harness runs with **no mo
 ```
 src/whetstone/
   domain/       Canonical, provider-agnostic model. Imports NO provider code.
-                enums, refs, change (+diff parser), finding, eval_model, skill, review, score
+                enums, refs, change (+diff parser), finding, eval_model, skill, review, score, run
   core/         The harness. loader · matching · scoring · gate · harness
   reviewer/     Reviewer protocol + LLMReviewer + PatternReviewer (test double)
   judge/        Judge protocol + LLMJudge + DeterministicJudge (test double)
@@ -84,11 +87,19 @@ src/whetstone/
   providers/    Capability protocols + registry + gitlab/ adapter + fake/ provider
   corpus/       MR history → candidate eval cases (human-promoted)
   meta_eval/    Validate a judge against human-labeled pairs
-  service.py    Operable API layer (used by the CLI and any future HTTP layer)
+  runs.py       Run-record persistence (JSON files + derived SQLite index)
+  candidates.py The triage queue: pending candidates + recorded promote/reject decisions
+  promote.py    Edited candidate → validated eval case (round-tripped through load_skill)
+  report.py     Run record → self-contained HTML / text report
+  gitio.py      Git write primitives (branch, commit, push) that never touch the working tree
+  config.py     `whetstone.toml` loading
+  service.py    Operable API layer (used by the CLI and the console)
+  ui/           FastAPI console — app · deps (identity/authz) · routers · built SPA assets
   cli.py        `whetstone` command-line interface
 skills/         The skill registry (folders of SKILL.md + meta.yaml + eval_cases/)
-tests/          unit · contract (provider conformance) · golden · live (opt-in) · fixtures
-docs/           Milestone plan + decision record
+ui/             Console frontend source (React + Vite); builds into src/whetstone/ui/static/
+tests/          unit · api · contract (provider conformance) · golden · live (opt-in) · fixtures
+docs/           Milestone plan + decision record + console UI plan
 ```
 
 The **plugin boundary**: the core loop depends only on capability `Protocol`s in
@@ -308,11 +319,15 @@ candidate. It **PASSes only if all guards hold**:
 `GateResult` reports `passed`, `reasons` (human-readable failure list), `regressed_cases`, and the
 before/after recall and fp_rate. This is the seam the CI job and every future proposal engine call.
 
+`whetstone eval gate` takes `recall_tol` and `fp_tol` from `[gate]` in `whetstone.toml`, so a repo
+sets its tolerance once instead of repeating flags in every CI invocation. `--recall-tol` /
+`--fp-tol` override the file.
+
 ---
 
 ## CLI reference
 
-Top-level groups: `eval`, `corpus`, `skills`, `providers`.
+Top-level groups: `eval`, `corpus`, `skills`, `providers`, `llm`, `runs` — plus `report`.
 
 ```bash
 whetstone --help
@@ -333,6 +348,9 @@ by default, or any local/OpenAI-compatible backend via `--llm` (see [The LLM lay
 | `--api-key-env TEXT` | preset default | Name of the env var holding the API key, if the server needs one. |
 | `--effort TEXT` | `high` | Reviewer effort: `low`/`medium`/`high`/`xhigh`/`max` (Anthropic only). |
 | `--trials INT` | `1` | Trials per eval case (≥1); >1 surfaces variance. |
+| `--workers INT` | `1` | Evaluate this many cases concurrently. |
+| `--save / --no-save` | on | Store a run record for later inspection (see [Run records](#run-records--reports)). |
+| `--runs-dir PATH` | config | Where run records are stored. |
 | `--dry-run` | off | Validate & summarize the skill; **no model call**, no credentials. |
 | `--json` | off | Emit the full `SkillScore` as JSON instead of a summary. |
 
@@ -348,6 +366,9 @@ Skill code-review-rust-error-handling v1  (k=5)
     [catch ] unwrap-in-handler              recall 1.00
     [noflag] unwrap-in-test                 fp_rate 0.00
     [noflag] error-mapped-question-mark     fp_rate 0.00
+
+run 20260725T040013Z-code-review-rust-error-handling-349fb3  (12 llm calls, 8.4s)
+  whetstone report --run 20260725T040013Z-code-review-rust-error-handling-349fb3
 ```
 
 ### `whetstone eval gate`
@@ -475,6 +496,668 @@ whetstone llm check --llm ollama --model qwen2.5-coder:7b
 # OK: backend returned ok=True note='ready'
 ```
 
+### `whetstone runs list` / `show` / `reindex`
+
+Inspect stored run records.
+
+| Command | Options | Purpose |
+|---|---|---|
+| `runs list` | `--skill`, `--limit` (20), `--runs-dir` | Recent runs, newest first. |
+| `runs show <run-id>` | `--json`, `--runs-dir` | One run's summary, or the full record. |
+| `runs reindex` | `--runs-dir` | Rebuild the index from the stored files. |
+
+```bash
+whetstone runs list --skill code-review-rust-error-handling
+# 20260725T040013Z-...-349fb3  2026-07-25 04:00  code-review-rust-error-handling v1  recall 1.000  fp 0.000  k=3
+```
+
+A run whose `version` is shared by another run with *different* content is flagged
+`⚠ version reused for different content` — the common failure of editing guidance without bumping
+`version`, which would otherwise make two unlike runs look comparable.
+
+### `whetstone report`
+
+Render a stored run as a **self-contained HTML report** — one file, no external assets, no
+JavaScript. Open it from disk, attach it to a CI job, or paste it into a merge request.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--run TEXT` | *(required)* | Run id (see `runs list`). |
+| `--format TEXT` | `html` | `html`, `text`, or `json`. |
+| `--out PATH` | stdout | Write to a file instead. |
+| `--runs-dir PATH` | config | Where run records are stored. |
+
+```bash
+whetstone report --run 20260725T040013Z-...-349fb3 --out report.html
+```
+
+---
+
+## Run records & reports
+
+`SkillScore` answers *what* a skill scored. A **run record** answers *why*: it keeps every finding
+the reviewer produced and every verdict the judge returned, so a failing case can be diagnosed long
+after the run.
+
+Without it, a flaky case surfaces as `recall 0.60` and nothing else — and you cannot tell whether
+the reviewer missed the issue, the judge ruled wrongly, or the expectation is badly worded. Those
+have three different fixes.
+
+```
+▾ unwrap-in-handler   should_catch   recall 0.60 (3/5 trials)   ⚠ flaky
+  ▾ Trial 3 — FN
+    Expected: "unwrap on the DB result can panic on a normal error path"
+              src/handlers/charge.rs lines 40–45   severity ≥ warning
+    Reviewer findings (2):
+      charge.rs:41  warning  "consider handling this error"   conf 0.4
+        └ judge: NOT MATCHED — "the finding is generic and does not identify
+                 the unwrap as the panic source"              conf 0.8
+      charge.rs:88  info     "unused import"                  conf 0.9
+        └ outside expectation region (lines 40–45) — not judged
+```
+
+**Recording is free.** Semantic matching short-circuits at the first match, and capture preserves
+that exactly — a recorded run makes precisely the same model calls as an unrecorded one. There is
+therefore no "fast path" that skips it.
+
+**Records are derived artifacts, not source of truth.** They live in `.whetstone/runs/<id>.json`
+(gitignored) with a disposable SQLite index beside them; deleting the directory costs history only.
+Git remains canonical for skills.
+
+Findings that matched *no* expectation are retained and surfaced separately — they are either
+unlabeled true positives (worth promoting to a `should_catch` case) or noise (worth pinning with a
+`should_not_flag` case).
+
+```python
+from whetstone.runs import RunStore
+from whetstone.report import render_run_html
+
+store = RunStore()
+record = store.latest("code-review-rust-error-handling")
+open("report.html", "w", encoding="utf-8").write(render_run_html(record))
+```
+
+---
+
+## The console (`whetstone ui`)
+
+A local web console for the two jobs the CLI does badly: **diagnosing why an eval case failed**, and
+**turning review history into eval cases**. Everything else it does — browsing skills, reading run
+history — the CLI can do too; these two it genuinely cannot.
+
+It is a thin HTTP layer over `whetstone.service` plus a prebuilt single-page app. It holds no state
+of its own: skills are read from disk on every request, runs come from `.whetstone/runs/`, and every
+write it makes lands as a git commit on a branch.
+
+**Contents:** [Prerequisites](#prerequisites) · [Install](#install) · [Starting it](#starting-it) ·
+[Configuration](#console-configuration) · [First run](#first-run-a-five-minute-tour) ·
+[Screens](#the-screens) · [Reading a failure](#reading-a-failure-the-run-drill-down) ·
+[Triage](#triage-the-full-workflow) · [Security](#security-and-deployment) ·
+[HTTP API](#http-api) · [Developing](#developing-the-console) ·
+[Troubleshooting](#console-troubleshooting) · [Not built yet](#not-built-yet)
+
+---
+
+### Prerequisites
+
+| | Needed for | Notes |
+|---|---|---|
+| Python 3.13 + `uv` | everything | Same as the CLI. |
+| The `ui` extra | running the console | `fastapi` + `uvicorn`. Not installed by default. |
+| `git` | triage, repo status | Read-only browsing works without a repo, degraded. |
+| **Node 20+** | **only** rebuilding the frontend | Wheels ship built assets. End users never need it. |
+
+You do **not** need model credentials to use the console. It never calls a model — runs are launched
+by the CLI (`whetstone eval run`) and the console reads what they recorded.
+
+---
+
+### Install
+
+**From a published wheel** — nothing to build:
+
+```bash
+pip install 'whetstone[ui]'
+whetstone ui
+```
+
+**From a source checkout** — the built assets are gitignored, so build them once:
+
+```bash
+uv sync --extra dev          # includes the ui extra
+cd ui && npm install && npm run build && cd ..
+whetstone ui
+```
+
+`npm run build` type-checks, runs the frontend tests, and writes to
+`src/whetstone/ui/static/`. It takes a few seconds and is only needed after a frontend change.
+
+If you skip it, `whetstone ui` still starts and the API works — the browser shows a page explaining
+what to run. That is deliberate: a missing frontend build should not look like a broken install.
+
+---
+
+### Starting it
+
+```bash
+whetstone ui                      # http://127.0.0.1:8787, opens a browser
+whetstone ui --port 9000          # a different port
+whetstone ui --read-only          # browse without any write affordances
+whetstone ui --no-open            # do not launch a browser (scripts, remote shells)
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--host TEXT` | `127.0.0.1` | Bind address. Non-loopback requires `--insecure-bind`. |
+| `--port INT` | `8787` | Bind port. |
+| `--read-only` | off | Disable every mutating route, server-side. |
+| `--open` / `--no-open` | `--open` | Open a browser on start. |
+| `--dev` | off | Serve only the API, for the Vite dev server to proxy. See [Developing](#developing-the-console). |
+| `--insecure-bind` | off | Acknowledge binding a publicly reachable address. |
+
+On start it prints where it is serving from, so a misconfigured skills root is obvious immediately:
+
+```
+Whetstone console on http://127.0.0.1:8787
+  skills   /home/costa/work/whetstone/skills
+  runs     /home/costa/work/whetstone/.whetstone/runs
+```
+
+Stop it with `Ctrl-C`. Nothing is left running and nothing needs cleaning up.
+
+---
+
+### Console configuration
+
+Every setting resolves **CLI flag → environment variable → `whetstone.toml` → default**.
+
+```toml
+[ui]
+host = "127.0.0.1"
+port = 8787
+read_only = false
+practice_mode = false            # reserved; see the note below
+trust_proxy_headers = false      # must be true to accept identity headers
+
+[skills]
+root = "skills"                  # what the console browses
+repo = "."                       # the git repo it commits into
+
+[candidates]
+dir = "candidates"               # the triage queue
+
+[runs]
+dir = ".whetstone/runs"          # where run records are read from
+```
+
+| Environment variable | Overrides |
+|---|---|
+| `WHETSTONE_UI_HOST` / `WHETSTONE_UI_PORT` | `[ui] host` / `port` |
+| `WHETSTONE_READ_ONLY` | `[ui] read_only` (`1`/`true`/`yes`/`on`) |
+| `WHETSTONE_PRACTICE_MODE` | `[ui] practice_mode` |
+| `WHETSTONE_SKILLS_ROOT` / `WHETSTONE_SKILLS_REPO` | `[skills] root` / `repo` |
+| `WHETSTONE_CANDIDATES_DIR` | `[candidates] dir` |
+| `WHETSTONE_RUNS_DIR` | `[runs] dir` |
+
+Relative paths in `whetstone.toml` resolve against the file's own directory; paths from environment
+variables resolve against the current working directory, as environment variables conventionally do.
+
+> **`practice_mode` is declared but inert.** It is reported to the UI and shown as a badge, but
+> nothing consumes it yet, because the console does not launch runs — that is Phase 4. Setting it
+> today changes only what the header displays.
+
+**Pointing at a separate skills repo:**
+
+```toml
+[skills]
+root = "../company-skills/skills"
+repo = "../company-skills"
+```
+
+`root` must be *inside* `repo`, since promotions commit files by repo-relative path. If they are
+unrelated directories the console says so with a 500 and names both — a misconfiguration, not
+something a user request can fix.
+
+---
+
+### First run: a five-minute tour
+
+From a fresh checkout, with no model credentials:
+
+```bash
+# 1. Build the frontend once.
+cd ui && npm install && npm run build && cd ..
+
+# 2. Start the console. The skills index will show one skill, "never evaluated".
+whetstone ui
+```
+
+To get a run to look at, you need a model — Anthropic, or anything local:
+
+```bash
+# 3. Score the bundled skill. Any backend works; a local model is fine.
+whetstone eval run --skill skills/code-review-rust-error-handling --trials 5 \
+  --llm ollama --model qwen2.5-coder:7b
+
+# 4. Refresh the console. The skill now has a score, a sparkline, and a run to open.
+```
+
+`--trials 5` is worth it for a first look: multiple trials are what make flakiness visible, and the
+flaky cases are the interesting ones.
+
+To try triage without a GitLab instance, point `[candidates] dir` at any directory containing
+`corpus pull` output. With a real instance:
+
+```bash
+export GITLAB_TOKEN=glpat-...
+whetstone corpus pull --base-url https://gitlab.acme.com --project acme/payments \
+  --since 2026-01-01 --out candidates --skills-root skills
+```
+
+---
+
+### The screens
+
+| Route | Screen |
+|---|---|
+| `/` | Skills index |
+| `/skills/<id>` | Skill detail — guidance, cases, runs, metadata |
+| `/skills/<id>/cases/<case-id>` | Eval case — diff, expectations, history |
+| `/triage` | Candidate queue |
+| `/runs` | Run history |
+| `/runs/<run-id>` | Run drill-down |
+
+Every URL is deep-linkable. Paste a run link into a merge request and it opens where you left it.
+
+#### Skills index
+
+One row per skill, **weakest first** — the landing order answers "which of our skills is actually
+weak?", which otherwise takes a CLI run per skill and eyeballing.
+
+- **`8 catch / 5 noflag`** — the case split. A skill with no `should_not_flag` cases has nothing
+  keeping its precision honest.
+- **`R` / `FP`** — recall and false-positive rate from the most recent run.
+- **Sparkline** — recall over recent runs, oldest to newest. Direction, not precision.
+- **`version reused`** — another run shares this `skill_version` with different content, so the two
+  are not comparable despite appearances. Almost always means guidance was edited without bumping
+  `version` in frontmatter.
+- **`never evaluated`** — no runs. These sort *after* scored skills: a measured F2 of 0 is a more
+  urgent problem than an unknown.
+
+#### Skill detail
+
+**Guidance** renders `SKILL.md` and, under each rule, the review signals that justified it from
+`meta.yaml` — `R1 ← acme/payments!812#note_44`. Rules the reviewer never cited in the latest run are
+badged **untested guidance**: if no finding ever cites a rule, any cases guarding it passed without
+exercising it, so they would pass whether or not the guidance works.
+
+**Eval cases** lists each case with its kind, the file it concerns, its provenance, and how it fared
+last run. A **flaky** badge means trials disagreed — unstable, as opposed to simply wrong.
+
+**Runs** is this skill's history, newest first. **Metadata** shows owner, declared rules, trigger
+labels, and references.
+
+#### Case detail
+
+The diff with expectation regions highlighted **by new-file line number** — the same coordinates
+`Region.line_range` uses, so what you see is what the matcher sees. The sidebar shows each
+expectation in full and how the case has scored across recent runs, with `⚠` on runs where trials
+disagreed.
+
+#### Runs
+
+Every run, newest first: when, which skill and version, recall, fp rate, `k`, and the model. Badged
+`version reused` and `practice` where applicable.
+
+---
+
+### Reading a failure: the run drill-down
+
+This is the screen the console exists for. A flaky case shows up everywhere else as `recall 0.60`
+and nothing more — which is indistinguishable between three different problems with three different
+fixes. The drill-down separates them.
+
+Expand a case, then a trial:
+
+```
+▾ unwrap-in-handler       should catch      FN FN TP FN TP    2/5   ⚠ flaky
+
+  ▾ Trial 1 of 5                                                FN
+
+    FN  must appear  (missed — the reviewer should have flagged this)
+        “unwrap on the DB result can panic on a normal error path”
+        src/handlers/charge.rs lines 40–45   severity ≥ warning
+
+        No finding was eligible — nothing the reviewer reported reached the judge here.
+
+        Filtered out before judging:
+          src/handlers/charge.rs:41  info  "consider handling this error"  conf 0.35
+            not judged — below the required severity
+```
+
+Read it top-down:
+
+1. **The chips** (`FN FN TP FN TP`) are the per-trial outcome. Disagreement across trials is
+   flakiness; uniform `FN` is a consistent miss.
+2. **The quoted text** is what the expectation asserted, recorded with the run. It is copied, not
+   referenced, so the record stays readable even after the skill is edited.
+3. **The findings**, each with the judge's verdict, confidence, and one-sentence reason.
+4. **Filtered out before judging** — findings the structural prefilter dropped, and why.
+
+**Diagnosing from what you see:**
+
+| What the trial shows | What went wrong | Where to fix it |
+|---|---|---|
+| No findings at all | The reviewer missed it entirely | The skill's guidance |
+| A finding, `judge: NOT MATCHED` with a reason you disagree with | The judge ruled badly | The expectation's wording, or the judge (see meta-eval) |
+| A finding filtered out — *below the required severity* | The reviewer found it but rated it lower than the case demands | `severity_min` on the case, or the guidance |
+| A finding filtered out — *outside the expected line range* | The region is wrong, or the reviewer anchored elsewhere | The case's `line_range` |
+| `Findings matching no expectation` | The reviewer said something nothing asserts | Promote it to a new case, or pin it with `should_not_flag` |
+
+That last section is worth attention: those findings are either unlabelled true positives worth
+capturing, or noise worth pinning. Either way they are free corpus growth.
+
+**Standalone report ↗** in the header renders the same drill-down as a single self-contained HTML
+file — no server, no assets — for attaching to a CI job or pasting into a merge request. It is the
+same output as `whetstone report --run <id>`.
+
+---
+
+### Triage: the full workflow
+
+`corpus pull` proposes candidate eval cases; a person decides which are real. This is the screen
+that exists because the CLI genuinely could not do the job.
+
+**Why it needs a UI at all.** `corpus/builder.py` sets a candidate's expectation to the **raw body of
+the first review comment** — in real repositories that is "nit: use `?` here", "see above", "👍", or
+a paragraph about something else. That text becomes the ground truth the LLM judge scores every
+finding against. `whetstone corpus promote` is a verbatim `copyfile` and has no way to express a
+correction, so the human step that must happen has nowhere to happen.
+
+#### Filling the queue
+
+```bash
+whetstone corpus pull \
+  --base-url https://gitlab.acme.com \
+  --project acme/payments \
+  --since 2026-01-01 \
+  --out candidates \
+  --skills-root skills          # routes each candidate to a skill by trigger globs
+```
+
+Then open **Triage**. The console reads `[candidates] dir` (default `candidates/`).
+
+#### The three panes
+
+```
+┌────────────┬───────────────────────────────┬──────────────────────┐
+│ QUEUE      │ DIFF                          │ EXPECTATION          │
+│            │                               │                      │
+│ ▸ 812-t0   │  src/handlers/charge.rs       │ kind  ◉catch ○noflag │
+│   0.90     │                               │ skill [rust-errors▾] │
+│   812-t1   │  40  fn charge(id: Id) {      │ case id [812-t0    ] │
+│   0.50     │  41 +  let row = db.get(id)   │ region [41]–[43]     │
+│   813-cl0  │  42 +      .unwrap();         │ severity [none    ▾] │
+│   0.30     │  43    process(row);          │                      │
+│            │                               │ ORIGINAL COMMENT     │
+│ 3 pending  │  drag line numbers to select  │ "nit: use `?` here"  │
+│ 1 promoted │                               │ ─────────────────────│
+│ 1 rejected │                               │ SEMANTIC  [unedited] │
+│            │                               │ [                  ] │
+└────────────┴───────────────────────────────┴──────────────────────┘
+   j/k move   a promote   x reject   Enter promote
+```
+
+**Queue** is ordered by the corpus builder's confidence — applied suggestions (0.9) before resolved
+comments (0.5) before clean merges (0.3). That is the order attention is worth spending in.
+
+**Diff** highlights the current region. Drag across the **line numbers** to change it.
+
+**Expectation** is the form. The **original comment** and the editable **semantic** field sit side by
+side, both visible, and the field is badged **unedited** until you change it. The job is to rewrite
+the signal, not to accept it.
+
+#### Step by step
+
+1. **Pick a candidate** — `j`/`k`, or click.
+2. **Check the kind.** `should catch` asserts the reviewer must flag this; `should not flag` asserts
+   it must stay quiet. The expectation's `must` follows automatically — a `should_catch` case whose
+   expectation says `not_appear` is incoherent, so the UI cannot express it.
+3. **Confirm the target skill.** Auto-routed by trigger globs; blank if nothing matched.
+4. **Fix the region.** Drag on the diff, or type the line numbers. Clear either end for "whole file".
+   This is the field most likely to be wrong in an auto-generated candidate.
+5. **Rewrite the semantic.** Describe the issue as the judge should understand it — a standalone
+   sentence, not a reply to a thread. *"unwrap on the DB result can panic on a normal error path"*,
+   not *"nit: use `?` here"*.
+6. **Optionally set a severity floor**, if findings below it should not count.
+7. **Validate** (optional) to check without writing, or **Promote** to commit.
+
+#### Keyboard
+
+| Key | Action |
+|---|---|
+| `j` / `k` | Next / previous candidate |
+| `a` or `Enter` | Promote |
+| `x` | Open the reject form |
+
+Shortcuts are suppressed while a text field is focused, so typing never triggers an action.
+
+#### Validation, and what the errors mean
+
+**Validate** and **Promote** both render the case and load it back through the real `load_skill`
+parser before anything is written. A case the console accepts is by construction one the harness can
+run. Errors are reported against the field that caused them:
+
+| Message | Cause |
+|---|---|
+| `no target skill chosen` | The skill dropdown is blank |
+| `expectation points at 'x.rs', which this diff does not change` | Path typo; the message lists the files the diff does touch |
+| `expectation covers lines 5000–6000 …, it changes lines 40–43` | The region misses every hunk, so the case could never pass |
+| `line range 45–40 is inverted` | First line after the last |
+| `case id '…' is not usable as a folder name` | Ids become directory names; letters, digits, `.`, `-`, `_` only |
+| `missing diff file 'change.diff'` | The candidate folder is incomplete |
+
+#### Rejecting
+
+Rejections **require a reason** and are kept in `decision.json` beside the candidate. The corpus
+builder assigns confidence by signal strength and nothing currently tells it whether those guesses
+were any good — the noes are that evidence. A bare "no" teaches it nothing.
+
+Both decisions are reversible: reopening a candidate is a `DELETE` on its decision. Undoing a
+promotion does **not** revert its commit — the branch is the record of what was proposed, and
+rewriting it silently would be worse than a duplicate.
+
+#### Batches and proposing
+
+Promotions accumulate on **one branch** — `whetstone/cases/batch-N` — so a triage session produces
+one merge request rather than one per case. The header shows the current branch and a **Propose N
+cases** button.
+
+Which batch is open is derived from git, never stored: a branch that already has a remote-tracking
+ref has been pushed, so the next promotion starts the following number. That lookup is local, so it
+never touches the network.
+
+**Propose** pushes the branch. It does **not** open the merge request — that needs a provider
+implementing `WriteConnector`, which Milestone 1 defines but does not implement. The response says
+where the branch went rather than pretending. Without a remote configured it refuses and tells you
+the work is safe locally.
+
+#### What triage never does
+
+- Never touches your working tree or switches your branch. Commits are built with git plumbing
+  against a temporary index.
+- Never commits to `main`/`master`, or any branch in `[git] protected_branches`.
+- Never pushes implicitly, and never pushes a branch it did not create. `Propose` refuses anything
+  protected or outside `[git] branch_prefix`, so a stray request cannot publish whatever happens to
+  be sitting on your local `main`.
+- Refuses to write when the working tree is dirty in the paths it would touch — otherwise your
+  uncommitted local edits would be swept into a console commit and attributed to you.
+
+---
+
+### Security and deployment
+
+**The console has no authentication of its own, and will not grow one.** A half-built auth system is
+worse than an explicit boundary.
+
+**Local (the default).** Binds `127.0.0.1` and trusts the local git identity for attribution.
+Binding a publicly reachable address requires `--insecure-bind`, deliberately:
+
+```
+$ whetstone ui --host 0.0.0.0
+Error: refusing to bind 0.0.0.0 without --insecure-bind: the console has no
+authentication of its own and would be reachable by anyone on the network
+```
+
+**For a team,** put an authenticating reverse proxy (OIDC) in front and opt in to its headers:
+
+```toml
+[ui]
+trust_proxy_headers = true    # identity from X-Forwarded-User / X-Forwarded-Email
+```
+
+Until that flag is set those headers are **ignored** — otherwise forging one would be an
+authentication bypass rather than a convenience. With it set and no headers present, the caller is
+anonymous.
+
+**Read-only mode** (`--read-only`, or `[ui] read_only = true`) disables every mutating route
+server-side. The UI also hides write affordances, so nobody discovers the 403 by clicking — but the
+guard is the server's, not the interface's.
+
+---
+
+### HTTP API
+
+Interactive docs at **`/docs`**; the schema at **`/openapi.json`**. Responses are the same pydantic
+models the CLI uses.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/config` | Capabilities, principal, read-only and practice flags, backends |
+| `GET` | `/api/git/status` | Branch, head, cleanliness, remote |
+| `POST` | `/api/git/propose` | Push a batch branch |
+| `GET` | `/api/skills` | Index rows, weakest first |
+| `GET` | `/api/skills/{id}` | Guidance, cases, runs, rules, untested rules |
+| `GET` | `/api/skills/{id}/cases/{case_id}` | Eval case, diff, history |
+| `GET` | `/api/runs` | Run history, `?skill_id=`, `?limit=` |
+| `GET` | `/api/runs/{id}` | Full record — findings and verdicts |
+| `GET` | `/api/runs/{id}/report` | Standalone HTML report |
+| `GET` | `/api/candidates` | Triage queue + counts |
+| `GET` | `/api/candidates/batch` | The branch the next promotion lands on |
+| `GET` | `/api/candidates/{id}` | One candidate + its pre-filled edit form |
+| `POST` | `/api/candidates/{id}/preview` | Validate edits, write nothing |
+| `POST` | `/api/candidates/{id}/promote` | Commit the edited case to the batch branch |
+| `POST` | `/api/candidates/{id}/reject` | Record a reasoned rejection |
+| `DELETE` | `/api/candidates/{id}/decision` | Return a candidate to the queue |
+
+Errors are `{"message": …, "path": …}`. `422` is a validation failure with `path` naming the field;
+`404` is a missing resource; `409` is a concurrent-write conflict; `403` is read-only mode; `500` is
+a misconfiguration.
+
+---
+
+### Developing the console
+
+Two terminals, with hot reloading:
+
+```bash
+whetstone ui --dev     # API only on :8787, no browser
+cd ui && npm run dev   # Vite on :5173, proxying /api
+```
+
+Open **http://localhost:5173**.
+
+**Types are generated, not written.** `ui/src/api/schema.d.ts` comes from the app's OpenAPI schema:
+
+```bash
+cd ui && npm run gen:api
+```
+
+Run it after any API change and commit the result. A change to a pydantic model then surfaces as a
+TypeScript compile error rather than a runtime surprise — it has already caught real bugs.
+
+**Tests:**
+
+```bash
+uv run pytest tests/api      # every route, temp repo + temp run store, no network
+cd ui && npm test            # frontend logic (vitest)
+```
+
+See [`ui/README.md`](ui/README.md) for frontend conventions and the dependency-advisory assessment.
+
+---
+
+### Console troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `the console needs the 'ui' extra` | `uv sync --extra ui`, or `pip install 'whetstone[ui]'` |
+| Browser shows "Console assets not built" | `cd ui && npm install && npm run build`. The API is fine. |
+| Skills index is empty | `[skills] root` points somewhere without skill folders. The start-up banner prints the resolved path. |
+| Triage says "No candidate directory" | Run `whetstone corpus pull --out candidates`, or point `[candidates] dir` at existing output. |
+| `⚠ version reused for different content` | Guidance changed without bumping `version` in `SKILL.md`. Bump it; comparison keys on content hash, not the number. |
+| Promote fails with `uncommitted changes in …` | Commit or stash your local edits to those files first. The console will not sweep them into its commit. |
+| Promote fails with a `409` | Another writer moved the branch. Reload and retry. |
+| `Propose` fails with `no git remote` | Nothing is lost; the branch exists locally. Add a remote or push by hand. |
+| `Propose` fails with `refusing to push` | The branch is protected or outside `[git] branch_prefix`. The console only publishes branches it created. |
+| Header shows a `•` next to the branch | The working tree is dirty. Informational. |
+| `did not respond within 30s` | The console process died. Check the terminal running `whetstone ui`. |
+| Port already in use | `whetstone ui --port 9000` |
+
+---
+
+### Not built yet
+
+The console covers browsing, diagnosis, and triage. Still to come (see
+[`docs/ui-console.md`](docs/ui-console.md) for the plan and its phasing):
+
+- **Authoring** — editing skill guidance and hand-writing eval cases, gated by a rule that no merge
+  request may open without a passing gate for that exact content hash.
+- **Run orchestration** — launching evals from the console, with progress, cancellation, cost
+  estimation, and a working practice mode.
+- **Compare & judge lab** — diffing two runs with client-side tolerance tuning, and labelling judge
+  verdicts to grow the meta-eval set.
+
+Until then, runs are launched with `whetstone eval run` and gates with `whetstone eval gate`.
+
+---
+
+## Configuration (`whetstone.toml`)
+
+Optional. Discovered by walking up from the working directory; every field resolves
+**flag → environment → file → default**. Relative paths resolve against the file's own directory.
+
+```toml
+[skills]
+root = "skills"                  # the skill registry
+repo = "."                       # git repo containing it; may be a separate checkout
+
+[candidates]
+dir = "candidates"               # where `corpus pull` writes and Triage reads
+
+[git]
+branch_prefix = "whetstone/"       # console branches; also the only ones it will push
+default_base = "main"
+push_remote = "origin"
+author = "principal"               # "principal" credits whoever clicked; "console" uses the
+                                   # repo's own git identity
+protected_branches = ["main", "master"]
+
+[runs]
+dir = ".whetstone/runs"
+max_llm_calls_per_run = 2000       # reserved; see the note below
+
+[gate]                             # defaults for `whetstone eval gate`; --recall-tol overrides
+recall_tol = 0.0
+fp_tol = 0.0
+```
+
+> **`max_llm_calls_per_run` is declared but inert.** It is parsed and reported, and nothing enforces
+> it: the console cannot launch runs yet, and a CLI run's budget is the operator's own shell. It
+> becomes a real backstop in the phase that adds run orchestration.
+
+Pointing at a separate company skills repo is `repo = "../company-skills"` — no code change.
+
 ---
 
 ## Programmatic API (`whetstone.service`)
@@ -502,6 +1185,7 @@ assert outcome.result.passed
 | Function | Signature | Returns |
 |---|---|---|
 | `run_eval` | `(skill, client, *, trials=1, reviewer_effort="high", judge_effort="medium")` | `SkillScore` |
+| `record_eval` | `(skill, client, *, trials=1, backend="", model="", on_event=None, max_workers=1, cancel=None, …)` | `RunRecord` (score + findings + verdicts) |
 | `gate_skills` | `(base, candidate, client, *, cfg=None, trials=1)` | `GateOutcome` (`.result`, `.base`, `.candidate`) |
 | `pull_corpus` | `(connector, project, since, skills=None)` | `list[CandidateCase]` |
 | `format_score` | `(SkillScore)` | `str` |
@@ -810,7 +1494,9 @@ Test layers:
 
 | Directory | What it covers |
 |---|---|
-| `tests/unit/` | Scoring, gate, matching, diff parser, loader, corpus builder, LLM reviewer/judge, meta-eval, service, CLI. |
+| `tests/unit/` | Scoring, gate, matching, diff parser, loader, corpus builder, LLM reviewer/judge, meta-eval, run capture, run store, git I/O, config, report, service, CLI. |
+| `tests/api/` | Every console route, via `TestClient` against a temp git repo and a temp run store. No network, no model. |
+| `ui/src/**/*.test.ts` | Frontend logic (`npm test`, vitest) — the diff parser that produces the line numbers everything else anchors to. |
 | `tests/contract/` | The provider conformance suite, run against `FakeProvider` and the GitLab adapter. |
 | `tests/golden/` | The full harness + gate driven by a `PatternReviewer`, asserting exact scores (guards against silent scoring drift). |
 | `tests/live/` | **Opt-in** real-model tests (judge meta-eval). Skipped unless `WHETSTONE_LIVE_LLM=1`. |
@@ -874,6 +1560,10 @@ Aim for a **balanced set** — enough `should_catch` cases to measure recall and
 | `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Per-request timeout in seconds for OpenAI-compatible backends (raise it for slow local hardware). |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
 | `WHETSTONE_LIVE_LLM` | `tests/live/` | Set to `1` to run the opt-in live-model tests. |
+| `WHETSTONE_SKILLS_ROOT` | `config` | Skill registry path, overriding `whetstone.toml`. |
+| `WHETSTONE_SKILLS_REPO` | `config` | Git repo containing the registry. |
+| `WHETSTONE_RUNS_DIR` | `config` | Where run records are stored. |
+| `WHETSTONE_CANDIDATES_DIR` | `config` | Where the triage queue is read from. |
 
 ---
 

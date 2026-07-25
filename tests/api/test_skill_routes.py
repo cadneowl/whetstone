@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from datetime import timedelta
+
+from fastapi.testclient import TestClient
+from helpers import AT, make_record
+
+from whetstone.runs import RunStore
+
+
+def test_index_lists_skills_with_case_counts(client: TestClient) -> None:
+    [skill] = client.get("/api/skills").json()
+    assert skill["id"] == "rust-errors"
+    assert skill["name"] == "Rust error handling review"
+    assert skill["owner"] == "@backend-guild"  # from meta.yaml, previously dropped on load
+    assert skill["catch_cases"] == 1
+    assert skill["noflag_cases"] == 1
+    assert skill["latest"] is None  # no runs yet
+
+
+def test_index_carries_latest_score_and_trend(client: TestClient, store: RunStore) -> None:
+    for i in range(3):
+        store.save(make_record(f"run-{i}", created_at=AT + timedelta(hours=i)))
+    [skill] = client.get("/api/skills").json()
+    assert skill["latest"]["id"] == "run-2"
+    assert skill["latest"]["recall"] == 1.0
+    assert skill["recall_trend"] == [1.0, 1.0, 1.0]  # oldest -> newest, for the sparkline
+
+
+def test_index_flags_a_version_covering_two_contents(
+    client: TestClient, store: RunStore
+) -> None:
+    later = AT + timedelta(hours=1)
+    store.save(make_record("run-a", version=2, skill_hash="aaa"))
+    store.save(make_record("run-b", version=2, skill_hash="bbb", created_at=later))
+    [skill] = client.get("/api/skills").json()
+    assert skill["stale_version"] is True
+
+
+def test_index_sorts_weakest_first(client: TestClient, store: RunStore, skills_root) -> None:  # type: ignore[no-untyped-def]
+    weak = skills_root / "weak-skill"
+    weak.mkdir()
+    (weak / "SKILL.md").write_text("---\nid: weak-skill\nversion: 1\n---\n\nbody\n", "utf-8")
+    store.save(make_record("strong", skill_id="rust-errors"))
+    store.save(make_record("weak", skill_id="weak-skill", recall_tp=False))
+    ids = [s["id"] for s in client.get("/api/skills").json()]
+    assert ids == ["weak-skill", "rust-errors"]
+
+
+def test_detail_exposes_guidance_rules_and_provenance(client: TestClient) -> None:
+    body = client.get("/api/skills/rust-errors").json()
+    assert body["skill"]["version"] == 2
+    assert "no unchecked panics" in body["skill"]["body"]
+    assert body["rules"] == ["R1", "R2"]
+    assert body["skill"]["provenance"]["R1"][0]["ref"] == "acme/payments!812#note_44"
+
+
+def test_untested_rules_need_a_run_to_be_knowable(client: TestClient, store: RunStore) -> None:
+    # With no run, "which rules are exercised" is unknown — not "none".
+    assert client.get("/api/skills/rust-errors").json()["untested_rules"] == []
+    assert client.get("/api/skills/rust-errors").json()["has_runs"] is False
+
+    store.save(make_record())  # a run whose only matched finding is attributed to R1
+    body = client.get("/api/skills/rust-errors").json()
+    assert body["has_runs"] is True
+    assert body["untested_rules"] == ["R2"]
+
+
+def test_detail_summarises_cases_with_last_outcome(client: TestClient, store: RunStore) -> None:
+    store.save(make_record(recall_tp=False))
+    cases = {c["id"]: c for c in client.get("/api/skills/rust-errors").json()["cases"]}
+    assert cases["unwrap-in-handler"]["kind"] == "should_catch"
+    assert cases["unwrap-in-handler"]["path"] == "src/handlers/charge.rs"
+    assert cases["unwrap-in-handler"]["last_recall"] == 0.0
+    assert cases["unwrap-in-handler"]["provenance"]["ref"] == "acme/payments!812"
+    assert cases["unwrap-in-test"]["last_fp_rate"] == 0.0
+
+
+def test_detail_lists_run_history(client: TestClient, store: RunStore) -> None:
+    store.save(make_record("run-0"))
+    store.save(make_record("run-1", created_at=AT + timedelta(hours=1)))
+    runs = client.get("/api/skills/rust-errors").json()["runs"]
+    assert [r["id"] for r in runs] == ["run-1", "run-0"]
+
+
+def test_unknown_skill_is_404(client: TestClient) -> None:
+    response = client.get("/api/skills/nope")
+    assert response.status_code == 404
+    assert "no skill" in response.json()["message"]
+
+
+def test_skill_id_cannot_escape_the_root(client: TestClient) -> None:
+    # Percent-encoded, so the traversal reaches the handler rather than being normalised away by
+    # the client. Each must be rejected on its own merits, not by accident of URL parsing.
+    for encoded in ("%2e%2e", "%2e%2e%2f%2e%2e%2fetc", "%2e%2e%5cwindows"):
+        assert client.get(f"/api/skills/{encoded}").status_code == 404
+        assert client.get(f"/api/skills/{encoded}/cases/x").status_code == 404
+
+
+def test_case_detail_returns_the_diff_and_expectations(client: TestClient) -> None:
+    body = client.get("/api/skills/rust-errors/cases/unwrap-in-handler").json()
+    assert body["case"]["kind"] == "should_catch"
+    assert body["case"]["expect"][0]["where"]["line_range"] == [40, 45]
+    assert "+    let row = db.get(id).unwrap();" in body["diff"]
+
+
+def test_case_history_tracks_outcomes_across_runs(client: TestClient, store: RunStore) -> None:
+    store.save(make_record("run-0", recall_tp=True))
+    store.save(make_record("run-1", recall_tp=False, created_at=AT + timedelta(hours=1)))
+    history = client.get("/api/skills/rust-errors/cases/unwrap-in-handler").json()["history"]
+    assert [(h["run_id"], h["recall"]) for h in history] == [("run-1", 0.0), ("run-0", 1.0)]
+
+
+def test_unknown_case_is_404(client: TestClient) -> None:
+    response = client.get("/api/skills/rust-errors/cases/nope")
+    assert response.status_code == 404
+
+
+def test_broken_skill_reports_the_offending_file(client: TestClient, skills_root) -> None:  # type: ignore[no-untyped-def]
+    bad = skills_root / "rust-errors" / "eval_cases" / "broken"
+    bad.mkdir()
+    (bad / "case.yaml").write_text("id: broken\nkind: should_catch\n", encoding="utf-8")
+    response = client.get("/api/skills/rust-errors")
+    assert response.status_code == 422
+    body = response.json()
+    assert "missing diff file" in body["message"]
+    assert body["path"].endswith("broken")  # so the console can point at the right case

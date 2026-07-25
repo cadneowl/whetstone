@@ -55,7 +55,30 @@ def load_skill(path: str | Path) -> Skill:
         triggers=triggers,
         references=references,
         eval_cases=eval_cases,
+        # `owner` may live in either file; frontmatter wins when both are present.
+        owner=str(fm.get("owner") or meta.get("owner") or ""),
+        provenance=_load_provenance(meta.get("provenance")),
     )
+
+
+def _load_provenance(raw: Any) -> dict[str, list[Provenance]]:
+    """`meta.yaml`'s `provenance:` block — rule id → the signals that justified that rule."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[Provenance]] = {}
+    for rule_id, entries in raw.items():
+        if not isinstance(entries, list):
+            continue
+        out[str(rule_id)] = [
+            Provenance(
+                source=str(e.get("source", "manual")),
+                ref=e.get("ref"),
+                human_signal=e.get("human_signal"),
+            )
+            for e in entries
+            if isinstance(e, dict)
+        ]
+    return out
 
 
 def _load_eval_cases(cases_dir: Path, skill_id: str) -> list[EvalCase]:

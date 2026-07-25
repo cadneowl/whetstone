@@ -1,0 +1,46 @@
+@import 'tailwindcss';
+
+/* One palette, defined once, used in both schemes. Semantic names (`surface`, `line`, `good`)
+   rather than colour names, so the dark variant is a value swap and not a second design. */
+@theme {
+  --color-canvas: #ffffff;
+  --color-surface: #fafafa;
+  --color-line: #e2e2e2;
+  --color-ink: #1a1a1a;
+  --color-muted: #666666;
+  --color-good: #1a7f37;
+  --color-bad: #cf222e;
+  --color-warn: #9a6700;
+  --color-accent: #0969da;
+}
+
+/* Plain `:root` overrides, not a second `@theme` block: Tailwind v4 hoists `@theme` out of media
+   queries, so nesting one here would emit the dark values unconditionally and break light mode.
+   Utilities compile to `var(--color-…)`, so redefining the variables is enough. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas: #0d1117;
+    --color-surface: #161b22;
+    --color-line: #30363d;
+    --color-ink: #e6edf3;
+    --color-muted: #8b949e;
+    --color-good: #3fb950;
+    --color-bad: #f85149;
+    --color-warn: #d29922;
+    --color-accent: #58a6ff;
+  }
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  @apply bg-canvas text-ink antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* Data-dense screens read better with tabular figures — columns of scores line up. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

@@ -1,0 +1,70 @@
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { useConsoleConfig, useGitStatus } from '@/api/client'
+import { ErrorBoundary } from './ErrorBoundary'
+import { Badge } from './primitives'
+
+export function AppShell() {
+  const { data: config } = useConsoleConfig()
+  const { data: git } = useGitStatus()
+  const location = useLocation()
+
+  return (
+    <div className="min-h-screen">
+      <header className="border-b border-line">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3">
+          <NavLink to="/" className="text-[15px] font-semibold">
+            Whetstone
+          </NavLink>
+          <nav className="flex gap-4 text-sm">
+            <Tab to="/" end>
+              Skills
+            </Tab>
+            <Tab to="/triage">Triage</Tab>
+            <Tab to="/runs">Runs</Tab>
+          </nav>
+
+          <div className="ml-auto flex items-center gap-2 text-xs text-muted">
+            {config?.read_only && (
+              <Badge tone="warn" title="Mutating routes are disabled server-side">
+                read-only
+              </Badge>
+            )}
+            {config?.practice_mode && (
+              <Badge tone="warn" title="Runs use deterministic doubles — no model, no spend">
+                practice mode
+              </Badge>
+            )}
+            {git?.available && git.status && (
+              <span title={`HEAD ${git.status.head.slice(0, 12)}`}>
+                <span className="font-mono">{git.status.branch}</span>
+                {!git.status.clean && <span className="ml-1 text-warn">•</span>}
+              </span>
+            )}
+            {config && <span title={config.principal.email}>{config.principal.name}</span>}
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-6xl px-5 py-6">
+        {/* Keyed on the route so a crash on one page does not wedge the others. */}
+        <ErrorBoundary key={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
+      </main>
+    </div>
+  )
+}
+
+function Tab({ to, end, children }: { to: string; end?: boolean; children: string }) {
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      className={({ isActive }) =>
+        isActive ? 'text-ink' : 'text-muted transition-colors hover:text-ink'
+      }
+    >
+      {children}
+    </NavLink>
+  )
+}
