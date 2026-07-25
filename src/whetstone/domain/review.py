@@ -30,6 +30,14 @@ class MergeRequestRef(BaseModel):
     base_sha: str = ""
     head_sha: str = ""
     merged_at: datetime | None = None
+    # Where a tracker key gets mentioned in practice — a title prefix, a "Fixes PAY-812" line, or
+    # the branch name. Carried so the corpus builder can pair a merge request with the incident it
+    # closed without either side's provider knowing the other exists.
+    description: str = ""
+    source_branch: str = ""
+    # Team-applied labels ("backend", "security"). A skill declares the ones it answers to in
+    # `triggers.labels`, which is how a case reaches a skill whose subject isn't visible in a path.
+    labels: list[str] = []
 
 
 class ReviewComment(BaseModel):

@@ -138,6 +138,98 @@ def test_prepared_files_are_repo_relative(tmp_path: Path) -> None:
     assert prepared.files["skills/rust-errors/eval_cases/812-t0/change.diff"] == DIFF
 
 
+# --- rule provenance ------------------------------------------------------------
+
+
+def _prepare_with_rule(tmp_path: Path, rule_id: str, meta: str | None) -> dict[str, str]:
+    entry = _entry()
+    edits = edits_from(entry)
+    edits.rule_id = rule_id
+    return prepare(entry, edits, skills_root="skills", meta_yaml=meta).files
+
+
+def test_no_rule_id_leaves_metadata_alone() -> None:
+    # Plenty of cases exercise a skill without justifying any single rule.
+    entry = _entry()
+    assert not any(k.endswith("meta.yaml") for k in prepare(
+        entry, edits_from(entry), skills_root="skills"
+    ).files)
+
+
+def test_rule_id_files_the_source_mr_under_that_rule(tmp_path: Path) -> None:
+    """`meta.yaml` provenance is the only record of *why* a rule exists, and nothing wrote to it.
+
+    Committing it alongside the case means the evidence lands in the same review as the thing it
+    justifies, rather than in a follow-up nobody makes.
+    """
+    files = _prepare_with_rule(tmp_path, "R1", None)
+    meta = yaml.safe_load(files["skills/rust-errors/meta.yaml"])
+    assert meta["provenance"]["R1"] == [
+        {
+            "source": "gitlab_mr",
+            "ref": "acme/payments!812",
+            "human_signal": "suggestion applied",
+        }
+    ]
+
+
+def test_existing_metadata_is_preserved(tmp_path: Path) -> None:
+    existing = yaml.safe_dump(
+        {
+            "owner": "@backend-guild",
+            "references": [{"kind": "code", "repo": "gitlab:acme/payments", "path": "src/e.rs"}],
+            "provenance": {"R2": [{"source": "gitlab_mr", "ref": "acme/payments!780"}]},
+        }
+    )
+    files = _prepare_with_rule(tmp_path, "R1", existing)
+    meta = yaml.safe_load(files["skills/rust-errors/meta.yaml"])
+    assert meta["owner"] == "@backend-guild"
+    assert meta["references"][0]["path"] == "src/e.rs"
+    assert meta["provenance"]["R2"] == [{"source": "gitlab_mr", "ref": "acme/payments!780"}]
+    assert len(meta["provenance"]["R1"]) == 1
+
+
+def test_the_same_signal_is_not_cited_twice(tmp_path: Path) -> None:
+    # Two cases promoted out of one MR must not make it look like two independent pieces of
+    # evidence for the rule.
+    once = _prepare_with_rule(tmp_path, "R1", None)["skills/rust-errors/meta.yaml"]
+    twice = _prepare_with_rule(tmp_path, "R1", once)["skills/rust-errors/meta.yaml"]
+    assert yaml.safe_load(twice)["provenance"]["R1"] == yaml.safe_load(once)["provenance"]["R1"]
+
+
+def test_a_second_rule_is_appended_not_substituted(tmp_path: Path) -> None:
+    first = _prepare_with_rule(tmp_path, "R1", None)["skills/rust-errors/meta.yaml"]
+    both = yaml.safe_load(_prepare_with_rule(tmp_path, "R2", first)["skills/rust-errors/meta.yaml"])
+    assert set(both["provenance"]) == {"R1", "R2"}
+
+
+@pytest.mark.parametrize("bad", ["r1", "RULE", "R", "1R", "R1a", "../R1", "R 1"])
+def test_rule_id_must_look_like_a_rule_tag(tmp_path: Path, bad: str) -> None:
+    """A key the SKILL.md rule regex can't produce reads as a declared, forever-untested rule."""
+    entry = _entry()
+    edits = edits_from(entry)
+    edits.rule_id = bad
+    with pytest.raises(SkillLoadError, match="rule id"):
+        prepare(entry, edits, skills_root="skills")
+
+
+def test_provenance_written_for_a_rule_is_read_back_by_the_loader(tmp_path: Path) -> None:
+    # The round trip that matters: what promote writes is what `load_skill` (and therefore
+    # `rule_ids`/`untested_rules`) later reads.
+    from whetstone.core.loader import load_skill
+    from whetstone.service import rule_ids
+
+    skill_dir = tmp_path / "rust-errors"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nid: rust-errors\n---\nbody\n", encoding="utf-8")
+    (skill_dir / "meta.yaml").write_text(
+        _prepare_with_rule(tmp_path, "R1", None)["skills/rust-errors/meta.yaml"], encoding="utf-8"
+    )
+    skill = load_skill(skill_dir)
+    assert skill.provenance["R1"][0].ref == "acme/payments!812"
+    assert rule_ids(skill) == ["R1"]
+
+
 def test_prepare_round_trips_through_the_real_loader(tmp_path: Path) -> None:
     prepared = prepare(_entry(), edits_from(_entry()), skills_root=tmp_path)
     # The returned case came back out of load_skill, so the harness can definitely run it.

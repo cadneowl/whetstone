@@ -1,0 +1,16 @@
+[
+  {
+    "id": 10001,
+    "object": {
+      "url": "https://gitlab.acme.com/acme/payments/-/merge_requests/910",
+      "title": "acme/payments!910"
+    }
+  },
+  {
+    "id": 10002,
+    "object": {
+      "url": "https://wiki.acme.com/incidents/2026-06-02",
+      "title": "Incident review"
+    }
+  }
+]

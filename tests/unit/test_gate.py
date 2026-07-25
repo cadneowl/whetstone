@@ -61,3 +61,54 @@ def test_case_regression_budget() -> None:
     res = gate(old, new, GateConfig(recall_tol=1.0, max_case_regressions=1))
     assert not res.passed
     assert set(res.regressed_cases) == {"a", "b"}
+
+
+# --- targeted cases: the change has to earn its keep ---------------------------
+
+
+def test_a_change_that_fixes_nothing_passes_without_targets() -> None:
+    """The baseline behaviour, stated so the contrast below is deliberate rather than incidental."""
+    s = _score({"a": Confusion(fn=1)})
+    res = gate(s, s)
+    assert res.passed
+    assert res.fixed_cases == [] and res.unfixed_cases == []
+
+
+def test_targeted_case_that_is_fixed_passes_and_is_reported() -> None:
+    old = _score({"a": Confusion(fn=1)})
+    new = _score({"a": Confusion(tp=1)})
+    res = gate(old, new, GateConfig(targeted_cases=["a"]))
+    assert res.passed
+    assert res.fixed_cases == ["a"]
+
+
+def test_targeted_case_that_still_fails_blocks_the_change() -> None:
+    """Without this the gate only ever asks "did anything break?" — a no-op edit sails through."""
+    s = _score({"a": Confusion(fn=1)})
+    res = gate(s, s, GateConfig(targeted_cases=["a"]))
+    assert not res.passed
+    assert res.unfixed_cases == ["a"]
+    assert "still fails" in res.reasons[0] and "recall 0.000" in res.reasons[0]
+
+
+def test_targeted_false_positive_reports_its_own_metric() -> None:
+    s = _score({"b": Confusion(fp=1)}, {"b": "should_not_flag"})
+    res = gate(s, s, GateConfig(targeted_cases=["b"]))
+    assert not res.passed
+    assert "fp_rate 1.000" in res.reasons[0]
+
+
+def test_targeting_an_unknown_case_fails_rather_than_being_ignored() -> None:
+    """A typo'd or stale case id must not read as a satisfied requirement."""
+    s = _score({"a": Confusion(tp=1)})
+    res = gate(s, s, GateConfig(targeted_cases=["typo"]))
+    assert not res.passed
+    assert res.unfixed_cases == ["typo"]
+    assert "not in the candidate's eval set" in res.reasons[0]
+
+
+def test_targeting_an_already_passing_case_is_not_counted_as_fixed() -> None:
+    s = _score({"a": Confusion(tp=1)})
+    res = gate(s, s, GateConfig(targeted_cases=["a"]))
+    assert res.passed
+    assert res.fixed_cases == []  # nothing was wrong with it, so nothing was fixed

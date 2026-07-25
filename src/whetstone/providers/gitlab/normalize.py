@@ -22,6 +22,11 @@ def mr_ref(repo: RepoRef, mr: dict[str, Any]) -> MergeRequestRef:
         base_sha=str(refs.get("base_sha", "")),
         head_sha=str(refs.get("head_sha", "")),
         merged_at=mr.get("merged_at"),
+        # GitLab returns plain strings here. Older instances can omit the key entirely, which is
+        # simply "no labels" — never a reason to fail the pull.
+        labels=[str(label) for label in (mr.get("labels") or [])],
+        description=str(mr.get("description") or ""),
+        source_branch=str(mr.get("source_branch") or ""),
     )
 
 

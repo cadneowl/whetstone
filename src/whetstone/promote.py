@@ -13,6 +13,7 @@ case that cannot be read is never committed.
 
 from __future__ import annotations
 
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -23,11 +24,18 @@ from pydantic import BaseModel
 from whetstone.candidates import CandidateEntry
 from whetstone.core.loader import SkillLoadError, load_skill
 from whetstone.domain.enums import Severity
-from whetstone.domain.eval_model import EvalCase, EvalKind
+from whetstone.domain.eval_model import EvalCase, EvalKind, Provenance
 from whetstone.naming import describe_unsafe, is_safe_segment
 
 CASE_FILE = "case.yaml"
 DIFF_FILE = "change.diff"
+META_FILE = "meta.yaml"
+
+# The shape `service.rule_ids` can find in a SKILL.md body ("- **R1 — …**"). Enforced here so a
+# provenance key can never name a rule the body regex could not produce: such a key would be
+# reported as a declared rule forever and, having no findings to cite it, as a permanently untested
+# one.
+_RULE_ID = re.compile(r"^[A-Z][A-Z0-9]*[0-9]$")
 
 
 class CaseEdits(BaseModel):
@@ -41,6 +49,10 @@ class CaseEdits(BaseModel):
     line_range: tuple[int, int] | None = None
     severity_min: Severity | None = None
     expectation_id: str = "e1"
+    # Optional: the rule this case is evidence for. Setting it files the source MR under that rule
+    # in `meta.yaml`, which is the only record of *why* a piece of guidance exists. Left empty, the
+    # case still lands — plenty of cases test a skill without justifying any one rule.
+    rule_id: str = ""
 
     @property
     def must(self) -> str:
@@ -113,10 +125,53 @@ def render_case_yaml(entry: CandidateEntry, edits: CaseEdits) -> str:
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
 
-def prepare(entry: CandidateEntry, edits: CaseEdits, *, skills_root: Path | str) -> PreparedCase:
+def render_meta_yaml(existing: str | None, rule_id: str, provenance: Provenance) -> str:
+    """`meta.yaml` with one more signal filed under `rule_id`.
+
+    Round-tripped through YAML, so comments in the original are lost. That is the price of making
+    this a structured edit rather than a text patch, and `meta.yaml` is documented as machine
+    metadata — a mangled provenance block would be the worse trade.
+    """
+    data: dict[str, Any] = {}
+    if existing and existing.strip():
+        loaded = yaml.safe_load(existing)
+        if loaded is not None and not isinstance(loaded, dict):
+            raise SkillLoadError(f"{META_FILE} must be a mapping")
+        data = loaded or {}
+
+    block = data.get("provenance") or {}
+    if not isinstance(block, dict):
+        raise SkillLoadError(f"{META_FILE}: 'provenance' must map a rule id to a list of signals")
+
+    signal: dict[str, Any] = {"source": provenance.source}
+    if provenance.ref:
+        signal["ref"] = provenance.ref
+    if provenance.human_signal:
+        signal["human_signal"] = provenance.human_signal
+
+    signals = block.get(rule_id) or []
+    if not isinstance(signals, list):
+        raise SkillLoadError(f"{META_FILE}: provenance for {rule_id!r} must be a list")
+    # Re-promoting two cases out of the same MR must not cite it twice.
+    block[rule_id] = signals if signal in signals else [*signals, signal]
+
+    data["provenance"] = block
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def prepare(
+    entry: CandidateEntry,
+    edits: CaseEdits,
+    *,
+    skills_root: Path | str,
+    meta_yaml: str | None = None,
+) -> PreparedCase:
     """Render and validate an edited candidate. Raises `SkillLoadError` if it wouldn't load.
 
     `skills_root` is only used to build repo-relative paths; nothing under it is written here.
+    `meta_yaml` is the skill's current metadata, needed only when `edits.rule_id` is set — the
+    updated copy is returned in `files` so the rule's evidence lands in the same commit as the case
+    that demonstrates it, rather than in a follow-up nobody makes.
     """
     if not edits.skill_id:
         raise SkillLoadError("no target skill chosen for this candidate")
@@ -129,6 +184,12 @@ def prepare(entry: CandidateEntry, edits: CaseEdits, *, skills_root: Path | str)
     for value, what in ((edits.skill_id, "target skill"), (edits.case_id, "case id")):
         if not is_safe_segment(value):
             raise SkillLoadError(describe_unsafe(value, what))
+
+    if edits.rule_id and not _RULE_ID.match(edits.rule_id):
+        raise SkillLoadError(
+            f"rule id {edits.rule_id!r} should look like R1 or SEC2 — uppercase, ending in a "
+            "digit, matching how rules are tagged in SKILL.md"
+        )
 
     if edits.line_range is not None:
         lo, hi = edits.line_range
@@ -146,14 +207,21 @@ def prepare(entry: CandidateEntry, edits: CaseEdits, *, skills_root: Path | str)
     case_yaml = render_case_yaml(entry, edits)
     case = _validate(case_yaml, diff, edits)
 
-    base = Path(skills_root) / edits.skill_id / "eval_cases" / edits.case_id
+    skill_dir = Path(skills_root) / edits.skill_id
+    base = skill_dir / "eval_cases" / edits.case_id
+    files = {
+        (base / CASE_FILE).as_posix(): case_yaml,
+        (base / DIFF_FILE).as_posix(): diff,
+    }
+    if edits.rule_id:
+        files[(skill_dir / META_FILE).as_posix()] = render_meta_yaml(
+            meta_yaml, edits.rule_id, entry.candidate.provenance
+        )
+
     return PreparedCase(
         skill_id=edits.skill_id,
         case_id=edits.case_id,
-        files={
-            (base / CASE_FILE).as_posix(): case_yaml,
-            (base / DIFF_FILE).as_posix(): diff,
-        },
+        files=files,
         case=case,
     )
 

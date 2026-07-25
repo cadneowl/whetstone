@@ -1,9 +1,9 @@
 # Whetstone
 
 A system for keeping a company's agent **skills** (code review, arch review, secret-scanning, …)
-continuously sharp. It learns from GitLab merge-request reviews and the codebase, and — critically —
-**never ships a skill change it can't prove is a net improvement**, because every change passes an
-evaluated regression gate first.
+continuously sharp. It learns from GitLab merge-request reviews, from the defects your tracker says
+shipped anyway, and from the codebase — and, critically, **never ships a skill change it can't prove
+is a net improvement**, because every change passes an evaluated regression gate first.
 
 > **The thesis:** most AI review tools are stateless — they review each PR fresh. Whetstone treats
 > the *skill* as the durable, versioned knowledge artifact and turns human review signals into
@@ -79,13 +79,15 @@ judge) both have `Fake` implementations, so the entire harness runs with **no mo
 ```
 src/whetstone/
   domain/       Canonical, provider-agnostic model. Imports NO provider code.
-                enums, refs, change (+diff parser), finding, eval_model, skill, review, score, run
+                enums, refs, change (+diff parser/reverser), finding, eval_model, skill, review,
+                issue, score, run
   core/         The harness. loader · matching · scoring · gate · harness
   reviewer/     Reviewer protocol + LLMReviewer + PatternReviewer (test double)
   judge/        Judge protocol + LLMJudge + DeterministicJudge (test double)
   llm/          LLMClient protocol + factory · AnthropicClient · OpenAICompatibleClient (local) · FakeLLMClient (test)
-  providers/    Capability protocols + registry + gitlab/ adapter + fake/ provider
-  corpus/       MR history → candidate eval cases (human-promoted)
+  providers/    Capability protocols + registry + gitlab/ + jira/ adapters + fake/ provider
+  corpus/       Review + defect history → candidate eval cases (human-promoted)
+                builder · linking (issue ↔ merge request) · model
   meta_eval/    Validate a judge against human-labeled pairs
   runs.py       Run-record persistence (JSON files + derived SQLite index)
   candidates.py The triage queue: pending candidates + recorded promote/reject decisions
@@ -174,14 +176,15 @@ Frontmatter fields (all optional except `id`, which defaults to the folder name)
 | `name` / `description` | Human labels; `name` is used in the reviewer prompt. |
 | `version` | Integer, bumped on any content change. Git is the source of truth. |
 | `triggers.paths` | Glob patterns (`PurePosixPath.full_match`, so `**/*.rs` works) used to route eval cases to this skill. |
-| `triggers.labels` | MR labels the skill applies to. |
+| `triggers.labels` | Merge-request labels the skill answers to — the fallback when the subject isn't visible in a file path (a `security` label over a `values.yaml`). Paths win when both match. |
 
 The markdown **body** below the frontmatter is the actual guidance handed to the reviewer.
 
 ### `meta.yaml`
 
 Machine metadata. `references` are resolvable pointers (drift-checkable later), not copied text;
-`provenance` records which signals justified each rule.
+`provenance` records which signals justified each rule — written by triage when a promotion cites a
+rule, and read back by `rule_ids` / `untested_rules`.
 
 ```yaml
 owner: "@backend-guild"
@@ -305,6 +308,7 @@ candidate. It **PASSes only if all guards hold**:
 - `fp_rate_new <= fp_rate_old + fp_tol`
 - no committed case that *passed* under the baseline may start *failing* (beyond
   `max_case_regressions`)
+- every case named in `targeted_cases` passes under the candidate
 
 `GateConfig` (all defaults are strict):
 
@@ -315,13 +319,41 @@ candidate. It **PASSes only if all guards hold**:
 | `max_case_regressions` | `0` | How many previously-passing cases may regress. |
 | `case_recall_floor` | `0.999` | A case "passes" if its recall ≥ this. |
 | `case_fp_ceiling` | `0.001` | …and its fp_rate ≤ this. |
+| `targeted_cases` | `[]` | Cases this change claims to fix; each must pass. |
 
-`GateResult` reports `passed`, `reasons` (human-readable failure list), `regressed_cases`, and the
-before/after recall and fp_rate. This is the seam the CI job and every future proposal engine call.
+`GateResult` reports `passed`, `reasons` (human-readable failure list), `regressed_cases`,
+`fixed_cases` / `unfixed_cases`, and the before/after recall and fp_rate. This is the seam the CI job
+and every future proposal engine call.
+
+### Both sides answer the same questions
+
+`service.gate_skills` scores the baseline and the candidate over the **union** of their eval cases,
+so the only thing that differs between the two runs is the guidance. This matters most for the case
+the corpus loop is built to produce: one that documents an issue the reviewer currently *misses*.
+Scored over its own case set, the candidate's pooled recall would drop against a baseline that never
+had to answer the new case, and the gate would read that as a regression — rejecting exactly the
+change `corpus pull` exists to propose. Under union scoring both sides miss it equally, so promoting
+the case is neutral, and fixing it later is an improvement the gate can see.
+
+### Making a change earn its keep
+
+Left alone the gate only ever asks *did anything break?*, so a guidance edit that does nothing at all
+passes. Name the cases a change is supposed to fix and it has to deliver them:
+
+```bash
+whetstone eval gate --base-ref main --candidate-ref my-branch \
+  --repo . --skill-path skills/code-review-rust-error-handling \
+  --targeted unwrap-in-handler --targeted swallowed-error
+```
+
+Each targeted case must **pass** under the candidate; naming a case that isn't in the eval set is a
+failure rather than a silently satisfied requirement. `fixed_cases` reports the ones that were
+failing before, so a PASS says what the change actually bought.
 
 `whetstone eval gate` takes `recall_tol` and `fp_tol` from `[gate]` in `whetstone.toml`, so a repo
 sets its tolerance once instead of repeating flags in every CI invocation. `--recall-tol` /
-`--fp-tol` override the file.
+`--fp-tol` override the file. `--targeted` is deliberately *not* read from config — which cases a
+change must fix is a property of that change, not a repo-wide default.
 
 ---
 
@@ -390,8 +422,12 @@ with `--repo`/`--skill-path`) — e.g. gate a branch against `main`. Backend sel
 | `--trials INT` | `1` | Trials per case. |
 | `--recall-tol FLOAT` | `0.0` | Allowed recall drop. |
 | `--fp-tol FLOAT` | `0.0` | Allowed false-positive-rate rise. |
+| `--targeted TEXT` | *(none)* | Case id this change must fix; repeatable. Fails unless it passes. |
 | `--dry-run` | off | Validate both sides; **no model call**. |
 | `--json` | off | Emit the full `GateOutcome` as JSON. |
+
+Both sides are scored over the union of their eval cases — see
+[the regression gate](#the-regression-gate).
 
 ```bash
 whetstone eval gate \
@@ -418,7 +454,14 @@ token from the environment variable named by `--token-env`.
 | `--since [%Y-%m-%d]` | *(required)* | Only MRs merged on/after this date. |
 | `--out PATH` | *(required)* | Directory to write candidate folders into. |
 | `--token-env TEXT` | `GITLAB_TOKEN` | Env var holding the GitLab token. |
-| `--skills-root PATH` | *(none)* | Skills root; used to route each candidate to a skill by trigger globs. |
+| `--skills-root PATH` | *(none)* | Skills root; used to route each candidate to a skill by trigger globs and MR labels. |
+| `--max-clean-files INT` | `5` | Cap on `should_not_flag` candidates sampled from one comment-free MR. |
+| `--refresh` | off | Rewrite candidates already in the queue (never ones already decided). |
+| `--jira-url TEXT` | *(none)* | Jira base URL. Enables the escaped-defect signal. |
+| `--jira-project TEXT` | *(none)* | Jira project key, e.g. `PAY`. Required with `--jira-url`. |
+| `--jira-email TEXT` | *(none)* | Cloud account email (Basic auth). Omit for a Server/DC bearer token. |
+| `--jira-token-env TEXT` | `JIRA_TOKEN` | Env var holding the Jira token. |
+| `--max-defect-files INT` | `3` | Cap on candidates sampled from one defect fix. |
 
 ```bash
 export GITLAB_TOKEN=glpat-...
@@ -430,9 +473,26 @@ whetstone corpus pull \
   --skills-root skills
 ```
 
+With a tracker, so shipped defects become cases too:
+
+```bash
+export GITLAB_TOKEN=glpat-...  JIRA_TOKEN=...
+whetstone corpus pull \
+  --base-url https://gitlab.acme.com --project acme/payments \
+  --jira-url https://acme.atlassian.net --jira-project PAY \
+  --jira-email you@acme.com \
+  --since 2026-01-01 --out ./candidates --skills-root skills
+```
+
 Each candidate is written to `./candidates/<id>/` as `case.yaml` + `change.diff` (ready to promote)
 plus `candidate.json` (kind, confidence, suggested skill, rationale) for triage. Nothing enters a
 skill automatically.
+
+**Safe to re-run.** Ids are scoped by project (`acme-payments-812-t0`), so pulling several projects
+into one directory can't collide, and overlapping `--since` windows — the normal way to run this —
+skip what's already queued. A candidate somebody has already promoted or rejected is never rewritten,
+not even with `--refresh`: reviving a rejected candidate as a fresh-looking one would quietly undo a
+human decision. The summary line reports what was skipped rather than leaving it implicit.
 
 ### `whetstone corpus promote`
 
@@ -451,7 +511,7 @@ whetstone corpus promote \
 
 ### `whetstone skills list`
 
-List skills under a root and their eval-case counts.
+List skills under a root, their eval-case counts, and how well their precision cases are evidenced.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -460,7 +520,13 @@ List skills under a root and their eval-case counts.
 ```bash
 whetstone skills list --root skills
 # code-review-rust-error-handling  v1  (3 eval cases)
+# secrets-in-logs                  v4  (22 eval cases)
+#     ⚠ 18 of 20 precision case(s) rest on nobody having commented
 ```
+
+That warning is not cosmetic: `fp_rate` averages over every `should_not_flag` case, and one built
+from a clean merge establishes only that nobody said anything. See
+[precision evidence](#precision-evidence-that-isnt-just-silence).
 
 ### `whetstone providers list`
 
@@ -470,6 +536,7 @@ List registered provider plugins (no options).
 whetstone providers list
 # fake
 # gitlab
+# jira
 ```
 
 ### `whetstone llm list`
@@ -923,14 +990,32 @@ the signal, not to accept it.
 2. **Check the kind.** `should catch` asserts the reviewer must flag this; `should not flag` asserts
    it must stay quiet. The expectation's `must` follows automatically — a `should_catch` case whose
    expectation says `not_appear` is incoherent, so the UI cannot express it.
-3. **Confirm the target skill.** Auto-routed by trigger globs; blank if nothing matched.
+3. **Confirm the target skill.** Auto-routed by trigger globs and MR labels; blank if nothing
+   matched.
 4. **Fix the region.** Drag on the diff, or type the line numbers. Clear either end for "whole file".
    This is the field most likely to be wrong in an auto-generated candidate.
 5. **Rewrite the semantic.** Describe the issue as the judge should understand it — a standalone
    sentence, not a reply to a thread. *"unwrap on the DB result can panic on a normal error path"*,
    not *"nit: use `?` here"*.
 6. **Optionally set a severity floor**, if findings below it should not count.
-7. **Validate** (optional) to check without writing, or **Promote** to commit.
+7. **Optionally cite a rule.** See below.
+8. **Validate** (optional) to check without writing, or **Promote** to commit.
+
+#### Evidence for rule
+
+`meta.yaml` carries a `provenance` block mapping each rule id to the review signals that justified
+it — the only record of *why* a piece of guidance exists, and the thing `rule_ids` and
+`untested_rules` read to report on a skill's rule set. It was hand-maintained, so it drifted.
+
+Put a rule id (`R1`, `SEC2` — uppercase, ending in a digit, matching how rules are tagged in
+`SKILL.md`) in **Evidence for rule** and promoting the case files the source MR under that rule in
+the same commit. The evidence lands with the case that demonstrates it rather than in a follow-up
+nobody makes. Leave it empty when a case tests the skill without justifying any single rule; that is
+common and perfectly fine.
+
+Re-promoting two cases out of one MR won't cite it twice, and a second promotion in the same session
+builds on the first — the metadata is read from the batch branch, not the working tree, so nothing
+is dropped.
 
 #### Keyboard
 
@@ -955,6 +1040,7 @@ run. Errors are reported against the field that caused them:
 | `expectation covers lines 5000–6000 …, it changes lines 40–43` | The region misses every hunk, so the case could never pass |
 | `line range 45–40 is inverted` | First line after the last |
 | `case id '…' is not usable as a folder name` | Ids become directory names; letters, digits, `.`, `-`, `_` only |
+| `rule id '…' should look like R1 or SEC2` | Rule ids must match the tag shape used in `SKILL.md` |
 | `missing diff file 'change.diff'` | The candidate folder is incomplete |
 
 #### Rejecting
@@ -1198,12 +1284,12 @@ paths with no network.
 
 ## Providers & the plugin architecture
 
-Providers are the only place that knows about GitLab (and, later, GitHub, Jira, wikis). They
+Providers are the only place that knows about GitLab or Jira (and, later, GitHub, wikis). They
 implement narrow **capability protocols** (`providers/base.py`) and normalize provider payloads into
 the canonical `domain` model.
 
 ```python
-class Capability(StrEnum): source; review; write
+class Capability(StrEnum): source; review; tracker; write
 
 class SourceConnector(Protocol):
     def capabilities(self) -> set[Capability]: ...
@@ -1215,16 +1301,24 @@ class ReviewConnector(Protocol):
     def list_reviewed_changes(self, repo, since) -> list[MergeRequestRef]: ...
     def get_review(self, mr) -> ReviewedChange: ...
 
+class IssueConnector(Protocol):        # trackers: the escaped-defect signal
+    def capabilities(self) -> set[Capability]: ...
+    def list_resolved_issues(self, project, since) -> list[IssueRef]: ...
+    def get_issue(self, ref) -> Issue: ...
+
 class WriteConnector(Protocol):        # interface only in M1
     def open_change_request(self, repo, branch, title, body) -> str: ...
 ```
+
+Capabilities are split so a provider implements only what it can: GitLab has no incidents, Jira has
+no diffs, and neither should have to pretend otherwise.
 
 ### The registry (config-not-code onboarding)
 
 ```python
 from whetstone.providers import build_provider, available_providers
 
-available_providers()                  # {"fake", "gitlab"}
+available_providers()                  # {"fake", "gitlab", "jira"}
 conn = build_provider({"kind": "gitlab", "base_url": "https://gitlab.acme.com"})
 ```
 
@@ -1244,42 +1338,156 @@ conn = GitLabConnector.from_config({
 })
 ```
 
+### Jira connector
+
+Implements `IssueConnector` — the **tracker** capability — against Jira REST. Deliberately separate
+from `ReviewConnector`: a tracker knows nothing about diffs and a forge knows nothing about
+incidents, so pairing them is the corpus builder's job (`corpus/linking.py`), not a provider's.
+
+```python
+from whetstone.providers.jira.provider import JiraConnector
+
+conn = JiraConnector.from_config({
+    "base_url": "https://acme.atlassian.net",
+    "token_env": "JIRA_TOKEN",
+    "email": "you@acme.com",       # present → Cloud Basic auth; absent → Server/DC bearer
+    "defect_types": ["bug", "incident", "sev1"],   # your instance's names for "went wrong"
+    "jql_filter": 'labels = "production"',          # optional extra AND clause
+    "search_path": "/rest/api/2/search",            # override for Server/Data Center
+})
+```
+
+What it owns internally, so the core never sees it:
+
+- **Both auth schemes.** Cloud authenticates an API token as Basic against the account email;
+  Server/DC uses a bearer PAT. Which one is in play follows from whether an email was configured.
+- **Both pagination styles.** Cloud's newer search returns an opaque `nextPageToken`; Server/DC
+  returns `startAt`/`total`. Detected per response rather than declared, plus a hard limit so a
+  mistyped JQL cannot page through an entire instance.
+- **ADF flattening.** Cloud v3 returns descriptions as a nested node tree, Server returns a string.
+  Both come out as text, and inline runs are joined without separators so a sentence containing a
+  code-formatted identifier does not come back with gaps in it.
+- **JQL construction**, with the project key validated — it arrives from the command line and lands
+  inside a quoted JQL string.
+- **Best-effort remote links.** Plenty of instances have no forge integration; a 404 there returns
+  no links rather than aborting a backfill. The primary join is the issue key mentioned in the merge
+  request, which needs no Jira call at all.
+
+### Issue ↔ merge-request linking
+
+`corpus/linking.py` joins the two sides on evidence both already publish:
+
+1. **The issue key in the merge request** — title, description, or branch name (`feature/PAY-812`).
+   Near-universal and needs nothing configured.
+2. **The tracker's own remote links** — authoritative when present, frequently absent. Matched on
+   the MR number *and* the project path, since `!910` exists in every repository.
+
+Either is enough. When several merge requests reference one issue — a fix plus its follow-up, or a
+backport — all of them are returned rather than guessing which was the real fix.
+
 ### FakeProvider
 
 An in-memory implementation of every capability (`providers/fake/`). Seed it with `add_file`,
-`add_change`, `add_review`; the whole harness and corpus builder run against it with no network.
+`add_change`, `add_review`, `add_issue`; the whole harness and corpus builder run against it with no
+network.
 
 ### Contract conformance suite
 
-`tests/contract/conformance.py` defines the behavioral contract **once** as mixin classes. Both the
-Fake and GitLab providers subclass them and pass the identical assertions (GitLab through recorded
-`respx` cassettes in `tests/fixtures/gitlab/`). Any new provider must pass the same suite — this is
-how "plugin-ready" is enforced rather than hoped.
+`tests/contract/conformance.py` defines the behavioral contract **once** as mixin classes —
+`SourceContract`, `ReviewContract`, `IssueContract`. Providers subclass them and pass identical
+assertions (GitLab and Jira through recorded `respx` cassettes in `tests/fixtures/`). Any new
+provider must pass the same suite — this is how "plugin-ready" is enforced rather than hoped.
 
 ---
 
 ## The corpus builder
 
-`corpus/builder.py` turns the `ReviewedChange` objects the connector produces into **candidate eval
-cases**, by signal strength:
+`corpus/builder.py` turns review history and resolved defects into **candidate eval cases**. What a
+signal is evidence *of* depends on its outcome, not merely its existence:
 
-| GitLab signal | Case kind | Confidence |
+| Signal | Case kind | Confidence |
 |---|---|---|
+| **Escaped defect** — a tracker bug, its fix reversed | `should_catch` | 0.95 |
 | Suggestion **applied** | `should_catch` | 0.9 |
+| **The accepted fix** — that suggestion, applied | `should_not_flag` | 0.85 |
+| Escaped defect from a sprawling multi-file fix | `should_catch` | 0.75 |
+| Suggestion **declined** (thread resolved, not applied) | `should_not_flag` | 0.6 |
 | Resolved diff comment | `should_catch` | 0.5 |
-| Merged with no diff-anchored feedback | `should_not_flag` (per file) | 0.3 |
+| Merged with no diff-anchored feedback | `should_not_flag` (sampled per file) | 0.3 |
+| Diff comment on a still-**open** thread | `should_catch` | 0.2 |
+
+Several of those rows exist to avoid overclaiming. A thread nobody resolved is an argument in
+progress — evidence of attention, not of a verdict — so it lands at the bottom of the queue labelled
+`reviewer comment left open` rather than masquerading as a settled catch. A suggestion the author
+closed *without* taking is the cleanest negative label GitLab gives: the reviewer raised a point and
+the team declined it. (Not certain — an author who made the same fix by hand also leaves the
+suggestion unapplied — hence 0.6 and a human to confirm.)
+
+### Escaped defects: the strongest recall signal
+
+Review history tells you what a reviewer *caught*. A tracker tells you what everybody **missed**.
+Recall asks "would we have caught this?", and for a defect that shipped the honest answer is already
+known to be no — which makes it the most valuable case in the corpus.
+
+Pair a resolved defect with the merge request that fixed it and **reverse that fix**: where the fix
+removed `.unwrap()` and added `?`, the reversal adds `.unwrap()` back. That reversed diff is exactly
+the change a reviewer should have objected to.
+
+```
+PAY-812 "Charge handler panics…"  ──┐
+                                    ├─▶ reverse(fix)  ──▶  should_catch @ 0.95
+acme/payments!910 (the fix)       ──┘                      semantic = the issue summary
+```
+
+The expectation's ground truth is the **issue summary** — "Charge handler panics when the DB row is
+missing" — which is written to be understood on its own, unlike the review-comment bodies the MR
+path has to work with.
+
+Guards, because reversal is not always meaningful:
+
+- A fix that only *adds* lines (a new guard clause) reverses to a pure deletion, leaving no line in
+  the new file to anchor an expectation to. Those are skipped rather than turned into a case that can
+  never match.
+- A fix touching many files is a fix mixed with refactoring; reversing all of it reintroduces things
+  nobody called a bug. Confidence drops to 0.75 and the sample is capped at `--max-defect-files`.
+- Only issues whose *type* means "something was wrong with the product" qualify — see
+  `defect_types`.
+
+### Precision evidence that isn't just silence
+
+`should_not_flag` cases built from clean merges have a soft spot: nobody commenting is not the same
+as there being nothing to flag, so an `fp_rate` computed mostly from those rewards a reviewer that
+says nothing. Two things address it.
+
+**The accepted fix.** An applied suggestion carries its own replacement text, endorsed twice — the
+reviewer proposed it, the author took it. Applying it to the same hunk yields code a reviewer must
+stay quiet about, so flagging it is a false positive on the exact pattern the rule targets. That is
+*confirmed* evidence rather than inferred silence, and it was free: `Suggestion.proposed` was already
+being parsed and discarded. Every applied suggestion now yields a catch/no-flag pair.
+
+**Saying so when it isn't.** `precision_evidence(skill)` counts a skill's negative cases by strength
+— `confirmed`, `silence`, `unclassified` (hand-written cases are not guessed at). `whetstone skills
+list` and the console's skill page flag a skill whose precision rests mostly on silence, because its
+`fp_rate` should be read with suspicion. The inference cannot be repaired; hiding it was the part
+that was fixable.
 
 Key functions:
 
 ```python
 from whetstone.corpus.builder import (
-    pull_candidates, build_candidates, route_to_skill, write_candidate,
+    pull_candidates, build_candidates, classify, route_to_skill, write_candidate,
+    pull_defect_candidates, defect_candidates,
 )
 
-candidates = pull_candidates(connector, repo, since, skills)   # walk a repo
+candidates = pull_candidates(connector, repo, since, skills)   # walk a repo's reviews
 candidates = build_candidates(reviewed_change, skills)         # one MR
-skill_id   = route_to_skill("src/handlers/charge.rs", skills)  # match trigger globs
+signal     = classify(thread)                                  # kind, confidence, label
+skill_id   = route_to_skill("src/handlers/charge.rs", skills, labels)
 write_candidate(candidate, "eval_cases/<id>")                  # serialize to disk
+
+# The tracker side: resolved defects paired with the merge requests that fixed them.
+candidates = pull_defect_candidates(reviews, tracker, repo, "PAY", since, skills)
+candidates = defect_candidates(issue, fixing_change, skills)   # one issue + its fix
 ```
 
 Design guarantees:
@@ -1289,7 +1497,19 @@ Design guarantees:
 - **Faithful diffs:** `CodeChange.to_unified_diff()` reconstructs a real `change.diff` (using the
   provider's captured `raw_diff`), so a promoted candidate round-trips through `load_skill` as a
   valid `EvalCase`.
-- **Auto-routing:** `route_to_skill` matches the changed path against skill `triggers.paths`.
+- **Auto-routing:** `route_to_skill` matches the changed path against skill `triggers.paths`, then
+  falls back to the MR's labels against `triggers.labels`. Path wins, because it describes the file
+  the case is about while a label describes the whole merge request. Defect candidates additionally
+  route on the issue's own labels and components.
+- **Bounded sampling:** a comment-free merge contributes at most `max_clean_files` (default 5)
+  `should_not_flag` candidates, preferring files that route to a skill. Uncapped, one 200-file
+  refactor buried every high-signal candidate under the weakest signal the builder produces. When
+  the sample is capped the candidate's own rationale says so (`Sampled 5 of 200 changed files`) —
+  a truncated sample that reads like a complete one invites "this MR was clean across the board".
+
+**Remaining bias.** The clean-merge inference is still an inference: `--max-clean-files 0` turns it
+off entirely if you would rather have a smaller corpus than a flattering one. What the accepted-fix
+counterparts change is that a corpus no longer *has* to lean on it for precision.
 
 ---
 

@@ -537,12 +537,18 @@ Design decisions that matter:
 - **Line range is dragged on the diff, not typed.** The region is the field most likely to be wrong
   in an auto-generated candidate.
 - **Reject requires a reason**, stored with the candidate. Rejections are evidence for tuning the
-  builder's confidence heuristics (`corpus/builder.py:18`); today they vanish.
+  builder's confidence heuristics (`corpus/builder.py`); today they vanish.
 - **Promote validates before writing** — the edited case round-trips through `load_skill`, and
   `SkillLoadError` renders inline against the offending field (`ui/errors.py` maps the exception's
   path prefix to a field pointer).
-- **Batch mode** for the `should_not_flag` clean-merge candidates, which arrive in bulk at
-  confidence 0.3 and are largely uniform.
+- **An optional rule citation.** Setting *Evidence for rule* files the source MR under that rule id
+  in the skill's `meta.yaml`, committed alongside the case. That block is the only record of why a
+  piece of guidance exists and it feeds `rule_ids` / `untested_rules`; leaving it to a follow-up
+  commit meant it drifted from the cases it was supposed to explain. The metadata is read from the
+  batch branch, so consecutive promotions in one session accumulate rather than overwrite.
+- **Batch mode** for the `should_not_flag` clean-merge candidates, which arrive at confidence 0.3
+  and are largely uniform. They are also sampled — `max_clean_files`, default 5 per MR — so one
+  large comment-free merge cannot bury the high-signal candidates above them.
 - Promotions accumulate on one branch; **Propose N cases** opens a single MR.
 
 ### 10.4 Case editor — "add test data"
@@ -596,7 +602,10 @@ Two runs, or two git refs, side by side:
 
 - Left: word-level diff of the `SKILL.md` guidance.
 - Right: per-case outcome delta — `✓→✓`, `✓→✗` (regression, red), `✗→✓` (improvement, green).
-- Header: the `GateResult` verdict with `reasons` rendered as prose.
+  Both sides are scored over the union of their eval cases, so a case that exists on only one side
+  still gets a row; it is the guidance that varies between the runs, not the questions.
+- Header: the `GateResult` verdict with `reasons` rendered as prose, plus `fixed_cases` — a change
+  that names targeted cases has to make them pass, and this is where "it earned its keep" shows.
 - **Tolerance sliders** (`recall_tol`, `fp_tol`) recompute the verdict **client-side from stored
   records** — no re-run, no spend. You can see exactly how much slack a change would need, which
   turns "what tolerance is right?" from a guess into an observation.

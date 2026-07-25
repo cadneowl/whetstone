@@ -4,6 +4,8 @@ from datetime import datetime
 
 import pytest
 from conformance import (
+    IssueContract,
+    IssueScenario,
     ReviewContract,
     ReviewScenario,
     SourceContract,
@@ -11,6 +13,7 @@ from conformance import (
 )
 
 from whetstone.domain.change import AddedLine, CodeChange, FileChange
+from whetstone.domain.issue import Issue, IssueKind, IssueRef
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import (
     MergeRequestRef,
@@ -70,13 +73,44 @@ def _build_provider() -> FakeProvider:
         ],
     )
     p.add_review(review)
+
+    p.add_issue(
+        Issue(
+            ref=IssueRef(tracker="fake", key="PAY-812", project="PAY"),
+            kind=IssueKind.defect,
+            summary="Charge handler panics when the DB row is missing",
+            resolved_at=datetime(2026, 6, 2),
+        )
+    )
+    p.add_issue(
+        Issue(
+            ref=IssueRef(tracker="fake", key="PAY-990", project="PAY"),
+            kind=IssueKind.task,
+            summary="Add a refund receipt endpoint",
+            resolved_at=datetime(2026, 6, 10),
+        )
+    )
     return p
 
 
-class TestFakeConformance(SourceContract, ReviewContract):
+class TestFakeConformance(SourceContract, ReviewContract, IssueContract):
     @pytest.fixture
     def connector(self) -> FakeProvider:
         return _build_provider()
+
+    @pytest.fixture
+    def tracker(self) -> FakeProvider:
+        return _build_provider()
+
+    @pytest.fixture
+    def issue_scenario(self) -> IssueScenario:
+        return IssueScenario(
+            project="PAY",
+            since=datetime(2026, 1, 1),
+            defect_key="PAY-812",
+            task_key="PAY-990",
+            summary="Charge handler panics when the DB row is missing",
+        )
 
     @pytest.fixture
     def source_scenario(self) -> SourceScenario:

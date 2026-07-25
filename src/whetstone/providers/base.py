@@ -5,6 +5,7 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from whetstone.domain.change import CodeChange
+from whetstone.domain.issue import Issue, IssueRef
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import FileBlob, MergeRequestRef, ReviewedChange
 
@@ -13,6 +14,7 @@ class Capability(StrEnum):
     source = "source"
     review = "review"
     write = "write"
+    tracker = "tracker"
 
 
 @runtime_checkable
@@ -31,6 +33,19 @@ class ReviewConnector(Protocol):
     def capabilities(self) -> set[Capability]: ...
     def list_reviewed_changes(self, repo: RepoRef, since: datetime) -> list[MergeRequestRef]: ...
     def get_review(self, mr: MergeRequestRef) -> ReviewedChange: ...
+
+
+@runtime_checkable
+class IssueConnector(Protocol):
+    """Read resolved tracker issues — the escaped-defect signal (Jira today, Linear/GitHub later).
+
+    Deliberately separate from `ReviewConnector`: a tracker knows nothing about diffs, and a forge
+    knows nothing about incidents. Pairing the two is the corpus builder's job, not a provider's.
+    """
+
+    def capabilities(self) -> set[Capability]: ...
+    def list_resolved_issues(self, project: str, since: datetime) -> list[IssueRef]: ...
+    def get_issue(self, ref: IssueRef) -> Issue: ...
 
 
 @runtime_checkable

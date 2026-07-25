@@ -13,6 +13,7 @@ from whetstone.corpus.model import CandidateCase
 from whetstone.domain.change import AddedLine, CodeChange, FileChange
 from whetstone.domain.eval_model import Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
+from whetstone.gitio import ref_exists
 from whetstone.runs import RunStore
 from whetstone.ui.app import create_app
 
@@ -210,6 +211,66 @@ def test_promotion_records_the_decision_and_leaves_the_queue(client: TestClient)
     assert decided["case_id"] == "812-t0"
     assert decided["branch"] == "whetstone/cases/batch-1"
     assert decided["commit"]
+
+
+def test_promotion_without_a_rule_id_does_not_touch_metadata(
+    client: TestClient, repo: Path
+) -> None:
+    edits = _edits(client, "812-t0")
+    body = client.post("/api/candidates/812-t0/promote", json={"edits": edits}).json()
+    assert not any(p.endswith("meta.yaml") for p in body["prepared"]["files"])
+
+
+def test_promotion_with_a_rule_id_records_the_evidence_for_that_rule(
+    client: TestClient, repo: Path
+) -> None:
+    """`meta.yaml` provenance is the record of why a rule exists, and nothing used to write it.
+
+    It also feeds `rule_ids`/`untested_rules`, so leaving it hand-maintained meant the console
+    reported on a rule set that drifted from the evidence behind it.
+    """
+    edits = _edits(client, "812-t0", rule_id="R2")
+    body = client.post("/api/candidates/812-t0/promote", json={"edits": edits}).json()
+
+    meta = yaml.safe_load(_git(repo, "show", f"{body['branch']}:skills/rust-errors/meta.yaml"))
+    assert meta["provenance"]["R2"] == [
+        {"source": "gitlab_mr", "ref": "acme/payments!812", "human_signal": "suggestion applied"}
+    ]
+    # Everything already in the file survives the edit.
+    assert meta["provenance"]["R1"][0]["ref"] == "acme/payments!812#note_44"
+    assert meta["owner"] == "@backend-guild"
+    assert meta["references"][0]["path"] == "src/error.rs"
+
+
+def test_a_second_promotion_builds_on_the_first_ones_metadata(
+    client: TestClient, repo: Path
+) -> None:
+    """The second commit must start from the branch, not the working tree, or it drops the first."""
+    for candidate_id, rule in (("812-t0", "R1"), ("813-t1", "R2")):
+        edits = _edits(client, candidate_id, rule_id=rule)
+        body = client.post(
+            f"/api/candidates/{candidate_id}/promote", json={"edits": edits}
+        ).json()
+
+    meta = yaml.safe_load(_git(repo, "show", f"{body['branch']}:skills/rust-errors/meta.yaml"))
+    assert {"R1", "R2"} <= set(meta["provenance"])
+    assert len(meta["provenance"]["R1"]) == 2  # the seeded citation plus the new one
+
+
+def test_a_malformed_rule_id_is_rejected_before_anything_is_written(
+    client: TestClient, repo: Path
+) -> None:
+    edits = _edits(client, "812-t0", rule_id="not a rule")
+    response = client.post("/api/candidates/812-t0/promote", json={"edits": edits})
+    assert response.status_code == 422
+    assert "rule id" in response.json()["message"]
+    assert not ref_exists(repo, "whetstone/cases/batch-1")
+
+
+def test_preview_shows_the_metadata_change_too(client: TestClient) -> None:
+    edits = _edits(client, "812-t0", rule_id="R2")
+    body = client.post("/api/candidates/812-t0/preview", json={"edits": edits}).json()
+    assert "skills/rust-errors/meta.yaml" in body["files"]
 
 
 def test_commit_message_carries_the_provenance(client: TestClient, repo: Path) -> None:

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from whetstone.domain.issue import IssueKind
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import MergeRequestRef
 from whetstone.providers.base import Capability
@@ -36,6 +37,15 @@ class ReviewScenario:
     mr_ref: MergeRequestRef
     min_threads: int
     has_applied_suggestion: bool
+
+
+@dataclass
+class IssueScenario:
+    project: str
+    since: datetime
+    defect_key: str  # an issue whose type means "something was wrong with the product"
+    task_key: str  # one whose type does not
+    summary: str  # the defect's summary, which becomes eval-case ground truth
 
 
 class SourceContract:
@@ -108,3 +118,54 @@ class ReviewContract:
         first = connector.get_review(review_scenario.mr_ref)  # type: ignore[attr-defined]
         second = connector.get_review(review_scenario.mr_ref)  # type: ignore[attr-defined]
         assert first == second
+
+
+class IssueContract:
+    """Assertions every IssueConnector must satisfy. Subclass supplies the fixtures."""
+
+    def test_declares_tracker_capability(self, tracker: object) -> None:
+        assert Capability.tracker in tracker.capabilities()  # type: ignore[attr-defined]
+
+    def test_list_resolved_issues_includes_target(
+        self, tracker: object, issue_scenario: IssueScenario
+    ) -> None:
+        refs = tracker.list_resolved_issues(  # type: ignore[attr-defined]
+            issue_scenario.project, issue_scenario.since
+        )
+        assert any(r.key == issue_scenario.defect_key for r in refs)
+
+    def test_refs_carry_their_project(
+        self, tracker: object, issue_scenario: IssueScenario
+    ) -> None:
+        refs = tracker.list_resolved_issues(  # type: ignore[attr-defined]
+            issue_scenario.project, issue_scenario.since
+        )
+        assert all(r.project == issue_scenario.project for r in refs)
+        assert all(r.tracker for r in refs)
+
+    def test_defect_is_classified_as_one(
+        self, tracker: object, issue_scenario: IssueScenario
+    ) -> None:
+        ref = self._ref(tracker, issue_scenario, issue_scenario.defect_key)
+        issue = tracker.get_issue(ref)  # type: ignore[attr-defined]
+        assert issue.kind is IssueKind.defect
+        assert issue.is_defect
+        # The summary becomes an eval case's expectation, so an empty one is a broken normalizer.
+        assert issue.summary == issue_scenario.summary
+
+    def test_non_defect_is_not_classified_as_one(
+        self, tracker: object, issue_scenario: IssueScenario
+    ) -> None:
+        ref = self._ref(tracker, issue_scenario, issue_scenario.task_key)
+        assert tracker.get_issue(ref).kind is IssueKind.task  # type: ignore[attr-defined]
+
+    def test_get_issue_is_idempotent(
+        self, tracker: object, issue_scenario: IssueScenario
+    ) -> None:
+        ref = self._ref(tracker, issue_scenario, issue_scenario.defect_key)
+        assert tracker.get_issue(ref) == tracker.get_issue(ref)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _ref(tracker: object, scenario: IssueScenario, key: str) -> object:
+        refs = tracker.list_resolved_issues(scenario.project, scenario.since)  # type: ignore[attr-defined]
+        return next(r for r in refs if r.key == key)
