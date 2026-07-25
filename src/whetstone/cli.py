@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import shutil
+import webbrowser
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -8,19 +11,23 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 
+from whetstone.config import load_config
 from whetstone.core.gate import GateConfig
 from whetstone.core.loader import load_skill, load_skills
+from whetstone.domain.run import RunEvent, RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import LLMClient
-from whetstone.llm.factory import PRESETS, build_llm_client
+from whetstone.llm.factory import PRESETS, build_llm_client, resolve_backend
 from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.registry import available_providers
+from whetstone.report import render_run_html, render_run_text
+from whetstone.runs import RunStore, stale_version_ids
 from whetstone.service import (
     format_gate,
     format_score,
     gate_skills,
     pull_corpus,
-    run_eval,
+    record_eval,
 )
 from whetstone.vcs import export_tree
 
@@ -30,11 +37,22 @@ corpus_app = typer.Typer(help="Turn GitLab MR history into candidate eval cases.
 skills_app = typer.Typer(help="Inspect the skill registry.")
 providers_app = typer.Typer(help="Inspect provider plugins.")
 llm_app = typer.Typer(help="Choose and health-check the model backend (cloud or local).")
+runs_app = typer.Typer(help="Inspect stored run records.")
 app.add_typer(eval_app, name="eval")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(skills_app, name="skills")
 app.add_typer(providers_app, name="providers")
 app.add_typer(llm_app, name="llm")
+app.add_typer(runs_app, name="runs")
+
+RunsDirOpt = Annotated[
+    Path | None,
+    typer.Option("--runs-dir", help="Where run records live (default: config / .whetstone/runs)"),
+]
+
+
+def _store(runs_dir: Path | None) -> RunStore:
+    return RunStore(runs_dir if runs_dir is not None else load_config().runs_dir)
 
 # Shared LLM-selection options, so `eval run` and `eval gate` pick a backend the same way.
 _LLM_HELP = (
@@ -101,6 +119,13 @@ def eval_run(
     api_key_env: KeyEnvOpt = None,
     effort: Annotated[str, typer.Option()] = "high",
     trials: Annotated[int, typer.Option(min=1)] = 1,
+    workers: Annotated[
+        int, typer.Option(min=1, help="Evaluate this many cases concurrently")
+    ] = 1,
+    save: Annotated[
+        bool, typer.Option("--save/--no-save", help="Store a run record for later inspection")
+    ] = True,
+    runs_dir: RunsDirOpt = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate & summarize; no model call")
     ] = False,
@@ -111,14 +136,43 @@ def eval_run(
     Runs against any backend (see `--llm`): Anthropic by default, or a local model such as Qwen on
     Ollama/LM Studio. `--dry-run` loads and validates the skill and prints a summary without calling
     the model (no credentials or token spend) — a cheap wiring check.
+
+    Every run is stored (see `whetstone runs`), keeping the findings and judge verdicts behind the
+    score so a failure can be diagnosed afterwards with `whetstone report`.
     """
     sk = load_skill(skill)
     if dry_run:
         typer.echo(_dry_summary(sk))
         return
     client = _client(llm, model, base_url, api_key_env)
-    score = run_eval(sk, client, trials=trials, reviewer_effort=effort)
-    typer.echo(score.model_dump_json(indent=2) if json_out else format_score(score))
+    backend = resolve_backend(llm, model=model, base_url=base_url)
+    record = record_eval(
+        sk,
+        client,
+        trials=trials,
+        reviewer_effort=effort,
+        backend=backend.name,
+        model=backend.model,
+        max_workers=workers,
+        on_event=None if json_out else _progress,
+    )
+    if save:
+        _store(runs_dir).save(record)
+    if json_out:
+        typer.echo(record.score.model_dump_json(indent=2))
+        return
+    typer.echo(format_score(record.score))
+    if save:
+        typer.echo(f"\nrun {record.id}  ({record.llm_calls} llm calls, {record.duration_s:.1f}s)")
+        typer.echo(f"  whetstone report --run {record.id}")
+
+
+def _progress(event: RunEvent) -> None:
+    """Case-level progress on stderr, so `--json` and piped stdout stay clean."""
+    if event.kind == "case_done":
+        typer.echo(
+            f"  [{event.completed_cases}/{event.total_cases}] {event.case_id}", err=True
+        )
 
 
 @eval_app.command("gate")
@@ -140,8 +194,10 @@ def eval_gate(
     base_url: BaseUrlOpt = None,
     api_key_env: KeyEnvOpt = None,
     trials: Annotated[int, typer.Option(min=1)] = 1,
-    recall_tol: Annotated[float, typer.Option()] = 0.0,
-    fp_tol: Annotated[float, typer.Option()] = 0.0,
+    # None, not 0.0, so "not passed" is distinguishable from "explicitly zero" and the flag can
+    # override `[gate]` in whetstone.toml rather than silently shadowing it with its own default.
+    recall_tol: Annotated[float | None, typer.Option(help="Allowed recall drop")] = None,
+    fp_tol: Annotated[float | None, typer.Option(help="Allowed false-positive rise")] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate both sides; no model call")
     ] = False,
@@ -152,6 +208,11 @@ def eval_gate(
     Each side is a skill folder (`--base`/`--candidate`) OR a git ref (`--base-ref` /
     `--candidate-ref` with `--repo` and `--skill-path`) — e.g. gate a branch against `main`.
     """
+    defaults = load_config().gate
+    tolerances = GateConfig(
+        recall_tol=recall_tol if recall_tol is not None else defaults.recall_tol,
+        fp_tol=fp_tol if fp_tol is not None else defaults.fp_tol,
+    )
     base_dir, base_tmp = _resolve_skill_dir(base, base_ref, repo, skill_path)
     cand_dir, cand_tmp = _resolve_skill_dir(candidate, candidate_ref, repo, skill_path)
     try:
@@ -165,7 +226,7 @@ def eval_gate(
             base_skill,
             candidate_skill,
             _client(llm, model, base_url, api_key_env),
-            cfg=GateConfig(recall_tol=recall_tol, fp_tol=fp_tol),
+            cfg=tolerances,
             trials=trials,
         )
         typer.echo(outcome.model_dump_json(indent=2) if json_out else format_gate(outcome))
@@ -224,6 +285,167 @@ def skills_list(
     """List skills and their eval-case counts."""
     for s in load_skills(root):
         typer.echo(f"{s.id}  v{s.version}  ({len(s.eval_cases)} eval cases)")
+
+
+@runs_app.command("list")
+def runs_list(
+    skill: Annotated[
+        str | None, typer.Option("--skill", help="Only runs for this skill id")
+    ] = None,
+    limit: Annotated[int, typer.Option(min=1)] = 20,
+    runs_dir: RunsDirOpt = None,
+) -> None:
+    """List stored runs, most recent first."""
+    summaries = _store(runs_dir).list(skill_id=skill, limit=limit)
+    if not summaries:
+        typer.echo("no runs recorded yet — run `whetstone eval run`")
+        return
+    stale = stale_version_ids(summaries)
+    for s in summaries:
+        when = s.created_at.strftime("%Y-%m-%d %H:%M")
+        flags = "  [practice]" if s.practice_mode else ""
+        # Same version, different content: the two runs are not comparable despite appearances.
+        flags += "  ⚠ version reused for different content" if s.id in stale else ""
+        typer.echo(
+            f"{s.id}  {when}  {s.skill_id} v{s.skill_version}  "
+            f"recall {s.recall:.3f}  fp {s.fp_rate:.3f}  k={s.k}{flags}"
+        )
+
+
+@runs_app.command("show")
+def runs_show(
+    run_id: Annotated[str, typer.Argument(help="Run id (see `whetstone runs list`)")],
+    runs_dir: RunsDirOpt = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Print a stored run's summary, or the full record as JSON."""
+    record = _load_run(run_id, runs_dir)
+    typer.echo(record.model_dump_json(indent=2) if json_out else render_run_text(record))
+
+
+@runs_app.command("reindex")
+def runs_reindex(runs_dir: RunsDirOpt = None) -> None:
+    """Rebuild the run index from the stored files."""
+    typer.echo(f"indexed {_store(runs_dir).reindex()} run(s)")
+
+
+@app.command("report")
+def report(
+    run: Annotated[str, typer.Option("--run", help="Run id (see `whetstone runs list`)")],
+    fmt: Annotated[
+        str, typer.Option("--format", help="html | text | json")
+    ] = "html",
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write to this file instead of stdout")
+    ] = None,
+    runs_dir: RunsDirOpt = None,
+) -> None:
+    """Render a stored run as a self-contained HTML report (or text/JSON).
+
+    The HTML is a single file with no external assets — open it from disk, attach it to a CI job, or
+    paste it into a merge request. It drills from the score down to each finding and the judge's
+    reason for accepting or rejecting it.
+    """
+    record = _load_run(run, runs_dir)
+    renderers: dict[str, Callable[[RunRecord], str]] = {
+        "html": render_run_html,
+        "text": render_run_text,
+        "json": lambda r: r.model_dump_json(indent=2),
+    }
+    render = renderers.get(fmt.lower())
+    if render is None:
+        raise typer.BadParameter(f"unknown format {fmt!r}; choose html, text, or json")
+    content = render(record)
+    if out is None:
+        typer.echo(content)
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(content, encoding="utf-8")
+    typer.echo(f"wrote {out}")
+
+
+def _load_run(run_id: str, runs_dir: Path | None) -> RunRecord:
+    try:
+        return _store(runs_dir).load(run_id)
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@app.command("ui")
+def ui(
+    host: Annotated[str | None, typer.Option("--host", help="Bind address")] = None,
+    port: Annotated[int | None, typer.Option("--port", help="Bind port")] = None,
+    read_only: Annotated[
+        bool, typer.Option("--read-only", help="Disable every mutating route")
+    ] = False,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open")] = True,
+    dev: Annotated[
+        bool, typer.Option("--dev", help="Serve the API only, for the Vite dev server to proxy")
+    ] = False,
+    insecure_bind: Annotated[
+        bool,
+        typer.Option(
+            "--insecure-bind",
+            help="Acknowledge binding a non-loopback address; the console has no auth of its own",
+        ),
+    ] = False,
+) -> None:
+    """Start the console: skills, eval cases, runs, and the drill-down behind every score.
+
+    Binds loopback by default. The console has **no authentication of its own** — a shared
+    deployment belongs behind an authenticating reverse proxy, with `trust_proxy_headers = true`
+    in `whetstone.toml`. Binding a public address therefore requires `--insecure-bind`.
+
+    With `--dev`, only the API is served (default port 8787) so `npm run dev` in `ui/` can proxy to
+    it with hot reloading.
+    """
+    try:
+        import uvicorn
+    except ModuleNotFoundError as exc:
+        raise typer.BadParameter(
+            "the console needs the 'ui' extra — install it with: pip install 'whetstone[ui]' "
+            "(or `uv sync --extra ui`)"
+        ) from exc
+
+    from whetstone.ui.app import STATIC_DIR, create_app
+
+    config = load_config()
+    if read_only:
+        config.ui.read_only = True
+    bind_host = host or config.ui.host
+    bind_port = port or config.ui.port
+
+    if not _is_loopback(bind_host) and not insecure_bind:
+        raise typer.BadParameter(
+            f"refusing to bind {bind_host} without --insecure-bind: the console has no "
+            "authentication of its own and would be reachable by anyone on the network"
+        )
+
+    url = f"http://{bind_host}:{bind_port}"
+    typer.echo(f"Whetstone console on {url}")
+    typer.echo(f"  skills   {config.skills_root}")
+    typer.echo(f"  runs     {config.runs_dir}")
+    if config.ui.read_only:
+        typer.echo("  mode     read-only")
+    if dev:
+        typer.echo("  dev      API only — run `npm run dev` in ui/ and open http://localhost:5173")
+    elif not (STATIC_DIR / "index.html").is_file():
+        typer.echo("  note     console assets not built; run `npm install && npm run build` in ui/")
+
+    if open_browser and not dev:
+        webbrowser.open(url)
+
+    app = create_app(config, serve_console=not dev)
+    uvicorn.run(app, host=bind_host, port=bind_port, log_level="warning")
+
+
+def _is_loopback(host: str) -> bool:
+    if host in {"localhost", ""}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @providers_app.command("list")

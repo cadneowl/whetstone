@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from whetstone.domain.refs import RepoRef
 
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
 class AddedLine(BaseModel):
@@ -26,6 +26,35 @@ class FileChange(BaseModel):
 
     def added_line_numbers(self) -> list[int]:
         return [a.line for a in self.added]
+
+    def new_line_spans(self) -> list[tuple[int, int]]:
+        """Inclusive new-file line ranges this change actually covers, one per hunk.
+
+        An expectation anchored outside every span can never match a finding, so this is what makes
+        "is this region real?" answerable. Falls back to the added lines when a change carries no
+        raw hunk text (a synthesized diff).
+        """
+        spans: list[tuple[int, int]] = []
+        for line in self.raw_diff.splitlines():
+            match = _HUNK_RE.match(line)
+            if match is None:
+                continue
+            start = int(match.group(1))
+            count = int(match.group(2)) if match.group(2) is not None else 1
+            # A zero-length hunk (pure deletion) still anchors at `start`.
+            spans.append((start, start + max(count, 1) - 1))
+        if spans:
+            return spans
+        lines = self.added_line_numbers()
+        return [(min(lines), max(lines))] if lines else []
+
+    def covers(self, line_range: tuple[int, int]) -> bool:
+        """True if `line_range` overlaps any hunk. Unknown coverage counts as covered."""
+        spans = self.new_line_spans()
+        if not spans:
+            return True
+        lo, hi = line_range
+        return any(lo <= end and start <= hi for start, end in spans)
 
 
 class CodeChange(BaseModel):

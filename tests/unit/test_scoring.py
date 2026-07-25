@@ -4,7 +4,7 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalCase, Expectation
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region, RepoRef
-from whetstone.domain.score import Confusion
+from whetstone.domain.score import Confusion, SkillScore
 from whetstone.judge import DeterministicJudge
 
 REPO = RepoRef.parse("local:t")
@@ -82,3 +82,26 @@ def test_confusion_metric_conventions() -> None:
     assert Confusion().precision == 1.0  # nothing flagged
     assert Confusion(tp=1, fp=1).precision == 0.5
     assert Confusion(fp=1, tn=1).fp_rate == 0.5
+
+
+def test_score_serializes_its_metrics() -> None:
+    """The metrics are the score. A serialized SkillScore without them forces every consumer —
+    `--json` output, the HTTP API, the console — to reimplement the denominator conventions."""
+    case = _case("should_catch", "appear", "a.rs", (40, 45), pattern="unwrap")
+    score = SkillScore(skill_id="s", version=1, k=1, cases=[score_case(case, [[]], JUDGE)])
+    dumped = score.model_dump()
+    assert dumped["recall"] == 0.0
+    assert dumped["fp_rate"] == 0.0
+    assert dumped["precision"] == 1.0
+    assert dumped["f2"] == 0.0
+    assert dumped["cases"][0]["recall"] == 0.0
+    assert dumped["cases"][0]["confusion"]["fn"] == 1
+
+
+def test_metrics_are_not_required_on_input() -> None:
+    """Records written before the metrics were serialized must still load."""
+    revived = SkillScore.model_validate(
+        {"skill_id": "s", "version": 1, "k": 1,
+         "cases": [{"case_id": "c", "kind": "should_catch", "trials": [{"tp": 1}]}]}
+    )
+    assert revived.recall == 1.0

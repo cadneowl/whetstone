@@ -3,9 +3,15 @@ from __future__ import annotations
 import statistics
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 from whetstone.domain.eval_model import EvalKind
+
+# The metrics below are `computed_field`, not plain properties, so they appear in `model_dump()` and
+# `model_dump_json()`. A serialized score without its metrics is close to useless — `--json` output
+# and the HTTP API would carry raw confusion counts and force every consumer to reimplement the
+# conventions documented here. They are serialization-only: reading a record that predates them
+# simply recomputes.
 
 
 class Confusion(BaseModel):
@@ -30,16 +36,19 @@ class Confusion(BaseModel):
             tn=self.tn + other.tn,
         )
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def recall(self) -> float:
         denom = self.tp + self.fn
         return 1.0 if denom == 0 else self.tp / denom
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def fp_rate(self) -> float:
         denom = self.fp + self.tn
         return 0.0 if denom == 0 else self.fp / denom
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def precision(self) -> float:
         denom = self.tp + self.fp
@@ -60,14 +69,17 @@ class CaseScore(BaseModel):
     kind: EvalKind
     trials: list[Confusion]
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def confusion(self) -> Confusion:
         return sum(self.trials, Confusion())
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def recall(self) -> float:
         return self.confusion.recall
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def fp_rate(self) -> float:
         return self.confusion.fp_rate
@@ -82,24 +94,34 @@ class SkillScore(BaseModel):
     k: int
     cases: list[CaseScore]
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def confusion(self) -> Confusion:
         return sum((c.confusion for c in self.cases), Confusion())
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def recall(self) -> float:
         return self.confusion.recall
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def fp_rate(self) -> float:
         return self.confusion.fp_rate
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def precision(self) -> float:
         return self.confusion.precision
 
     def f_beta(self, beta: float = 2.0) -> float:
         return self.confusion.f_beta(beta)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def f2(self) -> float:
+        """The recall-favouring composite, serialized. `f_beta()` covers other betas."""
+        return self.f_beta()
 
     def _per_trial(self, metric: Literal["recall", "fp_rate"]) -> list[float]:
         """Skill-level metric computed independently for each trial index (stability signal)."""
@@ -109,11 +131,13 @@ class SkillScore(BaseModel):
             out.append(getattr(trial_total, metric))
         return out
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def recall_stdev(self) -> float:
         vals = self._per_trial("recall")
         return statistics.pstdev(vals) if len(vals) > 1 else 0.0
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def fp_rate_stdev(self) -> float:
         vals = self._per_trial("fp_rate")

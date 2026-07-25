@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from whetstone.domain.eval_model import EvalCase
+from whetstone.domain.eval_model import EvalCase, Provenance
 
 
 class Triggers(BaseModel):
@@ -28,3 +28,7 @@ class Skill(BaseModel):
     triggers: Triggers = Triggers()
     references: list[Reference] = []
     eval_cases: list[EvalCase] = []
+    # From meta.yaml. `owner` governs approval; `provenance` maps a rule id (R1, R2…) to the review
+    # signals that justified it, so guidance can be traced back to the evidence for it.
+    owner: str = ""
+    provenance: dict[str, list[Provenance]] = {}

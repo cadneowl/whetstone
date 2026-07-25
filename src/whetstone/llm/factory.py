@@ -63,6 +63,23 @@ PRESETS: dict[str, Preset] = {
 
 LOCAL_PRESETS = ("ollama", "lmstudio", "vllm", "llamacpp")
 
+
+@dataclass(frozen=True)
+class Backend:
+    """What a provider name actually resolved to — recorded alongside every run, so a score is
+    attributable to a specific backend and model, not to whatever the environment held that day.
+    """
+
+    name: str  # the requested provider name ("anthropic", "ollama", a custom label…)
+    kind: str  # "anthropic" | "openai"
+    model: str
+    base_url: str | None
+    preset: Preset
+
+    @property
+    def label(self) -> str:
+        return self.preset.label
+
 # Aliases resolve to the generic custom slot — so `--llm openai-compatible` / `--llm pi` etc. work.
 _CUSTOM_ALIASES = {"custom", "openai-compatible", "openai_compatible", "compatible"}
 
@@ -92,18 +109,47 @@ def build_llm_client(
     ``Authorization`` header is sent unless you ask for one. ``timeout`` (or
     ``WHETSTONE_LLM_TIMEOUT``, seconds) raises the per-request budget for slow local hardware.
     """
+    backend = resolve_backend(provider, model=model, base_url=base_url)
+
+    if backend.kind == "anthropic":
+        from whetstone.llm.anthropic_client import AnthropicClient
+
+        return AnthropicClient(backend.model)
+
+    from whetstone.llm.openai_client import OpenAICompatibleClient
+
+    endpoint = backend.base_url or ""
+    key = api_key or _resolve_key(api_key_env, backend.preset)
+    resolved_timeout = timeout if timeout is not None else _env_timeout()
+    if resolved_timeout is None:
+        return OpenAICompatibleClient(model=backend.model, base_url=endpoint, api_key=key)
+    return OpenAICompatibleClient(
+        model=backend.model, base_url=endpoint, api_key=key, timeout=resolved_timeout
+    )
+
+
+def resolve_backend(
+    provider: str | None = None, *, model: str | None = None, base_url: str | None = None
+) -> Backend:
+    """Resolve provider/model/base-URL the same way `build_llm_client` does, without constructing a
+    client. Lets the CLI and the run recorder name the backend without paying for (or requiring
+    credentials for) a real client.
+    """
     name = (provider or os.getenv("WHETSTONE_LLM") or "anthropic").lower()
     resolved_base = base_url or os.getenv("WHETSTONE_LLM_BASE_URL")
     preset = _resolve_preset(name, resolved_base)
-
     resolved_model = model or os.getenv("WHETSTONE_LLM_MODEL")
 
     if preset.kind == "anthropic":
-        from whetstone.llm.anthropic_client import DEFAULT_MODEL, AnthropicClient
+        from whetstone.llm.anthropic_client import DEFAULT_MODEL
 
-        return AnthropicClient(resolved_model or DEFAULT_MODEL)
-
-    from whetstone.llm.openai_client import OpenAICompatibleClient
+        return Backend(
+            name=name,
+            kind="anthropic",
+            model=resolved_model or DEFAULT_MODEL,
+            base_url=None,
+            preset=preset,
+        )
 
     endpoint = resolved_base or preset.base_url
     if not endpoint:
@@ -115,12 +161,8 @@ def build_llm_client(
             f"provider {name!r} needs a model (--model or WHETSTONE_LLM_MODEL), "
             "e.g. qwen2.5-coder:7b"
         )
-    key = api_key or _resolve_key(api_key_env, preset)
-    resolved_timeout = timeout if timeout is not None else _env_timeout()
-    if resolved_timeout is None:
-        return OpenAICompatibleClient(model=resolved_model, base_url=endpoint, api_key=key)
-    return OpenAICompatibleClient(
-        model=resolved_model, base_url=endpoint, api_key=key, timeout=resolved_timeout
+    return Backend(
+        name=name, kind="openai", model=resolved_model, base_url=endpoint, preset=preset
     )
 
 

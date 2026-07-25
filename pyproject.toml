@@ -13,12 +13,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The console. Kept optional so the core CLI, and CI, stay lean.
+ui = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
 dev = [
     "pytest>=8.0",
     "respx>=0.21",
     "ruff>=0.5",
     "mypy>=1.10",
     "types-PyYAML>=6.0",
+    "whetstone[ui]",
 ]
 
 [project.scripts]
@@ -30,10 +36,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/whetstone"]
+# The built SPA is generated and gitignored; force-include it so wheels ship a console that runs
+# without Node. Maintainers build it with `npm run build` in ui/.
+artifacts = ["src/whetstone/ui/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = [
+    # Starlette's TestClient prefers httpx2. The GitLab connector and its respx cassettes are built
+    # on httpx 0.x, so the tree stays there rather than carrying two HTTP clients.
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
 
 [tool.ruff]
 line-length = 100
