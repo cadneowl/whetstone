@@ -412,3 +412,50 @@ small — the two runs differ by 0.04 on the drafted arm, which is one probe. An
 case is the weakest label in the fixture: describing what is *correct* forces the judge to match a
 finding that takes the opposite stance on the same code, and it is genuinely arguable both ways.
 
+## ADR-021 — Guidance is the whole folder, not one file
+
+**Context.** Guidance outgrows `SKILL.md`. A real skill splits its rules into `patterns/rust.md`,
+`reference/errors.md` and so on, and the body points at them by name. Whetstone read none of it.
+`load_skill` opened `SKILL.md`, `meta.yaml`, `eval_cases/` and `wiki/`, and the review prompt was
+built from `skill.body` alone — so "see ./patterns/rust.md for the full list" reached the model as a
+pointer to a file it could not open, and the guidance under test was silently incomplete.
+
+The second consequence was worse. `skill_hash` did not cover those files either, so rewriting a
+referenced page from *never unwrap* to *always unwrap* left the digest byte for byte identical:
+
+```
+hash before: 687e5fd86e1791cf
+hash after : 687e5fd86e1791cf
+```
+
+A gate passed against one set of rules therefore went on authorising the publication of a different
+set — *Propose MR* stayed enabled, the badge stayed green. That is precisely the failure C6 exists
+to prevent, and it was reachable by editing a file the tool never mentioned.
+
+**Decision.** Every `.md` under a skill folder is guidance. It is loaded into `Skill.pages`, covered
+by `skill_hash`, and inlined into the review prompt after the body.
+
+**Four exclusions, each something other than rules:** `SKILL.md` (it is the body), `eval_cases/`
+(the corpus that tests the rules), `wiki/` (repo context, retrieved per change rather than always
+sent, and already hashed), and the step folders (prompts instructing the harness). Everything else
+in the folder is sent to a model, so anything that is not guidance does not belong there.
+
+**Path is hashed as well as text.** Moving a rule between pages changes what the prompt says; two
+skills differing only in where a rule lives are not interchangeable for scoring.
+
+**Loaded in full, bounded at render.** The hash covers what is on disk; the cap applies when the
+prompt is built. So editing a page that was too large to send still invalidates a gate — the
+conservative direction. `MAX_PAGE_BYTES` matches `WikiLimits.max_bytes` for the same reason: this
+text is paid for on every case of every trial on both sides of a gate.
+
+**A page that will not fit is dropped whole and named in the prompt.** Half a set of rules reads to
+a model as a complete set, and a rule truncated mid-sentence is worse than one honestly absent. The
+prompt says which files were withheld so the model does not report confidently on rules it never saw.
+
+**A skill with no pages hashes exactly as before**, verified against a live gate record: no stored
+evidence is invalidated by this landing.
+
+**The console shows pages but does not edit them.** The editor stages `SKILL.md`; companion pages
+travel with the branch because staging is folder-level, and the Edit tab names them so nobody
+mistakes the textarea for the whole guidance. Editing them in the browser is a bigger change — a
+multi-file editor — and not required to close the soundness hole.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,8 @@ from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalCase, Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
-from whetstone.domain.skill import Reference, Skill, Triggers
+from whetstone.domain.skill import GuidancePage, Reference, Skill, Triggers
+from whetstone.steps import STEP_KINDS
 from whetstone.wiki import WIKI_DIR, WikiError, load_wiki
 
 
@@ -25,8 +27,78 @@ def load_skills(root: str | Path) -> list[Skill]:
     return skills
 
 
+SKILL_FILE_NAME = "SKILL.md"
+
+# Folders under a skill that hold something other than guidance. Everything else is guidance and is
+# sent to the reviewer, so this list is the whole contract — see `GuidancePage`.
+_NOT_GUIDANCE = {"eval_cases", WIKI_DIR, *STEP_KINDS}
+
+
+def _is_markdown(name: str) -> bool:
+    """Case-insensitively, on every platform.
+
+    `Path.rglob("*.md")` is not portable: pathlib case-folds the pattern through `os.path.normcase`,
+    which is a no-op on POSIX and lowercasing on Windows. So `RULES.MD` was guidance on a laptop and
+    invisible in Linux CI — the same commit hashing two different ways, which would let a gate
+    recorded on one machine disagree with the identity computed on another. Deciding here, in
+    Python, makes the answer the same everywhere.
+    """
+    return name.lower().endswith(".md")
+
+
+def _load_pages(path: Path) -> list[GuidancePage]:
+    """Every markdown file under the skill folder that is part of its guidance.
+
+    Walked with the reserved folders pruned rather than filtered afterwards. `eval_cases/` is the
+    one directory in a skill designed to grow without limit — `improve.py` speaks of tens of
+    thousands of promoted cases — and the console reloads skills from disk on every request by
+    design. Recursing into it to discard everything found there cost ~300ms per skill load at four
+    thousand cases, on every page view.
+
+    Sorted by path so the prompt — and therefore `skill_hash`, and therefore whether a stored gate
+    still applies — cannot change because a filesystem returned entries in a different order.
+    """
+    pages: list[GuidancePage] = []
+    for directory, subdirs, files in os.walk(path):
+        here = Path(directory)
+        relative_dir = here.relative_to(path)
+        if relative_dir == Path("."):
+            # Reserved names are top-level only, so this prunes once and everything below a
+            # `patterns/` folder stays guidance whatever it is called.
+            subdirs[:] = [d for d in subdirs if d not in _NOT_GUIDANCE]
+        subdirs.sort()
+        for name in sorted(files):
+            if not _is_markdown(name):
+                continue
+            relative = relative_dir / name if relative_dir != Path(".") else Path(name)
+            # The body is not also a page. Compared case-insensitively because a case-insensitive
+            # filesystem happily opens `SKILL.md` when the file on disk is `skill.md`, and the
+            # mismatch used to send — and hash — the whole body twice.
+            if len(relative.parts) == 1 and name.lower() == SKILL_FILE_NAME.lower():
+                continue
+            pages.append(GuidancePage(path=relative.as_posix(), text=_read_page(here / name)))
+    pages.sort(key=lambda p: p.path)
+    return pages
+
+
+def _read_page(file: Path) -> str:
+    """Read a guidance page, or fail as a skill load error naming the file.
+
+    An unhandled `UnicodeDecodeError` here took down `load_skills` for the entire root — one page
+    saved as latin-1 by an older editor and the console's skill list returned a 500 with a message
+    that named no file. The wiki loader already treats this as a skill load failure; so does this.
+    """
+    try:
+        return file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise SkillLoadError(f"{file}: guidance pages must be UTF-8 ({e.reason})") from e
+    except OSError as e:
+        raise SkillLoadError(f"{file}: cannot read guidance page: {e}") from e
+
+
 def load_skill(path: str | Path) -> Skill:
-    """Load one skill folder: SKILL.md (frontmatter + body), meta.yaml, eval_cases/*."""
+    """Load one skill folder: SKILL.md (frontmatter + body), meta.yaml, eval_cases/*, and the
+    companion markdown pages that make up the rest of the guidance."""
     path = Path(path)
     fm, body = _parse_frontmatter((path / "SKILL.md").read_text(encoding="utf-8"))
     meta = _read_yaml(path / "meta.yaml") if (path / "meta.yaml").is_file() else {}
@@ -60,6 +132,7 @@ def load_skill(path: str | Path) -> Skill:
         description=str(fm.get("description", "")),
         version=version,
         body=body.strip(),
+        pages=_load_pages(path),
         triggers=triggers,
         references=references,
         eval_cases=eval_cases,
