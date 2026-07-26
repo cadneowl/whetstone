@@ -47,6 +47,9 @@ from whetstone.providers.base import IssueConnector, ReviewConnector
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
+from whetstone.sampling import sample_cases
+from whetstone.steps import SamplePolicy
+from whetstone.wiki import WikiLimits
 
 
 class GateOutcome(BaseModel):
@@ -62,6 +65,8 @@ def run_eval(
     trials: int = 1,
     reviewer_effort: Effort = "high",
     judge_effort: Effort = "medium",
+    sample: SamplePolicy | None = None,
+    wiki_limits: WikiLimits | None = None,
 ) -> SkillScore:
     """Score a skill by running its eval set through an LLM reviewer + judge."""
     return record_eval(
@@ -70,6 +75,8 @@ def run_eval(
         trials=trials,
         reviewer_effort=reviewer_effort,
         judge_effort=judge_effort,
+        sample=sample,
+        wiki_limits=wiki_limits,
     ).score
 
 
@@ -89,20 +96,30 @@ def record_eval(
     max_workers: int = 1,
     cancel: threading.Event | None = None,
     now: datetime | None = None,
+    sample: SamplePolicy | None = None,
+    wiki_limits: WikiLimits | None = None,
 ) -> RunRecord:
     """Score a skill and return the full run record — every finding and every judge verdict.
 
     This is the primitive; `run_eval` is the projection down to the score. Recording costs no extra
     model calls (see `core.matching.evaluate_expectation`), so there is no reason to run without it.
+
+    `sample` scores a deterministic subset, for corpora too large to run whole. The record's
+    `skill_hash` is taken from the skill as given, never from the sampled copy — evidence has to be
+    attributable to content that exists on disk, the same reason `record_gate` hashes its arguments
+    rather than the union-cased skills it builds.
     """
     counted = CountingClient(client)
-    reviewer = LLMReviewer(counted, effort=reviewer_effort)
+    reviewer = LLMReviewer(counted, effort=reviewer_effort, wiki_limits=wiki_limits)
     judge = LLMJudge(counted, effort=judge_effort)
+
+    drawn = sample_cases(skill.eval_cases, sample)
+    scored = skill if not drawn.sampled else skill.model_copy(update={"eval_cases": drawn.cases})
 
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
     score, cases = run_skill_recorded(
-        skill, reviewer, judge, k=trials, on_event=on_event, max_workers=max_workers, cancel=cancel
+        scored, reviewer, judge, k=trials, on_event=on_event, max_workers=max_workers, cancel=cancel
     )
     duration = time.perf_counter() - clock
 
@@ -278,6 +295,8 @@ def gate_skills(
     *,
     cfg: GateConfig | None = None,
     trials: int = 1,
+    sample: SamplePolicy | None = None,
+    wiki_limits: WikiLimits | None = None,
 ) -> GateOutcome:
     """Score a base and candidate version of a skill and apply the regression gate.
 
@@ -291,10 +310,20 @@ def gate_skills(
     `skill_hash` matches nothing in git — which is why `record_gate` hashes the arguments to this
     function rather than anything it constructs.
     """
-    cases = union_cases(base, candidate)
-    base_score = run_eval(base.model_copy(update={"eval_cases": cases}), client, trials=trials)
+    cfg = cfg or GateConfig()
+    # Sampled once, from the union, and handed to both sides. Sampling each side separately would
+    # draw different cases whenever their case sets differ, which is exactly the situation a gate
+    # exists for. Targeted cases are forced in: a change claiming to fix case X that is then never
+    # scored on X would fail for a reason nobody could see.
+    drawn = sample_cases(union_cases(base, candidate), sample, always_include=cfg.targeted_cases)
+    cases = drawn.cases
+    base_score = run_eval(
+        base.model_copy(update={"eval_cases": cases}), client, trials=trials,
+        wiki_limits=wiki_limits,
+    )
     candidate_score = run_eval(
-        candidate.model_copy(update={"eval_cases": cases}), client, trials=trials
+        candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
+        wiki_limits=wiki_limits,
     )
     result = gate(base_score, candidate_score, cfg)
     return GateOutcome(result=result, base=base_score, candidate=candidate_score)
@@ -314,18 +343,24 @@ def record_gate(
     practice_mode: bool = False,
     principal: str = "",
     now: datetime | None = None,
+    sample: SamplePolicy | None = None,
+    wiki_limits: WikiLimits | None = None,
 ) -> GateRecord:
     """Gate a candidate against a baseline and return a storable record of the comparison.
 
     This is the primitive the console's gate-before-propose rule (C6) rests on: `gate_skills`
     computes a verdict, and this attaches the identity of the content that verdict was about.
     `candidate_hash` is taken from the skill as committed — not from the union-cased copy that was
-    scored — so evidence can only ever be matched to guidance someone can actually publish.
+    scored — so evidence can only ever be matched to guidance someone can actually publish. The same
+    applies to `sample`: a sampled gate still records the hash of the whole skill, because that is
+    the content the verdict authorises publishing.
     """
     counted = CountingClient(client)
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
-    outcome = gate_skills(base, candidate, counted, cfg=cfg, trials=trials)
+    outcome = gate_skills(
+        base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits
+    )
     duration = time.perf_counter() - clock
 
     candidate_hash = skill_hash(candidate)

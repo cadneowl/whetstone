@@ -13,6 +13,7 @@ from whetstone.domain.skill import Skill
 from whetstone.judge import DeterministicJudge
 from whetstone.llm import FakeLLMClient
 from whetstone.reviewer.llm_reviewer import LLMFinding, LLMFindingList, LLMReviewer
+from whetstone.wiki import SkillWiki, WikiEntry, WikiPage
 
 SKILL_DIR = Path(__file__).resolve().parents[2] / "skills" / "code-review-rust-error-handling"
 REPO = RepoRef.parse("gitlab:acme/payments")
@@ -77,6 +78,77 @@ def test_reviewer_prompt_carries_skill_body_and_diff() -> None:
     assert "unwrap" in captured["system"]  # skill guidance body
     assert ".unwrap()" in captured["user"]  # the diff under review
     assert client.calls[0].effort == "high"
+
+
+def _capture() -> tuple[dict[str, str], object]:
+    captured: dict[str, str] = {}
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        captured["system"] = system
+        captured["user"] = user
+        return LLMFindingList(findings=[])
+
+    return captured, handler
+
+
+def test_wiki_pages_for_the_touched_paths_reach_the_system_prompt() -> None:
+    skill = _skill().model_copy(
+        update={
+            "wiki": SkillWiki(
+                entries=[
+                    WikiEntry(page="handlers", paths=["src/handlers/**"]),
+                    WikiEntry(page="billing", paths=["src/billing/**"]),
+                ],
+                pages={
+                    "handlers": WikiPage(id="handlers", title="Handlers", text="Charge flow notes"),
+                    "billing": WikiPage(id="billing", title="Billing", text="Ledger notes"),
+                },
+            )
+        }
+    )
+    captured, handler = _capture()
+    LLMReviewer(FakeLLMClient(handler)).review(skill, _change())
+
+    assert "Charge flow notes" in captured["system"]
+    assert "Ledger notes" not in captured["system"]  # its glob does not cover the changed file
+
+
+def test_guidance_precedes_wiki_context_in_the_prompt() -> None:
+    """The stable text stays in front, so the cacheable prefix is as long as possible."""
+    skill = _skill().model_copy(
+        update={
+            "wiki": SkillWiki(
+                entries=[WikiEntry(page="h", paths=["src/**"])],
+                pages={"h": WikiPage(id="h", title="Handlers", text="Charge flow notes")},
+            )
+        }
+    )
+    captured, handler = _capture()
+    LLMReviewer(FakeLLMClient(handler)).review(skill, _change())
+
+    assert captured["system"].index("unwrap") < captured["system"].index("Charge flow notes")
+
+
+def test_wiki_is_labelled_as_context_not_as_rules() -> None:
+    """Background that reads as guidance would invent findings the skill never authorised."""
+    skill = _skill().model_copy(
+        update={
+            "wiki": SkillWiki(
+                entries=[WikiEntry(page="h", paths=["src/**"])],
+                pages={"h": WikiPage(id="h", title="Handlers", text="Charge flow notes")},
+            )
+        }
+    )
+    captured, handler = _capture()
+    LLMReviewer(FakeLLMClient(handler)).review(skill, _change())
+
+    assert "NOT review guidance" in captured["system"]
+
+
+def test_skill_without_a_wiki_produces_the_prompt_it_always_did() -> None:
+    captured, handler = _capture()
+    LLMReviewer(FakeLLMClient(handler)).review(_skill(), _change())
+    assert "Background on this codebase" not in captured["system"]
 
 
 def test_reviewer_plugs_into_run_skill() -> None:

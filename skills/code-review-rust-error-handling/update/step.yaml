@@ -1,0 +1,40 @@
+# How this skill's repo context is regenerated.
+#
+# Run with: whetstone skills update --skill <this skill folder> --repo <path to the source repo>
+#
+# Whetstone does not summarize repositories. This step invokes the generator you already run, then
+# indexes what it produces so retrieval can be deterministic. The wiki is part of skill_hash, so a
+# refresh that changes any page retracts a passing gate and the skill must be re-gated before it
+# can be proposed.
+
+description: Regenerate the repo wiki from the openwiki generator.
+
+# Substituted before the command runs:
+#   {{repo}}      the source repository passed with --repo
+#   {{out_dir}}   a temporary directory your generator must write into
+#   {{skill_id}}  this skill's id
+#
+# A list of arguments, never a string: nothing is re-split on spaces and no shell is involved, so
+# a path with a space in it works and a value from your config can never become two arguments.
+run: ["openwiki", "build", "--repo", "{{repo}}", "--out", "{{out_dir}}"]
+
+# Seconds before the generator is killed. Summarizing a large repo is slow; this is not.
+timeout_s: 900
+
+# What your generator must leave in {{out_dir}}:
+#
+#   pages/<name>.md    one markdown file per subject. The first `# heading` becomes its title.
+#   index.yaml         which source paths each page describes (see below).
+#
+# If your generator writes index.yaml itself, delete the `index:` block below — the tool that knows
+# which files a page describes is the right place for that mapping to live. If it only writes
+# pages, declare the mapping here and Whetstone will write index.yaml for you.
+#
+# Globs are matched with `**` meaning "any depth" and `*` meaning "one segment", so `src/auth/*`
+# does NOT match src/auth/nested/thing.rs. A change retrieves the pages whose globs cover the files
+# it touches, ranked by how many of them each page covers.
+
+index:
+  - page: handlers
+    paths:
+      - "src/handlers/**"

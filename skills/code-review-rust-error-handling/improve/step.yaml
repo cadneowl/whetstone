@@ -1,0 +1,43 @@
+# How a guidance change is drafted from this skill's failures.
+#
+# Run with: whetstone skills improve --skill <this skill folder>
+#
+# Whetstone assembles a bounded digest of the last run's failures and renders it into prompt.md.
+# The step never reads eval_cases/ itself, which is what keeps this affordable at a corpus of any
+# size: it sees representatives of the failure *kinds*, never the failures.
+
+description: Draft a guidance change from the failures of the last run.
+
+inputs:
+  failures:
+    # How many failures reach the prompt. These are cluster representatives, not the first N —
+    # 12 here means twelve different kinds of failure, largest group first.
+    max: 12
+    # What counts as the same kind of failure:
+    #   rule        the rule id the reviewer cited (default; falls back to the expectation)
+    #   expectation the specific expectation that failed
+    #   path        the top-level directory, i.e. roughly the subsystem
+    #   none        no clustering; representatives are individual failures
+    cluster_by: rule
+    # Diff shown per failure, in bytes. Raise if your rules need wide context to judge.
+    max_diff_bytes: 2000
+    # Learn from misses, from false positives, or both.
+    outcomes: [fn, fp]
+  wiki:
+    max_pages: 4
+    max_bytes: 24000
+
+# The instructions given to the model. Whetstone supplies the output structure (a complete
+# guidance body, a rationale, and the eval case ids the change should fix), so this file only has
+# to say how to think about the change.
+prompt: prompt.md
+
+# model:
+#   effort: high
+
+# Instead of `prompt:`, a step may set `run:` to have Whetstone invoke your own program: the
+# digest arrives as JSON on stdin, and it must print {"body": ..., "rationale": ...,
+# "targeted_cases": [...]} on stdout. Use it when a prompt genuinely will not do — the declarative
+# form above is what most skills want.
+#
+# run: ["python", "run.py"]

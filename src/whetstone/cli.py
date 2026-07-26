@@ -5,6 +5,7 @@ import os
 import shutil
 import webbrowser
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -24,8 +25,10 @@ from whetstone.domain.run import RunEvent, RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
+from whetstone.improve import build_digest, propose
 from whetstone.llm.base import LLMClient
-from whetstone.llm.factory import PRESETS, build_llm_client, resolve_backend
+from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
+from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval, render
 from whetstone.providers.base import ConnectorError
 from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
@@ -33,6 +36,7 @@ from whetstone.providers.registry import available_providers
 from whetstone.report import render_run_html, render_run_text
 from whetstone.reviews import ReviewSource, ReviewStore, ReviewUpload, build_review
 from whetstone.runs import RunStore, stale_version_ids
+from whetstone.scaffold import write_scaffold
 from whetstone.service import (
     apply_ruling,
     format_gate,
@@ -44,6 +48,8 @@ from whetstone.service import (
     record_gate,
     record_review,
 )
+from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step, load_steps
+from whetstone.update import refresh_wiki
 from whetstone.vcs import export_tree
 
 app = typer.Typer()
@@ -171,6 +177,81 @@ def _client(llm: str | None, model: str | None, base_url: str | None, key_env: s
         raise typer.BadParameter(str(exc)) from exc
 
 
+YesOpt = Annotated[
+    bool,
+    typer.Option("--yes", "-y", help="Skip the cost confirmation (for CI and scripts)"),
+]
+
+
+def _preflight(plan: Plan, assume_yes: bool) -> None:
+    """Show what a step will cost and get consent before spending anything.
+
+    Printed to stderr so `--json` stdout stays machine-readable. Confirmation is skipped only for
+    `--yes` and for a backend that cannot bill; a shell with no answer available aborts rather than
+    assuming one, since the failure mode of guessing wrong here is somebody's invoice. CI passes
+    `--yes`, which is the same thing said deliberately.
+    """
+    typer.echo(render(plan), err=True)
+    if assume_yes or not plan.spends_money:
+        typer.echo("", err=True)
+        return
+    try:
+        proceed = typer.confirm("\nProceed?", default=True)
+    except typer.Abort:
+        typer.echo(
+            "\nno answer available on this input — re-run with --yes to proceed without asking.",
+            err=True,
+        )
+        raise
+    if not proceed:
+        raise typer.Abort()
+    typer.echo("", err=True)
+
+
+def _resolve(llm: str | None, model: str | None, base_url: str | None) -> Backend:
+    try:
+        return resolve_backend(llm, model=model, base_url=base_url)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+SampleOpt = Annotated[
+    int | None,
+    typer.Option("--sample", help="Score at most this many cases (default: the skill's "
+                 "evaluate/step.yaml, else all of them)"),
+]
+SeedOpt = Annotated[
+    int | None, typer.Option("--sample-seed", help="Seed for the deterministic sample")
+]
+
+
+def _step(skill_dir: Path, kind: str, *, required: bool = False) -> StepSpec | None:
+    """Load one of a skill's pipeline steps, turning a bad definition into a usable CLI error."""
+    try:
+        spec = load_step(skill_dir, kind, skill_id=skill_dir.name)  # type: ignore[arg-type]
+    except StepError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if spec is None and required:
+        raise typer.BadParameter(
+            f"{skill_dir} has no {kind}/ step. Run `whetstone skills scaffold --skill "
+            f"{skill_dir}` to write a starter one."
+        )
+    return spec
+
+
+def _sample_policy(spec: StepSpec | None, max_cases: int | None, seed: int | None) -> (
+    SamplePolicy | None
+):
+    """Merge `--sample`/`--sample-seed` over the skill's own evaluate policy. Flags win."""
+    base = spec.sample if spec else SamplePolicy()
+    resolved = SamplePolicy(
+        max_cases=max_cases if max_cases is not None else base.max_cases,
+        seed=seed if seed is not None else base.seed,
+        stratify=base.stratify,
+    )
+    return resolved if resolved.max_cases is not None else None
+
+
 def _dry_summary(skill: Skill) -> str:
     catch = sum(1 for c in skill.eval_cases if c.kind == "should_catch")
     noflag = len(skill.eval_cases) - catch
@@ -206,7 +287,9 @@ def eval_run(
     base_url: BaseUrlOpt = None,
     api_key_env: KeyEnvOpt = None,
     effort: Annotated[str, typer.Option()] = "high",
-    trials: Annotated[int, typer.Option(min=1)] = 1,
+    trials: Annotated[int | None, typer.Option(min=1)] = None,
+    sample: SampleOpt = None,
+    sample_seed: SeedOpt = None,
     workers: Annotated[
         int, typer.Option(min=1, help="Evaluate this many cases concurrently")
     ] = 1,
@@ -217,6 +300,7 @@ def eval_run(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate & summarize; no model call")
     ] = False,
+    yes: YesOpt = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Run a skill's eval set through the LLM reviewer + judge and print the score.
@@ -225,15 +309,28 @@ def eval_run(
     Ollama/LM Studio. `--dry-run` loads and validates the skill and prints a summary without calling
     the model (no credentials or token spend) — a cheap wiring check.
 
+    Defaults come from the skill's own `evaluate/step.yaml` when it has one — sample size, trials
+    and wiki caps — and any flag here overrides it.
+
     Every run is stored (see `whetstone runs`), keeping the findings and judge verdicts behind the
     score so a failure can be diagnosed afterwards with `whetstone report`.
     """
     sk = load_skill(skill)
+    policy = _step(skill, "evaluate")
     if dry_run:
         typer.echo(_dry_summary(sk))
         return
+
+    trials = trials if trials is not None else (policy.trials if policy else 1)
+    drawn = _sample_policy(policy, sample, sample_seed)
+    limits = policy.inputs.wiki if policy else None
+    backend = _resolve(llm, model, base_url)
+    scored = min(drawn.max_cases or len(sk.eval_cases), len(sk.eval_cases)) if drawn else None
+    plan = plan_eval(sk, backend, trials=trials, cases=scored, wiki_limits=limits)
+    check_budget(plan, load_config().runs.max_llm_calls_per_run)
+    _preflight(plan, yes)
+
     client = _client(llm, model, base_url, api_key_env)
-    backend = resolve_backend(llm, model=model, base_url=base_url)
     record = record_eval(
         sk,
         client,
@@ -243,6 +340,8 @@ def eval_run(
         model=backend.model,
         max_workers=workers,
         on_event=None if json_out else _progress,
+        sample=drawn,
+        wiki_limits=limits,
     )
     if save:
         _store(runs_dir).save(record)
@@ -281,7 +380,9 @@ def eval_gate(
     model: ModelOpt = None,
     base_url: BaseUrlOpt = None,
     api_key_env: KeyEnvOpt = None,
-    trials: Annotated[int, typer.Option(min=1)] = 1,
+    trials: Annotated[int | None, typer.Option(min=1)] = None,
+    sample: SampleOpt = None,
+    sample_seed: SeedOpt = None,
     # None, not 0.0, so "not passed" is distinguishable from "explicitly zero" and the flag can
     # override `[gate]` in whetstone.toml rather than silently shadowing it with its own default.
     recall_tol: Annotated[float | None, typer.Option(help="Allowed recall drop")] = None,
@@ -300,6 +401,7 @@ def eval_gate(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate both sides; no model call")
     ] = False,
+    yes: YesOpt = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Compare a candidate skill against a baseline; exit non-zero if it regresses (CI gate).
@@ -331,17 +433,42 @@ def eval_gate(
             typer.echo(f"base:      {_dry_summary(base_skill)}")
             typer.echo(f"candidate: {_dry_summary(candidate_skill)}")
             return
-        backend = resolve_backend(llm, model=model, base_url=base_url)
+
+        # Read from the candidate: a change to how a skill is evaluated travels with the change to
+        # the skill, so a branch that widens its own sample is gated using the sample it proposes.
+        policy = _step(cand_dir, "evaluate")
+        gate_trials = trials if trials is not None else (policy.trials if policy else 1)
+        drawn = _sample_policy(policy, sample, sample_seed)
+        limits = policy.inputs.wiki if policy else None
+        backend = _resolve(llm, model, base_url)
+
+        union = len(
+            {c.id for c in base_skill.eval_cases} | {c.id for c in candidate_skill.eval_cases}
+        )
+        scored = min(drawn.max_cases or union, union) if drawn else union
+        plan = plan_eval(
+            candidate_skill, backend, trials=gate_trials, cases=scored, action="eval gate",
+            wiki_limits=limits,
+        )
+        # Both sides are scored, so a gate costs twice what the same run would.
+        if plan.estimate:
+            plan.estimate = replace(plan.estimate, calls=plan.estimate.calls * 2)
+            plan.details.append("both base and candidate are scored, so this is doubled")
+        check_budget(plan, load_config().runs.max_llm_calls_per_run)
+        _preflight(plan, yes)
+
         record = record_gate(
             base_skill,
             candidate_skill,
             _client(llm, model, base_url, api_key_env),
             cfg=tolerances,
-            trials=trials,
+            trials=gate_trials,
             base_ref=base_ref or str(base_dir),
             candidate_ref=candidate_ref or str(cand_dir),
             backend=backend.name,
             model=backend.model,
+            sample=drawn,
+            wiki_limits=limits,
         )
         if save:
             _gates(gates_dir).save(record)
@@ -680,6 +807,234 @@ def skills_list(
                 f"    ⚠ {silence} of {silence + confirmed + evidence['unclassified']} "
                 "precision case(s) rest on nobody having commented"
             )
+
+
+SkillDirOpt = Annotated[Path, typer.Option("--skill", help="Path to a skill folder")]
+
+
+@skills_app.command("scaffold")
+def skills_scaffold(
+    skill: SkillDirOpt,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite files that already exist")
+    ] = False,
+) -> None:
+    """Write starter evaluate/, improve/ and update/ steps into a skill folder.
+
+    The generated files are the documentation: every setting is present with its default and a
+    comment explaining what changing it costs. Edit them in place — `improve/prompt.md` in
+    particular is meant to be rewritten in the skill's own voice.
+    """
+    if not (skill / "SKILL.md").is_file():
+        raise typer.BadParameter(f"{skill} does not look like a skill folder (no SKILL.md)")
+    written = write_scaffold(skill, force=force)
+    if not written:
+        typer.echo("nothing written — all step files already exist (use --force to overwrite)")
+        return
+    for path in written:
+        typer.echo(f"wrote {path}")
+    typer.echo(f"\nnext: edit {skill / 'improve' / 'prompt.md'}, then `whetstone skills steps "
+               f"--skill {skill}` to check it loads")
+
+
+@skills_app.command("steps")
+def skills_steps(skill: SkillDirOpt) -> None:
+    """Show the pipeline steps a skill defines, and validate every one of them."""
+    try:
+        found = load_steps(skill, skill_id=skill.name)
+    except StepError as exc:
+        typer.echo(f"invalid step: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if not found:
+        typer.echo(
+            f"{skill.name} defines no steps. `whetstone skills scaffold --skill {skill}` "
+            f"writes starter ones."
+        )
+        return
+    for kind, spec in found.items():
+        if spec.is_subprocess:
+            how = f"run {' '.join(spec.run)}"
+        else:
+            how = "prompt" if spec.prompt else "config only (no model call)"
+        typer.echo(f"{kind:9} {how}")
+        if spec.description:
+            typer.echo(f"          {spec.description}")
+        if kind == "evaluate":
+            cap = spec.sample.max_cases
+            typer.echo(
+                f"          trials={spec.trials}  "
+                f"sample={'all cases' if cap is None else f'{cap} (seed {spec.sample.seed})'}"
+            )
+        if kind == "improve":
+            f = spec.inputs.failures
+            typer.echo(
+                f"          up to {f.max} failure(s), clustered by {f.cluster_by}, "
+                f"{f.max_diff_bytes}B of diff each"
+            )
+
+
+@skills_app.command("improve")
+def skills_improve(
+    skill: SkillDirOpt,
+    run_id: Annotated[
+        str | None,
+        typer.Option("--run", help="Improve from this run (default: the skill's most recent)"),
+    ] = None,
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    runs_dir: RunsDirOpt = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Write the proposed guidance here instead of stdout"),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show the digest that would be sent; no model call")
+    ] = False,
+    yes: YesOpt = False,
+) -> None:
+    """Draft a guidance change from what the last run got wrong.
+
+    Reads the skill's `improve/step.yaml`, assembles a bounded digest of the run's failures —
+    clustered, so what reaches the model is one representative per *kind* of failure rather than
+    the first N of the same one — and returns a rewritten guidance body plus the eval cases the
+    change is meant to fix.
+
+    Nothing is written to the skill. The output is a proposal: gate it, then paste it into the
+    console's guidance editor or `--out` it and diff.
+    """
+    sk = load_skill(skill)
+    spec = _step(skill, "improve", required=True)
+    assert spec is not None  # `required=True` raised otherwise
+
+    record = _run_to_improve_from(sk.id, run_id, runs_dir)
+    if dry_run:
+        digest = build_digest(sk, record, spec.inputs.failures)
+        typer.echo(spec.render_prompt(digest.prompt_values()) if spec.prompt else
+                   digest.model_dump_json(indent=2))
+        return
+
+    client = None
+    if spec.calls_a_model:
+        backend = _resolve(llm or spec.model.llm, model or spec.model.model, base_url)
+        plan = plan_calls(
+            "skills improve",
+            backend,
+            calls=1,
+            basis="one call: the guidance rewrite",
+            details=[f"digest: up to {spec.inputs.failures.max} clustered failure(s)"],
+        )
+        _preflight(plan, yes)
+        client = _client(llm or spec.model.llm, model or spec.model.model, base_url, api_key_env)
+    else:
+        typer.echo(f"running {' '.join(spec.run)} — Whetstone is not calling a model; "
+                   f"what your program does is its own business", err=True)
+
+    try:
+        result = propose(spec, sk, record, client=client)
+    except StepError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    d = result.digest
+    typer.echo(
+        f"# from {d.total_failures} failure(s) across {d.scored_cases} scored case(s), "
+        f"shown as {len(d.clusters)} cluster(s)",
+        err=True,
+    )
+    if result.unknown_cases:
+        # A hallucinated case id would become a `--targeted` flag that fails the gate for a reason
+        # that has nothing to do with the guidance.
+        typer.echo(
+            f"# dropped {len(result.unknown_cases)} targeted case id(s) that do not exist: "
+            f"{', '.join(result.unknown_cases)}",
+            err=True,
+        )
+    if result.proposal.rationale:
+        typer.echo(f"# rationale: {result.proposal.rationale}", err=True)
+
+    if out is not None:
+        out.write_text(result.proposal.body.rstrip() + "\n", encoding="utf-8")
+        typer.echo(f"wrote {out}", err=True)
+    else:
+        typer.echo(result.proposal.body)
+
+    typer.echo("\n# gate it before publishing:", err=True)
+    targeted = "".join(f" --targeted {c}" for c in result.proposal.targeted_cases)
+    typer.echo(f"#   whetstone eval gate --base {skill} --candidate <edited copy>{targeted}",
+               err=True)
+
+
+@skills_app.command("update")
+def skills_update(
+    skill: SkillDirOpt,
+    repo: Annotated[
+        Path, typer.Option("--repo", help="The source repository to summarize")
+    ] = Path("."),
+    write: Annotated[
+        bool,
+        typer.Option("--write/--no-write", help="Write the generated wiki into the skill folder"),
+    ] = True,
+) -> None:
+    """Regenerate this skill's repo wiki by running the generator its update step names.
+
+    Whetstone does not summarize repositories — this invokes yours, checks the output is indexable,
+    and writes it under `wiki/`. The wiki is part of `skill_hash`, so a refresh that changes any
+    page retracts the skill's passing gate and it must be re-gated before it can be proposed.
+    """
+    sk = load_skill(skill)
+    spec = _step(skill, "update", required=True)
+    assert spec is not None
+
+    typer.echo(f"running {' '.join(spec.run)}", err=True)
+    try:
+        result = refresh_wiki(spec, repo=repo, current=sk.wiki, skills_root=str(skill.parent))
+    except StepError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(result.note)
+    if not result.changed:
+        return
+    if not write:
+        typer.echo("--no-write: nothing written")
+        return
+
+    for relative, content in result.files.items():
+        path = Path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    typer.echo(f"wrote {len(result.files)} file(s) under {skill / 'wiki'}")
+    typer.echo(
+        f"\nthe reviewer's context changed, so re-gate before proposing:\n"
+        f"  whetstone eval gate --repo . --skill-path {skill} "
+        f"--base-ref main --candidate-ref <your branch>"
+    )
+
+
+def _run_to_improve_from(
+    skill_id: str, run_id: str | None, runs_dir: Path | None
+) -> RunRecord | None:
+    """The run whose failures an improve step learns from.
+
+    A missing run is not fatal: improving from no evidence at all is legitimate for a brand-new
+    skill, and the digest says plainly that it saw none rather than pretending the skill is perfect.
+    """
+    store = _store(runs_dir)
+    if run_id is not None:
+        return store.load(run_id)
+    recent = store.list(skill_id=skill_id, limit=1)
+    if not recent:
+        typer.echo(
+            f"no stored run for {skill_id} — improving from guidance alone. "
+            f"`whetstone eval run --skill <folder>` first for a far better proposal.",
+            err=True,
+        )
+        return None
+    typer.echo(f"improving from run {recent[0].id}", err=True)
+    return store.load(recent[0].id)
 
 
 @runs_app.command("list")

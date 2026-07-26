@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from whetstone.domain.eval_model import EvalCase, Provenance
+from whetstone.wiki import SkillWiki
 
 
 class Triggers(BaseModel):
@@ -32,3 +33,6 @@ class Skill(BaseModel):
     # signals that justified it, so guidance can be traced back to the evidence for it.
     owner: str = ""
     provenance: dict[str, list[Provenance]] = {}
+    # Repo context, retrieved per change and injected into the review prompt. Empty for most
+    # skills; a skill with one is reviewing against knowledge of the codebase, not just rules.
+    wiki: SkillWiki = SkillWiki()

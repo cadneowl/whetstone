@@ -1,0 +1,35 @@
+# How this skill is scored.
+#
+# Configuration only: there is no prompt and no program here. `whetstone eval run` and
+# `whetstone eval gate` read this file and use it as their defaults, and any flag you pass on the
+# command line overrides it.
+
+description: Score this skill against its promoted eval cases.
+
+# Reviewer passes per case. Raise to 2-3 for an unstable skill to measure variance; every
+# increment multiplies the cost of every run and every gate by the same factor.
+trials: 1
+
+sample:
+  # null scores every case. Set a number once the corpus outgrows what you can afford to run
+  # whole — a few hundred is usually enough to move a score meaningfully.
+  max_cases: null
+  # Selection is a hash of this seed and the case id, so the same seed always draws the same
+  # cases. Both sides of a gate use one draw, which is what keeps the comparison fair. Change it
+  # only to deliberately re-roll which cases you are measuring on.
+  seed: 0
+  # Draw proportionally from each case kind. Turn this off and a sample of a corpus that is mostly
+  # should_catch will sometimes contain no negative cases at all — and a false-positive rate
+  # measured over zero negative cases is a flattering zero.
+  stratify: true
+
+inputs:
+  wiki:
+    # Repo context injected per review, when this skill has a wiki/ folder. Paid for on every case
+    # of every trial on both sides of a gate, which is why these are small.
+    max_pages: 4
+    max_bytes: 24000
+
+model:
+  # Omit any of these to inherit whatever the command resolved (--llm / --model / WHETSTONE_LLM).
+  # effort: high
