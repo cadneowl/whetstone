@@ -310,6 +310,47 @@ def test_improve_plan_warns_when_there_is_nothing_to_learn_from(
     assert any("no failures to learn from" in w for w in plan["warnings"])
 
 
+def test_improve_scores_the_draft_and_says_so_before_the_click(
+    client: TestClient, steps: Path, repo: Path
+) -> None:
+    """Whatever the launch route refuses, the plan has to have said first.
+
+    The console shows this plan *before* the click, so a silent plan followed by a 422 means
+    confirming a spend and only then being told no. It also stopped being a rare state once a draft
+    could be scored on its own: with work staged, the newest run is usually of the working tree,
+    which is exactly when someone reaches for this button.
+    """
+    _score(client)  # a run of the working tree
+    _stage_guidance(client, "# Rewritten\n\n- **R9 — something the run never saw.**\n")
+
+    plan = client.post("/api/jobs/improve/plan", json={"skill_id": "rust-errors"}).json()
+    launch = client.post("/api/jobs/improve", json={"skill_id": "rust-errors"})
+
+    assert launch.status_code == 422, "a run of different content must still be refused"
+    assert any("different version" in w for w in plan["warnings"]), plan["warnings"]
+
+
+def test_improve_accepts_a_run_of_the_staged_draft(
+    client: TestClient, steps: Path, repo: Path
+) -> None:
+    """The loop this exists for: score the draft, then improve from what the draft got wrong.
+
+    Before `staged`, improve read the working tree, so a run of the draft was rejected as describing
+    different content and a run of the working tree had nothing to say about the draft. There was no
+    run that satisfied it, which is what made a failing gate a dead end.
+    """
+    _stage_guidance(client, "# Rewritten\n\n- **R9 — something only the branch has.**\n")
+    launched = client.post(
+        "/api/jobs/eval", json={"skill_id": "rust-errors", "staged": True}
+    ).json()
+    job = _await(client, launched["id"])
+    assert job["state"] == "done", job
+    assert job["result"]["scored"] == "whetstone/skill/rust-errors"
+
+    plan = client.post("/api/jobs/improve/plan", json={"skill_id": "rust-errors"}).json()
+    assert not any("different version" in w for w in plan["warnings"]), plan["warnings"]
+
+
 def test_an_instruction_clears_that_warning(client: TestClient, steps: Path) -> None:
     _score(client)
     plan = client.post(
@@ -354,3 +395,17 @@ def test_read_only_mode_still_allows_planning(readonly_client: TestClient, steps
     assert readonly_client.post(
         "/api/jobs/eval/plan", json={"skill_id": "rust-errors"}
     ).status_code == 200
+
+
+def test_improve_still_works_when_the_folder_name_is_not_the_skill_id(
+    client: TestClient, skills_root: Path, steps: Path
+) -> None:
+    """`_load_one` documents this as supported, and `staging.source` addresses skills by folder
+    name — so resolving the edited skill through staging raised `NoSuchSkill`, a `LookupError` with
+    no HTTP handler, and the console answered 500."""
+    renamed = skills_root / "rust-errors"
+    moved = skills_root / "some-other-folder"
+    renamed.rename(moved)
+
+    response = client.post("/api/jobs/improve/plan", json={"skill_id": "rust-errors"})
+    assert response.status_code != 500, response.text

@@ -65,6 +65,10 @@ class EvalRequest(BaseModel):
     skill_id: str
     trials: int | None = None
     sample: int | None = None
+    # Score what `whetstone/skill/<id>` holds instead of the working tree. A boolean rather than a
+    # ref, deliberately: the console never scores an arbitrary tree, so no caller-supplied revision
+    # is ever handed to git — the same rule `GateRequest` follows.
+    staged: bool = False
 
 
 class GateRequest(BaseModel):
@@ -132,7 +136,7 @@ def cancel_job(job_id: str, jobs: JobsDep) -> Job:
 
 @router.post("/eval/plan", response_model=Plan)
 def plan_eval_job(request: EvalRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
-    skill = _skill(root, request.skill_id)
+    skill, _ = _skill_to_score(config, root, request)
     return _eval_plan(config, skill, request)
 
 
@@ -141,8 +145,11 @@ def launch_eval(
     request: EvalRequest, config: ConfigDep, root: SkillsRootDep, store: StoreDep, jobs: JobsDep
 ) -> Job:
     """Score a skill against its eval cases, in the background."""
-    skill = _skill(root, request.skill_id)
+    skill, ref = _skill_to_score(config, root, request)
     plan = _eval_plan(config, skill, request)
+    # The evaluate step always comes from the working tree: it is how the operator's machine runs a
+    # model, not part of the guidance under test, and taking it from a branch would let a staged
+    # change quietly alter the harness measuring it.
     spec = _step(root, skill, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)
     policy = _sample(spec, request.sample)
@@ -164,6 +171,9 @@ def launch_eval(
                 trials=trials,
                 backend=backend.name,
                 model=backend.model,
+                # Recorded so the run says which content it scored. `skill_hash` already proves
+                # *that* two runs differ; this says where the scored version came from.
+                git_ref=ref,
                 on_event=on_event,
                 cancel=handle.cancel_event,
                 sample=policy,
@@ -177,6 +187,7 @@ def launch_eval(
             "recall": record.score.recall,
             "fp_rate": record.score.fp_rate,
             "llm_calls": record.llm_calls,
+            "scored": ref or "working tree",
         }
 
     return _launch(jobs, "eval", skill.id, work, plan)
@@ -277,7 +288,7 @@ def launch_gate(
 def plan_improve_job(
     request: ImproveRequest, config: ConfigDep, root: SkillsRootDep, store: StoreDep
 ) -> Plan:
-    skill = _skill(root, request.skill_id)
+    skill = _skill_being_edited(config, root, request.skill_id)
     spec = _require_step(root, skill, "improve")
     if not spec.calls_a_model:
         return Plan(
@@ -311,8 +322,14 @@ def _warn_if_nothing_to_learn(
     """
     try:
         record = _run_for(store, skill, request)
-    except Unprocessable:
-        return  # a stale run is reported by the launch route, in its own words
+    except Unprocessable as exc:
+        # Surfaced here, not left to the launch route. This plan is what the console shows *before*
+        # the click, so swallowing the refusal meant confirming a spend and only then being told no
+        # — the wall this codebase avoids everywhere else. It also stopped being a rare state once
+        # a draft could be scored: with work on a branch, the newest run is often of the working
+        # tree, and that is precisely when someone reaches for this button.
+        plan.warnings.append(str(exc))
+        return
     if record is None:
         plan.warnings.append(
             "no stored run for this skill — the draft will see the guidance and nothing else. "
@@ -334,7 +351,7 @@ def launch_improve(
     jobs: JobsDep,
 ) -> Job:
     """Draft a guidance change from a run's failures. Stages nothing — the console does that."""
-    skill = _skill(root, request.skill_id)
+    skill = _skill_being_edited(config, root, request.skill_id)
     spec = _require_step(root, skill, "improve")
     plan = plan_improve_job(request, config, root, store)
     record = _run_for(store, skill, request)
@@ -675,6 +692,51 @@ def _skill(root: Path, skill_id: str) -> Skill:
     return _load_one(root, skill_id)
 
 
+def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[Skill, str | None]:
+    """The skill an eval scores, and the git ref it came from.
+
+    The working tree by default, which is what `eval run` has always meant. `staged=True` scores the
+    draft on the skill's branch instead, and that is the option the loop was missing: staging never
+    touches the working tree, so before this the only way to measure an unmerged change was a gate —
+    and a gate reports a *difference* between two versions while writing no run record at all. An
+    operator with a failing gate therefore had a verdict, no per-case outcomes, and nothing the
+    improve step could learn from, because improve reads runs.
+
+    The whole folder is loaded, not just `SKILL.md`: a draft may add or change eval cases too, and
+    "run the full suite on my draft" means the suite the draft carries.
+    """
+    if not request.staged:
+        return _skill(root, request.skill_id), None
+
+    branch = staging.skill_branch(config, request.skill_id)
+    found = staging.skill_at(config, branch, request.skill_id)
+    if found is None:
+        raise Unprocessable(
+            f"nothing is staged on {branch} for {request.skill_id!r} — edit the guidance and "
+            f"press Stage on branch first, or score the working tree instead."
+        )
+    return found[0], branch
+
+
+def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:
+    """The skill the console's improve step works on: the staged draft if there is one.
+
+    Resolved exactly as the editor resolves what it shows, so "fix these failures" acts on the
+    version the operator is looking at. Without this, improving a staged draft was impossible: the
+    step read the working tree, so a run that scored the draft was rejected as describing different
+    content, and a run of the working tree had nothing to learn from once the draft had moved on.
+
+    `NoSuchSkill` is in the fallback list because it is a `LookupError`, not a `StagingError`, and
+    leaving it out broke a case the loader documents as supported: `staging.source` addresses a
+    skill by folder name, while `_load_one` also finds one whose `SKILL.md` declares an `id` that
+    differs from its folder. For those, this raised past every handler and the console answered 500.
+    """
+    try:
+        return staging.source(config, skill_id)[0]
+    except (staging.StagingError, staging.NoSuchSkill, GitError, OSError):
+        return _skill(root, skill_id)
+
+
 def _gate_sides(config: Config, skill_id: str) -> tuple[Skill, Skill]:
     """The base and candidate a console gate compares: the default branch and the skill's branch."""
     branch = staging.skill_branch(config, skill_id)
@@ -766,7 +828,8 @@ def _eval_plan(config: Config, skill: Skill, request: EvalRequest) -> Plan:
         wiki_limits=spec.inputs.wiki if spec else None,
     )
     check_budget(plan, config.runs.max_llm_calls_per_run)
-    _warn_if_a_change_is_staged(plan, config, skill)
+    if not request.staged:
+        _warn_if_a_change_is_staged(plan, config, skill)
     return plan
 
 
@@ -778,9 +841,13 @@ def _warn_if_a_change_is_staged(plan: Plan, config: Config, skill: Skill) -> Non
     number back — identical to the baseline — and the obvious reading of that is "my edit did
     nothing". It did; this run simply did not look at it.
 
-    A warning rather than scoring the branch instead: one number about the candidate answers
-    nothing on its own, because "did that help?" is a comparison. The gate is what answers it, so
-    the warning names the gate.
+    This used to name the gate as the only answer, on the reasoning that one number about a
+    candidate settles nothing because "did that help?" is a comparison. That was true and
+    incomplete. The other question an operator asks — *what is still wrong with my draft?* — is not
+    a comparison, and only a run can answer it: a gate reports a difference and writes no run
+    record, so a failing gate left nothing behind for the improve step to read. So the warning now
+    names both, and scoring the draft is a request this route accepts rather than advice to go and
+    do something by hand.
     """
     from whetstone.domain.run import skill_hash
 
@@ -792,8 +859,9 @@ def _warn_if_a_change_is_staged(plan: Plan, config: Config, skill: Skill) -> Non
     if staged is None or skill_hash(staged[0]) == skill_hash(skill):
         return
     plan.warnings.append(
-        f"{branch} holds a staged change that this run will NOT measure — an eval scores the "
-        f"working tree. Run the gate to compare the two."
+        f"{branch} holds a staged change that this run will NOT measure — this scores the working "
+        f"tree. Score the draft instead to get its per-case outcomes, or run the gate to compare "
+        f"the two."
     )
 
 

@@ -492,6 +492,12 @@ class SkillDetail(BaseModel):
     untested_rules: list[str] = []
     has_runs: bool = False
     precision_evidence: dict[str, int] = {}
+    # The run every `last_recall` and `last_fp_rate` on `cases` came from, named rather than left
+    # to be inferred from `runs[0]`. A caller cannot otherwise say *which guidance* those outcomes
+    # describe, and on the editor screen that is exactly the question: the case list is scored
+    # against the working tree while the textarea above it holds a staged branch, so a red MISSED
+    # can sit directly under a change that already fixed it.
+    scored_by: RunSummary | None = None
 
 
 class CaseDetail(BaseModel):
@@ -605,6 +611,8 @@ def skill_detail(skill: Skill, store: RunStore, *, runs: int = 20) -> SkillDetai
         untested_rules=untested_rules(skill, latest),
         has_runs=latest is not None,
         precision_evidence=precision_evidence(skill),
+        # Same record the case outcomes were read from, so the two can never disagree.
+        scored_by=history[0] if history else None,
     )
 
 

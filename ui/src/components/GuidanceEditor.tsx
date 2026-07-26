@@ -1,5 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   ApiError,
   keys,
@@ -9,6 +10,7 @@ import {
   useSaveGuidance,
   type CaseSummary,
   type Proposal,
+  type RunSummary,
   type SkillDetail,
 } from '@/api/client'
 import { Guidance } from './Guidance'
@@ -76,6 +78,22 @@ function Editor({
   const dirty = draft.trim() !== proposal.body.trim()
   const conflict = save.error instanceof ApiError && save.error.status === 409
 
+  /**
+   * Whether the case outcomes on this screen describe the guidance in the textarea.
+   *
+   * They often do not, and that was the gap. An eval scores the *working tree*; the editor and the
+   * gate below it describe a *staged branch*. Once something is staged the two diverge, and the
+   * screen shows a red MISSED directly beneath a change that already fixed it, with nothing saying
+   * the two halves are about different versions. Gating does not close it either: a gate writes a
+   * gate record, never a run record, so clearing a candidate at recall 1.00 leaves every case row
+   * still reporting the baseline.
+   *
+   * Computed once here rather than in each panel, so the case list and the improve panel can never
+   * disagree about it.
+   */
+  const scoredBy = detail.scored_by
+  const outcomesAreStale = scoredBy != null && scoredBy.skill_hash !== proposal.skill_hash
+
   // A save answers with the branch's new head, and this component only remounts once the proposal
   // refetch lands. Without preferring the response, a second save in that window sends a head the
   // first save has already superseded and gets a 409 that is not a conflict with anyone.
@@ -91,7 +109,14 @@ function Editor({
         </p>
       )}
 
-      <ImprovePanel skillId={skillId} cases={detail.cases} onDrafted={setDraft} />
+      <ImprovePanel
+        skillId={skillId}
+        cases={detail.cases}
+        onDrafted={setDraft}
+        stale={outcomesAreStale}
+        staged={proposal.staged}
+        base={proposal.base}
+      />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-2">
@@ -112,6 +137,24 @@ function Editor({
             Tag rules as <code className="font-mono">- **R1 — …**</code> so findings, provenance and
             the untested-guidance check can refer to them.
           </p>
+          {/* Said here because this box is not the whole guidance, and nothing else on the screen
+              would tell you. A skill may split its rules across companion markdown; those pages are
+              sent to the reviewer and are inside `skill_hash`, so editing one on disk invalidates a
+              gate — which reads as the console spontaneously forgetting a passing verdict unless
+              you know the page exists. */}
+          {detail.skill.pages.length > 0 && (
+            <p className="text-xs text-muted">
+              Plus {detail.skill.pages.length} companion page(s), also sent to the reviewer and
+              covered by the gate:{' '}
+              {detail.skill.pages.map((p, i) => (
+                <span key={p.path}>
+                  {i > 0 && ', '}
+                  <code className="font-mono">{p.path}</code>
+                </span>
+              ))}
+              . Edit those on disk — this box is <code className="font-mono">SKILL.md</code> only.
+            </p>
+          )}
         </div>
 
         <div className="space-y-2">
@@ -174,7 +217,14 @@ function Editor({
       {save.error && !conflict && <ErrorNote error={save.error} />}
 
       <ProposalPanel proposal={proposal} repo={repo} pendingEdit={dirty} />
-      <PinnedCases cases={detail.cases} />
+      <PinnedCases
+        cases={detail.cases}
+        scoredBy={scoredBy}
+        stale={outcomesAreStale}
+        staged={proposal.staged}
+        base={proposal.base}
+        skillId={skillId}
+      />
     </div>
   )
 }
@@ -226,10 +276,16 @@ function ImprovePanel({
   skillId,
   cases,
   onDrafted,
+  stale,
+  staged,
+  base,
 }: {
   skillId: string
   cases: CaseSummary[]
   onDrafted: (body: string) => void
+  stale: boolean
+  staged: boolean
+  base: string
 }) {
   const [instruction, setInstruction] = useState('')
   const [note, setNote] = useState('')
@@ -238,16 +294,23 @@ function ImprovePanel({
   const failing = scored.filter((c) =>
     c.kind === 'should_catch' ? (c.last_recall ?? 1) < 1 : (c.last_fp_rate ?? 0) > 0,
   )
-  const summary = !scored.length
-    ? 'Never scored, so a draft would see the guidance and nothing else. Run the evals first.'
-    : failing.length === 0
-      ? `Passing all ${scored.length} scored case(s) — there is nothing here to learn from.`
-      : `Failing ${failing.length} of ${scored.length} scored case(s): ` +
-        failing
-          .slice(0, 3)
-          .map((c) => c.id)
-          .join(', ') +
-        (failing.length > 3 ? `, and ${failing.length - 3} more` : '')
+  // These counts come from the last run, so while that run describes different content than the
+  // draft they are not a fact about anything on this screen. Saying "passing all 3 cases" directly
+  // above a warning that those numbers are about the wrong version is the same self-contradiction
+  // ADR-019 exists to remove, reproduced one panel further down — so when stale, the warning is
+  // the whole message.
+  const summary = stale
+    ? ''
+    : !scored.length
+      ? 'Never scored, so a draft would see the guidance and nothing else. Run the evals first.'
+      : failing.length === 0
+        ? `Passing all ${scored.length} scored case(s) — there is nothing here to learn from.`
+        : `Failing ${failing.length} of ${scored.length} scored case(s): ` +
+          failing
+            .slice(0, 3)
+            .map((c) => c.id)
+            .join(', ') +
+          (failing.length > 3 ? `, and ${failing.length - 3} more` : '')
 
   return (
     <section className="rounded-lg border border-line bg-surface/50 p-3">
@@ -256,7 +319,34 @@ function ImprovePanel({
         <span className="text-xs text-muted">loads into the editor; commits nothing</span>
       </div>
       {/* A button with no stated reason to press it is what made this panel read as noise. */}
-      <p className="mb-2 text-xs text-muted">{summary}</p>
+      {summary && <p className="mb-2 text-xs text-muted">{summary}</p>}
+      {/* "Run the evals first" with a draft staged used to point only at the header's Run evals,
+          which scores the working tree — everything except the change being worked on. Staleness
+          cannot be detected with no run to compare against, so the offer hangs off the draft
+          existing at all. */}
+      {!scored.length && staged && (
+        <div className="mb-2">
+          <ScoreTheDraft
+            skillId={skillId}
+            note="Your draft is on the branch; the header's Run evals would score the working tree."
+          />
+        </div>
+      )}
+      {/* The server refuses this outright — `_run_for` rejects a run that scored different content
+          than the working tree. Said here as well, because being told before the click why the
+          button will not work is the difference between a guard rail and a wall, and because the
+          failures it would learn from are ones the staged edit may already have fixed. */}
+      {stale && (
+        <div className="mb-2 space-y-2 rounded border border-warn/40 bg-warn/5 px-2.5 py-2">
+          <p className="text-xs text-warn">
+            The last run scored the guidance on <code className="font-mono">{base}</code>, not what
+            you have staged, so this would draft from failures your edit may already have fixed —
+            and the server refuses it for that reason. Score the draft first, then the failures it
+            learns from are the ones you actually still have.
+          </p>
+          <ScoreTheDraft skillId={skillId} />
+        </div>
+      )}
       <LaunchButton
         kind="improve"
         request={{ skill_id: skillId, instruction }}
@@ -415,6 +505,91 @@ function gateCommand(proposal: Proposal, repo: string): string {
  * skill with two cases and a rewritten rule has a gate that will pass on almost anything.
  */
 /** How this case went last time it was scored, or that it never was. */
+/**
+ * Score what is on the skill's branch.
+ *
+ * Offered anywhere the screen has just admitted that its numbers do not describe the draft. Telling
+ * someone their outcomes are about the wrong version and leaving them to find the remedy is half a
+ * feature; before this the remedy was checking out the branch and running the CLI by hand.
+ */
+function ScoreTheDraft({ skillId, note }: { skillId: string; note?: string }) {
+  return (
+    <div className="space-y-1">
+      <LaunchButton
+        kind="eval"
+        request={{ skill_id: skillId, staged: true }}
+        label="Score the draft"
+      />
+      {note && <p className="text-[11px] text-muted">{note}</p>}
+    </div>
+  )
+}
+
+/**
+ * Which run the verdicts beneath came from, and whether it describes what is being edited.
+ *
+ * The unstale line is provenance rather than a warning: "where do I see the score?" is answered by
+ * naming the run and linking to it, and a verdict with no stated source invites the reader to
+ * assume it means whatever the rest of the screen means.
+ */
+function Provenance({
+  scoredBy,
+  stale,
+  staged,
+  base,
+  skillId,
+}: {
+  scoredBy: RunSummary | null | undefined
+  stale: boolean
+  staged: boolean
+  base: string
+  skillId: string
+}) {
+  if (!scoredBy) {
+    // A never-scored skill *with* a draft is the trap this whole feature exists to remove: the only
+    // visible control was the header's "Run evals", which scores the working tree and therefore
+    // measures everything except the change being worked on. Staleness cannot be detected here —
+    // there is no run to compare against — so the button is offered whenever a draft exists.
+    return (
+      <div className="mb-2 space-y-2">
+        <p className="text-xs text-muted">
+          Never scored — run the evals to find out which of these the guidance currently gets wrong.
+        </p>
+        {staged && (
+          <ScoreTheDraft skillId={skillId} note="Scores the branch, not the working tree." />
+        )}
+      </div>
+    )
+  }
+
+  const link = (
+    <Link to={`/runs/${encodeURIComponent(scoredBy.id)}`} className="font-mono hover:text-accent">
+      {scoredBy.id}
+    </Link>
+  )
+
+  if (!stale) {
+    return (
+      <p className="mb-2 text-xs text-muted">
+        Outcomes from run {link} · {when(scoredBy.created_at)}
+      </p>
+    )
+  }
+  return (
+    <div className="mb-2 space-y-2 rounded border border-warn/40 bg-warn/5 px-2.5 py-2">
+      <p className="text-xs text-warn">
+        These verdicts are from run {link}, which scored the guidance on{' '}
+        <code className="font-mono">{base}</code> — <strong>not what you have staged</strong>. Your
+        draft has never been run against these cases, so a MISSED below may already be fixed.
+      </p>
+      {/* The fix for the question this warning provokes, next to the warning. Telling someone their
+          numbers describe the wrong thing and leaving them to work out the remedy is half a
+          feature — and the remedy used to be "check out the branch and run the evals by hand". */}
+      <ScoreTheDraft skillId={skillId} />
+    </div>
+  )
+}
+
 function CaseVerdict({ c }: { c: CaseSummary }) {
   const value = c.kind === 'should_catch' ? c.last_recall : c.last_fp_rate
   if (value === null || value === undefined) {
@@ -428,7 +603,21 @@ function CaseVerdict({ c }: { c: CaseSummary }) {
   )
 }
 
-function PinnedCases({ cases }: { cases: CaseSummary[] }) {
+function PinnedCases({
+  cases,
+  scoredBy,
+  stale,
+  staged,
+  base,
+  skillId,
+}: {
+  cases: CaseSummary[]
+  scoredBy: RunSummary | null | undefined
+  stale: boolean
+  staged: boolean
+  base: string
+  skillId: string
+}) {
   if (cases.length === 0) {
     return (
       <p className="rounded-lg border border-warn/40 bg-warn/5 px-4 py-3 text-sm text-warn">
@@ -442,6 +631,7 @@ function PinnedCases({ cases }: { cases: CaseSummary[] }) {
       <h3 className="mb-2 text-xs tracking-wide text-muted uppercase">
         What constrains this guidance ({cases.length})
       </h3>
+      <Provenance scoredBy={scoredBy} stale={stale} staged={staged} base={base} skillId={skillId} />
       <ul className="space-y-1">
         {cases.map((c) => (
           <li
