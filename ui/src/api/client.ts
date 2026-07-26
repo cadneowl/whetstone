@@ -54,6 +54,8 @@ export type JobRequest = {
   skill_id: string
   trials?: number | null
   sample?: number | null
+  /** eval only: score the staged draft rather than the working tree. */
+  staged?: boolean
   targeted?: string[]
   instruction?: string
   stale_ok?: boolean

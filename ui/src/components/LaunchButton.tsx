@@ -306,7 +306,16 @@ function JobResult({ job }: { job: Job }) {
     return (
       <p className="mt-2 text-xs">
         recall <span className="tabular">{fmt(r.recall)}</span> · fp{' '}
-        <span className="tabular">{fmt(r.fp_rate)}</span> · {String(r.llm_calls)} call(s) ·{' '}
+        <span className="tabular">{fmt(r.fp_rate)}</span> · {String(r.llm_calls)} call(s)
+        {/* Which content was scored. Two runs of "the same skill" can differ only in this, and a
+            number with no version attached is what made the editor screen contradict itself. The
+            branch is named by role, not spelled out: `whetstone/skill/<id>` is forty characters
+            that add nothing beside a score, and the gate transcript already settled this by
+            labelling its sides `base`/`candidate` rather than repeating the ref on every line. */}
+        {r.scored ? (
+          <> · scored {r.scored === 'working tree' ? 'the working tree' : 'the draft'}</>
+        ) : null}{' '}
+        ·{' '}
         <a className="text-accent hover:underline" href={`/runs/${String(r.run_id)}`}>
           open the run
         </a>

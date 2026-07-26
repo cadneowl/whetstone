@@ -1326,6 +1326,11 @@ export interface components {
             sample?: number | null;
             /** Skill Id */
             skill_id: string;
+            /**
+             * Staged
+             * @default false
+             */
+            staged: boolean;
             /** Trials */
             trials?: number | null;
         };
@@ -1641,6 +1646,32 @@ export interface components {
              */
             message: string;
             status?: components["schemas"]["RepoStatus"] | null;
+        };
+        /**
+         * GuidancePage
+         * @description A markdown file beside `SKILL.md` that is part of the guidance.
+         *
+         *     Guidance outgrows one file. A skill splits its rules into `patterns/rust.md`,
+         *     `reference/errors.md` and so on, and `SKILL.md` points at them — at which point the pointer is
+         *     all the reviewer used to get. The referenced text reached no prompt and, worse, entered no hash:
+         *     rewriting `patterns/rust.md` from "never unwrap" to "always unwrap" left `skill_hash` byte for
+         *     byte identical, so a gate passed against the old rules still authorised publishing the new ones.
+         *     That is the one thing C6 exists to prevent.
+         *
+         *     So every `.md` under the skill folder is guidance, with four exceptions that are something else:
+         *     `SKILL.md` itself (it is the body), `eval_cases/` (the corpus), `wiki/` (repo context, retrieved
+         *     per change rather than always sent), and the step folders (prompts for the harness, not rules
+         *     for the reviewer). Anything else in the folder is sent to the model, so anything that is not
+         *     guidance does not belong there.
+         */
+        GuidancePage: {
+            /** Path */
+            path: string;
+            /**
+             * Text
+             * @default
+             */
+            text: string;
         };
         /** GuidanceRequest */
         GuidanceRequest: {
@@ -2682,6 +2713,11 @@ export interface components {
              */
             owner: string;
             /**
+             * Pages
+             * @default []
+             */
+            pages: components["schemas"]["GuidancePage"][];
+            /**
              * Provenance
              * @default {}
              */
@@ -2748,6 +2784,7 @@ export interface components {
              * @default []
              */
             runs: components["schemas"]["RunSummary"][];
+            scored_by?: components["schemas"]["RunSummary"] | null;
             skill: components["schemas"]["Skill"];
             /**
              * Untested Rules

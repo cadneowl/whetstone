@@ -360,6 +360,7 @@ catches the failure mode a generated rewrite actually has, at the moment it can 
 **Eval cases show their last outcome.** The pinned list previously showed ids and paths, which is
 decoration; which of them the skill currently gets *wrong* is the only thing that makes it worth
 reading while rewriting a rule.
+
 ## ADR-018 — A drafted expectation has to beat the comment it replaces, measurably
 
 **Context.** The triage step offers to rewrite a case's `semantic` — the ground truth every future
@@ -411,6 +412,86 @@ mined history, so it measures the mechanism rather than any real team's review h
 small — the two runs differ by 0.04 on the drafted arm, which is one probe. And the `should_not_flag`
 case is the weakest label in the fixture: describing what is *correct* forces the judge to match a
 finding that takes the opposite stance on the same code, and it is genuinely arguable both ways.
+
+## ADR-019 — A verdict names the guidance it describes
+
+**Context.** The editor screen shows two things that look like one thing. The textarea, the diff and
+the C6 proposal panel all describe the **staged branch**; the eval-case list and the improve panel's
+digest describe the **working tree**, because an eval scores the working tree. Once anything is
+staged those diverge, and the screen renders a red `MISSED` directly beneath a change that already
+fixed it.
+
+Gating does not close the gap — it widens it. `record_gate` writes a `GateRecord`, never a
+`RunRecord`, so clearing a candidate at `recall 0.33 → 1.00` leaves every case row still reporting
+the baseline. The screen then states a number that says *fixed* four lines above a list that says
+*MISSED*, with nothing anywhere saying they are about different versions of the guidance. The
+preflight already warned about exactly this for `eval run` ("holds a staged change that this run
+will NOT measure"); the editor never did.
+
+**Decision.** An outcome is shown with the run that produced it. `SkillDetail.scored_by` names that
+run explicitly rather than leaving callers to infer it from `runs[0]`, and the console compares its
+`skill_hash` against the staged content:
+
+- **Same content** — the run is named and linked, as provenance. "Where do I see the score?" should
+  be answerable by reading the screen, and an unattributed verdict invites the reader to assume it
+  means whatever the rest of the page means.
+- **Different content** — the case list says so in warn tone: these verdicts describe the base, the
+  staged edit has never been run against them, and the gate verdict above is the only measurement
+  of what is staged.
+- **Never scored** — said plainly, rather than a column of "not scored" the reader has to add up.
+
+**The improve panel warns on the same condition**, because the server already refuses it — `_run_for`
+rejects a run that scored different content, as the CLI does with `--stale-ok`. Being told before
+the click why the button will not work is the difference between a guard rail and a wall, and the
+failures it would learn from are ones the staged edit may already have fixed.
+
+**Computed once, in the parent.** Two panels depend on the same comparison, and a screen whose whole
+purpose is to stop two halves disagreeing must not itself contain two copies of the test.
+
+**Not fixed by writing run records from gates.** A gate scores a *union* of both sides' cases under
+its own sampling policy; filing that as a run of the candidate would make the runs list a mix of two
+different measurements. Saying which measurement you are looking at is the fix for the *label*;
+ADR-020 is the fix for the missing measurement itself.
+
+## ADR-020 — A draft can be scored on its own
+
+**Context.** The loop an operator actually works in is: change the guidance, run the full suite, read
+the score, ask the improve step to fix what failed, repeat. It broke at the second step, and the
+break was invisible because every individual piece behaved correctly.
+
+Staging never touches the working tree, and an eval scored the working tree. So the only way to
+measure an unmerged change was a gate — and a gate answers a *comparison* ("did that help?") while
+writing no run record at all. An operator with a failing gate therefore had a verdict, no per-case
+outcomes, and nothing for `improve` to read, because `improve` reads runs. Worse, `improve` resolved
+the skill from the working tree, so a run of the draft was rejected as describing different content
+while a run of the working tree had nothing to say about the draft. **No run existed that satisfied
+it.** The dead end was structural, not a missing button.
+
+**Decision.** `POST /jobs/eval` takes `staged: true` and scores what `whetstone/skill/<id>` holds.
+The whole skill folder is loaded, not just `SKILL.md` — a draft may add or change eval cases, and
+"run the full suite on my draft" means the suite the draft carries.
+
+**A boolean, not a ref.** No caller-supplied revision is handed to git; the server resolves the
+branch from the skill id, the same rule `GateRequest` already followed.
+
+**The evaluate step still comes from the working tree.** It is how this machine runs a model, not
+part of the guidance under test — taking it from the branch would let a staged change quietly alter
+the harness measuring it.
+
+**`improve` resolves the skill exactly as the editor does**: the staged draft when there is one.
+"Fix these failures" has to act on the version the operator is looking at, or a staged change can
+never be improved, only abandoned.
+
+**The refusal moved into the plan.** The stale-run check was already right, but the console shows a
+plan *before* the click, and the plan swallowed it — so the operator confirmed a spend and only then
+got a 422. That was tolerable while staleness was rare. It stops being rare the moment drafts are
+scorable, because with work on a branch the newest run is usually of the working tree, which is
+exactly when someone reaches for the button.
+
+**The old preflight warning was right and incomplete.** It named the gate as the answer, reasoning
+that one number about a candidate settles nothing. True for "did that help?", and wrong for the
+other question an operator asks — *what is still broken in my draft?* — which is not a comparison
+and which only a run can answer.
 
 ## ADR-021 — Guidance is the whole folder, not one file
 

@@ -76,6 +76,26 @@ def test_detail_summarises_cases_with_last_outcome(client: TestClient, store: Ru
     assert cases["unwrap-in-test"]["last_fp_rate"] == 0.0
 
 
+def test_detail_names_the_run_its_case_outcomes_came_from(
+    client: TestClient, store: RunStore
+) -> None:
+    """Without this the console cannot say which guidance a `MISSED` describes.
+
+    The editor scores the working tree while the textarea above it holds a staged branch, so a
+    caller needs the scoring run's identity to tell the reader whether the two agree.
+    """
+    assert client.get("/api/skills/rust-errors").json()["scored_by"] is None
+
+    store.save(make_record("run-0"))
+    store.save(make_record("run-1", created_at=AT + timedelta(hours=1)))
+    body = client.get("/api/skills/rust-errors").json()
+
+    assert body["scored_by"]["id"] == "run-1"
+    assert body["scored_by"]["skill_hash"]
+    # The same record the case outcomes were read from — these two must never disagree.
+    assert body["scored_by"]["id"] == body["runs"][0]["id"]
+
+
 def test_detail_lists_run_history(client: TestClient, store: RunStore) -> None:
     store.save(make_record("run-0"))
     store.save(make_record("run-1", created_at=AT + timedelta(hours=1)))
