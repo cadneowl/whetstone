@@ -40,11 +40,15 @@ surface. Both call the same `service.py` functions, and anything the console can
 | D1 | Frontend stack | **React + TypeScript + Vite.** Built to static assets, served by FastAPI. Maintainers need Node; users never do. |
 | D2 | Deployment model | **Local-first, single user, loopback-bound** — but the auth seam is built from day one (§7), so team deployment is configuration, not a rewrite. |
 | D3 | Where the console writes | **Configurable `skills_root`**, defaulting to this repo's `skills/`. A separate company skills repo is a config change (§6), not a code change. |
-| D4 | Skill-guidance editing | **In scope, built in full** — with git write-through and a **gate-before-propose** rule (§10.2) that makes the console enforce the project's core thesis rather than route around it. |
+| D4 | Skill-guidance editing | **In scope** — with git write-through and a **gate-before-propose** rule (§10.2) that makes the console enforce the project's core thesis rather than route around it. Built in Phase 3; see §12 for what that phase does and does not yet cover. |
 
 D4 reverses the first draft's recommendation to defer. The concern behind that recommendation —
 "a web editor for prose in git duplicates GitLab" — is real, but it is answered by *design* (every
 edit is a branch; no MR can open without a passing gate) rather than by cutting scope.
+
+> **Correction.** This row read "In scope, built in full" while Phase 3 was still unbuilt, which
+> made the table a statement of intent dressed as a statement of fact — the one thing a scope table
+> must not be. It now describes the phase, and §12 says what is in it.
 
 ---
 
@@ -79,8 +83,12 @@ client*, not a database app. Every mutation produces files on a branch and, wher
 is configured, an MR. There is no "publish" step syncing a database into git — the write *is* the
 file write.
 
-**C2 — Runs are derived artifacts.** Run records are telemetry. Deleting `.whetstone/` costs nothing
-but history. Gitignored.
+**C2 — Runs are derived artifacts.** Run records are telemetry. Deleting `.whetstone/runs/` costs
+nothing but history. Gitignored.
+
+> **Amended by ADR-008.** `.whetstone/` is no longer uniformly disposable: `gates/` holds the
+> evidence C6 checks, so deleting it costs the right to propose a guidance change until the gates
+> are re-run. `runs/` is still pure telemetry.
 
 **C3 — Capture must not change scores.** Adding finding/verdict capture must leave every existing
 score bit-identical. `tests/golden/` pins exact scores and must pass unmodified.
@@ -391,6 +399,8 @@ Three details that carry weight:
 .whetstone/
   runs/<run-id>.json      # the record — files are truth
   runs.db                 # derived SQLite index, safe to delete, rebuilt by `runs.reindex()`
+  gates/<gate-id>.json    # evidence for C6; the filename carries the content hash it covers,
+                          # which is why this needs no index — the only query is exact-match
 ```
 
 ---
@@ -762,14 +772,45 @@ A **preview** route was added beyond the plan: it validates edits and returns ex
 committed, without writing. It is what lets a bad region or path be reported against the field that
 caused it while the person is still editing.
 
-### Phase 3 — Authoring — 1.5–2 wk
+### Phase 3 — Authoring — ✅ **done, except the case editor**
 
-1. `service.save_skill_edit` — frontmatter round-trip, order-preserving, version bump.
-2. Case editor (§10.4), both entry points, live `case.yaml` preview.
-3. Guidance editor with pinned case list (§10.2).
-4. **Gate-before-propose enforcement** (C6): `GET /api/skills/{id}/proposal`, disabled-button reason
-   strings, one-click gate launch.
-5. Optimistic concurrency end-to-end: 409 surfaces as a merge-conflict view, not a toast.
+1. ✅ `authoring.py` — frontmatter round-trip, order-preserving, version bump. `prepare_guidance` /
+   `prepare_meta` render, validate through `load_skill`, and report the resulting `skill_hash`.
+2. ⬜ Case editor (§10.4). **Not built.** Triage already renders a candidate into a case; authoring
+   one from nothing is the same form without a source MR, and it was the piece of this phase that
+   nothing else depends on.
+3. ✅ Guidance editor with pinned case list (§10.2) — textarea beside a live preview, the eval
+   cases that constrain the rule listed underneath.
+4. ✅ **Gate-before-propose enforcement** (C6): `GET /api/skills/{id}/proposal`, disabled-button
+   reason strings, and the same check at `POST /api/git/propose`.
+5. ✅ Optimistic concurrency end-to-end: a stale `expect_head` is a 409, rendered as state — what
+   the branch holds, what this tab expected, and an explicit "load what is on the branch".
+
+**Four deliberate deviations from the sketch:**
+
+- **The gate is not launched from the console.** §10.2 called for a one-click gate; running one
+  needs the job orchestration that is Phase 4. Rather than fake it, the panel prints the exact
+  `whetstone eval gate` invocation for the staged branch. A button that silently blocks for four
+  minutes would be worse than a command someone can read.
+- **C6 is enforced at the push, not only in the editor.** §10.2's *Open in editor* escape hatch
+  means the branch can receive commits the console never saw, so the check belongs at the one door
+  everything goes through. `POST /api/git/propose` refuses any branch that changes what a skill
+  would publish without a passing gate covering the result — including a branch made entirely
+  outside the console. The question is deliberately *what would this publish*, not *did `SKILL.md`
+  change*: deleting the one eval case a skill keeps failing raises its score without improving
+  anything, and `skill_hash` covers the cases so that it counts. Adding cases is the one exemption,
+  which is what keeps triage batches pushing freely.
+- **Evidence is keyed on content, not on the branch.** A gate record stores the `skill_hash` of the
+  skill *as committed*, and C6 matches on it. Typing one more character retracts the permission to
+  publish. Keying on the branch instead would let a passing gate become a standing licence.
+- **A practice-mode gate is not evidence.** Practice mode swaps in the pattern reviewer and the
+  deterministic judge (C4), so its verdict is about a regex. Accepting it would let a demo mode
+  wave the whole rule through.
+
+Editing `meta.yaml` is text-with-validation rather than a form: the provenance block is already
+written structurally by triage (`promote.render_meta_yaml`), and a form covering the rest would
+either duplicate that or fence in what an operator can express. Triggers stay in `SKILL.md`
+frontmatter and are preserved verbatim across an edit — the editor does not expose them yet.
 
 ### Phase 4 — Run orchestration — 1 wk
 
@@ -794,12 +835,14 @@ Cheap, because Phase 0 already captured the data.
 4. README + docs; `whetstone ui --help`.
 5. `mypy --strict` and `ruff` clean over `src/whetstone/ui/`; `tsc --noEmit` + eslint clean.
 
-**Total ≈ 9–11 weeks**, of which Phases 0–2 are done. Both gaps the plan was written around are now
-closed: the run drill-down that did not exist (G1), and the triage loop that had no tooling (G5).
+**Total ≈ 9–11 weeks**, of which Phases 0–3 are done. Three gaps the plan was written around are now
+closed: the run drill-down that did not exist (G1), the triage loop that had no tooling (G5), and
+the one nothing in the plan called a gap — **the guidance itself was read-only**, so the pipeline
+grew a skill's test suite while its rules could only be changed outside the tool.
 
-**Phase 3 (authoring) is next**, and its gate-before-propose rule (C6) is the load-bearing piece —
-`GET /api/skills/{id}/proposal` plus a disabled *Propose MR* button until a passing gate run exists
-for that exact `skill_hash`.
+**Phase 4 (run orchestration) is next**, and the guidance editor is what makes it urgent: C6 now
+tells someone their change needs a gate, and the console can only hand them a command to run in a
+terminal. Closing that is `jobs.py`, cost estimation, and the SSE progress stream.
 
 **Off-ramp taken.** `whetstone report --run <id> --format html` ships as part of Phase 0 — one
 self-contained file with the §10.5 drill-down, no server, no auth, drops straight into CI artifacts.

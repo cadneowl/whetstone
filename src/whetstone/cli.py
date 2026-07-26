@@ -20,6 +20,7 @@ from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
 from whetstone.domain.run import RunEvent, RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
+from whetstone.gates import GateStore
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, build_llm_client, resolve_backend
 from whetstone.providers.gitlab.provider import GitLabConnector
@@ -30,11 +31,11 @@ from whetstone.runs import RunStore, stale_version_ids
 from whetstone.service import (
     format_gate,
     format_score,
-    gate_skills,
     precision_evidence,
     pull_corpus,
     pull_defects,
     record_eval,
+    record_gate,
 )
 from whetstone.vcs import export_tree
 
@@ -86,6 +87,16 @@ RunsDirOpt = Annotated[
 
 def _store(runs_dir: Path | None) -> RunStore:
     return RunStore(runs_dir if runs_dir is not None else load_config().runs_dir)
+
+
+GatesDirOpt = Annotated[
+    Path | None,
+    typer.Option("--gates-dir", help="Where gate records live (default: .whetstone/gates)"),
+]
+
+
+def _gates(gates_dir: Path | None) -> GateStore:
+    return GateStore(gates_dir if gates_dir is not None else load_config().gates_dir)
 
 # Shared LLM-selection options, so `eval run` and `eval gate` pick a backend the same way.
 _LLM_HELP = (
@@ -238,6 +249,10 @@ def eval_gate(
             help="Case id this change must fix (repeatable). The gate fails unless it passes.",
         ),
     ] = None,
+    save: Annotated[
+        bool, typer.Option("--save/--no-save", help="Store a gate record (the console reads these)")
+    ] = True,
+    gates_dir: GatesDirOpt = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate both sides; no model call")
     ] = False,
@@ -251,6 +266,9 @@ def eval_gate(
     Both sides are scored over the union of their eval cases, so adding a case that documents a
     known miss is not itself a regression. Pass `--targeted <case-id>` (repeatable) to require the
     change to actually fix something rather than merely avoid breaking anything.
+
+    The result is stored. That is not just telemetry: the console refuses to publish a guidance
+    change without a passing gate for that exact content, and this is where it looks.
     """
     defaults = load_config().gate
     tolerances = GateConfig(
@@ -269,15 +287,27 @@ def eval_gate(
             typer.echo(f"base:      {_dry_summary(base_skill)}")
             typer.echo(f"candidate: {_dry_summary(candidate_skill)}")
             return
-        outcome = gate_skills(
+        backend = resolve_backend(llm, model=model, base_url=base_url)
+        record = record_gate(
             base_skill,
             candidate_skill,
             _client(llm, model, base_url, api_key_env),
             cfg=tolerances,
             trials=trials,
+            base_ref=base_ref or str(base_dir),
+            candidate_ref=candidate_ref or str(cand_dir),
+            backend=backend.name,
+            model=backend.model,
         )
-        typer.echo(outcome.model_dump_json(indent=2) if json_out else format_gate(outcome))
-        raise typer.Exit(code=0 if outcome.result.passed else 1)
+        if save:
+            _gates(gates_dir).save(record)
+        if json_out:
+            typer.echo(record.model_dump_json(indent=2))
+        else:
+            typer.echo(format_gate(record.result))
+            if save:
+                typer.echo(f"\ngate {record.id}")
+        raise typer.Exit(code=0 if record.result.passed else 1)
     finally:
         for tmp in (base_tmp, cand_tmp):
             if tmp is not None:

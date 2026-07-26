@@ -72,6 +72,37 @@ then checking the reviewer's findings against what each case expects:
 Everything is deterministically testable: the two nondeterministic edges (the reviewer and the
 judge) both have `Fake` implementations, so the entire harness runs with **no model and no network**.
 
+### The sharpening loop
+
+Scoring is half of it. The other half is the loop that produces something to score — and it is worth
+being precise about which parts are automatic and which are a person's judgement:
+
+```
+  GitLab MRs + Jira defects            ← real review history and shipped bugs
+        │  corpus pull                    (automatic)
+        ▼
+  candidate eval cases                 ← proposed, never merged blind
+        │  triage: rewrite, route, accept / reject   (a person, in the console)
+        ▼
+  skills/<id>/eval_cases/              ← the skill's test suite grows
+        │
+        │  ── a person edits the rules, in the console's guidance editor ──
+        ▼
+  skills/<id>/SKILL.md on whetstone/skill/<id>
+        │  eval gate --targeted <case>    (measures whether the edit is an improvement)
+        ▼
+  a stored gate record, keyed to that exact content
+        │  Propose MR                     (refused unless a passing gate covers it)
+        ▼
+  merge request
+```
+
+**Nothing here writes guidance for you.** The corpus builder proposes test data, the gate rules on
+whether a rewrite was an improvement, and the console refuses to publish one that has not been
+measured — but a human writes the rule. Automating that step is the proposal engine, and it is the
+next milestone; when it lands, its output enters this loop at the same place a person's does and
+faces the same gate.
+
 ---
 
 ## Architecture
@@ -90,8 +121,10 @@ src/whetstone/
                 builder · linking (issue ↔ merge request) · model
   meta_eval/    Validate a judge against human-labeled pairs
   runs.py       Run-record persistence (JSON files + derived SQLite index)
+  gates.py      Gate-record persistence, keyed on content hash — the evidence behind publishing
   candidates.py The triage queue: pending candidates + recorded promote/reject decisions
   promote.py    Edited candidate → validated eval case (round-tripped through load_skill)
+  authoring.py  Edited guidance → validated SKILL.md (frontmatter preserved, version bumped)
   report.py     Run record → self-contained HTML / text report
   gitio.py      Git write primitives (branch, commit, push) that never touch the working tree
   config.py     `whetstone.toml` loading
@@ -355,6 +388,37 @@ sets its tolerance once instead of repeating flags in every CI invocation. `--re
 `--fp-tol` override the file. `--targeted` is deliberately *not* read from config — which cases a
 change must fix is a property of that change, not a repo-wide default.
 
+### A gate result is evidence, not just output
+
+Every gate is stored under `.whetstone/gates/` as a `GateRecord` carrying the **content hash of the
+candidate skill as committed** (`domain/run.skill_hash` — the guidance body plus every eval case).
+That record is what makes "never ship a skill change you can't prove is an improvement" a property
+of the system rather than a habit: the console will not publish a guidance branch unless a passing
+record exists for the exact content it would push (see [ADR-008](docs/decisions.md)).
+
+Four consequences worth knowing:
+
+- **Editing the guidance again retracts the permission.** Evidence is bound to content, so one more
+  character means the change is unproven until it is re-gated. A passing gate is never a licence to
+  keep editing.
+- **Deleting or rewriting an eval case needs a gate too.** The question the guard asks is *does this
+  branch change what the skill would publish?* — not *did `SKILL.md` change?* Dropping the one case
+  a reviewer keeps failing raises recall without improving anything, and `skill_hash` covers the
+  cases so it counts. **Adding** cases is the one exemption, which is why triage batches push
+  without a gate: a case the skill never had cannot make it worse at the ones it did.
+- **A practice-mode gate does not count.** Practice mode swaps in the pattern reviewer and the
+  deterministic judge, so its verdict is about a regex, not about the model that will review code.
+- **`.whetstone/gates/` is load-bearing.** Unlike `.whetstone/runs/`, which is telemetry and safe to
+  delete, removing gate records costs the right to propose until they are re-run.
+
+Gate records are **local and gitignored**, which matches the console's local-first design (D2) but
+has a consequence worth knowing: a colleague's passing gate does not unlock *your* console. For a
+team, the enforcement point is CI — `whetstone eval gate` already exits non-zero on a regression, so
+a job on the skills repo blocks the merge regardless of who ran what locally.
+
+The hash is taken from the skills handed to `record_gate`, not from the ones `gate_skills` scores —
+those carry the union of both sides' cases, a set that exists in neither commit.
+
 ---
 
 ## CLI reference
@@ -423,11 +487,15 @@ with `--repo`/`--skill-path`) — e.g. gate a branch against `main`. Backend sel
 | `--recall-tol FLOAT` | `0.0` | Allowed recall drop. |
 | `--fp-tol FLOAT` | `0.0` | Allowed false-positive-rate rise. |
 | `--targeted TEXT` | *(none)* | Case id this change must fix; repeatable. Fails unless it passes. |
+| `--save` / `--no-save` | save | Store a gate record. The console reads these to decide what may be published. |
+| `--gates-dir PATH` | `.whetstone/gates` | Where gate records live. |
 | `--dry-run` | off | Validate both sides; **no model call**. |
-| `--json` | off | Emit the full `GateOutcome` as JSON. |
+| `--json` | off | Emit the full `GateRecord` as JSON. |
 
 Both sides are scored over the union of their eval cases — see
-[the regression gate](#the-regression-gate).
+[the regression gate](#the-regression-gate). The stored record is what
+[gate-before-propose](#a-gate-result-is-evidence-not-just-output) checks, so a CI job that runs this
+also leaves the evidence the console needs.
 
 ```bash
 whetstone eval gate \
@@ -765,6 +833,7 @@ dir = ".whetstone/runs"          # where run records are read from
 | `WHETSTONE_SKILLS_ROOT` / `WHETSTONE_SKILLS_REPO` | `[skills] root` / `repo` |
 | `WHETSTONE_CANDIDATES_DIR` | `[candidates] dir` |
 | `WHETSTONE_RUNS_DIR` | `[runs] dir` |
+| `WHETSTONE_GATES_DIR` | `[gate] dir` |
 
 Relative paths in `whetstone.toml` resolve against the file's own directory; paths from environment
 variables resolve against the current working directory, as environment variables conventionally do.
@@ -828,7 +897,7 @@ whetstone corpus pull --base-url https://gitlab.acme.com --project acme/payments
 | Route | Screen |
 |---|---|
 | `/` | Skills index |
-| `/skills/<id>` | Skill detail — guidance, cases, runs, metadata |
+| `/skills/<id>` | Skill detail — guidance, **edit**, cases, runs, metadata |
 | `/skills/<id>/cases/<case-id>` | Eval case — diff, expectations, history |
 | `/triage` | Candidate queue |
 | `/runs` | Run history |
@@ -863,6 +932,48 @@ last run. A **flaky** badge means trials disagreed — unstable, as opposed to s
 
 **Runs** is this skill's history, newest first. **Metadata** shows owner, declared rules, trigger
 labels, and references.
+
+#### Edit — changing what the reviewer does
+
+The only screen that changes a skill's behaviour. A markdown box beside a live preview, with the
+eval cases that constrain the rule pinned underneath — a rewrite is only as trustworthy as what
+tests it, and a skill with two cases has a gate that will pass on almost anything.
+
+**Stage on branch** commits to `whetstone/skill/<id>` through git plumbing: the working tree is
+never touched, `main` is never written, and a `version` bump lands once per proposal rather than
+once per save. Everything in the frontmatter you did not edit — `triggers`, comments, quoting style
+— comes back exactly as you wrote it; only the keys that changed are rewritten, and the result is
+verified by loading it back before anything is committed.
+
+Below the editor is the **Proposal** panel, which is C6 made visible:
+
+```
+Proposal   whetstone/skill/rust-errors   v3 · 1 commit ahead of main      [not gated]
+
+  this guidance has never been gated — run one to see whether it is an improvement
+
+  The console cannot launch runs yet, so gate it from a terminal:
+    whetstone eval gate \
+      --repo . \
+      --skill-path skills/rust-errors \
+      --base-ref main \
+      --candidate-ref whetstone/skill/rust-errors
+
+  [ Propose MR ]   ← disabled
+```
+
+*Propose MR* stays disabled until a **passing gate exists for the exact staged content**. Edit one
+more character and the permission is gone again, because the evidence is bound to the content hash
+rather than to the branch. When it does unlock, the panel names the gate that cleared it and what it
+bought (`fixed unwrap-in-handler`).
+
+A pass is not withdrawn by a later failing run — an eval at `k=1` is noisy, and letting a re-run
+revoke a demonstrated result would make publishing hostage to variance. But the disagreement is
+never hidden: the badge reads **gated, with a caveat** and the later failure is quoted.
+
+The same check runs server-side at `POST /api/git/propose`, so a branch edited outside the console
+faces it too. A concurrent write is a `409`, shown as what the branch holds versus what this tab
+expected, with an explicit *load what is on the branch* — nothing is overwritten silently.
 
 #### Case detail
 
@@ -1121,10 +1232,14 @@ models the CLI uses.
 |---|---|---|
 | `GET` | `/api/config` | Capabilities, principal, read-only and practice flags, backends |
 | `GET` | `/api/git/status` | Branch, head, cleanliness, remote |
-| `POST` | `/api/git/propose` | Push a batch branch |
+| `POST` | `/api/git/propose` | Push a branch — **refused** if it changes guidance no passing gate covers |
 | `GET` | `/api/skills` | Index rows, weakest first |
 | `GET` | `/api/skills/{id}` | Guidance, cases, runs, rules, untested rules |
 | `GET` | `/api/skills/{id}/cases/{case_id}` | Eval case, diff, history |
+| `GET` | `/api/skills/{id}/proposal` | What is staged, the diff, and whether it may be published |
+| `POST` | `/api/skills/{id}/guidance/preview` | Validate a guidance edit, write nothing |
+| `PUT` | `/api/skills/{id}/guidance` | Stage a `SKILL.md` edit on `whetstone/skill/{id}` |
+| `PUT` | `/api/skills/{id}/meta` | Stage a `meta.yaml` edit on the same branch |
 | `GET` | `/api/runs` | Run history, `?skill_id=`, `?limit=` |
 | `GET` | `/api/runs/{id}` | Full record — findings and verdicts |
 | `GET` | `/api/runs/{id}/report` | Standalone HTML report |
@@ -1194,13 +1309,14 @@ See [`ui/README.md`](ui/README.md) for frontend conventions and the dependency-a
 
 ### Not built yet
 
-The console covers browsing, diagnosis, and triage. Still to come (see
+The console covers browsing, diagnosis, triage, and guidance authoring. Still to come (see
 [`docs/ui-console.md`](docs/ui-console.md) for the plan and its phasing):
 
-- **Authoring** — editing skill guidance and hand-writing eval cases, gated by a rule that no merge
-  request may open without a passing gate for that exact content hash.
-- **Run orchestration** — launching evals from the console, with progress, cancellation, cost
-  estimation, and a working practice mode.
+- **Run orchestration** — launching evals and gates from the console, with progress, cancellation,
+  cost estimation, and a working practice mode. This is the gap the guidance editor makes most
+  visible: it can tell you a change needs a gate, but it can only hand you the command to run.
+- **A case editor** — hand-writing an eval case with no source merge request. Triage covers the
+  case that starts from one.
 - **Compare & judge lab** — diffing two runs with client-side tolerance tuning, and labelling judge
   verdicts to grow the meta-eval set.
 
@@ -1237,6 +1353,7 @@ max_llm_calls_per_run = 2000       # reserved; see the note below
 [gate]                             # defaults for `whetstone eval gate`; --recall-tol overrides
 recall_tol = 0.0
 fp_tol = 0.0
+dir = ".whetstone/gates"           # stored gate records — what gate-before-propose reads
 ```
 
 > **`max_llm_calls_per_run` is declared but inert.** It is parsed and reported, and nothing enforces
@@ -1254,8 +1371,9 @@ can drive the whole system from code — with the real model or a fake.
 
 ```python
 from whetstone.core.loader import load_skill
+from whetstone.gates import GateStore
 from whetstone.llm.anthropic_client import AnthropicClient
-from whetstone.service import run_eval, gate_skills, pull_corpus, format_score, format_gate
+from whetstone.service import run_eval, record_gate, pull_corpus, format_score, format_gate
 
 client = AnthropicClient(model="claude-opus-4-8")
 
@@ -1263,10 +1381,11 @@ client = AnthropicClient(model="claude-opus-4-8")
 score = run_eval(load_skill("skills/code-review-rust-error-handling"), client, trials=5)
 print(format_score(score))
 
-# Gate a candidate against a baseline
-outcome = gate_skills(load_skill("skills/base"), load_skill("skills/candidate"), client)
-print(format_gate(outcome))
-assert outcome.result.passed
+# Gate a candidate against a baseline, and keep the evidence
+record = record_gate(load_skill("skills/base"), load_skill("skills/candidate"), client)
+print(format_gate(record.result))
+GateStore(".whetstone/gates").save(record)
+assert record.result.passed
 ```
 
 | Function | Signature | Returns |
@@ -1274,9 +1393,20 @@ assert outcome.result.passed
 | `run_eval` | `(skill, client, *, trials=1, reviewer_effort="high", judge_effort="medium")` | `SkillScore` |
 | `record_eval` | `(skill, client, *, trials=1, backend="", model="", on_event=None, max_workers=1, cancel=None, …)` | `RunRecord` (score + findings + verdicts) |
 | `gate_skills` | `(base, candidate, client, *, cfg=None, trials=1)` | `GateOutcome` (`.result`, `.base`, `.candidate`) |
+| `record_gate` | `(base, candidate, client, *, cfg=None, trials=1, base_ref="", candidate_ref="", practice_mode=False, …)` | `GateRecord` — the outcome plus the content hashes it was about |
 | `pull_corpus` | `(connector, project, since, skills=None)` | `list[CandidateCase]` |
 | `format_score` | `(SkillScore)` | `str` |
-| `format_gate` | `(GateOutcome)` | `str` |
+| `format_gate` | `(GateResult)` | `str` |
+
+Use `record_gate` rather than `gate_skills` when the result should count as evidence: it attaches
+the `skill_hash` of each side **as committed**, which is what
+[gate-before-propose](#a-gate-result-is-evidence-not-just-output) matches on. `gate_skills` remains
+the right call when you only want the verdict.
+
+Authoring has its own module rather than living here, since it touches files rather than models:
+`authoring.prepare_guidance(base, current_text, SkillEdit(body=…), skills_root=…)` renders and
+validates a `SKILL.md` edit and reports the resulting hash, and `gitio.write_and_commit` puts it on
+a branch.
 
 Because the client is injected, tests pass a `FakeLLMClient` (below) and run the exact same code
 paths with no network.
@@ -1839,6 +1969,7 @@ Two things worth knowing, both about values being read back exactly as written:
 | `WHETSTONE_SKILLS_REPO` | `config` | Git repo containing the registry. |
 | `WHETSTONE_RUNS_DIR` | `config` | Where run records are stored. |
 | `WHETSTONE_CANDIDATES_DIR` | `config` | Where the triage queue is read from. |
+| `WHETSTONE_GATES_DIR` | `config` | Where gate records are stored — what gate-before-propose reads. |
 | `WHETSTONE_UI_HOST` / `WHETSTONE_UI_PORT` | `config` | Console bind address and port. |
 | `WHETSTONE_READ_ONLY` / `WHETSTONE_PRACTICE_MODE` | `config` | Console modes. An *empty* value counts as unset, so a shell-quoting accident cannot switch read-only off. |
 
@@ -1863,10 +1994,15 @@ whetstone/
 ## Where this is going
 
 Milestone 1 delivers **measurement before automation**: the `gate` function, callable from code,
-CLI, and (trivially wrapped) HTTP. The next milestones plug into that same seam:
+CLI, and HTTP — and now a stored verdict that publishing is checked against, so the thesis is
+enforced rather than merely intended. What is still a human's job is *writing the rule*. The next
+milestones close that:
 
 - **Distillation + proposal engine** — cluster review signals into candidate learnings and generate
-  skill diffs, each of which must pass `eval gate` before it can merge.
+  skill diffs. Its output enters the loop exactly where a person's edit does today: staged on a
+  `whetstone/skill/<id>` branch, and unpublishable until a gate record covers that content hash.
+- **Run orchestration** — launching gates from the console, so C6 stops being a rule the console
+  states and a command you run elsewhere.
 - **Control-plane API + governance** — the `POST /sharpen` surface, approval workflow, and drift
   detection.
 

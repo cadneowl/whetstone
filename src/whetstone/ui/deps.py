@@ -19,8 +19,10 @@ from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from whetstone.config import Config
+from whetstone.gates import GateStore
 from whetstone.gitio import author_from_config
 from whetstone.runs import RunStore
+from whetstone.ui.errors import Misconfigured
 
 PrincipalMode = Literal["local", "proxy", "anonymous"]
 
@@ -47,6 +49,11 @@ def get_store(request: Request) -> RunStore:
     return store
 
 
+def get_gates(request: Request) -> GateStore:
+    gates: GateStore = request.app.state.gates
+    return gates
+
+
 def get_skills_root(request: Request) -> Path:
     root: Path = request.app.state.config.skills_root
     return root
@@ -71,6 +78,19 @@ def get_principal(request: Request) -> Principal:
     return Principal(name=author.name, email=author.email, mode="local")
 
 
+def relative_skills_root(config: Config) -> str:
+    """The skills root as a repo-relative path, since commits address files that way."""
+    try:
+        return config.skills_root.relative_to(config.skills_repo).as_posix()
+    except ValueError:
+        # Nothing the caller sent is wrong — `whetstone.toml` points the two settings at unrelated
+        # directories, so no write can address the files it would commit.
+        raise Misconfigured(
+            f"skills root {config.skills_root} is not inside the git repo "
+            f"{config.skills_repo}; set [skills] root and repo to matching locations"
+        ) from None
+
+
 def require_writable(request: Request) -> None:
     """Guard for every mutating route. Read-only mode is enforced here, not in the UI."""
     config: Config = request.app.state.config
@@ -83,6 +103,7 @@ def require_writable(request: Request) -> None:
 
 ConfigDep = Annotated[Config, Depends(get_config)]
 StoreDep = Annotated[RunStore, Depends(get_store)]
+GatesDep = Annotated[GateStore, Depends(get_gates)]
 SkillsRootDep = Annotated[Path, Depends(get_skills_root)]
 PrincipalDep = Annotated[Principal, Depends(get_principal)]
 Writable = Depends(require_writable)

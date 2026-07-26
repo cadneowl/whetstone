@@ -67,6 +67,10 @@ class RunsConfig(BaseModel):
 class GateDefaults(BaseModel):
     recall_tol: float = 0.0
     fp_tol: float = 0.0
+    # Where gate records are stored. Unlike runs (C2, pure telemetry) these are *load-bearing*: the
+    # console will not publish a guidance change without a passing record for that exact content,
+    # so deleting this directory costs the right to propose until the gates are re-run.
+    dir: Path = Path(".whetstone/gates")
 
 
 class Config(BaseModel):
@@ -94,6 +98,10 @@ class Config(BaseModel):
     @property
     def candidates_dir(self) -> Path:
         return self._resolve(self.candidates.dir)
+
+    @property
+    def gates_dir(self) -> Path:
+        return self._resolve(self.gate.dir)
 
     def _resolve(self, path: Path) -> Path:
         if path.is_absolute() or self.source_dir is None:
@@ -150,6 +158,10 @@ def _apply_env(config: Config) -> Config:
     candidates_dir = os.environ.get("WHETSTONE_CANDIDATES_DIR")
     if candidates_dir:
         config.candidates.dir = Path(candidates_dir).resolve()
+
+    gates_dir = os.environ.get("WHETSTONE_GATES_DIR")
+    if gates_dir:
+        config.gate.dir = Path(gates_dir).resolve()
 
     host = os.environ.get("WHETSTONE_UI_HOST")
     if host:

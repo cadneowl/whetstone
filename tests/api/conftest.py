@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from whetstone.config import Config, SkillsConfig, UIConfig
+from whetstone.gates import GateStore
 from whetstone.runs import RunStore
 from whetstone.ui.app import create_app
 
@@ -123,11 +124,16 @@ def store(tmp_path: Path) -> RunStore:
 
 
 @pytest.fixture
+def gates(tmp_path: Path) -> GateStore:
+    return GateStore(tmp_path / ".whetstone" / "gates")
+
+
+@pytest.fixture
 def config(repo: Path, skills_root: Path) -> Config:
     return Config(skills=SkillsConfig(root=skills_root, repo=repo), ui=UIConfig(read_only=False))
 
 
 @pytest.fixture
-def client(config: Config, store: RunStore) -> Iterator[TestClient]:
-    with TestClient(create_app(config, store=store)) as c:
+def client(config: Config, store: RunStore, gates: GateStore) -> Iterator[TestClient]:
+    with TestClient(create_app(config, store=store, gates=gates)) as c:
         yield c

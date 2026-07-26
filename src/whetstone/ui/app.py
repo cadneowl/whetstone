@@ -14,9 +14,10 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from whetstone.config import Config, load_config
+from whetstone.gates import GateStore
 from whetstone.runs import RunStore
 from whetstone.ui.errors import NotFound, install_handlers
-from whetstone.ui.routers import candidates, meta, runs, skills
+from whetstone.ui.routers import authoring, candidates, meta, runs, skills
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -40,12 +41,13 @@ def create_app(
     config: Config | None = None,
     *,
     store: RunStore | None = None,
+    gates: GateStore | None = None,
     serve_console: bool = True,
 ) -> FastAPI:
     """Build the console app.
 
-    Both dependencies are injectable so tests drive the real routes against a temp repo and a temp
-    run store, with no network and no model.
+    Every dependency is injectable so tests drive the real routes against a temp repo, a temp run
+    store and a temp gate store, with no network and no model.
 
     `serve_console=False` skips the SPA entirely — what `whetstone ui --dev` wants, so that hitting
     the API port during development returns 404 rather than a stale build that looks live.
@@ -58,10 +60,12 @@ def create_app(
     )
     app.state.config = resolved
     app.state.store = store or RunStore(resolved.runs_dir)
+    app.state.gates = gates or GateStore(resolved.gates_dir)
 
     install_handlers(app)
     app.include_router(meta.router, prefix="/api")
     app.include_router(skills.router, prefix="/api")
+    app.include_router(authoring.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
     app.include_router(candidates.router, prefix="/api")
     if serve_console:

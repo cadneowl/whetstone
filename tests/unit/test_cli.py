@@ -281,3 +281,59 @@ def test_help_lists_subcommands() -> None:
     assert result.exit_code == 0
     for cmd in ("eval", "corpus", "skills", "providers"):
         assert cmd in result.stdout
+
+
+# --- `eval gate` leaves the evidence the console reads -------------------------
+
+
+@pytest.fixture
+def stub_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the model, so the gate path is exercised without a backend.
+
+    A reviewer that finds nothing: both sides score identically, which is all these tests need —
+    they are about what the command *stores*, not about what it concludes.
+    """
+    from pydantic import BaseModel
+
+    from whetstone.judge.llm_judge import JudgeVerdict
+    from whetstone.llm.fake_client import FakeLLMClient
+    from whetstone.reviewer.llm_reviewer import LLMFindingList
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        if schema is JudgeVerdict:
+            return JudgeVerdict(matched=False, confidence=1.0, reason="nothing was flagged")
+        return LLMFindingList(findings=[])
+
+    monkeypatch.setattr("whetstone.cli._client", lambda *a, **k: FakeLLMClient(handler))
+
+
+def test_eval_gate_stores_a_record(tmp_path: Path, stub_gate: None) -> None:
+    from whetstone.gates import GateStore
+
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    gates_dir = tmp_path / "gates"
+    result = runner.invoke(
+        app,
+        ["eval", "gate", "--base", skill, "--candidate", skill, "--gates-dir", str(gates_dir)],
+    )
+    assert result.exit_code == 0, result.output
+    records = GateStore(gates_dir).list()
+    assert len(records) == 1
+    assert records[0].skill_id == "code-review-rust-error-handling"
+    assert f"gate {records[0].id}" in result.stdout
+
+
+def test_no_save_leaves_nothing_behind(tmp_path: Path, stub_gate: None) -> None:
+    from whetstone.gates import GateStore
+
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    gates_dir = tmp_path / "gates"
+    result = runner.invoke(
+        app,
+        [
+            "eval", "gate", "--base", skill, "--candidate", skill,
+            "--gates-dir", str(gates_dir), "--no-save",
+        ],
+    )
+    assert result.exit_code == 0
+    assert GateStore(gates_dir).list() == []

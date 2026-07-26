@@ -5,10 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from whetstone.gitio import GitError, RepoStatus, check_publishable, push
+from whetstone.gitio import GitError, RepoStatus, check_publishable, push, ref_exists
 from whetstone.gitio import status as git_status
 from whetstone.llm.factory import PRESETS
-from whetstone.ui.deps import ConfigDep, Principal, PrincipalDep, Writable
+from whetstone.ui.deps import ConfigDep, GatesDep, Principal, PrincipalDep, Writable
+from whetstone.ui.errors import Unprocessable
+from whetstone.ui.routers.authoring import ungated_guidance
 
 router = APIRouter(tags=["meta"])
 
@@ -84,13 +86,17 @@ class ProposeResponse(BaseModel):
 
 
 @router.post("/git/propose", response_model=ProposeResponse, dependencies=[Writable])
-def propose(request: ProposeRequest, config: ConfigDep) -> ProposeResponse:
-    """Publish a batch branch.
+def propose(request: ProposeRequest, config: ConfigDep, gates: GatesDep) -> ProposeResponse:
+    """Publish a branch.
 
     Pushing is never implicit — this route exists so that it is always a deliberate action. Opening
     the merge request itself needs a provider implementing `WriteConnector`, which Milestone 1
     defines but does not implement; until one is registered this pushes the branch and says so
     rather than pretending a merge request was created.
+
+    A branch carrying a guidance change is refused unless a passing gate covers the exact content
+    it would publish (C6). This is the choke point rather than the editor, because the editor is
+    not the only way commits reach a branch.
     """
     remote = config.git.push_remote
     # The branch arrives from the client, so it is checked before anything else — a missing remote
@@ -100,6 +106,16 @@ def propose(request: ProposeRequest, config: ConfigDep) -> ProposeResponse:
         prefix=config.git.branch_prefix,
         protected=config.git.protected_branches,
     )
+    # Before the remote check, whose message promises the branch "exists locally and can be pushed
+    # by hand" — advice that is worse than useless when it does not exist.
+    if not ref_exists(config.skills_repo, request.branch):
+        raise GitError(f"no local branch {request.branch!r} to push")
+    blocked = ungated_guidance(config, gates, request.branch)
+    if blocked:
+        raise Unprocessable(
+            "no passing gate covers what this branch would publish, so it cannot be "
+            "proposed — " + "; ".join(blocked)
+        )
     if git_status(config.skills_repo).remote is None:
         raise GitError(
             f"no git remote configured, so {request.branch!r} cannot be pushed; "
