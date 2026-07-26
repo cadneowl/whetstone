@@ -36,7 +36,7 @@ See [`docs/milestone-1-eval-harness.md`](docs/milestone-1-eval-harness.md) for t
 15. [The corpus builder](#the-corpus-builder)
 16. [The LLM layer](#the-llm-layer)
 17. [Reviewers & judges](#reviewers--judges)
-18. [Meta-evaluation (validating the judge)](#meta-evaluation-validating-the-judge)
+18. [Meta-evaluation (validating the judge and the drafter)](#meta-evaluation-validating-the-judge-and-the-drafter)
 19. [Testing](#testing)
 20. [Extending Whetstone](#extending-whetstone)
 21. [Environment variables](#environment-variables)
@@ -120,7 +120,7 @@ src/whetstone/
   providers/    Capability protocols + registry + gitlab/ + jira/ adapters + fake/ provider
   corpus/       Review + defect history → candidate eval cases (human-promoted)
                 builder · linking (issue ↔ merge request) · model
-  meta_eval/    Validate a judge against human-labeled pairs
+  meta_eval/    Validate the judge, and the drafter, against human-labeled pairs
   runs.py       Run-record persistence (JSON files + derived SQLite index)
   gates.py      Gate-record persistence, keyed on content hash — the evidence behind publishing
   candidates.py The triage queue: pending candidates + recorded promote/reject decisions
@@ -2222,10 +2222,14 @@ score = run_skill(skill, LLMReviewer(client), LLMJudge(client), k=5)
 
 ---
 
-## Meta-evaluation (validating the judge)
+## Meta-evaluation (validating the judge and the drafter)
 
-The LLM judge decides every match — so its verdicts are only trustworthy if they agree with humans.
-`meta_eval/` measures that agreement against a labeled dataset.
+Everything downstream of a skill is scored by the eval. Two things upstream of it are not, and both
+sit under every number the gate prints: the **judge** that decides each match, and the **drafter**
+that writes the expectation the judge matches against. `meta_eval/` measures both against human
+labels.
+
+### The judge
 
 ```python
 from whetstone.meta_eval import (
@@ -2246,6 +2250,45 @@ assert report.accuracy >= JUDGE_ACCURACY_FLOOR   # default floor: 0.8
 
 Add labeled pairs to `tests/fixtures/meta_eval/labeled.json` (each entry: a `finding`, an
 `expectation`, and `is_match`) to strengthen the guardrail.
+
+### The drafter
+
+Triage offers to rewrite a case's `semantic` from the review comment it was seeded with. Whether
+that helps was an assumption until it was measured — and a bad expectation is durable in a way a bad
+guidance edit is not, because nothing downstream will ever fail because of it.
+
+```python
+from whetstone.meta_eval import (
+    load_drafting_cases, evaluate_drafting, DRAFT_IMPROVEMENT_FLOOR,
+)
+
+cases = load_drafting_cases("tests/fixtures/drafting/comments.json")
+report = evaluate_drafting(LLMJudge(client), cases, draft=my_drafter)
+assert report.improvement >= DRAFT_IMPROVEMENT_FLOOR   # default floor: +0.10
+print(report.summary())
+```
+
+Each case carries probe findings labeled by hand: one or more about the real problem, and one or
+more about a **different** real problem at the same location. Both arms face the same judge, probes
+and region — only the expectation text differs, so the difference is attributable to the sentence.
+
+- `missed` and `spurious` are counted apart. A missed pair scores a real catch as a miss (recall
+  reads low, and someone hunts for a hole in guidance that works). A spurious pair matches an
+  unrelated finding (recall reads high, and the case has stopped discriminating) — the worse of the
+  two, because nothing ever goes red.
+- Failures are attributed to cases, not just totalled. Two errors on one case is a drafter that
+  described the wrong defect; one error each on two cases is judge variance.
+- `draft` is injected, so a subprocess triage step can be measured on the same fixture as the
+  built-in one.
+
+Measured on `qwen3-coder:30b`: raw comments `0.71`, drafted `0.88–0.92`, improvement `+0.17` to
+`+0.21` over two runs. See **ADR-018** for what that number does and does not license — including
+the case where the drafter wrote a confident, well-formed sentence about the wrong defect.
+
+```bash
+WHETSTONE_LIVE_LLM=1 WHETSTONE_LLM=ollama WHETSTONE_LLM_MODEL=qwen3-coder:30b \
+    uv run pytest tests/live/test_live_drafting.py -s
+```
 
 ---
 

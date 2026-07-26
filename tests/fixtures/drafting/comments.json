@@ -1,0 +1,245 @@
+[
+  {
+    "id": "812-t0",
+    "kind": "should_catch",
+    "path": "src/handlers/charge.rs",
+    "line": 41,
+    "mr_title": "PAY-1204 tidy the charge handler",
+    "human_signal": "suggestion applied",
+    "comments": [{ "author": "ana", "body": "nit: use ? here" }],
+    "hunk": "@@ -38,6 +38,8 @@ pub async fn charge(id: Uuid, db: &Db) -> Result<Receipt, ApiError> {\n     let amount = body.amount_cents;\n \n+    let row = db.get(id).unwrap();\n+    let customer = row.customer;\n \n     Ok(Receipt::new(customer, amount))\n }",
+    "added": [
+      { "line": 41, "content": "    let row = db.get(id).unwrap();" },
+      { "line": 42, "content": "    let customer = row.customer;" }
+    ],
+    "probes": [
+      {
+        "message": "unwrap() on the database lookup will panic the request handler when no row exists for that id",
+        "is_match": true
+      },
+      {
+        "message": "the database call in the request path has no timeout, so a slow query blocks the worker",
+        "is_match": false
+      },
+      {
+        "message": "Receipt::new is called with its arguments in the wrong order",
+        "is_match": false
+      }
+    ]
+  },
+  {
+    "id": "907-t1",
+    "kind": "should_catch",
+    "path": "src/startup.rs",
+    "line": 27,
+    "mr_title": "wire up the new settings loader",
+    "human_signal": "suggestion applied",
+    "comments": [{ "author": "raj", "body": "same as above" }],
+    "hunk": "@@ -24,5 +24,7 @@ pub fn boot() -> Server {\n     tracing::init();\n \n+    let cfg = load_config().expect(\"config\");\n+    let pool = Pool::new(&cfg.database_url);\n \n     Server::new(pool)\n }",
+    "added": [
+      { "line": 27, "content": "    let cfg = load_config().expect(\"config\");" },
+      { "line": 28, "content": "    let pool = Pool::new(&cfg.database_url);" }
+    ],
+    "probes": [
+      {
+        "message": "expect() on the config load aborts the whole process instead of reporting a startup failure to the caller",
+        "is_match": true
+      },
+      {
+        "message": "startup panics rather than returning an error when the settings cannot be read",
+        "is_match": true
+      },
+      {
+        "message": "the configuration is re-read on every boot rather than cached across restarts",
+        "is_match": false
+      }
+    ]
+  },
+  {
+    "id": "915-t0",
+    "kind": "should_catch",
+    "path": "src/sync/worker.rs",
+    "line": 88,
+    "mr_title": "fetch remote state in the sync worker",
+    "human_signal": "thread resolved after rework",
+    "comments": [{ "author": "dee", "body": "this scares me tbh" }],
+    "hunk": "@@ -85,6 +85,8 @@ async fn tick(state: &Mutex<State>) -> Result<()> {\n     let started = Instant::now();\n \n+    let guard = state.lock().unwrap();\n+    let data = fetch(&guard.url).await?;\n \n     apply(data);\n     Ok(())\n }",
+    "added": [
+      { "line": 88, "content": "    let guard = state.lock().unwrap();" },
+      { "line": 89, "content": "    let data = fetch(&guard.url).await?;" }
+    ],
+    "probes": [
+      {
+        "message": "the mutex guard is still held across the await point, so another task needing the lock can deadlock the executor",
+        "is_match": true
+      },
+      {
+        "message": "unwrap() on lock() will panic if a previous holder panicked and poisoned the mutex",
+        "is_match": false
+      },
+      {
+        "message": "the elapsed time measured by `started` is never reported anywhere",
+        "is_match": false
+      }
+    ]
+  },
+  {
+    "id": "922-t0",
+    "kind": "should_catch",
+    "path": "src/auth/routes.rs",
+    "line": 15,
+    "mr_title": "add the admin console route",
+    "human_signal": "suggestion applied",
+    "comments": [{ "author": "ana", "body": "do we need this?" }],
+    "hunk": "@@ -12,5 +12,7 @@ pub fn console(user: &User) -> Response {\n     audit::seen(user.id);\n \n+    if user.role == \"admin\" {\n+        return grant_all(user);\n+    }\n \n     Response::forbidden()\n }",
+    "added": [
+      { "line": 15, "content": "    if user.role == \"admin\" {" },
+      { "line": 16, "content": "        return grant_all(user);" },
+      { "line": 17, "content": "    }" }
+    ],
+    "probes": [
+      {
+        "message": "authorisation is decided by string-comparing a role field instead of going through the permission check, so any user whose role string is 'admin' bypasses it",
+        "is_match": true
+      },
+      {
+        "message": "access control here trusts a raw role value on the user record rather than an authorisation lookup",
+        "is_match": true
+      },
+      {
+        "message": "the grant_all branch does not write an audit record naming who was elevated",
+        "is_match": false
+      }
+    ]
+  },
+  {
+    "id": "1031-t0",
+    "kind": "should_catch",
+    "path": "app/reports/filters.py",
+    "line": 33,
+    "mr_title": "report filters: handle the empty case",
+    "human_signal": "suggestion applied",
+    "comments": [{ "author": "priya", "body": "should be `is None`" }],
+    "hunk": "@@ -30,5 +30,7 @@ def apply(rows, cutoff):\n     rows = list(rows)\n \n+    if cutoff == None:\n+        return rows\n \n     return [r for r in rows if r.at >= cutoff]",
+    "added": [
+      { "line": 33, "content": "    if cutoff == None:" },
+      { "line": 34, "content": "        return rows" }
+    ],
+    "probes": [
+      {
+        "message": "None is tested with == rather than an identity comparison, so a value with a custom __eq__ can take the wrong branch",
+        "is_match": true
+      },
+      {
+        "message": "equality is used to test for None where an identity check is required",
+        "is_match": true
+      },
+      {
+        "message": "rows is materialised with list() before filtering, which loads the whole result set into memory",
+        "is_match": false
+      }
+    ]
+  },
+  {
+    "id": "1044-t0",
+    "kind": "should_catch",
+    "path": "app/ingest/process.py",
+    "line": 12,
+    "mr_title": "ingest: accept an options dict",
+    "human_signal": "suggestion applied",
+    "comments": [
+      {
+        "author": "sam",
+        "body": "while you're here can we rename `cfg` to `config`? we use the long form everywhere else. also that default is going to bite us"
+      }
+    ],
+    "hunk": "@@ -9,5 +9,8 @@ from .parse import parse_row\n \n+def process(data, cfg={}):\n+    cfg.setdefault(\"seen\", [])\n+    cfg[\"seen\"].append(len(data))\n     return [parse_row(d, cfg) for d in data]",
+    "added": [
+      { "line": 12, "content": "def process(data, cfg={}):" },
+      { "line": 13, "content": "    cfg.setdefault(\"seen\", [])" },
+      { "line": 14, "content": "    cfg[\"seen\"].append(len(data))" }
+    ],
+    "probes": [
+      {
+        "message": "the default argument is a mutable dict evaluated once at definition time, so mutations persist into every later call",
+        "is_match": true
+      },
+      {
+        "message": "state written into the cfg default leaks between separate calls to process()",
+        "is_match": true
+      },
+      {
+        "message": "process() iterates data without checking that it is non-empty",
+        "is_match": false
+      },
+      {
+        "message": "the parse_row import is unused when data is empty",
+        "is_match": false
+      }
+    ]
+  },
+  {
+    "id": "1052-t0",
+    "kind": "should_catch",
+    "path": "app/admin/search.py",
+    "line": 64,
+    "mr_title": "admin search by customer name",
+    "human_signal": "suggestion applied",
+    "comments": [
+      {
+        "author": "raj",
+        "body": "ok so overall this reads nicely and I like that you kept the pagination out of it, one thought is whether we want the ordering to be stable here because right now two customers with the same name could come back in either order which the frontend team hit last quarter on the invoices screen, and separately - sorry, long comment - the way the statement gets built here is not something we can ship, that value comes straight off the query string"
+      }
+    ],
+    "hunk": "@@ -61,5 +61,7 @@ def search(conn, request):\n     name = request.args.get(\"name\", \"\")\n \n+    sql = f\"SELECT id, name FROM customers WHERE name LIKE '%{name}%'\"\n+    rows = conn.execute(sql).fetchall()\n \n     return [dict(r) for r in rows]",
+    "added": [
+      {
+        "line": 64,
+        "content": "    sql = f\"SELECT id, name FROM customers WHERE name LIKE '%{name}%'\""
+      },
+      { "line": 65, "content": "    rows = conn.execute(sql).fetchall()" }
+    ],
+    "probes": [
+      {
+        "message": "the SQL statement is assembled by interpolating a caller-supplied value directly into the query text, which allows SQL injection",
+        "is_match": true
+      },
+      {
+        "message": "the query has no ORDER BY, so rows with equal names come back in an unstable order",
+        "is_match": false
+      },
+      {
+        "message": "the database connection is never closed if execute() raises",
+        "is_match": false
+      }
+    ]
+  },
+  {
+    "id": "1067-t2",
+    "kind": "should_not_flag",
+    "path": "src/handlers/charge_test.rs",
+    "line": 19,
+    "mr_title": "cover the charge handler",
+    "human_signal": "ruled a false positive in review",
+    "comments": [
+      { "author": "dee", "body": "looks fine - it's a test, panicking IS the assertion" }
+    ],
+    "hunk": "@@ -16,5 +16,8 @@ mod tests {\n \n+    #[test]\n+    fn charges_a_known_customer() {\n+        let receipt = charge(known_id(), &db()).unwrap();\n+        assert_eq!(receipt.cents, 500);\n     }\n }",
+    "added": [
+      { "line": 19, "content": "    #[test]" },
+      { "line": 20, "content": "    fn charges_a_known_customer() {" },
+      { "line": 21, "content": "        let receipt = charge(known_id(), &db()).unwrap();" },
+      { "line": 22, "content": "        assert_eq!(receipt.cents, 500);" }
+    ],
+    "probes": [
+      {
+        "message": "unwrap() here will panic if charge returns an error",
+        "is_match": true
+      },
+      {
+        "message": "this test does not cover the error branch of charge()",
+        "is_match": false
+      }
+    ]
+  }
+]
