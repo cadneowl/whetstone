@@ -395,7 +395,8 @@ def test_eval_gate_stores_a_record(tmp_path: Path, stub_gate: None) -> None:
     gates_dir = tmp_path / "gates"
     result = runner.invoke(
         app,
-        ["eval", "gate", "--base", skill, "--candidate", skill, "--gates-dir", str(gates_dir)],
+        ["eval", "gate", "--base", skill, "--candidate", skill, "--gates-dir", str(gates_dir),
+         "--yes"],
     )
     assert result.exit_code == 0, result.output
     records = GateStore(gates_dir).list()
@@ -413,8 +414,34 @@ def test_no_save_leaves_nothing_behind(tmp_path: Path, stub_gate: None) -> None:
         app,
         [
             "eval", "gate", "--base", skill, "--candidate", skill,
-            "--gates-dir", str(gates_dir), "--no-save",
+            "--gates-dir", str(gates_dir), "--no-save", "--yes",
         ],
     )
     assert result.exit_code == 0
     assert GateStore(gates_dir).list() == []
+
+
+def test_gate_refuses_to_spend_without_consent(tmp_path: Path, stub_gate: None) -> None:
+    """No confirmation available and no --yes means nothing is spent, not that it proceeds."""
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    result = runner.invoke(
+        app,
+        ["eval", "gate", "--base", skill, "--candidate", skill, "--no-save"],
+    )
+    assert result.exit_code != 0
+    assert "might involve cost" in result.output
+    assert "--yes" in result.output
+
+
+def test_preflight_names_the_backend_and_estimates_the_calls(
+    tmp_path: Path, stub_gate: None
+) -> None:
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    result = runner.invoke(
+        app, ["eval", "gate", "--base", skill, "--candidate", skill, "--no-save", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "backend   anthropic" in result.output
+    assert "LLM call(s)" in result.output
+    # A gate scores both sides, so its estimate must not read like a single run's.
+    assert "doubled" in result.output

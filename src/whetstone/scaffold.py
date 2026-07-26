@@ -1,0 +1,215 @@
+"""Starter step folders, written correctly so nobody has to start from a blank file.
+
+The request this answers was "provide instructions on how to write them, or propose writing them
+yourself so it is done correctly". Prose in a docs folder is instructions somebody has to find,
+read, and transcribe without typos. A generated folder that already runs is instructions they
+cannot get wrong, so the templates below carry their own explanation: every knob is present with
+its default and a comment saying what happens if you change it.
+
+The values here are deliberately conservative. A scaffold is copied far more often than it is read,
+so its defaults become the fleet's defaults, and a generous cap that nobody revisits is how a
+hundred skills quietly start costing ten times what anyone budgeted.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from whetstone.steps import STEP_FILE
+
+EVALUATE_STEP = """\
+# How this skill is scored.
+#
+# Configuration only: there is no prompt and no program here. `whetstone eval run` and
+# `whetstone eval gate` read this file and use it as their defaults, and any flag you pass on the
+# command line overrides it.
+
+description: Score this skill against its promoted eval cases.
+
+# Reviewer passes per case. Raise to 2-3 for an unstable skill to measure variance; every
+# increment multiplies the cost of every run and every gate by the same factor.
+trials: 1
+
+sample:
+  # null scores every case. Set a number once the corpus outgrows what you can afford to run
+  # whole — a few hundred is usually enough to move a score meaningfully.
+  max_cases: null
+  # Selection is a hash of this seed and the case id, so the same seed always draws the same
+  # cases. Both sides of a gate use one draw, which is what keeps the comparison fair. Change it
+  # only to deliberately re-roll which cases you are measuring on.
+  seed: 0
+  # Draw proportionally from each case kind. Turn this off and a sample of a corpus that is mostly
+  # should_catch will sometimes contain no negative cases at all — and a false-positive rate
+  # measured over zero negative cases is a flattering zero.
+  stratify: true
+
+inputs:
+  wiki:
+    # Repo context injected per review, when this skill has a wiki/ folder. Paid for on every case
+    # of every trial on both sides of a gate, which is why these are small.
+    max_pages: 4
+    max_bytes: 24000
+
+model:
+  # Omit any of these to inherit whatever the command resolved (--llm / --model / WHETSTONE_LLM).
+  # effort: high
+"""
+
+IMPROVE_STEP = """\
+# How a guidance change is drafted from this skill's failures.
+#
+# Run with: whetstone skills improve --skill <this skill folder>
+#
+# Whetstone assembles a bounded digest of the last run's failures and renders it into prompt.md.
+# The step never reads eval_cases/ itself, which is what keeps this affordable at a corpus of any
+# size: it sees representatives of the failure *kinds*, never the failures.
+
+description: Draft a guidance change from the failures of the last run.
+
+inputs:
+  failures:
+    # How many failures reach the prompt. These are cluster representatives, not the first N —
+    # 12 here means twelve different kinds of failure, largest group first.
+    max: 12
+    # What counts as the same kind of failure:
+    #   rule        the rule id the reviewer cited (default; falls back to the expectation)
+    #   expectation the specific expectation that failed
+    #   path        the top-level directory, i.e. roughly the subsystem
+    #   none        no clustering; representatives are individual failures
+    cluster_by: rule
+    # Diff shown per failure, in bytes. Raise if your rules need wide context to judge.
+    max_diff_bytes: 2000
+    # Learn from misses, from false positives, or both.
+    outcomes: [fn, fp]
+  wiki:
+    max_pages: 4
+    max_bytes: 24000
+
+# The instructions given to the model. Whetstone supplies the output structure (a complete
+# guidance body, a rationale, and the eval case ids the change should fix), so this file only has
+# to say how to think about the change.
+prompt: prompt.md
+
+# model:
+#   effort: high
+
+# Instead of `prompt:`, a step may set `run:` to have Whetstone invoke your own program: the
+# digest arrives as JSON on stdin, and it must print {"body": ..., "rationale": ...,
+# "targeted_cases": [...]} on stdout. Use it when a prompt genuinely will not do — the declarative
+# form above is what most skills want.
+#
+# run: ["python", "run.py"]
+"""
+
+IMPROVE_PROMPT = """\
+You are tightening the review guidance for `{{skill_id}}`.
+
+Its current recall is {{recall}} and its false-positive rate is {{fp_rate}}, measured over
+{{cases_scored}} of {{cases_total}} eval cases. Those cases are real code review outcomes: a human
+either flagged this code, or deliberately did not.
+
+The reviewer got {{failure_count}} things wrong. Below are {{shown_count}} of them, one per kind of
+failure, largest group first.
+
+{{failures}}
+
+## Current guidance
+
+{{guidance}}
+
+## Repo context
+
+{{wiki}}
+
+## What to do
+
+Rewrite the guidance so those failures would not recur.
+
+- Keep every rule that is already working. You are seeing a sample of failures, not the whole
+  picture, and a rule you have no evidence about is still load-bearing.
+- Prefer sharpening an existing rule over adding a new one. Guidance that grows a rule per failure
+  becomes a checklist no model can apply consistently.
+- A false positive usually means a rule needs a stated exception, not deletion.
+- A miss usually means a rule is too abstract to recognise the pattern in a diff. Say what the code
+  looks like.
+- Write rules that a reader can apply to a diff without access to the rest of the repository.
+
+Return the complete new guidance body, the rationale for the change, and the ids of the eval cases
+this change is meant to fix.
+"""
+
+UPDATE_STEP = """\
+# How this skill's repo context is regenerated.
+#
+# Run with: whetstone skills update --skill <this skill folder> --repo <path to the source repo>
+#
+# Whetstone does not summarize repositories. This step invokes the generator you already run, then
+# indexes what it produces so retrieval can be deterministic. The wiki is part of skill_hash, so a
+# refresh that changes any page retracts a passing gate and the skill must be re-gated before it
+# can be proposed.
+
+description: Regenerate the repo wiki from the openwiki generator.
+
+# Substituted before the command runs:
+#   {{repo}}      the source repository passed with --repo
+#   {{out_dir}}   a temporary directory your generator must write into
+#   {{skill_id}}  this skill's id
+#
+# A list of arguments, never a string: nothing is re-split on spaces and no shell is involved, so
+# a path with a space in it works and a value from your config can never become two arguments.
+run: ["openwiki", "build", "--repo", "{{repo}}", "--out", "{{out_dir}}"]
+
+# Seconds before the generator is killed. Summarizing a large repo is slow; this is not.
+timeout_s: 900
+
+# What your generator must leave in {{out_dir}}:
+#
+#   pages/<name>.md    one markdown file per subject. The first `# heading` becomes its title.
+#   index.yaml         which source paths each page describes (see below).
+#
+# If your generator writes index.yaml itself, delete the `index:` block below — the tool that knows
+# which files a page describes is the right place for that mapping to live. If it only writes
+# pages, declare the mapping here and Whetstone will write index.yaml for you.
+#
+# Globs are matched with `**` meaning "any depth" and `*` meaning "one segment", so `src/auth/*`
+# does NOT match src/auth/nested/thing.rs. A change retrieves the pages whose globs cover the files
+# it touches, ranked by how many of them each page covers.
+
+index:
+  - page: example
+    paths:
+      - "src/**"
+"""
+
+
+def scaffold_files() -> dict[str, str]:
+    """The starter step folders, as relative path → contents.
+
+    Nothing is interpolated: `{{skill_id}}` and friends stay as literal placeholders, because the
+    prompt is rendered per run against a live digest, not frozen at scaffold time.
+    """
+    return {
+        f"evaluate/{STEP_FILE}": EVALUATE_STEP,
+        f"improve/{STEP_FILE}": IMPROVE_STEP,
+        "improve/prompt.md": IMPROVE_PROMPT,
+        f"update/{STEP_FILE}": UPDATE_STEP,
+    }
+
+
+def write_scaffold(skill_dir: str | Path, *, force: bool = False) -> list[str]:
+    """Write the starter steps into a skill folder. Returns the paths written.
+
+    Existing files are never overwritten without `force`: these are edited by hand after the first
+    generation, and a scaffold command that silently reverted someone's improvement prompt would be
+    a very expensive convenience.
+    """
+    root = Path(skill_dir)
+    written: list[str] = []
+    for relative, content in scaffold_files().items():
+        path = root / relative
+        if path.exists() and not force:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        written.append(str(path))
+    return written

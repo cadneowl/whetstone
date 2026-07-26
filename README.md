@@ -26,20 +26,21 @@ See [`docs/milestone-1-eval-harness.md`](docs/milestone-1-eval-harness.md) for t
 5. [Eval cases](#eval-cases)
 6. [Scoring model](#scoring-model)
 7. [The regression gate](#the-regression-gate)
-8. [CLI reference](#cli-reference)
-9. [Run records & reports](#run-records--reports)
-10. [The console (`whetstone ui`)](#the-console-whetstone-ui)
-11. [Configuration (`whetstone.toml`)](#configuration-whetstonetoml)
-12. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
-13. [Providers & the plugin architecture](#providers--the-plugin-architecture)
-14. [The corpus builder](#the-corpus-builder)
-15. [The LLM layer](#the-llm-layer)
-16. [Reviewers & judges](#reviewers--judges)
-17. [Meta-evaluation (validating the judge)](#meta-evaluation-validating-the-judge)
-18. [Testing](#testing)
-19. [Extending Whetstone](#extending-whetstone)
-20. [Environment variables](#environment-variables)
-21. [Repository layout](#repository-layout)
+8. [The skill pipeline](docs/skill-pipeline.md) — `evaluate/`, `improve/`, `update/`, and the wiki
+9. [CLI reference](#cli-reference)
+10. [Run records & reports](#run-records--reports)
+11. [The console (`whetstone ui`)](#the-console-whetstone-ui)
+12. [Configuration (`whetstone.toml`)](#configuration-whetstonetoml)
+13. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
+14. [Providers & the plugin architecture](#providers--the-plugin-architecture)
+15. [The corpus builder](#the-corpus-builder)
+16. [The LLM layer](#the-llm-layer)
+17. [Reviewers & judges](#reviewers--judges)
+18. [Meta-evaluation (validating the judge)](#meta-evaluation-validating-the-judge)
+19. [Testing](#testing)
+20. [Extending Whetstone](#extending-whetstone)
+21. [Environment variables](#environment-variables)
+22. [Repository layout](#repository-layout)
 
 ---
 
@@ -179,7 +180,19 @@ skills/<skill-id>/
     <case-id>/
       case.yaml         # what this case asserts
       change.diff       # the code change under review (unified diff)
+
+  # Optional. A skill without these behaves exactly as it did before they existed.
+  wiki/                 # repo context, retrieved per change and injected into the review prompt
+    index.yaml          #   which source paths each page describes
+    pages/*.md
+  evaluate/step.yaml    # how this skill is scored (sampling, trials, wiki caps)
+  improve/step.yaml     # how a guidance change is drafted from failures  (+ prompt.md)
+  update/step.yaml      # how the wiki is regenerated, by invoking your own generator
 ```
+
+The last four are the **skill pipeline** — each skill's own scripts for keeping itself sharp.
+`whetstone skills scaffold --skill skills/<id>` writes correct starter versions of all of them.
+Full reference: **[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
 
 ### `SKILL.md`
 
@@ -443,12 +456,21 @@ by default, or any local/OpenAI-compatible backend via `--llm` (see [The LLM lay
 | `--base-url TEXT` | preset default | OpenAI-compatible endpoint (env `WHETSTONE_LLM_BASE_URL`) — point at a remote box. |
 | `--api-key-env TEXT` | preset default | Name of the env var holding the API key, if the server needs one. |
 | `--effort TEXT` | `high` | Reviewer effort: `low`/`medium`/`high`/`xhigh`/`max` (Anthropic only). |
-| `--trials INT` | `1` | Trials per eval case (≥1); >1 surfaces variance. |
+| `--trials INT` | skill's `evaluate/` step, else `1` | Trials per eval case (≥1); >1 surfaces variance. |
+| `--sample INT` | skill's `evaluate/` step, else all | Score at most this many cases (deterministic, stratified). |
+| `--sample-seed INT` | skill's `evaluate/` step, else `0` | Seed for the sample. Same seed → same cases. |
 | `--workers INT` | `1` | Evaluate this many cases concurrently. |
 | `--save / --no-save` | on | Store a run record for later inspection (see [Run records](#run-records--reports)). |
 | `--runs-dir PATH` | config | Where run records are stored. |
 | `--dry-run` | off | Validate & summarize the skill; **no model call**, no credentials. |
+| `--yes`, `-y` | off | Skip the cost confirmation (required in CI). |
 | `--json` | off | Emit the full `SkillScore` as JSON instead of a summary. |
+
+Before any model call this prints what it will cost and asks to proceed — the resolved backend and
+model, whether that backend bills, and an upper bound on the number of calls. `--yes` skips the
+question; without either a confirmation or `--yes`, the command aborts rather than assuming consent.
+Defaults for `--trials`, `--sample` and the wiki caps come from the skill's own
+[`evaluate/step.yaml`](docs/skill-pipeline.md) when it has one.
 
 ```bash
 whetstone eval run --skill skills/code-review-rust-error-handling --trials 5
@@ -483,19 +505,28 @@ with `--repo`/`--skill-path`) — e.g. gate a branch against `main`. Backend sel
 | `--base-ref TEXT` / `--candidate-ref TEXT` | — | Git refs to gate instead of folders (needs `--repo`/`--skill-path`). |
 | `--repo PATH` / `--skill-path TEXT` | `.` / — | Repo and skill path within it, for the `--*-ref` modes. |
 | `--llm` / `--model` / `--base-url` / `--api-key-env` | preset | Backend selection — same as `eval run`. |
-| `--trials INT` | `1` | Trials per case. |
+| `--trials INT` | candidate's `evaluate/` step, else `1` | Trials per case. |
+| `--sample INT` | candidate's `evaluate/` step, else all | Cap the cases scored. One draw is shared by both sides. |
+| `--sample-seed INT` | candidate's `evaluate/` step, else `0` | Seed for the sample. |
 | `--recall-tol FLOAT` | `0.0` | Allowed recall drop. |
 | `--fp-tol FLOAT` | `0.0` | Allowed false-positive-rate rise. |
 | `--targeted TEXT` | *(none)* | Case id this change must fix; repeatable. Fails unless it passes. |
 | `--save` / `--no-save` | save | Store a gate record. The console reads these to decide what may be published. |
 | `--gates-dir PATH` | `.whetstone/gates` | Where gate records live. |
 | `--dry-run` | off | Validate both sides; **no model call**. |
+| `--yes`, `-y` | off | Skip the cost confirmation (required in CI). |
 | `--json` | off | Emit the full `GateRecord` as JSON. |
 
 Both sides are scored over the union of their eval cases — see
 [the regression gate](#the-regression-gate). The stored record is what
 [gate-before-propose](#a-gate-result-is-evidence-not-just-output) checks, so a CI job that runs this
 also leaves the evidence the console needs.
+
+A gate scores both sides, so the cost preflight reports double what the same run would. `--sample`
+draws once from the union and hands the same cases to base and candidate, so the comparison stays
+fair; `--targeted` cases are always scored regardless of the draw. Sampling defaults come from the
+**candidate's** `evaluate/step.yaml`, so a branch that changes how a skill is evaluated is gated
+using the policy it proposes.
 
 ```bash
 whetstone eval gate \
@@ -725,6 +756,72 @@ whetstone skills list --root skills
 That warning is not cosmetic: `fp_rate` averages over every `should_not_flag` case, and one built
 from a clean merge establishes only that nobody said anything. See
 [precision evidence](#precision-evidence-that-isnt-just-silence).
+
+### `whetstone skills scaffold`
+
+Write starter `evaluate/`, `improve/` and `update/` steps into a skill folder. The generated files
+are the documentation — every setting is present with its default and a comment saying what changing
+it costs.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--skill PATH` | *(required)* | Skill folder. |
+| `--force` | off | Overwrite files that already exist. |
+
+Existing files are never overwritten without `--force`: `improve/prompt.md` is meant to be rewritten
+in the skill's own voice, and a command that silently reverted that would be an expensive
+convenience.
+
+### `whetstone skills steps`
+
+Show the pipeline steps a skill defines, and validate every one of them. Exits non-zero on a step
+that would not load, which makes it usable as a lint in CI.
+
+```bash
+whetstone skills steps --skill skills/code-review-rust-error-handling
+# evaluate  config only (no model call)
+#           trials=1  sample=all cases
+# improve   prompt
+#           up to 12 failure(s), clustered by rule, 2000B of diff each
+# update    run openwiki build --repo {{repo}} --out {{out_dir}}
+```
+
+### `whetstone skills improve`
+
+Draft a guidance change from what the last run got wrong. Reads the skill's `improve/step.yaml`,
+assembles a **bounded, clustered** digest of the run's failures, and returns a rewritten guidance
+body plus the eval case ids the change should fix.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--skill PATH` | *(required)* | Skill folder. |
+| `--run ID` | most recent | Improve from a specific stored run. |
+| `--out PATH` | stdout | Write the proposed guidance here. |
+| `--dry-run` | off | Print the rendered prompt; no model call. |
+| `--yes` | off | Skip the cost confirmation. |
+| `--llm/--model/--base-url/--api-key-env` | — | Backend selection, as elsewhere. |
+
+Nothing is written to the skill — the output is a proposal, and it prints the `eval gate` command
+that would prove it. Failures are grouped by cause with one representative per group, so what
+reaches the model is one example of each *kind* of failure rather than N copies of the commonest
+one. That is what keeps this affordable at a corpus of any size.
+
+### `whetstone skills update`
+
+Regenerate a skill's repo wiki by running the generator its `update/step.yaml` names. Whetstone does
+not summarize repositories; it invokes yours, checks the output is indexable, and writes it under
+`wiki/`.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--skill PATH` | *(required)* | Skill folder. |
+| `--repo PATH` | `.` | The source repository to summarize. |
+| `--no-write` | off | Report what changed without writing it. |
+
+The wiki is part of `skill_hash`, so a refresh that changes any page **retracts the skill's passing
+gate** and it must be re-gated before it can be proposed.
+
+Full reference: **[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
 
 ### `whetstone providers list`
 
@@ -2221,6 +2318,7 @@ whetstone/
   README.md                 # this file
   docs/
     milestone-1-eval-harness.md   # detailed M1 design
+    skill-pipeline.md             # evaluate/ · improve/ · update/ · the wiki
     decisions.md                  # architecture decision record
   src/whetstone/            # see Architecture
   skills/                   # the skill registry

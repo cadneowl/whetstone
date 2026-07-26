@@ -11,6 +11,7 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalCase, Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
 from whetstone.domain.skill import Reference, Skill, Triggers
+from whetstone.wiki import WIKI_DIR, WikiError, load_wiki
 
 
 class SkillLoadError(ValueError):
@@ -45,6 +46,13 @@ def load_skill(path: str | Path) -> Skill:
         raise SkillLoadError(f"{path}: 'version' must be an integer, got {raw_version!r}") from e
 
     eval_cases = _load_eval_cases(path / "eval_cases", skill_id)
+    try:
+        wiki = load_wiki(path / WIKI_DIR)
+    except WikiError as e:
+        # Surfaced as a skill load failure rather than swallowed: the wiki is inside `skill_hash`,
+        # so a skill that loads with a silently-empty wiki would score against different content
+        # than the one a gate approved.
+        raise SkillLoadError(f"{path}: invalid wiki: {e}") from e
 
     return Skill(
         id=skill_id,
@@ -58,6 +66,7 @@ def load_skill(path: str | Path) -> Skill:
         # `owner` may live in either file; frontmatter wins when both are present.
         owner=str(fm.get("owner") or meta.get("owner") or ""),
         provenance=_load_provenance(meta.get("provenance")),
+        wiki=wiki,
     )
 
 

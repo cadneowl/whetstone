@@ -137,3 +137,85 @@ but" never have to share one string.
 **Consequences:** deleting `.whetstone/gates/` is not free the way deleting `.whetstone/runs/` is
 (C2). Runs are telemetry; gate records are load-bearing, and removing them costs the right to
 propose until the gates are re-run.
+
+---
+
+## ADR-009 — A skill carries its own pipeline; the host owns the budget
+
+**Context.** Skills do not stay the same size or shape. One may hold forty eval cases and another
+forty thousand; a Rust skill and a Terraform skill do not want the same improvement prompt; and only
+the team that owns a skill knows which generator produces its repo context. Driving all of them
+from operator flags means the flags encode the union of every skill's needs, and nobody remembers
+which ones matter for which skill.
+
+**Decision.** Policy moves into the skill folder as three optional steps — `evaluate/`, `improve/`,
+`update/` — declared in YAML with an optional prompt template, and a `run:` escape hatch for the
+minority that need real code. Whetstone keeps the budget: it assembles what a step sees, clusters
+it, truncates it, caps it, and only then renders the prompt.
+
+**Why the split falls there.** A step that could walk `eval_cases/` would work at forty cases and
+fail at forty thousand, and it would fail in the worst way — a prompt that silently grows until it
+is truncated by an API. Since a step is never handed the corpus, a step author cannot get the
+scaling wrong; it is not theirs to get wrong. The cost of that is a step cannot do something we
+did not anticipate without dropping to `run:`, which is the right trade for the default path.
+
+**Failures are clustered, not sliced.** One representative per failure *kind*, largest group first.
+The first twelve failures alphabetically are usually twelve instances of one problem; twelve
+cluster representatives are twelve different things wrong with the guidance. Cluster size is also
+the best proxy available for what a rule change is worth.
+
+**Sampling is a hash, not a draw.** `sha256(seed:case_id)` — so base and candidate see one identical
+set of cases, a sampled gate remains attributable to the guidance, and a result reproduces on any
+machine. `random.sample` here would quietly turn every gate into a coin toss about which cases got
+drawn. Stratifying by case kind keeps a sample of a 90%-positive corpus from containing no negative
+cases and reporting a flattering `fp_rate` of zero. `--targeted` cases bypass sampling entirely: a
+change asserting it fixes case X that is then never scored on X fails for an invisible reason.
+
+## ADR-010 — Repo context is retrieved by path, and is part of `skill_hash`
+
+**Context.** A reviewer seeing only a diff and a list of rules judges every change as if the
+repository had no shape. Teams already run repo summarizers; the useful thing is to let a skill
+review against that output.
+
+**Decision.** A skill may carry `wiki/`: markdown pages plus an index mapping source-path globs to
+pages. At review time the pages covering the changed files are injected after the guidance, labelled
+as background and explicitly not as rules. Whetstone does not generate the wiki — `update/` invokes
+the generator the team already has and indexes what it produces.
+
+**Retrieval is by path, not by meaning.** Not a shortcut: a gate compares two skills over the same
+cases, so retrieval that could return different context on the two sides would make a score
+difference unattributable. Path retrieval is a pure function of the diff. Semantic retrieval would
+also cost an embedding call per case and make the gate noisier — paying more to measure worse.
+
+**The wiki is inside `skill_hash`.** It reaches the review prompt, so regenerating it changes what
+the reviewer sees, and a gate passed against the old context must not still authorise publishing.
+Without this, `whetstone skills update` would be a documented way around C6. Steps themselves are
+*not* hashed — they describe how to run things, not what the model reads while reviewing, so editing
+a sample size does not retract a gate.
+
+**A skill with no wiki hashes exactly as before**, so landing this invalidated no stored gate.
+
+**Caps are enforced at the retrieval boundary and never silent.** Over the page cap the excess is
+dropped and named; over the byte cap the most relevant page is truncated rather than dropped, since
+half of the right page is context and none of it is not.
+
+## ADR-011 — No model call starts without saying what it may cost
+
+**Context.** Every command that reaches a model can spend money, and how much depends on
+configuration an operator may have set weeks ago in an env var they have since forgotten.
+
+**Decision.** A shared preflight prints the resolved backend, model and endpoint, whether that
+backend bills, and an upper bound on the call count — then asks. `--yes` skips it; a local backend
+skips it automatically because nothing can bill.
+
+**"Billed" is three-state.** Local is free, Anthropic and OpenAI are not, and an internal gateway on
+someone's own hardware is genuinely unknown to us. Guessing "free" for the third is the guess that
+costs money; guessing "billed" trains people to ignore the warning. So it says unknown, and unknown
+prompts.
+
+**The estimate is an upper bound and says so.** Judging short-circuits at the first matching
+finding, so real runs come in under it. An estimate that could be exceeded would be worse than
+none — an operator who trusts it once and is billed twice over will never trust it again.
+
+**No confirmation available means abort, not proceed.** The failure mode of guessing wrong is
+somebody's invoice. CI passes `--yes`, which is the same consent given deliberately.

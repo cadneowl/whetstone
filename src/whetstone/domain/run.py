@@ -23,6 +23,7 @@ from whetstone.domain.refs import Region
 from whetstone.domain.score import Confusion, SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort
+from whetstone.wiki import wiki_digest
 
 Outcome = Literal["tp", "fn", "fp", "tn"]
 
@@ -215,10 +216,16 @@ class RunRecord(BaseModel):
 
 
 def skill_hash(skill: Skill) -> str:
-    """Content identity for a skill: its guidance plus every eval case that gates it.
+    """Content identity for a skill: everything that can change what it scores.
 
     Two skills with the same hash are interchangeable for scoring purposes; two with the same
     `version` but different hashes are a stale version bump, which the console surfaces.
+
+    The guidance and the eval cases are the obvious inputs. The wiki is here for the same reason:
+    it reaches the review prompt, so regenerating it changes what the reviewer sees, and a gate
+    passed against the old context must not still authorise publishing. A skill without a wiki
+    hashes exactly as it did before the wiki existed, so no stored gate result is invalidated by
+    the feature merely landing.
     """
     h = hashlib.sha256()
     h.update(skill.id.encode("utf-8"))
@@ -227,4 +234,7 @@ def skill_hash(skill: Skill) -> str:
     for case in sorted(skill.eval_cases, key=lambda c: c.id):
         h.update(b"\0case\0")
         h.update(case.model_dump_json().encode("utf-8"))
+    if not skill.wiki.is_empty():
+        h.update(b"\0wiki\0")
+        h.update(wiki_digest(skill.wiki).encode("utf-8"))
     return h.hexdigest()
