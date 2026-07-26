@@ -28,6 +28,8 @@ htmlcov/
 # Local env / secrets
 .env
 .env.*
+# ...except the committed template, which holds names and no values.
+!.env.example
 
 # OS / editor
 .DS_Store

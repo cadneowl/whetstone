@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 import shutil
 import webbrowser
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from whetstone.corpus.builder import DEFAULT_MAX_CLEAN_FILES, DEFAULT_MAX_DEFECT
 from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
 from whetstone.domain.run import RunEvent, RunRecord
 from whetstone.domain.skill import Skill
+from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, build_llm_client, resolve_backend
 from whetstone.providers.gitlab.provider import GitLabConnector
@@ -36,7 +38,7 @@ from whetstone.service import (
 )
 from whetstone.vcs import export_tree
 
-app = typer.Typer(help="Whetstone — keep agent skills sharp with an evaluated regression gate.")
+app = typer.Typer()
 eval_app = typer.Typer(help="Score skills and gate skill changes.")
 corpus_app = typer.Typer(help="Turn GitLab MR history into candidate eval cases.")
 skills_app = typer.Typer(help="Inspect the skill registry.")
@@ -49,6 +51,32 @@ app.add_typer(skills_app, name="skills")
 app.add_typer(providers_app, name="providers")
 app.add_typer(llm_app, name="llm")
 app.add_typer(runs_app, name="runs")
+
+@app.callback()
+def main(
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Load this instead of the nearest .env"),
+    ] = None,
+) -> None:
+    """Whetstone — keep agent skills sharp with an evaluated regression gate.
+
+    Reads a `.env` from the working directory or above before running anything, so tokens
+    (`ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `JIRA_TOKEN`) and `WHETSTONE_*` settings can live in a
+    file that is never committed. A variable already set in the real environment always wins.
+    """
+    # Here rather than in `load_config`, because that is not on every path: `corpus pull` builds a
+    # connector that reads `GITLAB_TOKEN` without loading config at all, and `eval run` resolves an
+    # API key before it touches the run store. A root callback runs before all of them.
+    if env_file is not None:
+        # Absolute, because this outlives the callback: the config loads later in the same command
+        # read it back, and a relative path would resolve against whatever the CWD is by then.
+        os.environ[ENV_FILE_VAR] = str(env_file.expanduser().resolve())
+    try:
+        load_env_file()
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
 
 RunsDirOpt = Annotated[
     Path | None,

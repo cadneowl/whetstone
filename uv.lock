@@ -893,6 +893,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "typer" },
 ]
@@ -920,6 +921,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },

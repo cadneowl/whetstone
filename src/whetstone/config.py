@@ -1,7 +1,10 @@
 """`whetstone.toml` — one place to say where the skills live and how the console should behave.
 
-Resolution order matches `llm/factory.py`: **CLI flag → environment → file → default**. This module
-covers the last three; callers apply their own flags on top of the result.
+Resolution order matches `llm/factory.py`: **CLI flag → environment → `.env` → file → default**.
+This module covers everything but the flags; callers apply those on top of the result.
+
+Secrets are deliberately not settable here: `whetstone.toml` is committed, so tokens belong in a
+`.env` (see `envfile.py`) or the real environment.
 
 Relative paths in the file resolve against the file's own directory, not the process CWD, so running
 `whetstone` from a subdirectory behaves the same as running it from the repo root.
@@ -15,6 +18,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from whetstone.envfile import load_env_file
 
 CONFIG_FILENAME = "whetstone.toml"
 
@@ -107,7 +112,13 @@ def find_config(start: str | Path | None = None) -> Path | None:
 
 
 def load_config(path: str | Path | None = None, *, start: str | Path | None = None) -> Config:
-    """Load config from `path`, or the nearest `whetstone.toml`, or built-in defaults."""
+    """Load config from `path`, or the nearest `whetstone.toml`, or built-in defaults.
+
+    Loads `.env` first, so a token or setting written there is visible to everything downstream —
+    not just to this function, but to the LLM factory and the provider connectors, which read the
+    environment directly. This is the choke point every entry path already goes through.
+    """
+    load_env_file(start=start)
     source = Path(path) if path is not None else find_config(start)
     data: dict[str, Any] = {}
     if source is not None:

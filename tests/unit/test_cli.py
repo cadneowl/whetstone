@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,78 @@ def test_a_decided_candidate_is_never_rewritten(tmp_path: Path, stub_pull: None)
     assert result.exit_code == 0
     assert "1 already decided" in result.stdout
     assert "diff is noise" in decision.read_text(encoding="utf-8")
+
+
+# --- .env ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def seen_token(monkeypatch: pytest.MonkeyPatch) -> dict[str, str | None]:
+    """Capture the token the GitLab connector would have been built with."""
+    seen: dict[str, str | None] = {}
+
+    def capture(config: dict[str, object]) -> object:
+        seen["token"] = os.environ.get(str(config.get("token_env", "GITLAB_TOKEN")))
+        return object()
+
+    monkeypatch.setattr("whetstone.cli.GitLabConnector.from_config", capture)
+    monkeypatch.delenv("GITLAB_TOKEN", raising=False)
+    return seen
+
+
+@pytest.mark.uses_dotenv
+def test_a_token_in_dotenv_reaches_the_connector(
+    tmp_path: Path, stub_pull: None, seen_token: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why the load is a root callback and not part of `load_config`.
+
+    `corpus pull` builds a connector that reads `GITLAB_TOKEN` and never loads config at all, so
+    hanging `.env` off config loading would have left this exact path unserved.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GITLAB_TOKEN=glpat-from-file\n", encoding="utf-8")
+
+    assert _pull(tmp_path / "candidates").exit_code == 0
+    assert seen_token["token"] == "glpat-from-file"
+
+
+@pytest.mark.uses_dotenv
+def test_the_shell_still_wins_over_dotenv(
+    tmp_path: Path, stub_pull: None, seen_token: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GITLAB_TOKEN=from-the-file\n", encoding="utf-8")
+    monkeypatch.setenv("GITLAB_TOKEN", "from-the-shell")
+
+    assert _pull(tmp_path / "candidates").exit_code == 0
+    assert seen_token["token"] == "from-the-shell"
+
+
+@pytest.mark.uses_dotenv
+def test_env_file_flag_selects_the_file(
+    tmp_path: Path, stub_pull: None, seen_token: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GITLAB_TOKEN=default\n", encoding="utf-8")
+    (tmp_path / "staging.env").write_text("GITLAB_TOKEN=staging\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["--env-file", str(tmp_path / "staging.env"), "corpus", "pull",
+         "--base-url", "https://gitlab.example", "--project", "acme/payments",
+         "--since", "2026-01-01", "--out", str(tmp_path / "candidates")],
+    )
+    assert result.exit_code == 0
+    assert seen_token["token"] == "staging"
+
+
+def test_a_missing_env_file_is_reported_not_ignored(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["--env-file", str(tmp_path / "nope.env"), "providers", "list"])
+    assert result.exit_code != 0
+    assert "does not exist" in result.output
 
 
 # --- the escaped-defect signal -------------------------------------------------
