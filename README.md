@@ -958,9 +958,9 @@ open("report.html", "w", encoding="utf-8").write(render_run_html(record))
 
 ## The console (`whetstone ui`)
 
-A local web console for the two jobs the CLI does badly: **diagnosing why an eval case failed**, and
-**turning review history into eval cases**. Everything else it does — browsing skills, reading run
-history — the CLI can do too; these two it genuinely cannot.
+A local web console for the whole loop: **scoring a skill**, **diagnosing why an eval case
+failed**, **turning review history into eval cases**, **drafting a guidance change from what a run
+got wrong**, and **gating it** — all without leaving the browser.
 
 It is a thin HTTP layer over `whetstone.service` plus a prebuilt single-page app. It holds no state
 of its own: skills are read from disk on every request, runs come from `.whetstone/runs/`, and every
@@ -969,7 +969,8 @@ write it makes lands as a git commit on a branch.
 **Contents:** [Prerequisites](#prerequisites) · [Install](#install) · [Starting it](#starting-it) ·
 [Configuration](#console-configuration) · [First run](#first-run-a-five-minute-tour) ·
 [Screens](#the-screens) · [Reading a failure](#reading-a-failure-the-run-drill-down) ·
-[Triage](#triage-the-full-workflow) · [Security](#security-and-deployment) ·
+[Triage](#triage-the-full-workflow) · [Running work](#running-work-from-the-console) ·
+[Security](#security-and-deployment) ·
 [HTTP API](#http-api) · [Developing](#developing-the-console) ·
 [Troubleshooting](#console-troubleshooting) · [Not built yet](#not-built-yet)
 
@@ -1643,20 +1644,37 @@ See [`ui/README.md`](ui/README.md) for frontend conventions and the dependency-a
 
 ---
 
+### Running work from the console
+
+The console launches everything the CLI does. Nothing in the loop requires a terminal.
+
+| Where | Does |
+|---|---|
+| **Skill → Runs** | *Run evals* — scores the skill, with live progress and cancellation |
+| **Skill → Edit** | *Draft a change* — improve step writes a proposal into the editor |
+| **Skill → Edit** | *Run the gate* — appears exactly where C6 blocks publishing, and clears it |
+| API | `POST /api/jobs/{eval,gate,improve,update}` |
+
+**Nothing starts without saying what it costs.** Every launch takes two clicks: the first fetches
+the plan and shows it — the resolved backend, whether it bills, and an upper bound on the calls —
+and the second starts the work. The banner comes from the same
+[`preflight`](#whetstone-eval-run) code the CLI prints, so the two cannot drift apart. Read-only
+mode blocks every launch; spending money is a write, whatever it leaves on disk.
+
+**Two jobs run at once, at most.** More would only spend faster against the same rate limits. Jobs
+live in memory and do not survive a restart — a finished job's *output* is in the run or gate store
+and is safe, but one still in flight when the server stops is gone rather than resumed.
+
+Progress is polled, not streamed. The console talks to a process on the same machine and a run
+emits roughly one event per case, so a second of latency is not worth an SSE endpoint and its
+reconnection logic on both sides.
+
 ### Not built yet
 
-The console covers browsing, diagnosis, triage, and guidance authoring. Still to come (see
-[`docs/ui-console.md`](docs/ui-console.md) for the plan and its phasing):
-
-- **Run orchestration** — launching evals and gates from the console, with progress, cancellation,
-  cost estimation, and a working practice mode. This is the gap the guidance editor makes most
-  visible: it can tell you a change needs a gate, but it can only hand you the command to run.
 - **A case editor** — hand-writing an eval case with no source merge request. Triage covers the
   case that starts from one.
 - **Compare & judge lab** — diffing two runs with client-side tolerance tuning, and labelling judge
   verdicts to grow the meta-eval set.
-
-Until then, runs are launched with `whetstone eval run` and gates with `whetstone eval gate`.
 
 ---
 

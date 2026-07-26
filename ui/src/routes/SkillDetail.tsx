@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { useSkill, type CaseSummary } from '@/api/client'
 import { Guidance } from '@/components/Guidance'
 import { GuidanceEditor } from '@/components/GuidanceEditor'
+import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
 export function SkillDetail() {
@@ -55,11 +56,28 @@ export function SkillDetail() {
         </Tabs.Content>
 
         <Tabs.Content value="runs">
+          <section className="mb-4 rounded-lg border border-line bg-surface/50 p-3">
+            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <h3 className="text-sm font-medium">Score this skill</h3>
+              <span className="text-xs text-muted">
+                {cases.length} eval case{cases.length === 1 ? '' : 's'}
+              </span>
+            </div>
+            {cases.length === 0 ? (
+              <p className="text-sm text-muted italic">
+                No eval cases to score. Promote some from the triage queue first.
+              </p>
+            ) : (
+              <LaunchButton
+                kind="eval"
+                request={{ skill_id: skill.id }}
+                label="Run evals"
+              />
+            )}
+          </section>
+
           {runs.length === 0 ? (
-            <Empty>
-              Never evaluated. Run <code className="font-mono">whetstone eval run</code> to record
-              one.
-            </Empty>
+            <Empty>Never evaluated. Run the evals above to record one.</Empty>
           ) : (
             <ul className="space-y-1.5">
               {runs.map((run) => (

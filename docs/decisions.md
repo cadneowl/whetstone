@@ -273,3 +273,43 @@ promise, and the scaffold is copied far more often than it is read.
 
 **The skill sets the default, the operator gets the last word.** A skill that knows it wants local
 hardware says so once; the person running it can still override per command.
+
+## ADR-015 — The console runs the work, and says what it costs first
+
+**Context.** Every measurement handed the operator back to a terminal. The console could show what
+a run produced and could stage a guidance edit, but the moment a number was needed it stopped —
+and the guidance editor said so out loud, stating the rule that blocked publishing and then
+printing a command to satisfy it elsewhere. That made C6 read as an obstacle rather than a step.
+
+**Decision.** A thread-backed job runner, launched from four routes: eval, gate, improve, update.
+The console drives all of them.
+
+**Threads, not processes or a queue.** The work is almost entirely waiting on a model, and the
+harness was already built for it — `run_skill_recorded` takes an `on_event` callback and a
+`threading.Event` to cancel. A broker would add an operational dependency to a tool that currently
+needs none.
+
+**Polled, not streamed.** SSE delivers a second sooner and costs a streaming route, an
+`EventSource` client and reconnection logic on both sides. The console talks to a process on the
+same machine and a run emits roughly one event per case.
+
+**In memory, not persisted.** A finished job's output is in the run or gate store and survives; a
+job in flight when the server stops is lost. Persisting partial runs would mean owning a schema for
+half a measurement, which is worse than a job the operator restarts.
+
+**Capped at two.** More concurrency does not finish sooner against the same rate limits; it only
+spends faster.
+
+**Every launch is two clicks.** The first fetches the plan, the second starts the work. Both the
+banner and the estimate come from `preflight`, the same code the CLI prints, so the surfaces cannot
+drift into disagreeing about what a run costs. Read-only mode blocks launches — spending money is a
+write regardless of what it leaves on disk.
+
+**Where the CLI refuses, the console warns.** `skills improve` on a run with no failures is refused
+outright by the CLI, because `--yes` would otherwise spend with nothing on screen to stop it. The
+console has no `--yes`: every launch is a click on a banner, so the fact goes into the banner as a
+warning and the operator decides. Rewriting passing guidance is a legitimate thing to want.
+
+**A drafted proposal is not committed.** `improve` returns the body into the editor; staging is a
+separate act. The value of a draft is that a person decides whether it is an improvement, and a
+machine-written rule then takes the identical path a hand-written one does — stage, gate, propose.

@@ -23,8 +23,9 @@ the API can show the same warning the CLI does, and it can be tested without a m
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from whetstone.domain.skill import Skill
 from whetstone.llm.factory import LOCAL_PRESETS, Backend
@@ -45,27 +46,30 @@ BILLING_NOTE: dict[Billing, str] = {
 }
 
 
-@dataclass(frozen=True)
-class Estimate:
+class Estimate(BaseModel):
     """An upper bound on model calls, with the arithmetic that produced it."""
 
     calls: int
     basis: str
 
 
-@dataclass
-class Plan:
-    """What is about to run, against what, at what cost."""
+class Plan(BaseModel):
+    """What is about to run, against what, at what cost.
+
+    A pydantic model rather than a dataclass because the console shows this too: the browser must
+    be able to render the identical banner the CLI prints, or the two would drift into disagreeing
+    about what a run costs.
+    """
 
     action: str
     backend: str
     model: str
-    base_url: str | None
+    base_url: str | None = None
     billing: Billing
     estimate: Estimate | None = None
     # Anything else worth seeing before committing: sampling, wiki injection, dropped context.
-    details: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+    details: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
     @property
     def spends_money(self) -> bool:

@@ -37,6 +37,19 @@ export type StagedSkill = Schemas['StagedSkill']
 export type Proposal = Schemas['Proposal']
 export type Verdict = Schemas['Verdict']
 export type GateRecord = Schemas['GateRecord']
+export type Job = Schemas['Job']
+export type JobKind = Job['kind']
+export type JobState = Job['state']
+export type Plan = Schemas['Plan']
+export type JobRequest = {
+  skill_id: string
+  trials?: number | null
+  sample?: number | null
+  targeted?: string[]
+  instruction?: string
+  stale_ok?: boolean
+  repo?: string
+}
 
 /** The shape the API returns for a handled failure — see `ui/errors.py`. */
 export interface ApiProblem {
@@ -102,6 +115,8 @@ export const keys = {
   proposal: (id: string) => ['proposal', id] as const,
   reviews: (skillId?: string) => ['reviews', skillId ?? 'all'] as const,
   review: (id: string) => ['review', id] as const,
+  jobs: ['jobs'] as const,
+  job: (id: string) => ['job', id] as const,
 }
 
 export function useConsoleConfig() {
@@ -346,4 +361,83 @@ function invalidateSkill(client: ReturnType<typeof useQueryClient>, skillId: str
   void client.invalidateQueries({ queryKey: keys.skill(skillId) })
   void client.invalidateQueries({ queryKey: keys.skills })
   void client.invalidateQueries({ queryKey: keys.git })
+}
+
+// --- jobs ---------------------------------------------------------------------
+
+/**
+ * Work the console launches: scoring a skill, gating a proposal, drafting a change.
+ *
+ * Polled rather than streamed. The console talks to a process on the same machine and a run emits
+ * roughly one event per case, so a second of latency buys nothing worth an SSE endpoint, an
+ * EventSource client and reconnection logic on both sides.
+ */
+export function useJobs() {
+  return useQuery({
+    queryKey: keys.jobs,
+    queryFn: () => get<Job[]>('/api/jobs'),
+    // Only while something is in flight: a console left open on a finished list should be idle.
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((j) => j.state === 'running') ? POLL_MS : false,
+  })
+}
+
+export function useJob(id: string | null) {
+  const client = useQueryClient()
+  return useQuery({
+    queryKey: keys.job(id ?? ''),
+    enabled: Boolean(id),
+    queryFn: async () => {
+      const job = await get<Job>(`/api/jobs/${encodeURIComponent(id!)}`)
+      if (job.state !== 'running') onJobSettled(client, job)
+      return job
+    },
+    refetchInterval: (query) => (query.state.data?.state === 'running' ? POLL_MS : false),
+  })
+}
+
+const POLL_MS = 900
+
+/** What a finished job invalidates — the same reads its result just changed. */
+function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
+  void client.invalidateQueries({ queryKey: keys.jobs })
+  if (job.kind === 'eval') {
+    void client.invalidateQueries({ queryKey: ['runs'] })
+    void client.invalidateQueries({ queryKey: keys.skill(job.skill_id) })
+    void client.invalidateQueries({ queryKey: keys.skills })
+  }
+  // A gate verdict is exactly what decides whether Propose is available.
+  if (job.kind === 'gate' || job.kind === 'update') invalidateSkill(client, job.skill_id)
+}
+
+export function usePlanJob(kind: JobKind) {
+  return useMutation({
+    mutationFn: (request: JobRequest) => send<Plan>('POST', `/api/jobs/${kind}/plan`, request),
+  })
+}
+
+export function useLaunchJob(kind: JobKind) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (request: JobRequest) => send<Job>('POST', `/api/jobs/${kind}`, request),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.jobs }),
+  })
+}
+
+export function useCancelJob() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => send<Job>('POST', `/api/jobs/${encodeURIComponent(id)}/cancel`),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.jobs }),
+  })
+}
+
+/** Commit a drafted guidance body to the skill's branch — the same branch the editor writes to. */
+export function useStageProposal(skillId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (body: string) =>
+      send<Record<string, string>>('POST', '/api/jobs/improve/stage', { skill_id: skillId, body }),
+    onSuccess: () => invalidateSkill(client, skillId),
+  })
 }
