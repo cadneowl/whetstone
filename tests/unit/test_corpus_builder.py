@@ -14,6 +14,7 @@ from whetstone.corpus.builder import (
     route_to_skill,
     write_candidate,
 )
+from whetstone.corpus.model import CandidateCase
 from whetstone.domain.change import (
     CodeChange,
     FileChange,
@@ -477,6 +478,51 @@ def test_pull_candidates_over_connector() -> None:
     cands = pull_candidates(fake, REPO, datetime(2026, 1, 1), [RUST_SKILL])
     assert [c.kind for c in cands] == ["should_catch", "should_not_flag"]
     assert all(c.provenance.ref == "acme/payments!812" for c in cands)
+
+
+# --- the conversation a candidate came from ------------------------------------
+
+
+def test_a_candidate_carries_the_thread_it_was_derived_from() -> None:
+    """The builder reduces a thread to one `semantic` string and a number.
+
+    Triage is asked whether that reduction was fair, which is unanswerable if the thread is gone.
+    """
+    cands = build_candidates(_reviewed([_applied_suggestion_thread()]), [RUST_SKILL])
+    discussion = cands[0].discussion
+
+    assert [(c.author, c.body) for c in discussion.comments] == [
+        ("reviewer_a", "Don't unwrap here.")
+    ]
+    assert discussion.resolved is True
+    assert discussion.suggestion == PROPOSED
+    assert discussion.suggestion_applied is True
+    assert not discussion.empty
+
+
+def test_the_accepted_fix_carries_the_same_conversation() -> None:
+    """Its whole claim is "this is what the reviewer asked for" — shown without the asking, it is
+    an unexplained blob of code."""
+    cands = build_candidates(_reviewed([_applied_suggestion_thread()]), [RUST_SKILL])
+    assert cands[1].kind == "should_not_flag"
+    assert cands[1].discussion.comments == cands[0].discussion.comments
+
+
+def test_a_comment_free_merge_still_names_the_merge_request() -> None:
+    """"Nobody said anything about this" is a claim a person should be able to go and check."""
+    reviewed = _reviewed([])
+    cands = build_candidates(reviewed, [RUST_SKILL])
+
+    assert cands and all(c.provenance.human_signal == "merged clean" for c in cands)
+    assert cands[0].discussion.empty
+    assert cands[0].discussion.mr_title == reviewed.mr.title
+
+
+def test_a_candidate_written_before_discussions_existed_still_loads() -> None:
+    """Queues on disk predate the field; a missing one is absent evidence, not a parse error."""
+    payload = build_candidates(_reviewed([_applied_suggestion_thread()]))[0].model_dump(mode="json")
+    del payload["discussion"]
+    assert CandidateCase.model_validate(payload).discussion.empty
 
 
 # --- one bad merge request must not end the walk -------------------------------

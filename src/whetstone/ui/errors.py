@@ -26,6 +26,10 @@ class Unprocessable(Exception):
     """The resource exists but cannot be used as asked."""
 
 
+class Conflict(Exception):
+    """The request is well-formed but disagrees with a decision already recorded."""
+
+
 class Misconfigured(Exception):
     """The deployment is set up wrongly — the caller's request was fine."""
 
@@ -38,6 +42,10 @@ def install_handlers(app: FastAPI) -> None:
     @app.exception_handler(Unprocessable)
     async def _unprocessable(request: Request, exc: Unprocessable) -> JSONResponse:
         return _problem(HTTP_422_VALIDATION, str(exc))
+
+    @app.exception_handler(Conflict)
+    async def _conflict(request: Request, exc: Conflict) -> JSONResponse:
+        return _problem(status.HTTP_409_CONFLICT, str(exc))
 
     @app.exception_handler(Misconfigured)
     async def _misconfigured(request: Request, exc: Misconfigured) -> JSONResponse:

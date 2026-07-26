@@ -9,6 +9,8 @@ import { CaseDetail } from './routes/CaseDetail'
 import { RunsIndex } from './routes/RunsIndex'
 import { RunDetail } from './routes/RunDetail'
 import { Triage } from './routes/Triage'
+import { ReviewsIndex } from './routes/ReviewsIndex'
+import { ReviewDetail } from './routes/ReviewDetail'
 import './index.css'
 
 const router = createBrowserRouter([
@@ -19,6 +21,8 @@ const router = createBrowserRouter([
       { index: true, element: <SkillsIndex /> },
       { path: 'skills/:skillId', element: <SkillDetail /> },
       { path: 'skills/:skillId/cases/:caseId', element: <CaseDetail /> },
+      { path: 'reviews', element: <ReviewsIndex /> },
+      { path: 'reviews/:reviewId', element: <ReviewDetail /> },
       { path: 'triage', element: <Triage /> },
       { path: 'runs', element: <RunsIndex /> },
       { path: 'runs/:runId', element: <RunDetail /> },

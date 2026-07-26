@@ -22,6 +22,11 @@ SIGNAL_OPEN = "reviewer comment left open"
 SIGNAL_CLEAN = "merged clean"
 SIGNAL_SUGGESTED_FIX = "suggested fix applied"
 SIGNAL_ESCAPED_DEFECT = "escaped defect"
+# From adjudicating the skill's own output on a live change (`reviews.py`) rather than mining what
+# humans happened to do. Every other signal infers what a reviewer *should* have said from what
+# people said to each other; these two are a direct ruling on what it actually said.
+SIGNAL_FINDING_CONFIRMED = "finding confirmed"
+SIGNAL_FINDING_REJECTED = "finding rejected"
 
 # How strong a `should_not_flag` case's evidence is.
 #
@@ -37,6 +42,9 @@ EVIDENCE_UNCLASSIFIED = "unclassified"
 PRECISION_EVIDENCE: dict[str, str] = {
     SIGNAL_DECLINED: EVIDENCE_CONFIRMED,
     SIGNAL_SUGGESTED_FIX: EVIDENCE_CONFIRMED,
+    # The least ambiguous negative there is: a person looked at this exact finding, on this exact
+    # code, and said it was wrong. Nothing is being inferred from what anyone did or did not say.
+    SIGNAL_FINDING_REJECTED: EVIDENCE_CONFIRMED,
     SIGNAL_CLEAN: EVIDENCE_SILENCE,
 }
 

@@ -10,6 +10,7 @@ import re
 import threading
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -19,10 +20,13 @@ from whetstone.corpus.builder import (
     DEFAULT_MAX_CLEAN_FILES,
     DEFAULT_MAX_DEFECT_FILES,
     SkipHandler,
+    candidate_from_finding,
     pull_candidates,
     pull_defect_candidates,
+    write_candidate,
 )
 from whetstone.corpus.model import CandidateCase
+from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import (
     EVIDENCE_CONFIRMED,
     EVIDENCE_SILENCE,
@@ -41,6 +45,7 @@ from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.counting import CountingClient
 from whetstone.providers.base import IssueConnector, ReviewConnector
 from whetstone.reviewer.llm_reviewer import LLMReviewer
+from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
 
 
@@ -120,6 +125,139 @@ def record_eval(
         cases=cases,
         score=score,
     )
+
+
+def record_review(
+    skill: Skill,
+    change: CodeChange,
+    client: LLMClient,
+    *,
+    source: ReviewSource = "merge_request",
+    ref: str = "",
+    url: str = "",
+    title: str = "",
+    reviewer_effort: Effort = "high",
+    backend: str = "",
+    model: str = "",
+    practice_mode: bool = False,
+    principal: str = "",
+    now: datetime | None = None,
+) -> ReviewRecord:
+    """Run a skill over a change that is not an eval case, and record what it said.
+
+    No judge. There are no expectations to judge against — that is the entire point. `run_eval`
+    asks "did the reviewer agree with a case we already wrote"; this asks "what does the reviewer
+    say about code nobody has labelled yet", and the answer is what a person then rules on.
+
+    `skill_hash` is stored so a ruling can be tied to the guidance that produced it. Findings from
+    guidance that has since been rewritten describe a reviewer that no longer exists.
+    """
+    counted = CountingClient(client)
+    reviewer = LLMReviewer(counted, effort=reviewer_effort)
+
+    started_at = now or datetime.now(UTC)
+    clock = time.perf_counter()
+    findings = reviewer.review(skill, change)
+    duration = time.perf_counter() - clock
+
+    return ReviewRecord(
+        id=new_review_id(skill.id, started_at),
+        created_at=started_at,
+        principal=principal,
+        skill_id=skill.id,
+        skill_version=skill.version,
+        skill_hash=skill_hash(skill),
+        source=source,
+        ref=ref,
+        url=url,
+        title=title,
+        base_ref=change.base_ref,
+        head_ref=change.head_ref,
+        backend=backend,
+        model=model,
+        reviewer_effort=reviewer_effort,
+        practice_mode=practice_mode,
+        duration_s=duration,
+        llm_calls=counted.calls,
+        change=change,
+        findings=findings,
+    )
+
+
+class AlreadyDecided(Exception):
+    """A ruling would rewrite a candidate somebody has already promoted or rejected."""
+
+
+def candidate_id_for(record: ReviewRecord, index: int) -> str:
+    """Stable per (review, finding), so re-ruling replaces rather than accumulates.
+
+    The review id is already unique and safe, which also keeps two reviews of the same merge
+    request — before and after a guidance edit — from writing over each other.
+    """
+    return f"{record.id}-f{index}"
+
+
+def apply_ruling(
+    record: ReviewRecord,
+    index: int,
+    *,
+    correct: bool,
+    note: str = "",
+    principal: str = "",
+    candidates_dir: Path,
+    skills: list[Skill] | None = None,
+    now: datetime | None = None,
+) -> tuple[ReviewRecord, CandidateCase]:
+    """Rule on one finding: write the candidate, and return the record with the verdict on it.
+
+    Shared by the console and `review --import` so the two cannot drift — a ruling that mints a
+    candidate through one path and not the other would be the kind of bug nobody notices until the
+    corpus is already missing half its strongest evidence.
+
+    Raises `IndexError` for an unknown finding, `ValueError` when the finding cites code the change
+    does not contain, and `AlreadyDecided` when the candidate this would rewrite has already been
+    promoted or rejected in triage.
+    """
+    if index < 0 or index >= len(record.findings):
+        raise IndexError(
+            f"review {record.id!r} has {len(record.findings)} finding(s); there is no {index}"
+        )
+
+    directory = Path(candidates_dir) / candidate_id_for(record, index)
+    if (directory / "decision.json").is_file():
+        # Rewriting it would be silent: the queue hides decided candidates, so the new ruling would
+        # never appear — and if the old one was promoted, the committed eval case would no longer
+        # match the record it came from. `undo_verdict` refuses the same case for the same reason.
+        raise AlreadyDecided(
+            f"finding {index} was already promoted or rejected in triage as "
+            f"{candidate_id_for(record, index)!r}. Undo that decision first, or leave the ruling "
+            "as it stands — changing it here would not reach the case that was already committed."
+        )
+
+    candidate = candidate_from_finding(
+        record.findings[index],
+        record.change,
+        correct=correct,
+        candidate_id=candidate_id_for(record, index),
+        ref=record.ref or record.id,
+        note=note,
+        skills=skills or [],
+    )
+
+    write_candidate(candidate, directory)
+    (directory / "candidate.json").write_text(candidate.model_dump_json(indent=2), encoding="utf-8")
+
+    updated = record.with_verdict(
+        FindingVerdict(
+            finding_index=index,
+            correct=correct,
+            at=now or datetime.now(UTC),
+            principal=principal,
+            note=note,
+            candidate_id=candidate.id,
+        )
+    )
+    return updated, candidate
 
 
 def union_cases(base: Skill, candidate: Skill) -> list[EvalCase]:

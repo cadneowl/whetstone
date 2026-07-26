@@ -20,6 +20,13 @@ export type Outcome = ExpectationOutcome['outcome']
 export type Queue = Schemas['Queue']
 export type QueueItem = Schemas['QueueItem']
 export type CaseEdits = Schemas['CaseEdits']
+export type CandidateCase = Schemas['CandidateCase']
+export type Discussion = Schemas['Discussion']
+export type ReviewRecord = Schemas['ReviewRecord']
+export type ReviewSummary = Schemas['ReviewSummary']
+export type ReviewListItem = Schemas['ReviewListItem']
+export type ReviewDetail = Schemas['ReviewDetail']
+export type FindingVerdict = Schemas['FindingVerdict']
 export type PreparedCase = Schemas['PreparedCase']
 export type PromoteResponse = Schemas['PromoteResponse']
 export type Batch = Schemas['Batch']
@@ -93,6 +100,8 @@ export const keys = {
   candidates: ['candidates'] as const,
   batch: ['batch'] as const,
   proposal: (id: string) => ['proposal', id] as const,
+  reviews: (skillId?: string) => ['reviews', skillId ?? 'all'] as const,
+  review: (id: string) => ['review', id] as const,
 }
 
 export function useConsoleConfig() {
@@ -279,6 +288,57 @@ export function useSaveMeta() {
       }),
     onSuccess: (staged) => invalidateSkill(client, staged.prepared.skill_id),
   })
+}
+
+// --- live reviews ---------------------------------------------------------------
+
+export function useReviews(skillId?: string) {
+  const query = skillId ? `?skill_id=${encodeURIComponent(skillId)}` : ''
+  return useQuery({
+    queryKey: keys.reviews(skillId),
+    queryFn: () => get<ReviewListItem[]>(`/api/reviews${query}`),
+  })
+}
+
+export function useReview(id: string) {
+  return useQuery({
+    queryKey: keys.review(id),
+    queryFn: () => get<ReviewDetail>(`/api/reviews/${encodeURIComponent(id)}`),
+  })
+}
+
+/** Mark one finding correct or false. Mints the candidate that holds the skill to the ruling. */
+export function useRuleOnFinding(reviewId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ index, correct, note }: { index: number; correct: boolean; note?: string }) =>
+      send<{ record: ReviewRecord; candidate: CandidateCase }>(
+        'POST',
+        `/api/reviews/${encodeURIComponent(reviewId)}/findings/${index}/verdict`,
+        { correct, note: note ?? '' },
+      ),
+    onSuccess: () => invalidateReview(client, reviewId),
+  })
+}
+
+export function useUndoFindingVerdict(reviewId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (index: number) =>
+      send<ReviewRecord>(
+        'DELETE',
+        `/api/reviews/${encodeURIComponent(reviewId)}/findings/${index}/verdict`,
+      ),
+    onSuccess: () => invalidateReview(client, reviewId),
+  })
+}
+
+function invalidateReview(client: ReturnType<typeof useQueryClient>, reviewId: string) {
+  void client.invalidateQueries({ queryKey: keys.review(reviewId) })
+  void client.invalidateQueries({ queryKey: ['reviews'] })
+  // A ruling adds to — or removes from — the triage queue.
+  void client.invalidateQueries({ queryKey: keys.candidates })
+  void client.invalidateQueries({ queryKey: keys.batch })
 }
 
 function invalidateSkill(client: ReturnType<typeof useQueryClient>, skillId: string) {

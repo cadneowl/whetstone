@@ -199,6 +199,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Reviews */
+        get: operations["list_reviews_api_reviews_get"];
+        put?: never;
+        /**
+         * Upload Review
+         * @description Ingest a review produced anywhere: the change, the skill's findings, and any rulings.
+         *
+         *     Whetstone does not have to be the thing that runs the reviewer. The skill may well run in CI or
+         *     an agent harness against the real merge request; what has to come back here are the *labels*,
+         *     because this is where the corpus and the gate live.
+         *
+         *     Rulings may ride along in the same payload, so one call carries the whole loop — the change,
+         *     what the skill said about it, and what a person thought of each part.
+         */
+        post: operations["upload_review_api_reviews_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{review_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Review */
+        get: operations["get_review_api_reviews__review_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{review_id}/findings/{index}/verdict": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rule On Finding
+         * @description Mark one finding correct or false, and mint the eval case that holds the skill to it.
+         */
+        post: operations["rule_on_finding_api_reviews__review_id__findings__index__verdict_post"];
+        /**
+         * Undo Verdict
+         * @description Take back a ruling, removing the candidate it minted.
+         *
+         *     A candidate somebody has already promoted or rejected is left alone: undoing a ruling is
+         *     correcting a mistake here, not reaching into the queue to overrule a decision someone else made
+         *     there — and a promotion is already a commit on a branch, which this cannot revert anyway.
+         */
+        delete: operations["undo_verdict_api_reviews__review_id__findings__index__verdict_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs": {
         parameters: {
             query?: never;
@@ -438,6 +511,7 @@ export interface components {
             change: components["schemas"]["CodeChange"];
             /** Confidence */
             confidence: number;
+            discussion?: components["schemas"]["Discussion"];
             /** Expect */
             expect: components["schemas"]["Expectation"][];
             /** Id */
@@ -453,6 +527,11 @@ export interface components {
              * @default
              */
             rationale: string;
+            /**
+             * Suggested Rule Id
+             * @default
+             */
+            suggested_rule_id: string;
             /** Suggested Skill */
             suggested_skill?: string | null;
         };
@@ -732,6 +811,66 @@ export interface components {
             candidate_id: string;
             decision: components["schemas"]["Decision"];
         };
+        /**
+         * Discussion
+         * @description The review conversation behind a candidate — what the builder read to decide it was one.
+         *
+         *     Carried on the candidate rather than fetched on demand. Triage happens long after the pull,
+         *     often by someone who cannot reach the merge request, and a case whose evidence is a hyperlink
+         *     is a case nobody checks.
+         *
+         *     It exists because the builder reduces a whole thread to a single `semantic` string and a
+         *     confidence number. Without the thread beside them, those are a verdict with its evidence
+         *     removed — and the judgement being asked for is precisely whether that reduction was fair.
+         */
+        Discussion: {
+            /**
+             * Comments
+             * @default []
+             */
+            comments: components["schemas"]["DiscussionComment"][];
+            /**
+             * Mr Title
+             * @default
+             */
+            mr_title: string;
+            /**
+             * Mr Url
+             * @default
+             */
+            mr_url: string;
+            /**
+             * Resolved
+             * @default false
+             */
+            resolved: boolean;
+            /**
+             * Suggestion
+             * @default
+             */
+            suggestion: string;
+            /**
+             * Suggestion Applied
+             * @default false
+             */
+            suggestion_applied: boolean;
+        };
+        /**
+         * DiscussionComment
+         * @description One message in the review thread a candidate was derived from.
+         */
+        DiscussionComment: {
+            /**
+             * Author
+             * @default
+             */
+            author: string;
+            /**
+             * Body
+             * @default
+             */
+            body: string;
+        };
         /** EvalCase */
         EvalCase: {
             change: components["schemas"]["CodeChange"];
@@ -857,6 +996,40 @@ export interface components {
             severity: components["schemas"]["Severity"];
             /** Skill Id */
             skill_id: string;
+        };
+        /**
+         * FindingVerdict
+         * @description A person's ruling on one finding.
+         *
+         *     `candidate_id` is set once the ruling has been turned into a triage candidate, which is what
+         *     makes minting idempotent: re-ruling the same finding replaces the verdict rather than filling
+         *     the queue with duplicates of it.
+         */
+        FindingVerdict: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /**
+             * Candidate Id
+             * @default
+             */
+            candidate_id: string;
+            /** Correct */
+            correct: boolean;
+            /** Finding Index */
+            finding_index: number;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Principal
+             * @default
+             */
+            principal: string;
         };
         /**
          * GateConfig
@@ -1025,6 +1198,42 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * IngestFinding
+         * @description One comment the skill made. `skill_id` is not repeated — the upload names it once.
+         */
+        IngestFinding: {
+            /** Confidence */
+            confidence?: number | null;
+            /** Line */
+            line?: number | null;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /** Path */
+            path: string;
+            /** Rule Id */
+            rule_id?: string | null;
+            /** @default 20 */
+            severity: components["schemas"]["Severity"];
+        };
+        /**
+         * IngestVerdict
+         * @description A ruling supplied alongside the findings, so one call carries the whole loop.
+         */
+        IngestVerdict: {
+            /** Correct */
+            correct: boolean;
+            /** Finding Index */
+            finding_index: number;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
         };
         /**
          * JudgeVerdictRecord
@@ -1274,6 +1483,305 @@ export interface components {
             head: string;
             /** Remote */
             remote?: string | null;
+        };
+        /** ReviewDetail */
+        ReviewDetail: {
+            /**
+             * Diff
+             * @default
+             */
+            diff: string;
+            record: components["schemas"]["ReviewRecord"];
+            /**
+             * Skill Ids
+             * @default []
+             */
+            skill_ids: string[];
+            /**
+             * Stale Skill
+             * @default false
+             */
+            stale_skill: boolean;
+        };
+        /**
+         * ReviewListItem
+         * @description One review as it appears in a list — enough to choose which to work on.
+         */
+        ReviewListItem: {
+            /**
+             * Stale Skill
+             * @default false
+             */
+            stale_skill: boolean;
+            summary: components["schemas"]["ReviewSummary"];
+        };
+        /**
+         * ReviewRecord
+         * @description One pass of a skill over one change, plus whatever has been ruled on so far.
+         */
+        ReviewRecord: {
+            /**
+             * Backend
+             * @default
+             */
+            backend: string;
+            /**
+             * Base Ref
+             * @default
+             */
+            base_ref: string;
+            change: components["schemas"]["CodeChange"];
+            /** Confirmed */
+            readonly confirmed: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Duration S
+             * @default 0
+             */
+            duration_s: number;
+            /**
+             * Findings
+             * @default []
+             */
+            findings: components["schemas"]["Finding"][];
+            /**
+             * Head Ref
+             * @default
+             */
+            head_ref: string;
+            /** Id */
+            id: string;
+            /**
+             * Llm Calls
+             * @default 0
+             */
+            llm_calls: number;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /** Pending */
+            readonly pending: number;
+            /**
+             * Practice Mode
+             * @default false
+             */
+            practice_mode: boolean;
+            /**
+             * Principal
+             * @default
+             */
+            principal: string;
+            /**
+             * Ref
+             * @default
+             */
+            ref: string;
+            /** Rejected */
+            readonly rejected: number;
+            /**
+             * Reviewer Effort
+             * @default high
+             */
+            reviewer_effort: string;
+            /**
+             * Skill Hash
+             * @default
+             */
+            skill_hash: string;
+            /**
+             * Skill Hash Assumed
+             * @default false
+             */
+            skill_hash_assumed: boolean;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Skill Version
+             * @default 0
+             */
+            skill_version: number;
+            /**
+             * Source
+             * @default merge_request
+             * @enum {string}
+             */
+            source: "merge_request" | "diff";
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+            /**
+             * Url
+             * @default
+             */
+            url: string;
+            /**
+             * Verdicts
+             * @default []
+             */
+            verdicts: components["schemas"]["FindingVerdict"][];
+        };
+        /**
+         * ReviewSummary
+         * @description A review as a list row: everything the row shows and nothing it does not.
+         *
+         *     Deliberately not the whole record. That carries the entire `CodeChange` — every file, every
+         *     line of every diff — so listing fifty reviews would ship fifty diffs to draw fifty lines of
+         *     text, and the browser would then throw all of them away.
+         */
+        ReviewSummary: {
+            /**
+             * Confirmed
+             * @default 0
+             */
+            confirmed: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Findings
+             * @default 0
+             */
+            findings: number;
+            /** Id */
+            id: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Pending
+             * @default 0
+             */
+            pending: number;
+            /**
+             * Ref
+             * @default
+             */
+            ref: string;
+            /**
+             * Rejected
+             * @default 0
+             */
+            rejected: number;
+            /**
+             * Skill Hash Assumed
+             * @default false
+             */
+            skill_hash_assumed: boolean;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Skill Version
+             * @default 0
+             */
+            skill_version: number;
+            /**
+             * Source
+             * @default merge_request
+             * @enum {string}
+             */
+            source: "merge_request" | "diff";
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+            /**
+             * Url
+             * @default
+             */
+            url: string;
+        };
+        /**
+         * ReviewUpload
+         * @description A review run anywhere, posted here.
+         *
+         *     Whetstone does not have to be the thing that runs your reviewer. Its value is the corpus and
+         *     the gate; the skill itself may well run in CI, in an agent harness, or in someone's editor.
+         *     This is how the labels get back regardless.
+         */
+        ReviewUpload: {
+            /**
+             * Backend
+             * @default
+             */
+            backend: string;
+            /**
+             * Base Ref
+             * @default
+             */
+            base_ref: string;
+            /** Diff */
+            diff: string;
+            /**
+             * Findings
+             * @default []
+             */
+            findings: components["schemas"]["IngestFinding"][];
+            /**
+             * Head Ref
+             * @default
+             */
+            head_ref: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Ref
+             * @default
+             */
+            ref: string;
+            /**
+             * Repo
+             * @default local:uploaded
+             */
+            repo: string;
+            /**
+             * Skill Hash
+             * @default
+             */
+            skill_hash: string;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Skill Version
+             * @default 0
+             */
+            skill_version: number;
+            /**
+             * Source
+             * @default merge_request
+             * @enum {string}
+             */
+            source: "merge_request" | "diff";
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+            /**
+             * Url
+             * @default
+             */
+            url: string;
+            /**
+             * Verdicts
+             * @default []
+             */
+            verdicts: components["schemas"]["IngestVerdict"][];
         };
         /**
          * RunListItem
@@ -1702,6 +2210,21 @@ export interface components {
              */
             reason: string;
         };
+        /** VerdictRequest */
+        VerdictRequest: {
+            /** Correct */
+            correct: boolean;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
+        /** VerdictResponse */
+        VerdictResponse: {
+            candidate: components["schemas"]["CandidateCase"];
+            record: components["schemas"]["ReviewRecord"];
+        };
     };
     responses: never;
     parameters: never;
@@ -1998,6 +2521,170 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GitState"];
+                };
+            };
+        };
+    };
+    list_reviews_api_reviews_get: {
+        parameters: {
+            query?: {
+                skill_id?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewListItem"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_review_api_reviews_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewUpload"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_review_api_reviews__review_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rule_on_finding_api_reviews__review_id__findings__index__verdict_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_id: string;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerdictRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VerdictResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    undo_verdict_api_reviews__review_id__findings__index__verdict_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_id: string;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

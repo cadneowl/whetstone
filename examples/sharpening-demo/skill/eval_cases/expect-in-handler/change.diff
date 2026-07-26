@@ -1,0 +1,10 @@
+diff --git a/src/handlers/refund.rs b/src/handlers/refund.rs
+--- a/src/handlers/refund.rs
++++ b/src/handlers/refund.rs
+@@ -22,4 +22,5 @@ impl RefundHandler {
+     pub fn refund(&self, id: u64) -> Response {
+-        let row = self.db.get(id)?;
++        let row = self.db.get(id).expect("refund row must exist");
+         Response::ok(row.amount)
+     }
+ }

@@ -1,0 +1,15 @@
+id: unwrap-in-handler
+kind: should_catch
+repo: "gitlab:acme/payments"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/payments!812"
+  human_signal: "suggestion applied"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: src/handlers/charge.rs
+      line_range: [40, 45]
+    semantic: "unwrap on the DB lookup panics when the row is absent, which is a normal error path"

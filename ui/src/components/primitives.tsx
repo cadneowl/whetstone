@@ -33,12 +33,13 @@ export function Badge({
   title,
 }: {
   children: ReactNode
-  tone?: 'neutral' | 'accent' | 'warn' | 'bad'
+  tone?: 'neutral' | 'accent' | 'good' | 'warn' | 'bad'
   title?: string
 }) {
   const tones = {
     neutral: 'text-muted border-line',
     accent: 'text-accent border-accent/40',
+    good: 'text-good border-good/50',
     warn: 'text-warn border-warn/50',
     bad: 'text-bad border-bad/50',
   }

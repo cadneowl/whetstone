@@ -1,0 +1,16 @@
+# The second thing v1 misses: it has no rule about discarded errors at all.
+id: swallowed-error
+kind: should_catch
+repo: "gitlab:acme/payments"
+change: change.diff
+provenance:
+  source: jira_issue
+  ref: "PAY-901 via acme/payments!910"
+  human_signal: "escaped defect"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: src/handlers/settle.rs
+      line_range: [55, 60]
+    semantic: "the settlement write's Result is discarded, so a failed write leaves no trace"

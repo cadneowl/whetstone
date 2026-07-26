@@ -510,6 +510,120 @@ Gate: PASS
   fp_rate 0.500 -> 0.000
 ```
 
+### `whetstone review`
+
+Run a skill over a **live change** and store what it found, for a person to rule on in the console.
+
+This is the other direction from `corpus pull`. That one mines history and infers what a reviewer
+*should* have said from what humans said to each other; this asks the reviewer directly, about code
+nobody has labelled, and stores the answer.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--skill PATH` | *(required)* | Skill folder to run. Optional with `--import`, which names its own skill. |
+| `--mr INT` | *(none)* | Merge request iid — **open or merged**. Needs `--gitlab-url` and `--project`. |
+| `--diff PATH` | *(none)* | A unified diff file instead, for something the forge cannot hand us. |
+| `--import PATH` | *(none)* | Ingest a review produced **elsewhere** (JSON). No model call — see below. |
+| `--gitlab-url TEXT` | *(none)* | GitLab base URL (with `--mr`). |
+| `--project TEXT` | *(none)* | Project path, e.g. `acme/payments` (with `--mr`). |
+| `--token-env TEXT` | `GITLAB_TOKEN` | Env var holding the GitLab token. |
+| `--llm` / `--model` / `--base-url` / `--api-key-env` | preset | Backend selection, exactly as `eval run`. |
+| `--effort TEXT` | `high` | Reviewer effort. |
+| `--reviews-dir PATH` | config | Where review records are stored. |
+| `--json` | off | Emit the full record. |
+
+The forge flag is `--gitlab-url`, not `--base-url`. This is the only command that takes both a forge
+and a model, and `--base-url` means the model in every other command — so pasting a local endpoint
+from `eval run` into here would otherwise have silently configured GitLab with it.
+
+```bash
+whetstone review \
+  --skill skills/code-review-rust-error-handling \
+  --gitlab-url https://gitlab.acme.com --project acme/payments --mr 1423
+```
+
+```
+3 finding(s) on acme/payments!1423
+  0. src/handlers/charge.rs:41 [R1]  unwrap on the DB result panics on a normal error path
+  1. src/handlers/charge.rs:44 [R2]  audit row written inside the retry loop
+  2. src/handlers/charge.rs:43  consider extracting MAX_RETRIES into config
+
+review 20260726T091500Z-code-review-rust-error-handling-7b2ce2  (1 llm calls, 11.4s)
+  open Reviews in `whetstone ui` to mark each finding correct or false
+```
+
+The diff is taken between the merge request's `base_sha` and `head_sha`, not against the target
+branch: an open MR's target moves under it, and diffing against a moving base would attribute other
+people's commits to it. The head is pinned on the record, because a force-push makes the stored line
+numbers point at different code.
+
+Rulings happen in the console — see [Reviews](#reviews-ruling-on-what-the-skill-said).
+
+#### Uploading a review run elsewhere
+
+**Whetstone does not have to be the thing that runs your reviewer.** The skill probably already runs
+somewhere real — CI, an agent harness, an editor — against the actual merge request. What has to
+come back here are the *labels*, because this is where the corpus and the gate live.
+
+`POST /api/reviews` (and `whetstone review --import`) take the change, the skill's comments, and the
+assessment of each one, in a single payload:
+
+```json
+{
+  "skill_id": "code-review-rust-error-handling",
+  "ref": "acme/payments!1423",
+  "url": "https://gitlab.acme.com/acme/payments/-/merge_requests/1423",
+  "title": "PAY-1204 add a retry budget to settlement",
+  "repo": "gitlab:acme/payments",
+  "head_ref": "9f8e7d6c",
+  "diff": "diff --git a/src/handlers/charge.rs …",
+  "findings": [
+    {"path": "src/handlers/charge.rs", "line": 41, "rule_id": "R1",
+     "severity": "error", "message": "`.unwrap()` will panic instead of returning an error."}
+  ],
+  "verdicts": [
+    {"finding_index": 0, "correct": true,
+     "note": "Correct — the retention job reaps these rows, so a miss is a normal error path."}
+  ]
+}
+```
+
+```bash
+whetstone review --import review.json     # the skill is resolved from skill_id in the payload
+curl -X POST localhost:8787/api/reviews -H 'content-type: application/json' -d @review.json
+```
+
+`verdicts` is optional — omit it and the review lands unruled for someone to work through in the
+console. Severity accepts `"error"` as well as `30`.
+
+**The note is not a comment field.** On a **correct** finding it becomes the expectation, which is
+what stops the case grading the reviewer against its own words (see below). On a **false positive**
+it becomes the rationale — why it was wrong is what the next person reading the case needs.
+
+**Everything checkable is checked at upload**: the skill must exist, the diff must parse, every
+finding must name a file the diff touches, severity must be a name or level that exists, and no
+verdict may point past the findings or rule on the same one twice. A payload is rejected whole
+rather than discovered to be broken one finding at a time.
+
+A finding whose *line* misses every hunk is a softer case, and is not rejected. Its expectation
+widens to the whole file and the candidate says so — because a finding pointing at the wrong line is
+itself a false positive, and refusing the ruling would make the one verdict it deserves impossible
+to record. Tighten the region in triage, with the diff on screen.
+
+**A ruling on an already-promoted finding is a 409.** Candidate ids are stable per (review,
+finding), so re-ruling normally replaces rather than accumulates — but once a candidate has been
+promoted or rejected in triage, rewriting it would be silent: the queue hides decided candidates, so
+the new ruling would never appear, and the committed eval case would no longer match its own record.
+Undo the triage decision first.
+
+**Say which guidance produced it.** `skill_hash` is optional; without it Whetstone assumes the skill
+currently on disk and marks the record **`version assumed`**. Staleness is computed against that
+hash, so an assumed one means "not stale" is an assumption rather than a fact.
+
+⚠️ This turns the console into something other systems POST to. It has **no authentication of its
+own** and binds loopback by default; a CI job posting to it needs the authenticating reverse proxy
+described in [Identity](#identity--authorization), not `--insecure-bind`.
+
 ### `whetstone corpus pull`
 
 Walk a GitLab project's reviewed MRs into **candidate eval cases** for a human to review. Reads the
@@ -569,8 +683,8 @@ whetstone corpus pull \
 ```
 
 Each candidate is written to `./candidates/<id>/` as `case.yaml` + `change.diff` (ready to promote)
-plus `candidate.json` (kind, confidence, suggested skill, rationale) for triage. Nothing enters a
-skill automatically.
+plus `candidate.json` (kind, confidence, suggested skill, rationale, and the review thread it came
+from) for triage. Nothing enters a skill automatically.
 
 **Safe to re-run.** Ids are scoped by project (`acme-payments-812-t0`), so pulling several projects
 into one directory can't collide, and overlapping `--since` windows — the normal way to run this —
@@ -1057,6 +1171,69 @@ same output as `whetstone report --run <id>`.
 
 ---
 
+### Reviews: ruling on what the skill said
+
+`whetstone review` runs a skill over an open merge request; this screen is where a person marks each
+finding **Correct** or **False positive**, and where that ruling becomes something the gate enforces.
+
+```
+┌───────────────────────────────┬──────────────────────────────────────┐
+│ FINDINGS                      │ DIFF                                 │
+│ #1 [R1][error]                │ 38   pub fn settle(&self, id) {      │
+│ `.unwrap()` replaces a lookup │ 39 - let row = db.get(id).ok_or(…)?; │
+│ that propagated NotFound…     │ 40 + let row = db.get(id).unwrap();  │
+│ [Correct] [False positive]    │ 41 + while attempts < MAX_RETRIES {  │
+│                               │ ▌42 + audit.record(row.id, attempts); │
+│ #2 [R2][warning]              │ 43 +     attempts += 1;              │
+│ Audit row written inside the  │ 44 + }                               │
+│ retry loop…        ← selected │                                      │
+│ [Correct] [False positive]    │  the cited line is highlighted       │
+└───────────────────────────────┴──────────────────────────────────────┘
+```
+
+Selecting a finding highlights the lines it cites — *"is this right?"* is unanswerable without
+seeing the code it points at, and a reviewer citing the wrong line is one of the ways a finding is
+wrong.
+
+**What a ruling does.** It writes a **candidate** into the triage queue — not an eval case directly:
+
+| Ruling | Becomes | Confidence |
+|---|---|---|
+| **False positive** | `should_not_flag` — the reviewer must stay silent here | **0.95** |
+| **Correct** | `should_catch` — the reviewer must keep flagging this | 0.90 |
+
+The rejection outranks the confirmation, which looks backwards until you write both cases out. *"Stay
+silent here"* is complete on its own and depends on no text being right. *"Say **this**"* is only as
+good as **this** — and left alone, **this** is the reviewer's own message, so the case grades the
+reviewer against its own words and passes forever.
+
+**Writing why fixes that.** The note field beside each ruling is optional but load-bearing: on a
+confirmed finding your explanation *becomes* the expectation, so the case describes the problem
+rather than repeating what the reviewer said about it. Compare:
+
+| | Expectation the case gets |
+|---|---|
+| Confirmed, no note | `` `.unwrap()` will panic instead of returning an error.`` — the reviewer's words |
+| Confirmed, with note | `Correct — the retention job reaps these rows, so a miss is a normal error path.` — yours |
+
+Either way the ruling routes through triage rather than straight to a case, so the semantic can be
+rewritten there; a note just means it usually does not need to be.
+
+A rejected finding maps to `confirmed` precision evidence (not `silence`), so it strengthens the
+`fp_rate` that the "precision rests on silence" warning is about.
+
+**It is not a suppression list.** A finding you call wrong becomes a case the gate enforces, so the
+next guidance change that reintroduces the false positive is refused. A suppression list would hide
+the false positive instead of making the skill better.
+
+**Rule provenance travels with it.** The finding knows which rule fired, so *Evidence for rule*
+arrives pre-filled and promoting the case files the source under that rule in `meta.yaml` — the rule
+gets a test and its evidence in one commit.
+
+**Stale reviews are marked.** The record stores the `skill_hash` that produced the findings; once the
+guidance is edited they describe a reviewer that no longer exists, and the screen says so rather than
+letting you spend attention on a version nobody runs.
+
 ### Triage: the full workflow
 
 `corpus pull` proposes candidate eval cases; a person decides which are real. This is the screen
@@ -1067,6 +1244,11 @@ the first review comment** — in real repositories that is "nit: use `?` here",
 a paragraph about something else. That text becomes the ground truth the LLM judge scores every
 finding against. `whetstone corpus promote` is a verbatim `copyfile` and has no way to express a
 correction, so the human step that must happen has nowhere to happen.
+
+Each candidate therefore carries the **whole thread it was reduced from** (`Discussion` in
+`corpus/model.py`), written into `candidate.json` at pull time rather than fetched on demand:
+triage happens long after the pull, often by someone who cannot reach the merge request, and a case
+whose evidence is a hyperlink is a case nobody checks.
 
 #### Filling the queue
 
@@ -1084,32 +1266,58 @@ Then open **Triage**. The console reads `[candidates] dir` (default `candidates/
 #### The three panes
 
 ```
-┌────────────┬───────────────────────────────┬──────────────────────┐
-│ QUEUE      │ DIFF                          │ EXPECTATION          │
-│            │                               │                      │
-│ ▸ 812-t0   │  src/handlers/charge.rs       │ kind  ◉catch ○noflag │
-│   0.90     │                               │ skill [rust-errors▾] │
-│   812-t1   │  40  fn charge(id: Id) {      │ case id [812-t0    ] │
-│   0.50     │  41 +  let row = db.get(id)   │ region [41]–[43]     │
-│   813-cl0  │  42 +      .unwrap();         │ severity [none    ▾] │
-│   0.30     │  43    process(row);          │                      │
-│            │                               │ ORIGINAL COMMENT     │
-│ 3 pending  │  drag line numbers to select  │ "nit: use `?` here"  │
-│ 1 promoted │                               │ ─────────────────────│
-│ 1 rejected │                               │ SEMANTIC  [unedited] │
-│            │                               │ [                  ] │
-└────────────┴───────────────────────────────┴──────────────────────┘
-   j/k move   a promote   x reject   Enter promote
+ escaped defect 1  ·  suggestion applied 4  ·  merged clean 61   ← filter, and legend
+┌────────────┬───────────────────────────────────┬──────────────────────┐
+│ QUEUE      │ DISCUSSION                        │ EXPECTATION          │
+│            │  [applied][should catch][resolved]│                      │
+│ ▸[applied] │  PAY-812 harden charge settlement │ kind  ◉catch ○noflag │
+│   0.90 💬3 │                                   │ skill [rust-errors▾] │
+│  [the fix] │  priya.raghunathan                │ case id [812-t0    ] │
+│   0.85 💬3 │  This unwraps a DB lookup that    │ region [41]–[43]     │
+│ [no comm.] │  returns None whenever the row…   │ severity [none    ▾] │
+│   0.30     │                                   │                      │
+│            │  tom                              │ AS GENERATED         │
+│            │  Good catch — fixed.              │ "This unwraps a DB…" │
+│            │                                   │ ─────────────────────│
+│            │  PROPOSED  [author applied it]    │ SEMANTIC  [unedited] │
+│            │  let row = db.get(id)?;           │ [                  ] │
+│            ├───────────────────────────────────┤                      │
+│            │ DIFF  src/handlers/charge.rs      │                      │
+│            │  41 +  let row = db.get(id)       │                      │
+│            │  42 +      .unwrap();             │                      │
+│ j/k move…  │  drag line numbers to select      │ [Promote][Validate]  │
+└────────────┴───────────────────────────────────┴──────────────────────┘
 ```
 
-**Queue** is ordered by the corpus builder's confidence — applied suggestions (0.9) before resolved
-comments (0.5) before clean merges (0.3). That is the order attention is worth spending in.
+**Queue** rows lead with the **signal** — what the candidate is evidence *of* — because the id is a
+slug nobody reads and the confidence is a number whose meaning *is* the signal. Ordered strongest
+first: escaped defects (0.95) before applied suggestions (0.90) before resolved comments (0.50)
+before clean merges (0.30). Hover any badge for what it claims.
+
+**Discussion** is the review conversation the candidate came from: who said what, whether the thread
+was resolved, the reviewer's proposed replacement, and whether the author applied it. It leads the
+middle column because a diff on its own is just a code change — what makes it a candidate is what
+somebody said about it. Every other thing on screen is the builder's *reading* of this, and triage
+exists to decide whether that reading was fair.
+
+For a `merged clean` candidate there is no conversation, and the pane says so in as many words:
+nobody commented, so the case rests on silence and is only as true as the original review was
+thorough.
+
+**Filter chips** above the panes hide signals you are not working. A repo that reviews by talking
+rather than by commenting inline produces a queue that is mostly `merged clean` — one candidate per
+changed file — and this is how you get it out of the way. (`corpus pull --max-clean-files 0`
+suppresses them at the source.) The chips double as the legend.
 
 **Diff** highlights the current region. Drag across the **line numbers** to change it.
 
-**Expectation** is the form. The **original comment** and the editable **semantic** field sit side by
-side, both visible, and the field is badged **unedited** until you change it. The job is to rewrite
-the signal, not to accept it.
+**Expectation** is the form: what will actually be written. **As generated** keeps the builder's
+text beside the editable **semantic** field, which stays badged **unedited** until you change it —
+the job is to rewrite the signal, not to accept it. Promote/Validate/Reject stay pinned to the
+bottom of the pane; on a long form, having to scroll to say yes is how a queue stops getting worked.
+
+Each pane scrolls independently and the whole workspace is one viewport tall, so a hundred queued
+candidates cannot push the diff below the fold.
 
 #### Step by step
 
@@ -1410,6 +1618,7 @@ assert record.result.passed
 | `record_eval` | `(skill, client, *, trials=1, backend="", model="", on_event=None, max_workers=1, cancel=None, …)` | `RunRecord` (score + findings + verdicts) |
 | `gate_skills` | `(base, candidate, client, *, cfg=None, trials=1)` | `GateOutcome` (`.result`, `.base`, `.candidate`) |
 | `record_gate` | `(base, candidate, client, *, cfg=None, trials=1, base_ref="", candidate_ref="", practice_mode=False, …)` | `GateRecord` — the outcome plus the content hashes it was about |
+| `record_review` | `(skill, change, client, *, source="merge_request", ref="", url="", title="", reviewer_effort="high", …)` | `ReviewRecord` — the skill's findings on a live change, awaiting rulings |
 | `pull_corpus` | `(connector, project, since, skills=None)` | `list[CandidateCase]` |
 | `format_score` | `(SkillScore)` | `str` |
 | `format_gate` | `(GateResult)` | `str` |
@@ -1998,6 +2207,7 @@ Two things worth knowing, both about values being read back exactly as written:
 | `WHETSTONE_RUNS_DIR` | `config` | Where run records are stored. |
 | `WHETSTONE_CANDIDATES_DIR` | `config` | Where the triage queue is read from. |
 | `WHETSTONE_GATES_DIR` | `config` | Where gate records are stored — what gate-before-propose reads. |
+| `WHETSTONE_REVIEWS_DIR` | `config` | Where live-review records and their rulings are stored. |
 | `WHETSTONE_UI_HOST` / `WHETSTONE_UI_PORT` | `config` | Console bind address and port. |
 | `WHETSTONE_READ_ONLY` / `WHETSTONE_PRACTICE_MODE` | `config` | Console modes. An *empty* value counts as unset, so a shell-quoting accident cannot switch read-only off. |
 

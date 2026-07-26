@@ -12,11 +12,13 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 
-from whetstone.config import load_config
+from whetstone.config import Config, load_config
 from whetstone.core.gate import GateConfig
 from whetstone.core.loader import load_skill, load_skills
 from whetstone.corpus.builder import DEFAULT_MAX_CLEAN_FILES, DEFAULT_MAX_DEFECT_FILES
+from whetstone.domain.change import CodeChange, parse_unified_diff
 from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
+from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import MergeRequestRef
 from whetstone.domain.run import RunEvent, RunRecord
 from whetstone.domain.skill import Skill
@@ -29,8 +31,10 @@ from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
 from whetstone.providers.registry import available_providers
 from whetstone.report import render_run_html, render_run_text
+from whetstone.reviews import ReviewSource, ReviewStore, ReviewUpload, build_review
 from whetstone.runs import RunStore, stale_version_ids
 from whetstone.service import (
+    apply_ruling,
     format_gate,
     format_score,
     precision_evidence,
@@ -38,6 +42,7 @@ from whetstone.service import (
     pull_defects,
     record_eval,
     record_gate,
+    record_review,
 )
 from whetstone.vcs import export_tree
 
@@ -126,6 +131,16 @@ GatesDirOpt = Annotated[
 
 def _gates(gates_dir: Path | None) -> GateStore:
     return GateStore(gates_dir if gates_dir is not None else load_config().gates_dir)
+
+
+ReviewsDirOpt = Annotated[
+    Path | None,
+    typer.Option("--reviews-dir", help="Where review records live (default: .whetstone/reviews)"),
+]
+
+
+def _reviews(reviews_dir: Path | None) -> ReviewStore:
+    return ReviewStore(reviews_dir if reviews_dir is not None else load_config().reviews_dir)
 
 # Shared LLM-selection options, so `eval run` and `eval gate` pick a backend the same way.
 _LLM_HELP = (
@@ -341,6 +356,191 @@ def eval_gate(
         for tmp in (base_tmp, cand_tmp):
             if tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)
+
+
+@app.command("review")
+def review(
+    skill: Annotated[
+        Path | None,
+        typer.Option("--skill", help="Skill folder. Optional with --import, which names its own."),
+    ] = None,
+    mr: Annotated[
+        int | None, typer.Option("--mr", help="Merge request iid to review — open or merged")
+    ] = None,
+    diff: Annotated[
+        Path | None, typer.Option("--diff", help="A unified diff file to review instead of an MR")
+    ] = None,
+    import_: Annotated[
+        Path | None,
+        typer.Option(
+            "--import",
+            help="Ingest a review produced elsewhere (JSON; see README) — no model call",
+        ),
+    ] = None,
+    # `--gitlab-url`, not `--base-url`. This is the only command taking both a forge and a model,
+    # and `--base-url` means the model everywhere else — so pasting an Ollama endpoint from
+    # `eval run` into here would have silently configured GitLab with it.
+    gitlab_url: Annotated[str | None, typer.Option("--gitlab-url", help="GitLab base URL")] = None,
+    project: Annotated[str | None, typer.Option(help="Project path (with --mr)")] = None,
+    token_env: Annotated[str, typer.Option()] = "GITLAB_TOKEN",
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    effort: Annotated[str, typer.Option()] = "high",
+    reviews_dir: ReviewsDirOpt = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Run a skill over a live change and store what it found, for a human to rule on.
+
+    This is the other direction from `corpus pull`. That one mines history and infers what a
+    reviewer should have said; this one asks the reviewer directly, about code nobody has labelled
+    yet, and stores the answer so somebody can mark each finding right or wrong in the console.
+
+    Rulings do not edit the skill. They mint candidates into the triage queue, where the ordinary
+    promote → batch → gate path applies — so a finding you call wrong becomes a case the gate
+    enforces rather than a suppression rule that hides it.
+    """
+    sources = [s for s in (mr, diff, import_) if s is not None]
+    if len(sources) != 1:
+        raise typer.BadParameter("give exactly one of --mr, --diff or --import")
+
+    if import_ is not None:
+        if any((llm, model, base_url, api_key_env)) or effort != "high":
+            # Silently ignoring them would look like the import had honored a backend choice.
+            raise typer.BadParameter("--import calls no model; drop the backend options")
+        _import_review(import_, skill, _reviews(reviews_dir), json_out=json_out)
+        return
+
+    if skill is None:
+        raise typer.BadParameter("--skill is required unless you are using --import")
+    sk = load_skill(skill)
+
+    if mr is not None:
+        if not gitlab_url or not project:
+            raise typer.BadParameter("--mr needs --gitlab-url and --project")
+        change, source, ref, url, title = _mr_change(gitlab_url, project, token_env, mr)
+    else:
+        change, source, ref, url, title = _diff_change(diff)  # type: ignore[arg-type]
+
+    if not change.files:
+        raise typer.BadParameter(f"{ref} has no reviewable file changes")
+
+    backend = resolve_backend(llm, model=model, base_url=base_url)
+    record = record_review(
+        sk,
+        change,
+        _client(llm, model, base_url, api_key_env),
+        source=source,
+        ref=ref,
+        url=url,
+        title=title,
+        reviewer_effort=effort,
+        backend=backend.name,
+        model=backend.model,
+    )
+    _reviews(reviews_dir).save(record)
+
+    if json_out:
+        typer.echo(record.model_dump_json(indent=2))
+        return
+    typer.echo(f"{len(record.findings)} finding(s) on {ref}")
+    for i, f in enumerate(record.findings):
+        rule = f" [{f.rule_id}]" if f.rule_id else ""
+        typer.echo(f"  {i}. {f.path}:{f.line or '?'}{rule}  {f.message}")
+    typer.echo(f"\nreview {record.id}  ({record.llm_calls} llm calls, {record.duration_s:.1f}s)")
+    # The rulings are the point, and they happen in the console.
+    typer.echo("  open Reviews in `whetstone ui` to mark each finding correct or false")
+
+
+def _import_review(
+    path: Path, skill_dir: Path | None, store: ReviewStore, *, json_out: bool
+) -> None:
+    """Ingest a review someone else produced — the same payload `POST /api/reviews` takes.
+
+    No model is called. The reviewer already ran, wherever it runs; this is the labels coming home.
+
+    The skill is resolved from the payload's own `skill_id` against the registry, the way the HTTP
+    route does it. `--skill` stays accepted for a skill folder outside the registry, but requiring
+    it would mean naming the same skill twice and erroring when the two disagree.
+    """
+    try:
+        upload = ReviewUpload.model_validate_json(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except ValueError as exc:
+        raise typer.BadParameter(f"{path}: {exc}") from exc
+
+    config = load_config()
+    skill = load_skill(skill_dir) if skill_dir else _from_registry(config, upload.skill_id)
+    try:
+        record = build_review(upload, skill)
+        skills = load_skills(config.skills_root) if config.skills_root.is_dir() else []
+        for verdict in upload.verdicts:
+            record, _ = apply_ruling(
+                record,
+                verdict.finding_index,
+                correct=verdict.correct,
+                note=verdict.note,
+                candidates_dir=config.candidates_dir,
+                skills=skills,
+            )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    store.save(record)
+    if json_out:
+        typer.echo(record.model_dump_json(indent=2))
+        return
+    typer.echo(f"imported review {record.id}: {len(record.findings)} finding(s) on {record.ref}")
+    if record.verdicts:
+        typer.echo(
+            f"  {record.confirmed} confirmed, {record.rejected} false "
+            f"-> {len(record.verdicts)} candidate(s) in {config.candidates_dir}"
+        )
+    if record.pending:
+        typer.echo(f"  {record.pending} still to rule — open Reviews in `whetstone ui`")
+    if record.skill_hash_assumed:
+        # Said out loud: staleness is computed against this, so an assumed hash means "not stale"
+        # is an assumption rather than a fact.
+        typer.echo("  note: no skill_hash supplied; assumed the guidance currently on disk")
+
+
+def _from_registry(config: Config, skill_id: str) -> Skill:
+    known = load_skills(config.skills_root) if config.skills_root.is_dir() else []
+    found = next((s for s in known if s.id == skill_id), None)
+    if found is None:
+        names = ", ".join(sorted(s.id for s in known)) or "none"
+        raise typer.BadParameter(
+            f"no skill {skill_id!r} under {config.skills_root} (known: {names}). "
+            "Point --skill at its folder, or fix skill_id in the payload."
+        )
+    return found
+
+
+def _mr_change(
+    gitlab_url: str, project: str, token_env: str, iid: int
+) -> tuple[CodeChange, ReviewSource, str, str, str]:
+    connector = GitLabConnector.from_config({"base_url": gitlab_url, "token_env": token_env})
+    repo = RepoRef.parse(f"gitlab:{project}")
+    try:
+        found = connector.get_merge_request(repo, iid)
+        # `base_sha`..`head_sha` rather than the target branch: an open merge request's target moves
+        # under it, and diffing against a moving base would attribute other people's commits to it.
+        change = connector.get_change(repo, found.base_sha, found.head_sha)
+    except ConnectorError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return change, "merge_request", f"{project}!{iid}", found.web_url, found.title
+
+
+def _diff_change(path: Path) -> tuple[CodeChange, ReviewSource, str, str, str]:
+    """A unified diff from disk — for reviewing something the forge cannot hand us."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    change = parse_unified_diff(text, RepoRef.parse("local:working-tree"))
+    return change, "diff", path.name, "", ""
 
 
 @corpus_app.command("pull")

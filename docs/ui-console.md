@@ -401,6 +401,7 @@ Three details that carry weight:
   runs.db                 # derived SQLite index, safe to delete, rebuilt by `runs.reindex()`
   gates/<gate-id>.json    # evidence for C6; the filename carries the content hash it covers,
                           # which is why this needs no index — the only query is exact-match
+  reviews/<review-id>.json  # a skill's findings on a live change, plus the rulings made on them
 ```
 
 ---
@@ -541,9 +542,27 @@ Three panes, keyboard-driven.
 
 Design decisions that matter:
 
+- **The whole review thread is shown, not just the comment that seeded the expectation.** Amended
+  after the first version shipped: the middle column led with the diff, and a queue dominated by
+  `merged clean` candidates therefore read as an undifferentiated list of code changes with no
+  visible connection to the review process it was supposedly learning from. A diff on its own *is*
+  just a code change. What makes it a candidate is what somebody said about it, so the conversation
+  leads and the diff follows.
+
+  The thread is carried on the candidate (`Discussion` in `corpus/model.py`) and written into
+  `candidate.json` at pull time rather than fetched when triage opens. Triage happens long after the
+  pull, often by someone without access to the forge, and a case whose evidence is a hyperlink is a
+  case nobody checks.
+- **Every candidate is badged with its signal, and the queue can be filtered by it.** The row used
+  to show an id, a confidence and a skill — which made a 0.30 guess-from-silence look exactly like a
+  0.90 applied suggestion until you clicked it. The confidence number's *meaning* is the signal, so
+  the signal leads. The filter chips double as a legend, each carrying what the signal claims.
 - **The raw comment and the semantic field sit side by side, both visible, only the semantic
   editable.** This is the fix for G5: the human *rewrites* rather than retypes, and can see exactly
   what signal is being transformed into ground truth.
+- **One viewport tall, three independently scrolling panes, actions pinned.** Triage is a volume
+  activity; a page that scrolls as a whole puts the promote button below a long thread and lets a
+  hundred queued candidates push the diff out of view.
 - **Line range is dragged on the diff, not typed.** The region is the field most likely to be wrong
   in an auto-generated candidate.
 - **Reject requires a reason**, stored with the candidate. Rejections are evidence for tuning the
@@ -560,6 +579,64 @@ Design decisions that matter:
   and are largely uniform. They are also sampled — `max_clean_files`, default 5 per MR — so one
   large comment-free merge cannot bury the high-signal candidates above them.
 - Promotions accumulate on one branch; **Propose N cases** opens a single MR.
+
+### 10.3b Live review — ruling on the skill's own output
+
+Added after the console shipped, in answer to a question the design had no answer to: *the skill
+reviewed an open MR and produced N findings — how do I tell it which are right?*
+
+Everything in §10.3 mines **history**. It reads a conversation between humans and infers what a
+reviewer should have said about code it never saw. That inference is the weakest link in the whole
+corpus, and it is avoidable: run the skill on a change that is open right now, show the findings,
+and let a person rule on them directly.
+
+`whetstone review` produces the record; this screen adjudicates it. Two panes — findings and diff —
+with the selected finding's cited lines highlighted, because a reviewer pointing at the wrong line
+is one of the ways a finding is wrong.
+
+Design decisions that matter:
+
+- **A ruling mints a triage candidate, not an eval case.** The extra hop looks like ceremony and is
+  not. A case built straight from a confirmed finding asserts "the reviewer must say *this*", where
+  *this* is the reviewer's own message — it would grade the reviewer against its own words and pass
+  forever. Triage is where that gets rewritten (G5, again, in a new place).
+- **A rejected finding outranks a confirmed one** (0.95 vs 0.90). "Stay silent here" is complete on
+  its own and depends on no text being right; "say this" is only as good as text nobody has fixed
+  yet. It also maps to `confirmed` rather than `silence` precision evidence, which is the first
+  signal in the project that measures precision without measuring quietness.
+- **Not a suppression list.** The obvious reading of "mark it false so it stops saying it" is a
+  mute button, and a mute button hides the false positive instead of removing it. The case goes
+  through the gate, so the next guidance change that reintroduces it is refused.
+- **The reviewed head is pinned.** An open merge request is force-pushed, rebased and added to;
+  findings carry line numbers, and a superseded head makes them point at different code.
+- **Reviews of edited guidance are marked stale.** The record stores the `skill_hash` that produced
+  the findings. Once the guidance changes they describe a reviewer that no longer exists.
+- **A finding citing a file outside the diff is refused at ruling time**, not left for `promote` to
+  reject later with less context. Reviewers do invent paths.
+- **Whetstone need not be the thing that runs the reviewer.** `POST /api/reviews` ingests a review
+  produced anywhere — CI, an agent harness, an editor — with the change, the findings and any
+  rulings in one payload. This is probably the more common shape in practice: the skill already runs
+  somewhere against the real merge request, and what has to come back is the labels. Its value here
+  is the corpus and the gate, not the reviewing, and the boundary should say so.
+- **The explanation is the expectation.** The optional note beside a ruling is not a comment field.
+  On a confirmed finding it *becomes* the case's `semantic`, which is what breaks the circularity
+  above at the moment the judgement is made rather than leaving it for triage. On a rejected one it
+  becomes the rationale. Making it a free-text afterthought would have wasted the most useful
+  sentence anyone types on this screen.
+- **An uploaded review's guidance version is a claim, not a fact.** `skill_hash` is optional on the
+  payload; without it the record marks itself `skill_hash_assumed` and the console badges it
+  **version assumed**, because staleness is computed against that hash and silently assuming it
+  would make "not stale" mean nothing.
+- **A case belongs to the skill that produced the finding**, not to whatever `route_to_skill`'s
+  globs match first. Path routing exists for mined comments, which have to be guessed at; a finding
+  already knows its own skill, and in a registry where several skills answer for one language,
+  letting the glob decide files every case under whichever skill sorts first.
+- **A ruling on a candidate somebody already promoted is a 409, not an overwrite.** The queue hides
+  decided candidates, so rewriting one is invisible — and the committed eval case would stop
+  matching the record it came from. `undo_verdict` already refused the same case.
+- **The list endpoint returns a summary, not the record.** A `ReviewRecord` carries the whole
+  `CodeChange`; a row shows eight scalars. Same defect as the triage queue's payload, and worth
+  naming twice because it is the shape that recurs whenever a list model is "the detail model".
 
 ### 10.4 Case editor — "add test data"
 
@@ -668,6 +745,12 @@ GET    /api/candidates                    → triage queue (filter: skill, kind,
 POST   /api/candidates/{id}/promote       → edited promote into a skill
 POST   /api/candidates/{id}/reject        → reason-tagged rejection
 
+POST   /api/reviews                       → ingest a review run anywhere: change + findings + rulings
+GET    /api/reviews                       → live reviews awaiting rulings (filter: skill)
+GET    /api/reviews/{id}                  → ReviewRecord + rendered diff + staleness
+POST   /api/reviews/{id}/findings/{n}/verdict   → rule correct/false; mints a triage candidate
+DELETE /api/reviews/{id}/findings/{n}/verdict   → undo, removing the candidate if still undecided
+
 POST   /api/runs/estimate                 → CostEstimate — calls + spend, no LLM touched
 POST   /api/runs                          → {skill, k, backend, model, practice} → run_id  (202)
 GET    /api/runs                          → history, filterable
@@ -759,6 +842,9 @@ palette was being emitted unconditionally and light mode never rendered.
 4. ✅ Triage screen (§10.3): three panes, `j`/`k`/`a`/`x`/`Enter`, raw comment beside the editable
    semantic with an **unedited** badge until it is rewritten.
 5. ✅ Batch branches (`whetstone/cases/batch-N`) + **Propose N cases**.
+6. ✅ *(follow-up)* The review conversation, signal badges, and a signal filter — see §10.3. The
+   first cut showed the diff and the builder's verdict but not the evidence between them, which is
+   how a screen for learning from review ends up looking like a list of unexplained code changes.
 
 **Two deliberate deviations from the sketch:**
 
@@ -812,12 +898,38 @@ written structurally by triage (`promote.render_meta_yaml`), and a form covering
 either duplicate that or fence in what an operator can express. Triggers stay in `SKILL.md`
 frontmatter and are preserved verbatim across an edit — the editor does not expose them yet.
 
+### Phase 3b — Live review adjudication — ✅ **done**
+
+Unplanned, and the phasing is better for it: the loop the whole project describes was missing its
+most direct link. Everything else infers the label; this asks for it.
+
+1. ✅ `reviews.py` — `ReviewRecord` + `ReviewStore`, same plain-JSON shape as gates.
+2. ✅ `service.record_review` — the reviewer over an arbitrary `CodeChange`, no judge, because there
+   are no expectations to judge against.
+3. ✅ `whetstone review --mr` / `--diff`, plus `GitLabConnector.get_merge_request` (the one
+   connector method `list_reviewed_changes`'s `state=merged` filter could not provide).
+4. ✅ `corpus.builder.candidate_from_finding` and two new `human_signal` values.
+5. ✅ `/api/reviews` — ingest, list, detail, rule, undo — and the Reviews screens (§10.3b).
+6. ✅ `POST /api/reviews` + `review --import`: a review run anywhere, posted here. `service.
+   apply_ruling` is shared by the router and the CLI so a ruling cannot mint a candidate through one
+   path and not the other.
+
+**Deliberately reusing rather than extending:** a ruling writes into the *existing* candidates
+directory, so promote, batch branches and C6 apply unchanged. The one new field on `CandidateCase`
+is `suggested_rule_id`, which carries the rule that fired into *Evidence for rule* — so a promoted
+case files its own provenance instead of relying on somebody remembering to.
+
+**Not built:** launching a review from the console. That needs Phase 4's job orchestration, which is
+why the screen begins with a record the CLI produced.
+
 ### Phase 4 — Run orchestration — 1 wk
 
 1. `jobs.py` — worker pool, cancellation, SSE event bus.
 2. Cost estimation (§9.5) + `ConfirmCost` dialog.
 3. Live progress UI; run cancellation.
 4. Practice-mode wiring through the whole stack (C4).
+5. **Launch a review from the console** (§10.3b) — "review this MR" as a button rather than a
+   command to paste, which is the last place the workflow hands you back to a terminal.
 
 ### Phase 5 — Compare & judge lab — 1 wk
 
