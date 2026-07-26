@@ -313,3 +313,50 @@ warning and the operator decides. Rewriting passing guidance is a legitimate thi
 **A drafted proposal is not committed.** `improve` returns the body into the editor; staging is a
 separate act. The value of a draft is that a person decides whether it is an improvement, and a
 machine-written rule then takes the identical path a hand-written one does — stage, gate, propose.
+
+## ADR-016 — The console opens on what to do, not on what exists
+
+**Context.** Whetstone grew as a set of capabilities — mine, triage, score, draft, gate, publish —
+each correct and each on its own screen. Assembled by hand they are not a workflow: the operator had
+to hold the whole pipeline in their head and work out which of ten actions was today's. The home
+screen was a list of skills, which answers "what exists" rather than "what should I do".
+
+**Decision.** The inbox is home. One row per skill: what arrived since last time with its merge
+request provenance, what the last run got wrong, where any change sits in the pipeline, and one
+ranked next action with the reason for it.
+
+**Ordered by closeness to shipping, not by severity.** A passing gate nobody has proposed is value
+already paid for; a queue of fresh signal is work not yet started. So `propose` outranks `gate`
+outranks `triage` outranks `score` outranks `improve`. An inbox that sorted by how much was wrong
+would bury the cheapest win under the largest pile.
+
+**The row shows evidence, not counts.** "Four unwraps shipped in !812, !814 and !820" is a reason to
+change a rule; "4 candidates" is a number. The merge request is what makes a signal checkable, so it
+is what the row leads with.
+
+**The decision is a pure function**, over exactly the state the buttons are enabled by, so the reason
+shown can never disagree with what the console will let you do.
+
+**Unrouted signal is counted, not hidden.** A candidate matching no skill's triggers is invisible
+from every per-skill view; the inbox surfaces the count rather than letting it rot in the queue.
+
+## ADR-017 — Show the difference, not the result
+
+**Context.** The guidance editor showed a textarea and a rendered preview. When the improve step
+drafted a change, the textarea's entire contents were replaced and the preview showed what the
+result would look like. Both were true, and neither answered the only question that matters at that
+moment: *what is different?* A rewrite that quietly dropped four working rules looked exactly like
+one that tightened a fifth — and the first version of the drafting feature produced precisely that.
+
+**Decision.** The right-hand pane defaults to a line diff against what is staged. Preview is still
+there, one click away, for judging how a rule reads.
+
+**Computed client-side.** It has to keep up with typing, and an LCS over lines is quadratic on
+inputs of a few dozen lines — which is free, and cheaper than a dependency.
+
+**It warns when a change is mostly deletion.** "+1 −9 lines, this removes far more than it adds"
+catches the failure mode a generated rewrite actually has, at the moment it can still be rejected.
+
+**Eval cases show their last outcome.** The pinned list previously showed ids and paths, which is
+decoration; which of them the skill currently gets *wrong* is the only thing that makes it worth
+reading while rewriting a rule.

@@ -12,6 +12,7 @@ import {
   type SkillDetail,
 } from '@/api/client'
 import { Guidance } from './Guidance'
+import { GuidanceDiff } from './GuidanceDiff'
 import { LaunchButton } from './LaunchButton'
 import { Badge, ErrorNote, Loading, when } from './primitives'
 
@@ -70,6 +71,7 @@ function Editor({
   const skillId = detail.skill.id
   const save = useSaveGuidance()
   const [draft, setDraft] = useState(proposal.body)
+  const [pane, setPane] = useState<'diff' | 'preview'>('diff')
 
   const dirty = draft.trim() !== proposal.body.trim()
   const conflict = save.error instanceof ApiError && save.error.status === 409
@@ -89,7 +91,7 @@ function Editor({
         </p>
       )}
 
-      <ImprovePanel skillId={skillId} onDrafted={setDraft} />
+      <ImprovePanel skillId={skillId} cases={detail.cases} onDrafted={setDraft} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-2">
@@ -113,9 +115,34 @@ function Editor({
         </div>
 
         <div className="space-y-2">
-          <div className="text-xs tracking-wide text-muted uppercase">Preview</div>
+          <div className="flex items-baseline gap-3 text-xs">
+            {/* Diff first, and selected by default while the draft differs: "what changed?" is the
+                question at this moment, and the preview cannot answer it. */}
+            <button
+              type="button"
+              onClick={() => setPane('diff')}
+              className={`tracking-wide uppercase transition-colors ${
+                pane === 'diff' ? 'text-ink' : 'text-muted hover:text-ink'
+              }`}
+            >
+              Diff
+            </button>
+            <button
+              type="button"
+              onClick={() => setPane('preview')}
+              className={`tracking-wide uppercase transition-colors ${
+                pane === 'preview' ? 'text-ink' : 'text-muted hover:text-ink'
+              }`}
+            >
+              Preview
+            </button>
+          </div>
           <div className="h-[28rem] overflow-y-auto rounded-lg border border-line bg-surface p-3">
-            <Guidance detail={{ ...detail, skill: { ...detail.skill, body: draft } }} />
+            {pane === 'diff' ? (
+              <GuidanceDiff before={proposal.body} after={draft} />
+            ) : (
+              <Guidance detail={{ ...detail, skill: { ...detail.skill, body: draft } }} />
+            )}
           </div>
         </div>
       </div>
@@ -197,13 +224,30 @@ function Conflict({ skillId, error }: { skillId: string; error: unknown }) {
  */
 function ImprovePanel({
   skillId,
+  cases,
   onDrafted,
 }: {
   skillId: string
+  cases: CaseSummary[]
   onDrafted: (body: string) => void
 }) {
   const [instruction, setInstruction] = useState('')
   const [note, setNote] = useState('')
+
+  const scored = cases.filter((c) => c.last_recall !== null || c.last_fp_rate !== null)
+  const failing = scored.filter((c) =>
+    c.kind === 'should_catch' ? (c.last_recall ?? 1) < 1 : (c.last_fp_rate ?? 0) > 0,
+  )
+  const summary = !scored.length
+    ? 'Never scored, so a draft would see the guidance and nothing else. Run the evals first.'
+    : failing.length === 0
+      ? `Passing all ${scored.length} scored case(s) — there is nothing here to learn from.`
+      : `Failing ${failing.length} of ${scored.length} scored case(s): ` +
+        failing
+          .slice(0, 3)
+          .map((c) => c.id)
+          .join(', ') +
+        (failing.length > 3 ? `, and ${failing.length - 3} more` : '')
 
   return (
     <section className="rounded-lg border border-line bg-surface/50 p-3">
@@ -211,6 +255,8 @@ function ImprovePanel({
         <h3 className="text-sm font-medium">Draft a change from the last run</h3>
         <span className="text-xs text-muted">loads into the editor; commits nothing</span>
       </div>
+      {/* A button with no stated reason to press it is what made this panel read as noise. */}
+      <p className="mb-2 text-xs text-muted">{summary}</p>
       <LaunchButton
         kind="improve"
         request={{ skill_id: skillId, instruction }}
@@ -362,6 +408,21 @@ function gateCommand(proposal: Proposal, repo: string): string {
  * Pinned beside the editor because a guidance change is only as trustworthy as what tests it: a
  * skill with two cases and a rewritten rule has a gate that will pass on almost anything.
  */
+/** How this case went last time it was scored, or that it never was. */
+function CaseVerdict({ c }: { c: CaseSummary }) {
+  const value = c.kind === 'should_catch' ? c.last_recall : c.last_fp_rate
+  if (value === null || value === undefined) {
+    return <span className="text-muted italic">not scored</span>
+  }
+  const passing = c.kind === 'should_catch' ? value >= 1 : value <= 0
+  return (
+    <span className={passing ? 'text-good' : 'text-bad'}>
+      {passing ? 'passing' : c.kind === 'should_catch' ? 'MISSED' : 'FALSE POSITIVE'}
+    </span>
+  )
+}
+
+
 function PinnedCases({ cases }: { cases: CaseSummary[] }) {
   if (cases.length === 0) {
     return (
@@ -387,6 +448,11 @@ function PinnedCases({ cases }: { cases: CaseSummary[] }) {
             </Badge>
             <span className="font-mono">{c.id}</span>
             <span className="font-mono text-muted">{c.path}</span>
+            {/* Without this the list is decoration: which of these the skill currently gets wrong
+                is the only thing that makes it worth reading while rewriting a rule. */}
+            <span className="ml-auto">
+              <CaseVerdict c={c} />
+            </span>
           </li>
         ))}
       </ul>

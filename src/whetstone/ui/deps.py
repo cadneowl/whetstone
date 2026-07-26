@@ -26,6 +26,7 @@ from whetstone.jobs import JobStore
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.ui.errors import Misconfigured
+from whetstone.watch import Watcher
 
 PrincipalMode = Literal["local", "proxy", "anonymous"]
 
@@ -60,6 +61,11 @@ def get_gates(request: Request) -> GateStore:
 def get_jobs(request: Request) -> JobStore:
     jobs: JobStore = request.app.state.jobs
     return jobs
+
+
+def get_watcher(request: Request) -> Watcher:
+    watcher: Watcher = request.app.state.watcher
+    return watcher
 
 
 def get_reviews(request: Request) -> ReviewStore:
@@ -115,6 +121,7 @@ ConfigDep = Annotated[Config, Depends(get_config)]
 StoreDep = Annotated[RunStore, Depends(get_store)]
 GatesDep = Annotated[GateStore, Depends(get_gates)]
 JobsDep = Annotated[JobStore, Depends(get_jobs)]
+WatcherDep = Annotated[Watcher, Depends(get_watcher)]
 ReviewsDep = Annotated[ReviewStore, Depends(get_reviews)]
 SkillsRootDep = Annotated[Path, Depends(get_skills_root)]
 PrincipalDep = Annotated[Principal, Depends(get_principal)]

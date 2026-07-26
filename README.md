@@ -958,15 +958,36 @@ open("report.html", "w", encoding="utf-8").write(render_run_html(record))
 
 ## The console (`whetstone ui`)
 
-A local web console for the whole loop: **scoring a skill**, **diagnosing why an eval case
-failed**, **turning review history into eval cases**, **drafting a guidance change from what a run
-got wrong**, and **gating it** — all without leaving the browser.
+A local web console for the whole loop, without leaving the browser.
+
+It opens on the **inbox**: one row per skill saying what arrived since you last looked, what the
+skill is currently getting wrong, and the single next thing worth doing — with the button that does
+it. Rows are ordered by how close they are to shipping, because finishing a change that already has
+a passing gate is worth more than starting a new one.
+
+```
+1 skill needs attention                     checked 12 minutes ago · 3 new
+
+  Rust error handling review     [triage]
+  new review outcomes arrived that nobody has ruled on yet
+    missed src/handlers/charge.rs · acme/payments!812
+      reviewer asked for `?`; the author applied it
+    missed src/handlers/refund.rs · acme/payments!814
+      unwrap shipped, later caused PAY-2231
+  [ Review 3 signals → ]
+```
+
+The next action is one of, in priority order: **propose** (a passing gate is going unused),
+**gate** (something is staged and unproven), **triage** (new signal to rule on), **score** (never
+measured, or measured as different content), **improve** (failing cases we already know about), or
+nothing — said plainly rather than left to inference.
 
 It is a thin HTTP layer over `whetstone.service` plus a prebuilt single-page app. It holds no state
 of its own: skills are read from disk on every request, runs come from `.whetstone/runs/`, and every
 write it makes lands as a git commit on a branch.
 
-**Contents:** [Prerequisites](#prerequisites) · [Install](#install) · [Starting it](#starting-it) ·
+**Contents:** [Watching for signal](#watching-for-signal) · [Prerequisites](#prerequisites) ·
+[Install](#install) · [Starting it](#starting-it) ·
 [Configuration](#console-configuration) · [First run](#first-run-a-five-minute-tour) ·
 [Screens](#the-screens) · [Reading a failure](#reading-a-failure-the-run-drill-down) ·
 [Triage](#triage-the-full-workflow) · [Running work](#running-work-from-the-console) ·
@@ -975,6 +996,37 @@ write it makes lands as a git commit on a branch.
 [Troubleshooting](#console-troubleshooting) · [Not built yet](#not-built-yet)
 
 ---
+
+### Watching for signal
+
+The loop only turns if something notices. Enable `[watch]` and the console sweeps your projects on
+an interval, mining merge requests into the triage queue so the inbox can open on what is new:
+
+```toml
+[watch]
+enabled = true
+interval_minutes = 30
+projects = ["acme/payments"]
+gitlab_url = "https://gitlab.example.com"
+lookback_days = 14          # how far the first sweep of a project looks back
+
+# Optional, and the strongest recall signal there is: resolved defects paired with the merge
+# requests that fixed them — cases review demonstrably missed.
+tracker_url = "https://jira.example.com"
+tracker_project = "PAY"
+```
+
+Off by default: a tool that reaches out to a forge on a timer should do so because someone asked it
+to. *Check now* sweeps immediately without waiting for the interval.
+
+**Each project carries a watermark**, advanced only after a sweep's candidates are safely on disk.
+A failed sweep re-covers its window rather than skipping it, and a restart resumes where the last
+success left off instead of re-walking months of history. Overlap is harmless — a candidate anyone
+has already ruled on is never rewritten.
+
+**A sweep mines; it does not act.** It writes candidates and stops. Nothing is promoted, no model is
+called, and nothing is spent — what to do about a signal is yours to decide, which is what the
+inbox is for.
 
 ### Prerequisites
 

@@ -136,3 +136,50 @@ def _read_decision(path: Path) -> Decision | None:
     except ValueError:
         return None
 
+
+
+class StoreResult(BaseModel):
+    """What a write of freshly mined candidates did to the queue.
+
+    `decided` is the number left alone because someone had already ruled on them — the reason a
+    pull is safe to re-run over an overlapping window, and the number worth reporting so a sweep
+    that appears to have found nothing can be told apart from one whose findings were all old news.
+    """
+
+    written: int = 0
+    existing: int = 0
+    decided: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.written + self.existing + self.decided
+
+
+def store_candidates(
+    candidates: list[CandidateCase], out: str | Path, *, refresh: bool = False
+) -> StoreResult:
+    """Write candidates into the queue, never disturbing one a human has touched.
+
+    Shared by `corpus pull` and the background watcher rather than reimplemented in each: the rule
+    about what may be overwritten is the one thing here that must not differ between the two, since
+    getting it wrong revives a rejected candidate as a fresh-looking case or clobbers a promotion
+    someone is part-way through editing.
+    """
+    from whetstone.corpus.builder import write_candidate
+
+    root = Path(out)
+    result = StoreResult()
+    for candidate in candidates:
+        directory = root / candidate.id
+        if (directory / "decision.json").is_file():
+            result.decided += 1
+            continue
+        if directory.is_dir() and not refresh:
+            result.existing += 1
+            continue
+        write_candidate(candidate, directory)
+        (directory / "candidate.json").write_text(
+            candidate.model_dump_json(indent=2), encoding="utf-8"
+        )
+        result.written += 1
+    return result
