@@ -5,10 +5,11 @@ import {
   type Attention,
   type ActionKind,
   type Signal,
+  type Sweep,
   type WatchState,
 } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
-import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
+import { Badge, Empty, ErrorNote, Intro, Loading, score, when } from '@/components/primitives'
 
 /**
  * The console's home: what happened since you last looked, and the one thing to do about it.
@@ -39,17 +40,33 @@ export function InboxRoute() {
     <div className="space-y-5">
       <header className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
+          {/* "Nothing needs attention" is only true if there is something to have an opinion
+              about. On a console with no skills at all it read as all-is-well to the one person
+              who most needed telling that nothing was set up. */}
           <h1 className="text-lg font-semibold">
-            {busy.length === 0
-              ? 'Nothing needs attention'
-              : busy.length === 1
-                ? '1 skill needs attention'
-                : `${busy.length} skills need attention`}
+            {rows.length === 0
+              ? 'No skills yet'
+              : busy.length === 0
+                ? 'Nothing needs attention'
+                : busy.length === 1
+                  ? '1 skill needs attention'
+                  : `${busy.length} skills need attention`}
           </h1>
-          <p className="mt-1 text-sm text-muted">
-            Whetstone watches your merge requests, turns what review caught — and what it missed —
-            into eval cases, and measures whether a rule change actually helps.
-          </p>
+          <Intro>
+            {rows.length === 0 ? (
+              <>
+                This is the console's home: one row per skill, showing the single next thing worth
+                doing and the evidence for saying so. Point{' '}
+                <code className="font-mono">[skills] root</code> at a folder of skills to fill it.
+              </>
+            ) : (
+              <>
+                One row per skill, showing the single next thing worth doing and the evidence for
+                saying so — ordered by closeness to shipping, not by how much is wrong. Start at the
+                top; each row's button does the thing rather than sending you to a screen about it.
+              </>
+            )}
+          </Intro>
         </div>
         <WatchStatus watch={watch} />
       </header>
@@ -73,9 +90,9 @@ export function InboxRoute() {
 
       {inbox.unrouted > 0 && (
         <p className="rounded-lg border border-warn/40 bg-warn/5 px-3 py-2 text-sm text-warn">
-          {inbox.unrouted} signal{inbox.unrouted === 1 ? '' : 's'} could not be matched to any
-          skill — no skill's <code className="font-mono">triggers.paths</code> covers the files
-          they touch.{' '}
+          {inbox.unrouted} signal{inbox.unrouted === 1 ? '' : 's'} could not be matched to any skill
+          — no skill's <code className="font-mono">triggers.paths</code> covers the files they
+          touch.{' '}
           <Link to="/triage" className="underline">
             Review them in triage
           </Link>
@@ -139,8 +156,15 @@ function Row({ row }: { row: Attention }) {
 
       {signals.length > 0 && <Signals signals={signals} total={row.new_signals} />}
 
-      <div className="mt-3">
+      <div className="mt-3 flex flex-wrap items-start gap-3">
         <Action row={row} />
+        {/* Re-scoring, offered alongside whatever today's headline action is. The inbox names one
+            next step per skill on purpose, but "score it again" is the thing you want after every
+            guidance edit, and a home screen that could only offer it to skills that had never been
+            measured was hiding it from exactly the people who needed it most. */}
+        {row.action.kind !== 'score' && row.total_cases > 0 && (
+          <LaunchButton kind="eval" request={{ skill_id: row.skill_id }} label="Run evals" />
+        )}
       </div>
     </article>
   )
@@ -162,9 +186,7 @@ function Signals({ signals, total }: { signals: Signal[]; total: number }) {
           </span>{' '}
           <span className="font-mono">{signal.path}</span>
           {signal.ref && <span className="text-muted"> · {signal.ref}</span>}
-          {signal.rationale && (
-            <span className="block text-muted">{signal.rationale}</span>
-          )}
+          {signal.rationale && <span className="block text-muted">{signal.rationale}</span>}
         </li>
       ))}
       {total > signals.length && (
@@ -231,48 +253,76 @@ function ActionBadge({ kind }: { kind: ActionKind }) {
   return <Badge tone={tone[kind]}>{kind}</Badge>
 }
 
-/** When Whetstone last looked, and whether it is looking at all. */
+/** When Whetstone last looked, what it found, and whether it is looking at all. */
 function WatchStatus({ watch }: { watch: WatchState }) {
   const check = useCheckNow()
-  const sweep = watch.last_sweep
+  // The mutation's own result first: it is what this click just produced. Waiting for the refetched
+  // inbox to carry it around would leave the button looking like it had done nothing.
+  const sweep = check.data ?? watch.last_sweep
+  const busy = check.isPending || watch.polling
 
   return (
-    <div className="text-right text-xs text-muted">
-      {!watch.enabled ? (
-        <p>
-          Not watching.{' '}
-          <span className="font-mono">[watch] enabled = true</span> in whetstone.toml turns it on.
-        </p>
-      ) : watch.polling || check.isPending ? (
-        <p className="text-accent">Checking…</p>
-      ) : sweep ? (
-        <p>
-          {sweep.error ? (
-            <span className="text-bad" title={sweep.error}>
-              last check failed
-            </span>
-          ) : (
-            <>
-              checked {when(sweep.at)} · {sweep.found} new
-            </>
-          )}
-        </p>
-      ) : (
-        <p>not checked yet</p>
-      )}
+    <div className="max-w-sm text-right text-xs text-muted">
+      <p>
+        {watch.enabled ? (
+          <>Watching every {watch.interval_minutes} min.</>
+        ) : (
+          <>
+            Not watching. <span className="font-mono">[watch] enabled = true</span> in
+            whetstone.toml turns it on.
+          </>
+        )}
+      </p>
       <button
         type="button"
-        disabled={check.isPending || watch.polling}
+        disabled={busy}
         onClick={() => check.mutate()}
         className="mt-1 rounded border border-line px-2 py-0.5 transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
       >
-        Check now
+        {busy ? 'Checking…' : 'Check now'}
       </button>
-      {check.error && (
+
+      {/* Shown whether or not anything is watching on a schedule. `Check now` runs a real sweep
+          either way, and this used to sit inside the `enabled` branch — so on the far commoner
+          setup, where watching is off, clicking it reached out to a forge and reported absolutely
+          nothing back. A button indistinguishable from a broken one. */}
+      {check.error ? (
         <div className="mt-2 text-left">
           <ErrorNote error={check.error} />
         </div>
+      ) : (
+        sweep && !busy && <SweepResult sweep={sweep} />
       )}
     </div>
+  )
+}
+
+/** What one sweep did, in the terms an operator would ask it in: what arrived, and when. */
+function SweepResult({ sweep }: { sweep: Sweep }) {
+  if (sweep.error) {
+    return (
+      <p className="mt-2 rounded border border-bad/40 bg-bad/5 px-2 py-1 text-left text-bad">
+        {/* The reason, not a tooltip on the words "last check failed". An expired token and a
+            project nobody configured need different things doing about them. */}
+        Check failed at {when(sweep.at)}: {sweep.error}
+      </p>
+    )
+  }
+
+  const found = sweep.found ?? 0
+  const queued = sweep.already_queued ?? 0
+  const decided = sweep.already_decided ?? 0
+  const skipped = sweep.skipped ?? []
+  const detail = [
+    found > 0 ? `${found} new` : 'nothing new',
+    queued > 0 ? `${queued} already queued` : '',
+    decided > 0 ? `${decided} already ruled on` : '',
+    skipped.length > 0 ? `${skipped.length} unreachable` : '',
+  ].filter(Boolean)
+
+  return (
+    <p className={`mt-2 ${found > 0 ? 'text-accent' : ''}`}>
+      Checked {when(sweep.at)} · {detail.join(' · ')}
+    </p>
   )
 }

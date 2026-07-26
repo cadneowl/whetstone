@@ -62,6 +62,13 @@ class RunsConfig(BaseModel):
     # Reserved: parsed and reported, but nothing enforces it yet. It becomes a real backstop when
     # the console can launch runs itself (the CLI's budget is the operator's own shell).
     max_llm_calls_per_run: int = 2000
+    # Write every prompt and reply to disk, for answering "why did the model say that?".
+    #
+    # Off by default and deliberately so: a transcript contains the whole review prompt — your
+    # guidance, your wiki pages and the full diff of every case — which is your source code in
+    # plain text, once per model call. Opt in per project here, or per command with --transcript.
+    transcripts: bool = False
+    transcripts_dir: Path = Path(".whetstone/transcripts")
 
 
 class GateDefaults(BaseModel):
@@ -138,6 +145,10 @@ class Config(BaseModel):
     @property
     def reviews_dir(self) -> Path:
         return self._resolve(self.reviews.dir)
+
+    @property
+    def transcripts_dir(self) -> Path:
+        return self._resolve(self.runs.transcripts_dir)
 
     def _resolve(self, path: Path) -> Path:
         if path.is_absolute() or self.source_dir is None:

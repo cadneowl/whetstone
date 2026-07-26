@@ -79,6 +79,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/candidates/{candidate_id}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Draft Expectation
+         * @description Draft this candidate's `semantic` from the evidence. Writes nothing.
+         *
+         *     The result goes back into the triage form for a person to accept, edit or discard. Nothing is
+         *     promoted here: a wrong expectation is durable in a way a wrong guidance edit is not, because
+         *     nothing will ever fail on account of it.
+         */
+        post: operations["draft_expectation_api_candidates__candidate_id__draft_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/candidates/{candidate_id}/draft/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Draft */
+        post: operations["plan_draft_api_candidates__candidate_id__draft_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/candidates/{candidate_id}/preview": {
         parameters: {
             query?: never;
@@ -384,6 +425,46 @@ export interface paths {
          *     whole value of the draft is that a person decides whether it is an improvement.
          */
         post: operations["stage_proposal_api_jobs_improve_stage_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Review
+         * @description Review a live change and store what the skill said, for a human to rule on.
+         *
+         *     The other direction from mining: `corpus pull` infers what a reviewer should have said from
+         *     what people did months ago; this asks the skill directly about code nobody has labelled.
+         */
+        post: operations["launch_review_api_jobs_review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/review/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Review Job */
+        post: operations["plan_review_job_api_jobs_review_plan_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -910,6 +991,11 @@ export interface components {
              * @default
              */
             semantic: string;
+            /**
+             * Semantic Drafted By
+             * @default
+             */
+            semantic_drafted_by: string;
             severity_min?: components["schemas"]["Severity"] | null;
             /** Skill Id */
             skill_id: string;
@@ -1001,6 +1087,7 @@ export interface components {
             path: string;
             /**
              * @default {
+             *       "semantic_drafted_by": "",
              *       "source": "manual"
              *     }
              */
@@ -1187,6 +1274,23 @@ export interface components {
             body: string;
         };
         /**
+         * DraftRequest
+         * @description Which skill's triage step to use. Usually the one the candidate is routed to.
+         */
+        DraftRequest: {
+            /**
+             * Skill Id
+             * @default
+             */
+            skill_id: string;
+        };
+        /** DraftResponse */
+        DraftResponse: {
+            draft: components["schemas"]["SemanticDraft"];
+            /** Drafted By */
+            drafted_by: string;
+        };
+        /**
          * Estimate
          * @description An upper bound on model calls, with the arithmetic that produced it.
          */
@@ -1210,6 +1314,7 @@ export interface components {
             kind: "should_catch" | "should_not_flag";
             /**
              * @default {
+             *       "semantic_drafted_by": "",
              *       "source": "manual"
              *     }
              */
@@ -1639,7 +1744,14 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update";
+            kind: "eval" | "gate" | "improve" | "update" | "review";
+            /** Log */
+            log?: components["schemas"]["LogLine"][];
+            /**
+             * Log Dropped
+             * @default 0
+             */
+            log_dropped: number;
             plan?: components["schemas"]["Plan"] | null;
             /**
              * @default {
@@ -1693,6 +1805,29 @@ export interface components {
             matched: boolean;
             /** Reason */
             reason: string;
+        };
+        /**
+         * LogLine
+         * @description One thing a job saw, as it saw it.
+         *
+         *     Deliberately flat text rather than a structure the console has to re-render: this is a
+         *     transcript, read top to bottom while something is happening, and the drill-down on the finished
+         *     run is where the same information gets a shape you can click.
+         */
+        LogLine: {
+            /**
+             * Group
+             * @default
+             */
+            group: string;
+            /** Text */
+            text: string;
+            /**
+             * Tone
+             * @default plain
+             * @enum {string}
+             */
+            tone: "plain" | "said" | "verdict" | "ok" | "bad";
         };
         /** MetaRequest */
         MetaRequest: {
@@ -1889,6 +2024,11 @@ export interface components {
             human_signal?: string | null;
             /** Ref */
             ref?: string | null;
+            /**
+             * Semantic Drafted By
+             * @default
+             */
+            semantic_drafted_by: string;
             /**
              * Source
              * @default manual
@@ -2117,6 +2257,31 @@ export interface components {
              * @default []
              */
             verdicts: components["schemas"]["FindingVerdict"][];
+        };
+        /**
+         * ReviewRequest
+         * @description Run a skill over a change nobody has labelled yet.
+         *
+         *     Two ways in. A pasted `diff` always works and needs no credentials, which is what makes it the
+         *     one the console leads with. `mr` reaches a real merge request through the `[watch]` connector
+         *     settings — the same GitLab URL and token the watcher already uses, rather than a second place
+         *     to configure the same forge.
+         */
+        ReviewRequest: {
+            /**
+             * Diff
+             * @default
+             */
+            diff: string;
+            /** Mr */
+            mr?: number | null;
+            /**
+             * Project
+             * @default
+             */
+            project: string;
+            /** Skill Id */
+            skill_id: string;
         };
         /**
          * ReviewSummary
@@ -2428,6 +2593,19 @@ export interface components {
             skill_id: string;
             /** Skill Version */
             skill_version: number;
+        };
+        /**
+         * SemanticDraft
+         * @description What a triage step returns.
+         */
+        SemanticDraft: {
+            /**
+             * Rationale
+             * @default
+             */
+            rationale: string;
+            /** Semantic */
+            semantic: string;
         };
         /**
          * Severity
@@ -3039,6 +3217,76 @@ export interface operations {
             };
         };
     };
+    draft_expectation_api_candidates__candidate_id__draft_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_draft_api_candidates__candidate_id__draft_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     preview_promotion_api_candidates__candidate_id__preview_post: {
         parameters: {
             query?: never;
@@ -3499,6 +3747,72 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_review_api_jobs_review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_review_job_api_jobs_review_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
                 };
             };
             /** @description Validation Error */

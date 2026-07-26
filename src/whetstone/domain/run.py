@@ -43,6 +43,11 @@ class RunEvent(BaseModel):
     trial: int | None = None
     completed_cases: int = 0
     total_cases: int = 0
+    # On `case_done`: the finished record — every finding the reviewer returned and every verdict
+    # the judge reached. Carried on the event rather than left for the caller to wait out, because a
+    # watcher's real question during a run is not "how far along" but "what is it saying" — and by
+    # the time the record is saved the run is over and the question is retrospective.
+    case: CaseRun | None = None
 
 
 class JudgeVerdictRecord(BaseModel):
@@ -173,6 +178,19 @@ class CaseRun(BaseModel):
         return sum((t.confusion for t in self.trials), Confusion())
 
     @property
+    def representative_trial(self) -> TrialRecord | None:
+        """The first trial that failed, else the first trial.
+
+        A case that failed once in five is still a failure, and anything showing a single trial —
+        an improve digest, a live transcript — has to show the one that failed. Picking trial 0
+        instead reports a green result for a case the score counts as half wrong.
+        """
+        for trial in self.trials:
+            if any(o.outcome in ("fn", "fp") for o in trial.outcomes):
+                return trial
+        return self.trials[0] if self.trials else None
+
+    @property
     def flaky(self) -> bool:
         """True when trials disagree about an expectation — unstable, as opposed to simply wrong."""
         if len(self.trials) < 2:
@@ -238,3 +256,8 @@ def skill_hash(skill: Skill) -> str:
         h.update(b"\0wiki\0")
         h.update(wiki_digest(skill.wiki).encode("utf-8"))
     return h.hexdigest()
+
+
+# `RunEvent.case` is annotated with a class defined further down the module, so the reference has to
+# be resolved once the name exists.
+RunEvent.model_rebuild()

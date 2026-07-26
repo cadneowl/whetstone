@@ -76,7 +76,7 @@ def run_skill_recorded(
             trials.append(reviewer.review(skill, case.change))
             progress.trial_done(case.id, trial_index)
         record = record_case(case, trials, judge)
-        progress.case_done(case.id)
+        progress.case_done(case.id, record)
         return record
 
     if max_workers > 1 and total > 1:
@@ -117,12 +117,12 @@ class _Progress:
         self._emit(RunEvent(kind="trial_done", case_id=case_id, trial=trial,
                             completed_cases=self._completed, total_cases=self._total))
 
-    def case_done(self, case_id: str) -> None:
+    def case_done(self, case_id: str, case: CaseRun | None = None) -> None:
         with self._lock:
             self._completed += 1
             completed = self._completed
         self._emit(RunEvent(kind="case_done", case_id=case_id, completed_cases=completed,
-                            total_cases=self._total))
+                            total_cases=self._total, case=case))
 
     def _emit(self, event: RunEvent) -> None:
         if self._sink is not None:

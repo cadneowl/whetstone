@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   useCancelJob,
   useJob,
@@ -79,9 +79,7 @@ export function LaunchButton({
           <button
             type="button"
             disabled={launch.isPending}
-            onClick={() =>
-              launch.mutate(request, { onSuccess: (started) => setJobId(started.id) })
-            }
+            onClick={() => launch.mutate(request, { onSuccess: (started) => setJobId(started.id) })}
             className="rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:text-muted"
           >
             {launch.isPending ? 'Starting…' : `Yes, ${label.toLowerCase()}`}
@@ -234,8 +232,72 @@ function JobStatus({
         <p className="mt-2 text-xs text-muted">Stopped. Nothing was recorded.</p>
       )}
       {job.state === 'done' && <JobResult job={job} />}
+      <Transcript job={job} />
     </div>
   )
+}
+
+/**
+ * What the model said, while it is still saying it.
+ *
+ * A progress bar reports that a call happened and nothing about what came back — and "what came
+ * back" is the entire question during a run you are paying for. Every line here is material the
+ * finished run's drill-down also shows; the difference is that this arrives while there is still
+ * time to cancel and change something.
+ */
+function Transcript({ job }: { job: Job }) {
+  const [open, setOpen] = useState(true)
+  const box = useRef<HTMLDivElement>(null)
+  const lines = job.log ?? []
+  const dropped = job.log_dropped ?? 0
+
+  // Follow the tail while it grows. Depending on the line count rather than on a timer means it
+  // scrolls exactly when there is something new, and stays put once the job is finished.
+  useEffect(() => {
+    const el = box.current
+    if (el && open) el.scrollTop = el.scrollHeight
+  }, [lines.length, open])
+
+  if (lines.length === 0) return null
+
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="text-xs text-muted transition-colors hover:text-ink"
+      >
+        {open ? '▾' : '▸'} what the model said ({lines.length}
+        {dropped > 0 ? ` of ${lines.length + dropped}` : ''} lines)
+      </button>
+      {open && (
+        <div
+          ref={box}
+          className="mt-1 max-h-72 overflow-y-auto rounded border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] leading-relaxed whitespace-pre-wrap"
+        >
+          {dropped > 0 && (
+            <p className="text-muted italic">
+              … {dropped} earlier line{dropped === 1 ? '' : 's'} dropped; the run record keeps all
+              of them
+            </p>
+          )}
+          {lines.map((line, i) => (
+            <p key={`${line.group}-${i}`} className={TONE[line.tone ?? 'plain']}>
+              {line.text}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const TONE: Record<string, string> = {
+  plain: 'text-ink',
+  said: 'text-muted',
+  verdict: 'text-muted',
+  ok: 'text-good',
+  bad: 'text-bad',
 }
 
 function JobResult({ job }: { job: Job }) {
@@ -255,18 +317,35 @@ function JobResult({ job }: { job: Job }) {
     const reasons = (r.reasons as string[]) ?? []
     return (
       <div className="mt-2 text-xs">
-        <p className={r.passed ? 'text-good' : 'text-bad'}>
-          Gate: {r.passed ? 'PASS' : 'FAIL'}
-        </p>
+        <p className={r.passed ? 'text-good' : 'text-bad'}>Gate: {r.passed ? 'PASS' : 'FAIL'}</p>
         {reasons.map((reason) => (
           <p key={reason} className="mt-0.5 text-muted">
             {reason}
           </p>
         ))}
-        {Boolean(r.passed) && (
-          <p className="mt-1 text-muted">This content may now be proposed.</p>
-        )}
+        {Boolean(r.passed) && <p className="mt-1 text-muted">This content may now be proposed.</p>}
       </div>
+    )
+  }
+  if (job.kind === 'review') {
+    const found = Number(r.findings ?? 0)
+    return (
+      <p className="mt-2 text-xs">
+        {found === 0 ? (
+          <span className="text-muted">
+            The skill said nothing about this change. Worth a{' '}
+            <code className="font-mono">should_not_flag</code> case if that is right, and worth
+            asking why if it is not.
+          </span>
+        ) : (
+          <>
+            {found} finding{found === 1 ? '' : 's'}, none ruled on yet ·{' '}
+            <a className="text-accent hover:underline" href={`/reviews/${String(r.review_id)}`}>
+              rule on them
+            </a>
+          </>
+        )}
+      </p>
     )
   }
   if (job.kind === 'update') {

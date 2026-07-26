@@ -67,6 +67,8 @@ def run_eval(
     judge_effort: Effort = "medium",
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    on_event: EventSink | None = None,
+    cancel: threading.Event | None = None,
 ) -> SkillScore:
     """Score a skill by running its eval set through an LLM reviewer + judge."""
     return record_eval(
@@ -77,6 +79,8 @@ def run_eval(
         judge_effort=judge_effort,
         sample=sample,
         wiki_limits=wiki_limits,
+        on_event=on_event,
+        cancel=cancel,
     ).score
 
 
@@ -297,6 +301,9 @@ def gate_skills(
     trials: int = 1,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    on_base: EventSink | None = None,
+    on_candidate: EventSink | None = None,
+    cancel: threading.Event | None = None,
 ) -> GateOutcome:
     """Score a base and candidate version of a skill and apply the regression gate.
 
@@ -317,13 +324,18 @@ def gate_skills(
     # scored on X would fail for a reason nobody could see.
     drawn = sample_cases(union_cases(base, candidate), sample, always_include=cfg.targeted_cases)
     cases = drawn.cases
+    # Two sinks rather than one: base and candidate score the same cases, so a single stream would
+    # show every case twice with no way to tell which side said what — the one thing a gate is for.
+    # `cancel` reaches both sides. A gate is the most expensive thing here — it scores two skills
+    # over the same cases — so it is the one an operator is most likely to want to stop, and
+    # without this the stop button was accepted, ignored, and the spending carried on.
     base_score = run_eval(
         base.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits,
+        wiki_limits=wiki_limits, on_event=on_base, cancel=cancel,
     )
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits,
+        wiki_limits=wiki_limits, on_event=on_candidate, cancel=cancel,
     )
     result = gate(base_score, candidate_score, cfg)
     return GateOutcome(result=result, base=base_score, candidate=candidate_score)
@@ -345,6 +357,9 @@ def record_gate(
     now: datetime | None = None,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    on_base: EventSink | None = None,
+    on_candidate: EventSink | None = None,
+    cancel: threading.Event | None = None,
 ) -> GateRecord:
     """Gate a candidate against a baseline and return a storable record of the comparison.
 
@@ -359,7 +374,8 @@ def record_gate(
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
     outcome = gate_skills(
-        base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits
+        base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
+        on_base=on_base, on_candidate=on_candidate, cancel=cancel,
     )
     duration = time.perf_counter() - clock
 

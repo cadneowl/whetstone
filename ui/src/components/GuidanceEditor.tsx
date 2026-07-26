@@ -355,11 +355,17 @@ function ProposalPanel({
           as the step it is. */}
       {proposal.staged && !verdict.can_propose && !pendingEdit && (
         <div className="mt-3">
-          <LaunchButton
-            kind="gate"
-            request={{ skill_id: skillId }}
-            label="Run the gate"
-          />
+          {/* Named as the question it answers. "Run the gate" is the mechanism; "did that help?"
+              is what the person who just staged a change actually wants to know — and the gate is
+              the only thing that answers it, because a single score on the new guidance has no
+              baseline to be better than. Scoring the skill here would read the working tree, which
+              still holds the old text, and report that nothing changed. */}
+          <p className="mb-2 text-xs text-muted">
+            Did that help? Scoring this skill would measure the working tree, which still holds the
+            old guidance. The gate scores both versions over the same cases and reports the
+            difference — which is also the evidence needed to publish.
+          </p>
+          <LaunchButton kind="gate" request={{ skill_id: skillId }} label="Run the gate" />
           <details className="mt-2">
             <summary className="cursor-pointer text-xs text-muted hover:text-ink">
               or run it yourself
@@ -421,7 +427,6 @@ function CaseVerdict({ c }: { c: CaseSummary }) {
     </span>
   )
 }
-
 
 function PinnedCases({ cases }: { cases: CaseSummary[] }) {
   if (cases.length === 0) {

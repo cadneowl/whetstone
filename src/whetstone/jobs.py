@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 from whetstone.preflight import Plan
 
-JobKind = Literal["eval", "gate", "improve", "update"]
+JobKind = Literal["eval", "gate", "improve", "update", "review"]
 JobState = Literal["running", "done", "failed", "cancelled"]
 
 # How many jobs may run at once. Two so a gate can be watched while something else finishes, and no
@@ -45,6 +45,12 @@ MAX_CONCURRENT = 2
 # Finished jobs kept for inspection. Beyond this the oldest are dropped — their results live in the
 # run and gate stores, so what is lost is a status line, not a measurement.
 MAX_RETAINED = 50
+
+# Log lines kept per job. The whole log is re-sent on every poll, so this is a payload cap as much
+# as a memory one: a run over ten thousand cases must not turn a status poll into a megabyte. The
+# complete record is written to the run store regardless, so what the cap drops is the live tail,
+# never the measurement.
+MAX_LOG_LINES = 200
 
 
 class JobBusy(RuntimeError):
@@ -61,6 +67,22 @@ class JobProgress(BaseModel):
         return self.completed / self.total if self.total else 0.0
 
 
+class LogLine(BaseModel):
+    """One thing a job saw, as it saw it.
+
+    Deliberately flat text rather than a structure the console has to re-render: this is a
+    transcript, read top to bottom while something is happening, and the drill-down on the finished
+    run is where the same information gets a shape you can click.
+    """
+
+    # Groups the lines belonging to one case, so a fan-out over several workers still reads as
+    # blocks rather than interleaved noise.
+    group: str = ""
+    text: str
+    # "said" is what the model returned, "verdict" what the judge decided, "ok"/"bad" the outcome.
+    tone: Literal["plain", "said", "verdict", "ok", "bad"] = "plain"
+
+
 class Job(BaseModel):
     """One unit of console-launched work, and everything needed to watch it."""
 
@@ -72,6 +94,10 @@ class Job(BaseModel):
     finished_at: datetime | None = None
     plan: Plan | None = None
     progress: JobProgress = JobProgress()
+    # What the model actually said, streamed while the job runs. Capped at MAX_LOG_LINES.
+    log: list[LogLine] = Field(default_factory=list)
+    # How many lines the cap has dropped, so a truncated transcript says it is truncated.
+    log_dropped: int = 0
     # What the job produced, shaped per kind: {"run_id": …}, {"gate_id": …, "passed": …},
     # {"proposal": {...}}. Kept loose on purpose — the console renders each kind explicitly, and a
     # union type here would have to be widened for every new job kind.
@@ -86,6 +112,7 @@ class Job(BaseModel):
 # `JobStore.list` shadows the builtin inside the class body, so later annotations there cannot
 # write `list[Job]`. Naming the type once is clearer than working around the shadowing at each use.
 JobList = list[Job]
+JobLines = list[LogLine]
 
 
 class JobStore:
@@ -201,6 +228,19 @@ class JobStore:
             if job is not None and not job.finished:
                 job.progress = progress
 
+    def _log(self, job_id: str, lines: JobLines) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            # Kept after the job finishes too: the transcript of a failed run is the most useful
+            # thing about it, and dropping it on the state change would throw away the evidence.
+            job.log.extend(lines)
+            if len(job.log) > MAX_LOG_LINES:
+                dropped = len(job.log) - MAX_LOG_LINES
+                job.log_dropped += dropped
+                del job.log[:dropped]
+
     def _cancelled(self, job_id: str) -> bool:
         with self._lock:
             event = self._cancels.get(job_id)
@@ -237,6 +277,11 @@ class JobHandle:
         self._store._update(
             self.job_id, JobProgress(completed=completed, total=total, label=label)
         )
+
+    def log(self, *lines: LogLine) -> None:
+        """Append to the job's transcript. Safe from any worker thread."""
+        if lines:
+            self._store._log(self.job_id, list(lines))
 
     def check(self) -> None:
         """Raise `Cancelled` if the operator asked to stop — for work with no cancel hook."""

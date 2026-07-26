@@ -1,6 +1,14 @@
-import { Link } from 'react-router-dom'
-import { useReviews, type ReviewListItem, type ReviewSummary } from '@/api/client'
-import { Badge, Empty, ErrorNote, Loading, when } from '@/components/primitives'
+import { useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import {
+  useInbox,
+  useReviews,
+  useSkills,
+  type ReviewListItem,
+  type ReviewSummary,
+} from '@/api/client'
+import { LaunchButton } from '@/components/LaunchButton'
+import { Badge, Empty, ErrorNote, Intro, Loading, when } from '@/components/primitives'
 
 /**
  * Live reviews awaiting a ruling.
@@ -19,21 +27,19 @@ export function ReviewsIndex() {
     <div>
       <header className="mb-4">
         <h1 className="text-lg font-semibold">Reviews</h1>
-        <p className="mt-1 text-sm text-muted">
-          A skill run over a live change. Rule on each finding and it becomes an eval case the gate
-          enforces.
-        </p>
+        <Intro>
+          The skill's own output on a live change, waiting for a verdict — the opposite direction
+          from Triage, which infers what a reviewer <em>should</em> have said. Open one and mark
+          each finding Correct or False positive. Each ruling mints a triage candidate: a confirmed
+          finding becomes a case the skill must keep catching, a rejected one a case the gate
+          refuses to let back in.
+        </Intro>
       </header>
 
+      <ReviewAChange />
+
       {!data?.length ? (
-        <Empty>
-          No reviews yet. Run{' '}
-          <code className="font-mono">
-            whetstone review --skill skills/&lt;id&gt; --base-url … --project … --mr 1423
-          </code>{' '}
-          to review an open merge request, or <code className="font-mono">--diff patch.diff</code>{' '}
-          for a local patch.
-        </Empty>
+        <Empty>No reviews yet — run one above.</Empty>
       ) : (
         <ul className="space-y-1.5">
           {data.map((item) => (
@@ -47,6 +53,124 @@ export function ReviewsIndex() {
   )
 }
 
+/**
+ * Running a review, on the screen that lists them.
+ *
+ * This was the one stage of the loop with no button: you could rule on findings but not produce
+ * any, so a review had to come from the CLI or an upload — which meant the half of the corpus that
+ * comes from the skill's own output was reachable only by people who already knew the commands.
+ *
+ * A pasted diff leads, because it works on the first day with nothing configured. The
+ * merge-request field appears only when `[watch]` names a forge, rather than offering an input that
+ * could only fail.
+ */
+function ReviewAChange() {
+  const { data: skills } = useSkills()
+  const { data: inbox } = useInbox()
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
+  const [skillId, setSkillId] = useState('')
+  const [diff, setDiff] = useState('')
+  const [mr, setMr] = useState('')
+
+  const hasForge = Boolean(inbox?.watch.enabled)
+  const chosen = skillId || skills?.[0]?.id || ''
+  const byMr = /^\d+$/.test(mr.trim())
+  const request = byMr ? { skill_id: chosen, mr: Number(mr) } : { skill_id: chosen, diff }
+  const ready = Boolean(chosen) && (diff.trim().length > 0 || byMr)
+
+  if (!skills?.length) return null
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mb-4 rounded-lg border border-line px-3 py-1.5 text-sm transition-colors hover:border-accent/50 hover:text-accent"
+      >
+        Review a change
+      </button>
+    )
+  }
+
+  return (
+    <section className="mb-5 space-y-3 rounded-lg border border-line bg-surface/50 p-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="text-sm font-medium">Review a change</h2>
+        <span className="text-xs text-muted">
+          the skill reads it and reports; nothing is judged and nothing is scored
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="ml-auto text-xs text-muted transition-colors hover:text-ink"
+        >
+          Close
+        </button>
+      </div>
+
+      <label className="block text-xs text-muted">
+        Skill
+        <select
+          value={chosen}
+          onChange={(e) => setSkillId(e.target.value)}
+          className="mt-1 block w-full rounded border border-line bg-canvas px-2 py-1.5 text-sm text-ink"
+        >
+          {skills.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name || s.id}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="block text-xs text-muted">
+        Paste a unified diff
+        <textarea
+          value={diff}
+          onChange={(e) => setDiff(e.target.value)}
+          rows={6}
+          spellCheck={false}
+          placeholder={'diff --git a/src/x.rs b/src/x.rs\n--- a/src/x.rs\n+++ b/src/x.rs\n@@ …'}
+          className="mt-1 block w-full rounded border border-line bg-canvas px-2 py-1.5 font-mono text-xs text-ink"
+        />
+      </label>
+
+      {hasForge && (
+        <label className="block text-xs text-muted">
+          …or a merge request number
+          <input
+            value={mr}
+            onChange={(e) => setMr(e.target.value)}
+            inputMode="numeric"
+            placeholder="1423"
+            className="mt-1 block w-32 rounded border border-line bg-canvas px-2 py-1.5 text-sm text-ink"
+          />
+          <span className="mt-1 block">
+            Fetched through the <code className="font-mono">[watch]</code> forge settings.
+          </span>
+        </label>
+      )}
+
+      {ready ? (
+        <LaunchButton
+          kind="review"
+          request={request}
+          label="Review it"
+          onDone={(job) => {
+            const id = (job.result as { review_id?: string }).review_id
+            if (id) navigate(`/reviews/${encodeURIComponent(id)}`)
+          }}
+        />
+      ) : (
+        <p className="text-xs text-muted">
+          Paste a diff{hasForge ? ', or give a merge request number' : ''} to continue.
+        </p>
+      )}
+    </section>
+  )
+}
+
 function Row({ item }: { item: ReviewListItem }) {
   const { summary } = item
   return (
@@ -55,9 +179,7 @@ function Row({ item }: { item: ReviewListItem }) {
       className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm transition-colors hover:border-accent/50"
     >
       <span className="min-w-0 truncate font-mono text-xs">{summary.ref || summary.id}</span>
-      {summary.title && (
-        <span className="min-w-0 flex-1 truncate text-muted">{summary.title}</span>
-      )}
+      {summary.title && <span className="min-w-0 flex-1 truncate text-muted">{summary.title}</span>}
       <Progress summary={summary} />
       {item.stale_skill && (
         <Badge
