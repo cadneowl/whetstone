@@ -32,17 +32,29 @@ from whetstone.config import Config
 from whetstone.core.gate import GateConfig
 from whetstone.core.harness import RunCancelled
 from whetstone.core.loader import SkillLoadError
+from whetstone.domain.change import parse_unified_diff
+from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
 from whetstone.gitio import GitError
 from whetstone.improve import propose
-from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobStore
+from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.llm.factory import Backend, build_llm_client, resolve_backend
+from whetstone.llm.transcript import RecordingClient, Transcript, transcript_path
 from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval
+from whetstone.providers.base import ConnectorError
 from whetstone.sampling import sample_cases
-from whetstone.service import record_eval, record_gate
+from whetstone.service import record_eval, record_gate, record_review
 from whetstone.steps import StepError, StepSpec, load_step
-from whetstone.ui.deps import ConfigDep, GatesDep, JobsDep, SkillsRootDep, StoreDep, Writable
+from whetstone.ui.deps import (
+    ConfigDep,
+    GatesDep,
+    JobsDep,
+    ReviewsDep,
+    SkillsRootDep,
+    StoreDep,
+    Writable,
+)
 from whetstone.ui.errors import Conflict, NotFound, Unprocessable
 from whetstone.update import refresh_wiki
 
@@ -75,6 +87,21 @@ class ImproveRequest(BaseModel):
 class UpdateRequest(BaseModel):
     skill_id: str
     repo: str = "."
+
+
+class ReviewRequest(BaseModel):
+    """Run a skill over a change nobody has labelled yet.
+
+    Two ways in. A pasted `diff` always works and needs no credentials, which is what makes it the
+    one the console leads with. `mr` reaches a real merge request through the `[watch]` connector
+    settings — the same GitLab URL and token the watcher already uses, rather than a second place
+    to configure the same forge.
+    """
+
+    skill_id: str
+    diff: str = ""
+    mr: int | None = None
+    project: str = ""
 
 
 @router.get("", response_model=list[Job])
@@ -128,11 +155,12 @@ def launch_eval(
         def on_event(event: RunEvent) -> None:
             if event.kind == "case_done":
                 handle.progress(event.completed_cases, event.total_cases, event.case_id)
+                handle.log(*transcript(event))
 
         try:
             record = record_eval(
                 skill,
-                _client(config, spec),
+                _client(config, spec, label=f"eval-{skill.id}"),
                 trials=trials,
                 backend=backend.name,
                 model=backend.model,
@@ -186,22 +214,50 @@ def launch_gate(
     branch = staging.skill_branch(config, request.skill_id)
 
     def work(handle: JobHandle) -> dict[str, Any]:
-        # The gate scores both sides itself, so there is no per-case hook to report against; say
-        # what is happening rather than show a bar that cannot move.
+        # The two sides are scored in sequence with no combined counter, so the bar cannot move
+        # meaningfully — the transcript is what tells you where it has got to.
         handle.progress(0, 1, "scoring base and candidate")
-        record = record_gate(
-            base,
-            candidate,
-            _client(config, spec),
-            cfg=cfg,
-            trials=trials,
-            base_ref=config.git.default_base,
-            candidate_ref=branch,
-            backend=backend.name,
-            model=backend.model,
-            sample=_sample(spec, request.sample),
-            wiki_limits=spec.inputs.wiki if spec else None,
-        )
+
+        def side(label: str, ref: str) -> Any:
+            """A sink that tags its lines with which side of the gate they came from.
+
+            `base`/`candidate` rather than the ref itself: a branch name is 35 characters that are
+            identical on every line, and repeating it pushed the finding — the part worth reading —
+            off the right of the panel. The ref is stated once, in a header.
+            """
+            announced = False
+
+            def sink(event: RunEvent) -> None:
+                nonlocal announced
+                if not announced:
+                    announced = True
+                    handle.log(LogLine(text=f"── scoring {label}: {ref} ──"))
+                handle.progress(0, 1, f"{label}: {event.case_id}")
+                handle.log(*(_prefixed(line, label) for line in transcript(event)))
+
+            return sink
+
+        try:
+            record = record_gate(
+                base,
+                candidate,
+                _client(config, spec, label=f"gate-{candidate.id}"),
+                cfg=cfg,
+                trials=trials,
+                base_ref=config.git.default_base,
+                candidate_ref=branch,
+                backend=backend.name,
+                model=backend.model,
+                sample=_sample(spec, request.sample),
+                wiki_limits=spec.inputs.wiki if spec else None,
+                on_base=side("base", config.git.default_base),
+                on_candidate=side("cand", branch),
+                cancel=handle.cancel_event,
+            )
+        except RunCancelled as exc:
+            # Nothing is saved: half a gate is not a verdict, and a record of one would be evidence
+            # C6 could match against content that was never fully measured.
+            raise Cancelled from exc
         gates.save(record)
         handle.progress(1, 1, "done")
         return {
@@ -290,7 +346,11 @@ def launch_improve(
             spec,
             skill,
             record,
-            client=_client(config, spec) if spec.calls_a_model else None,
+            client=(
+                _client(config, spec, label=f"improve-{skill.id}")
+                if spec.calls_a_model
+                else None
+            ),
             effort=spec.model.effort or "high",
             instruction=request.instruction,
         )
@@ -345,6 +405,122 @@ def stage_proposal(
             "version": str(prepared.version)}
 
 
+# --- review ----------------------------------------------------------------------
+
+
+@router.post("/review/plan", response_model=Plan)
+def plan_review_job(request: ReviewRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
+    skill = _skill(root, request.skill_id)
+    plan = plan_calls(
+        "review",
+        _backend(config, _step(root, skill, "evaluate")),
+        calls=1,
+        basis="one call: the reviewer over this change. No judge — there is nothing to judge yet",
+        details=["the findings are stored unruled; you decide which are right"],
+    )
+    if not skill.body.strip():
+        plan.warnings.append("this skill has no guidance, so the reviewer is being sent no rules")
+    return plan
+
+
+@router.post("/review", response_model=Job, dependencies=[Writable])
+def launch_review(
+    request: ReviewRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    reviews: ReviewsDep,
+    jobs: JobsDep,
+) -> Job:
+    """Review a live change and store what the skill said, for a human to rule on.
+
+    The other direction from mining: `corpus pull` infers what a reviewer should have said from
+    what people did months ago; this asks the skill directly about code nobody has labelled.
+    """
+    skill = _skill(root, request.skill_id)
+    spec = _step(root, skill, "evaluate")
+    backend = _backend(config, spec)
+    plan = plan_review_job(request, config, root)
+    change, source, ref, url, title = _review_change(config, request)
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, 1, f"reviewing {ref or 'the change'}")
+        handle.check()
+        record = record_review(
+            skill,
+            change,
+            _client(config, spec, label=f"review-{skill.id}"),
+            source=source,
+            ref=ref,
+            url=url,
+            title=title,
+            backend=backend.name,
+            model=backend.model,
+        )
+        reviews.save(record)
+        handle.log(
+            *(
+                LogLine(
+                    text=(
+                        f"  {f.path}:{f.line} {f.severity.name}"
+                        f"{' [' + f.rule_id + ']' if f.rule_id else ''} — {f.message}"
+                    ),
+                    tone="said",
+                )
+                for f in record.findings
+            )
+        )
+        if not record.findings:
+            handle.log(LogLine(text="  the skill found nothing to say about this change"))
+        handle.progress(1, 1, "done")
+        return {
+            "review_id": record.id,
+            "findings": len(record.findings),
+            "llm_calls": record.llm_calls,
+        }
+
+    return _launch(jobs, "review", skill.id, work, plan)
+
+
+def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:
+    """The change to review: a pasted diff, or a merge request pulled through `[watch]`'s forge."""
+    if request.diff.strip() and request.mr is not None:
+        raise Unprocessable("give a diff or a merge request, not both")
+
+    if request.diff.strip():
+        try:
+            change = parse_unified_diff(request.diff, RepoRef.parse("local:pasted"))
+        except ValueError as exc:
+            raise Unprocessable(f"that does not parse as a unified diff: {exc}") from exc
+        if not change.files:
+            raise Unprocessable("the diff contains no file changes; there is nothing to review")
+        return change, "diff", "pasted diff", "", ""
+
+    if request.mr is None:
+        raise Unprocessable("paste a diff, or give a merge request number to review")
+
+    watch = config.watch
+    project = request.project or (watch.projects[0] if watch.projects else "")
+    if not watch.gitlab_url or not project:
+        raise Unprocessable(
+            "reviewing a merge request needs [watch] gitlab_url and a project in whetstone.toml — "
+            "or paste the diff instead, which needs no credentials"
+        )
+    from whetstone.providers.gitlab.provider import GitLabConnector
+
+    connector = GitLabConnector.from_config(
+        {"base_url": watch.gitlab_url, "token_env": watch.token_env}
+    )
+    repo = RepoRef.parse(f"gitlab:{project}")
+    try:
+        found = connector.get_merge_request(repo, request.mr)
+        # base_sha..head_sha, not the target branch: an open MR's target moves under it, and
+        # diffing against a moving base attributes other people's commits to this change.
+        change = connector.get_change(repo, found.base_sha, found.head_sha)
+    except ConnectorError as exc:
+        raise Unprocessable(str(exc)) from exc
+    return change, "merge_request", f"{project}!{request.mr}", found.web_url, found.title
+
+
 # --- update ----------------------------------------------------------------------
 
 
@@ -396,6 +572,89 @@ def launch_update(
             details=["this runs the generator your update step names; Whetstone calls no model"],
         ),
     )
+
+
+# --- the transcript --------------------------------------------------------------
+
+
+def transcript(event: RunEvent) -> JobLines:
+    """One finished case, rendered as the lines a person would want to watch scroll past.
+
+    What a run is *doing* is invisible from a progress bar: "3 of 4" says a model was called and
+    nothing about what came back. This is the same material the finished run's drill-down shows —
+    every finding, every judge verdict and its reason — put in front of the operator while there is
+    still time to stop and change something.
+
+    One trial is rendered, not all of them — the rest are near-repeats and the run record keeps
+    them for the drill-down. It is the *representative* trial: the first that failed, else the
+    first. Rendering trial 0 instead reports a clean green result for a flaky case the score counts
+    as half wrong, which is the one situation where a watcher most needs to be told.
+    """
+    case = event.case
+    trial = None if case is None else case.representative_trial
+    if case is None or trial is None:
+        return []
+
+    head = f"{event.completed_cases}/{event.total_cases}"
+    flaky = " — FLAKY, trials disagree" if case.flaky else ""
+    lines = [
+        LogLine(
+            group=case.case_id,
+            text=f"[{head}] {case.case_id} ({case.kind}){flaky}",
+            tone="bad" if case.flaky else "plain",
+        )
+    ]
+
+    if not trial.findings:
+        lines.append(LogLine(group=case.case_id, text="  reviewer said nothing", tone="said"))
+    for finding in trial.findings:
+        where = f"{finding.path}:{finding.line}" if finding.line else finding.path
+        rule = f" [{finding.rule_id}]" if finding.rule_id else ""
+        lines.append(
+            LogLine(
+                group=case.case_id,
+                text=f"  {where} {finding.severity.name}{rule} — {finding.message}",
+                tone="said",
+            )
+        )
+
+    for outcome in trial.outcomes:
+        for verdict in outcome.verdicts:
+            lines.append(
+                LogLine(
+                    group=case.case_id,
+                    text=(
+                        f"  judge {outcome.expectation_id}: "
+                        f"{'MATCHED' if verdict.matched else 'no match'} "
+                        f"({verdict.confidence:.2f}) — {verdict.reason}"
+                    ),
+                    tone="verdict",
+                )
+            )
+        lines.append(
+            LogLine(
+                group=case.case_id,
+                text=f"  → {outcome.expectation_id} {_OUTCOME[outcome.outcome]}",
+                tone="bad" if outcome.outcome in ("fn", "fp") else "ok",
+            )
+        )
+    return lines
+
+
+def _prefixed(line: LogLine, label: str) -> LogLine:
+    """Tag a line with the side of the gate it came from."""
+    return line.model_copy(
+        update={"group": f"{label}:{line.group}", "text": f"{label} {line.text}"}
+    )
+
+
+# Spelled out, because "fn" on a line of its own is a Python keyword abbreviation, not a result.
+_OUTCOME = {
+    "tp": "caught it (tp)",
+    "tn": "stayed quiet, correctly (tn)",
+    "fn": "MISSED it (fn)",
+    "fp": "FALSE POSITIVE (fp)",
+}
 
 
 # --- shared ----------------------------------------------------------------------
@@ -476,16 +735,22 @@ def _backend(config: Config, spec: StepSpec | None) -> Backend:
         raise Unprocessable(str(exc)) from exc
 
 
-def _client(config: Config, spec: StepSpec | None) -> Any:
-    del config
+def _client(config: Config, spec: StepSpec | None, *, label: str = "job") -> Any:
     try:
-        return build_llm_client(
+        client = build_llm_client(
             spec.model.llm if spec else None,
             model=spec.model.model if spec else None,
             base_url=spec.model.base_url if spec else None,
         )
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
+    if not config.runs.transcripts:
+        return client
+    # Wrapped here rather than inside the harness: recording is a property of the client, so
+    # nothing downstream — reviewer, judge, improve step — has to know it is happening.
+    return RecordingClient(
+        client, Transcript(transcript_path(config.transcripts_dir, label))
+    )
 
 
 def _eval_plan(config: Config, skill: Skill, request: EvalRequest) -> Plan:
@@ -501,7 +766,35 @@ def _eval_plan(config: Config, skill: Skill, request: EvalRequest) -> Plan:
         wiki_limits=spec.inputs.wiki if spec else None,
     )
     check_budget(plan, config.runs.max_llm_calls_per_run)
+    _warn_if_a_change_is_staged(plan, config, skill)
     return plan
+
+
+def _warn_if_a_change_is_staged(plan: Plan, config: Config, skill: Skill) -> None:
+    """Say, before the spend, that this run will not measure the change you just staged.
+
+    Staging deliberately never touches the working tree, and an eval reads the working tree. So an
+    operator who drafts a change, stages it, and then scores the skill gets the *old* guidance's
+    number back — identical to the baseline — and the obvious reading of that is "my edit did
+    nothing". It did; this run simply did not look at it.
+
+    A warning rather than scoring the branch instead: one number about the candidate answers
+    nothing on its own, because "did that help?" is a comparison. The gate is what answers it, so
+    the warning names the gate.
+    """
+    from whetstone.domain.run import skill_hash
+
+    try:
+        branch = staging.skill_branch(config, skill.id)
+        staged = staging.skill_at(config, branch, skill.id)
+    except (staging.StagingError, GitError, OSError):
+        return  # no git, no branch, nothing to warn about
+    if staged is None or skill_hash(staged[0]) == skill_hash(skill):
+        return
+    plan.warnings.append(
+        f"{branch} holds a staged change that this run will NOT measure — an eval scores the "
+        f"working tree. Run the gate to compare the two."
+    )
 
 
 def _run_for(store: Any, skill: Skill, request: ImproveRequest) -> Any:

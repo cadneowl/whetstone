@@ -174,7 +174,11 @@ class Watcher:
                 # earlier would skip a window whose findings were never written.
                 with self._lock:
                     self._state.since[project] = started
-        except (ConnectorError, ValueError, OSError) as exc:
+        except ValueError as exc:
+            # No class name: a `ValueError` here is one of our own configuration refusals, already
+            # written as a sentence, and the console shows it to somebody editing a TOML file.
+            sweep.error = str(exc)
+        except (ConnectorError, OSError) as exc:
             sweep.error = f"{type(exc).__name__}: {exc}"
         except Exception as exc:  # noqa: BLE001 - a sweep must never take the console down
             sweep.error = f"{type(exc).__name__}: {exc}"

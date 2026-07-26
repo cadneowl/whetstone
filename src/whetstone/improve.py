@@ -172,7 +172,7 @@ def _failures(
     wanted = set(inputs.outcomes)
     out: list[Failure] = []
     for case_run in record.cases:
-        trial = _representative_trial(case_run)
+        trial = case_run.representative_trial
         if trial is None:
             continue
         for outcome in trial.outcomes:
@@ -182,18 +182,6 @@ def _failures(
                 _failure(case_run, trial, outcome, cases.get(case_run.case_id), inputs)
             )
     return out
-
-
-def _representative_trial(case_run: CaseRun) -> TrialRecord | None:
-    """The first trial that failed, else the first trial.
-
-    A flaky case that failed once in five is still a failure worth learning from, and picking the
-    failing trial is what puts it in front of the model rather than the four passes that hid it.
-    """
-    for trial in case_run.trials:
-        if any(o.outcome in ("fn", "fp") for o in trial.outcomes):
-            return trial
-    return case_run.trials[0] if case_run.trials else None
 
 
 def _failure(

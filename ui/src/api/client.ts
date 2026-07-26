@@ -48,6 +48,8 @@ export type ActionKind = NextAction['kind']
 export type Signal = Schemas['Signal']
 export type WatchState = Schemas['WatchState']
 export type Sweep = Schemas['Sweep']
+export type DraftResponse = Schemas['DraftResponse']
+/** The union of every job kind's request body. Each route validates its own shape server-side. */
 export type JobRequest = {
   skill_id: string
   trials?: number | null
@@ -56,6 +58,9 @@ export type JobRequest = {
   instruction?: string
   stale_ok?: boolean
   repo?: string
+  diff?: string
+  mr?: number
+  project?: string
 }
 
 /** The shape the API returns for a handled failure — see `ui/errors.py`. */
@@ -213,6 +218,30 @@ export function usePromote() {
   })
 }
 
+/**
+ * Draft this candidate's expectation from the evidence.
+ *
+ * Two calls, like every other spend in the console: the plan first, then the draft. Writes nothing
+ * either way — the result lands in the form for a person to accept, edit or discard.
+ */
+export function useDraftPlan() {
+  return useMutation({
+    mutationFn: ({ id, skillId }: { id: string; skillId: string }) =>
+      send<Plan>('POST', `/api/candidates/${encodeURIComponent(id)}/draft/plan`, {
+        skill_id: skillId,
+      }),
+  })
+}
+
+export function useDraftSemantic() {
+  return useMutation({
+    mutationFn: ({ id, skillId }: { id: string; skillId: string }) =>
+      send<DraftResponse>('POST', `/api/candidates/${encodeURIComponent(id)}/draft`, {
+        skill_id: skillId,
+      }),
+  })
+}
+
 export function useReject() {
   const client = useQueryClient()
   return useMutation({
@@ -265,11 +294,9 @@ export function useProposal(skillId: string) {
 export function usePreviewGuidance() {
   return useMutation({
     mutationFn: ({ skillId, edit }: { skillId: string; edit: SkillEdit }) =>
-      send<PreparedSkill>(
-        'POST',
-        `/api/skills/${encodeURIComponent(skillId)}/guidance/preview`,
-        { edit },
-      ),
+      send<PreparedSkill>('POST', `/api/skills/${encodeURIComponent(skillId)}/guidance/preview`, {
+        edit,
+      }),
   })
 }
 

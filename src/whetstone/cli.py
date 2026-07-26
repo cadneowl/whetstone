@@ -172,13 +172,47 @@ KeyEnvOpt = Annotated[
 ]
 
 
-def _client(llm: str | None, model: str | None, base_url: str | None, key_env: str | None) -> (
-    LLMClient
-):
+# Set by `--transcript`, read by `_client`. A module global rather than an argument threaded
+# through every command: it is a diagnostic switch nobody uses twice a week, and putting it in
+# eight signatures would put it in front of every reader of every command for that one run.
+_transcript_flag = False
+
+
+def _client(
+    llm: str | None,
+    model: str | None,
+    base_url: str | None,
+    key_env: str | None,
+    *,
+    label: str = "run",
+) -> LLMClient:
+    """The model client for a command, recording its prompts when asked to."""
     try:
-        return build_llm_client(llm, model=model, base_url=base_url, api_key_env=key_env)
+        client = build_llm_client(llm, model=model, base_url=base_url, api_key_env=key_env)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+    config = load_config()
+    if not (_transcript_flag or config.runs.transcripts):
+        return client
+
+    from whetstone.llm.transcript import RecordingClient, Transcript, transcript_path
+
+    path = transcript_path(config.transcripts_dir, label)
+    # On stderr, and said out loud: this file is about to contain the source of every case.
+    typer.echo(f"transcript  {path}", err=True)
+    return RecordingClient(client, Transcript(path))
+
+TranscriptOpt = Annotated[
+    bool,
+    typer.Option(
+        "--transcript",
+        help=(
+            "Write every prompt and reply to .whetstone/transcripts/. Contains your guidance, "
+            "wiki and the full diff of every case — i.e. your source, in plain text."
+        ),
+    ),
+]
 
 
 YesOpt = Annotated[
@@ -327,6 +361,7 @@ def eval_run(
         bool, typer.Option("--dry-run", help="Validate & summarize; no model call")
     ] = False,
     yes: YesOpt = False,
+    transcript: TranscriptOpt = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Run a skill's eval set through the LLM reviewer + judge and print the score.
@@ -358,7 +393,9 @@ def eval_run(
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
 
-    client = _client(*pick, api_key_env)
+    global _transcript_flag
+    _transcript_flag = _transcript_flag or transcript
+    client = _client(*pick, api_key_env, label=f"eval-{sk.id}")
     record = record_eval(
         sk,
         client,
@@ -545,6 +582,7 @@ def review(
     api_key_env: KeyEnvOpt = None,
     effort: Annotated[str, typer.Option()] = "high",
     reviews_dir: ReviewsDirOpt = None,
+    transcript: TranscriptOpt = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Run a skill over a live change and store what it found, for a human to rule on.
@@ -582,11 +620,13 @@ def review(
     if not change.files:
         raise typer.BadParameter(f"{ref} has no reviewable file changes")
 
+    global _transcript_flag
+    _transcript_flag = _transcript_flag or transcript
     backend = resolve_backend(llm, model=model, base_url=base_url)
     record = record_review(
         sk,
         change,
-        _client(llm, model, base_url, api_key_env),
+        _client(llm, model, base_url, api_key_env, label=f"review-{sk.id}"),
         source=source,
         ref=ref,
         url=url,
