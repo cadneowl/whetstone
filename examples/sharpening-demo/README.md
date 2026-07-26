@@ -64,6 +64,11 @@ PASS
 Exact numbers depend on the model. What matters is the **direction**, and that nothing changed
 except English prose in a markdown file.
 
+**This has been run.** On `qwen3-coder:30b` via Ollama, 2026-07-26: baseline `recall 0.333 /
+fp_rate 1.000`, gate `PASS` at `recall 0.333 -> 1.000, fp_rate 1.000 -> 0.000`, 24 model calls,
+about two minutes end to end. A local 30B model with no API key reproduces the documented result
+exactly — so if yours doesn't, read the section below rather than assuming the demo is stale.
+
 Step 5 imports a review produced somewhere else — two findings, one ruled correct and one ruled a
 false positive — and both rulings become eval cases in the triage queue. That is the other half of
 the loop: the corpus growing from real review output rather than from hand-written fixtures.

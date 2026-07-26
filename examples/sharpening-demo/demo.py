@@ -33,7 +33,26 @@ BRANCH = "improve-guidance"
 APPROX_CALLS = 24
 
 
+def _speak_utf8() -> None:
+    """Make the console accept the characters this demo and the CLI print.
+
+    A Windows console defaults to a legacy codepage — cp1252 here — which has no `─`, `→`, or `⚠`.
+    The very first banner died with UnicodeEncodeError before the demo had built anything, and the
+    traceback pointed at `print`, which tells a first-time reader nothing about what to do next.
+
+    Both halves matter. `reconfigure` fixes this process; `PYTHONIOENCODING` is inherited by the
+    `uv run whetstone …` children, which print `→` in their own output and would otherwise die the
+    same way one step later. `errors="replace"` keeps a genuinely 8-bit terminal printing a `?`
+    rather than crashing — a mangled rule is a cosmetic problem, a stack trace is not.
+    """
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    _speak_utf8()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--workdir",
