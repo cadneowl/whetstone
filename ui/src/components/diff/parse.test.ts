@@ -21,7 +21,13 @@ function shape(text: string) {
 describe('parseDiff', () => {
   it('numbers context and added lines, skipping removed ones', () => {
     const [file] = parseDiff(
-      diff(HUNK, ' fn charge() {', '-    let row = db.get(id);', '+    let row = try_get(id)?;', ' }'),
+      diff(
+        HUNK,
+        ' fn charge() {',
+        '-    let row = db.get(id);',
+        '+    let row = try_get(id)?;',
+        ' }',
+      ),
     )
     expect(file!.path).toBe('a.rs')
     expect(file!.lines.map((l) => [l.kind, l.newLine])).toEqual([
@@ -56,8 +62,17 @@ describe('parseDiff', () => {
   it('restarts numbering per file', () => {
     const files = parseDiff(
       [
-        '--- a/a.rs', '+++ b/a.rs', '@@ -1,1 +1,2 @@', ' one', '+two',
-        '--- a/b.rs', '+++ b/b.rs', '@@ -10,1 +10,2 @@', ' ten', '+eleven', '',
+        '--- a/a.rs',
+        '+++ b/a.rs',
+        '@@ -1,1 +1,2 @@',
+        ' one',
+        '+two',
+        '--- a/b.rs',
+        '+++ b/b.rs',
+        '@@ -10,1 +10,2 @@',
+        ' ten',
+        '+eleven',
+        '',
       ].join('\n'),
     )
     expect(files.map((f) => f.path)).toEqual(['a.rs', 'b.rs'])
@@ -100,8 +115,15 @@ describe('parseDiff', () => {
 
   it('ignores index and mode metadata', () => {
     const [file] = parseDiff(
-      ['diff --git a/a.rs b/a.rs', 'index abc123..def456 100644', '--- a/a.rs', '+++ b/a.rs',
-       HUNK, '+x', ''].join('\n'),
+      [
+        'diff --git a/a.rs b/a.rs',
+        'index abc123..def456 100644',
+        '--- a/a.rs',
+        '+++ b/a.rs',
+        HUNK,
+        '+x',
+        '',
+      ].join('\n'),
     )
     expect(file!.lines.map((l) => l.kind)).toEqual(['hunk', 'add'])
   })

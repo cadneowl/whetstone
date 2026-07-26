@@ -40,10 +40,10 @@ Run `gen:api` after any API change, and commit the regenerated `schema.d.ts`.
 
 `npm audit` reports advisories with no upgrade path available. Assessed:
 
-| Advisory | Assessment |
-|---|---|
-| `react-router` RSC-mode CSRF (7.12.0–8.2.0) | **Not applicable.** No fixed 7.x release exists. The advisory concerns React Server Components mode and server actions; this is a static SPA with a Python API and no RSC or server-action pipeline. |
-| `js-yaml`, `brace-expansion`, `minimatch` (via `@redocly/openapi-core` ← `openapi-typescript`) | **Not shipped.** Dev-only codegen, run by a maintainer against our own schema file. DoS-class issues against untrusted input; there is no untrusted input here. |
+| Advisory                                                                                       | Assessment                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `react-router` RSC-mode CSRF (7.12.0–8.2.0)                                                    | **Not applicable.** No fixed 7.x release exists. The advisory concerns React Server Components mode and server actions; this is a static SPA with a Python API and no RSC or server-action pipeline. |
+| `js-yaml`, `brace-expansion`, `minimatch` (via `@redocly/openapi-core` ← `openapi-typescript`) | **Not shipped.** Dev-only codegen, run by a maintainer against our own schema file. DoS-class issues against untrusted input; there is no untrusted input here.                                      |
 
 Re-check when a fixed `react-router` 7.x ships. Do not add `npm audit` to CI as a blocking gate
 until these clear, or it will fail on findings that do not apply.

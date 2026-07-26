@@ -5,10 +5,7 @@ import { Component, type ErrorInfo, type ReactNode } from 'react'
  * indistinguishable from the server being down. A crash should still say what broke and let you
  * get back to a working screen.
  */
-export class ErrorBoundary extends Component<
-  { children: ReactNode },
-  { error: Error | null }
-> {
+export class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null }
 
   static getDerivedStateFromError(error: Error) {

@@ -26,7 +26,8 @@ export const SIGNALS: SignalMeta[] = [
     short: 'escaped',
     // Red because it is a failure, not because it is weak: review missed this and it shipped.
     tone: 'bad',
-    meaning: 'A defect that reached production. Review demonstrably missed it — the strongest recall evidence there is.',
+    meaning:
+      'A defect that reached production. Review demonstrably missed it — the strongest recall evidence there is.',
   },
   {
     id: 'finding rejected',
@@ -52,19 +53,22 @@ export const SIGNALS: SignalMeta[] = [
     id: 'suggested fix applied',
     short: 'the fix',
     tone: 'good',
-    meaning: 'The accepted replacement itself. Code endorsed twice over, so flagging it would be a false positive.',
+    meaning:
+      'The accepted replacement itself. Code endorsed twice over, so flagging it would be a false positive.',
   },
   {
     id: 'suggestion declined',
     short: 'declined',
     tone: 'warn',
-    meaning: 'A reviewer proposed a change and the thread closed without it. A confirmed false alarm.',
+    meaning:
+      'A reviewer proposed a change and the thread closed without it. A confirmed false alarm.',
   },
   {
     id: 'reviewer comment resolved',
     short: 'resolved',
     tone: 'accent',
-    meaning: 'An inline comment whose thread was resolved. Something was raised here; whether code changed is not recorded.',
+    meaning:
+      'An inline comment whose thread was resolved. Something was raised here; whether code changed is not recorded.',
   },
   {
     id: 'reviewer comment left open',
@@ -76,7 +80,8 @@ export const SIGNALS: SignalMeta[] = [
     id: 'merged clean',
     short: 'no comments',
     tone: 'neutral',
-    meaning: 'Nobody commented on this merge request. Inferred from silence, which is the weakest evidence the builder produces — and silence is not the same as there being nothing to flag.',
+    meaning:
+      'Nobody commented on this merge request. Inferred from silence, which is the weakest evidence the builder produces — and silence is not the same as there being nothing to flag.',
   },
 ]
 
