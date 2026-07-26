@@ -746,6 +746,26 @@ function FormPane({
               }
             />
           </p>
+          {/* Explained in place, because this is the field with the least obvious name and the
+            largest consequence: it is the sentence every future run of this case is scored
+            against, and a weak one fails silently forever — nothing downstream ever goes red to
+            tell you. The other hints on this form are static; this one has to follow `kind`,
+            because should_not_flag inverts what a good sentence describes, and an operator who
+            writes the defect there has built a case asserting the opposite of what they meant. */}
+          <p className="mb-1.5 text-xs text-muted">
+            {edits.kind === 'should_catch' ? (
+              <>
+                What every finding is judged against: a standalone description of the problem here —
+                not the reviewer's words, not the fix.
+              </>
+            ) : (
+              <>
+                What every finding is judged against: a standalone description of what is{' '}
+                <em>correct</em> here, so a reviewer that complains can be recognised as wrong.
+              </>
+            )}{' '}
+            Someone who never saw this merge request has to be able to check it.
+          </p>
           <textarea
             value={edits.semantic}
             onChange={(e) => onChange({ ...edits, semantic: e.target.value })}
