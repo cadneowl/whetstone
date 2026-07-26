@@ -1211,7 +1211,8 @@ Until then, runs are launched with `whetstone eval run` and gates with `whetston
 ## Configuration (`whetstone.toml`)
 
 Optional. Discovered by walking up from the working directory; every field resolves
-**flag → environment → file → default**. Relative paths resolve against the file's own directory.
+**flag → environment → [`.env`](#env) → file → default**. Relative paths resolve against the file's
+own directory. Secrets are deliberately *not* settable here — this file is committed.
 
 ```toml
 [skills]
@@ -1770,6 +1771,58 @@ Aim for a **balanced set** — enough `should_catch` cases to measure recall and
 
 ## Environment variables
 
+### `.env`
+
+Every secret Whetstone needs is an environment variable, and none of them belong in
+`whetstone.toml`, which is committed. Put them in a **`.env`** instead — it is read automatically,
+discovered by walking up from the working directory exactly as `whetstone.toml` is, so running from
+a subdirectory behaves the same as running from the repo root.
+
+```bash
+# .env — gitignored; no exporting and no `source` needed
+ANTHROPIC_API_KEY=sk-ant-...
+GITLAB_TOKEN=glpat-...
+JIRA_TOKEN=...
+
+# Optional: a local model instead of Anthropic. See `whetstone llm list`.
+# WHETSTONE_LLM=ollama
+# WHETSTONE_LLM_MODEL=qwen2.5-coder:7b
+```
+
+Anything not secret is better off in `whetstone.toml`, which is committed and reviewable. `.env` is
+for the things that must not be.
+
+**A real environment variable always wins.** `.env` fills in what the environment has not already
+said, never the other way round — so `GITLAB_TOKEN=… whetstone corpus pull` does what it looks like
+it does even with a `.env` present, and CI can inject a secret without editing a file. The full
+order is:
+
+```
+CLI flag  →  real environment  →  .env  →  whetstone.toml  →  built-in default
+```
+
+`.env` sits at the *environment* tier rather than the file tier, because its contents **are**
+environment variables: `WHETSTONE_UI_PORT` written there behaves exactly as if it were exported.
+
+| Flag | Purpose |
+|---|---|
+| `--env-file PATH` | Load this instead of the nearest `.env` — e.g. `--env-file staging.env`. Naming a file that does not exist is an error rather than silence. |
+
+Also settable as `WHETSTONE_ENV_FILE`, which is how `--env-file` reaches the config loads that
+happen later in the same command.
+
+Two things worth knowing, both about values being read back exactly as written:
+
+- **Byte-order marks are handled.** A `.env` written by Notepad, VS Code on Windows, or
+  `Set-Content -Encoding utf8` starts with a BOM. Whetstone decodes with `utf-8-sig`. Worth knowing
+  because plain UTF-8 decoding drops the *first* variable and only the first, with no error at all.
+- **Values are literal.** dotenv's `${NAME}` substitution is switched off. It has no escape —
+  `\${NAME}` still expands, and neither quote style stops it — so leaving it on would silently
+  rewrite any credential containing `${`, with no way for its owner to prevent it. If you want a
+  composed value, write it out in full.
+
+### The variables
+
 | Variable | Used by | Purpose |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `AnthropicClient` | Anthropic credentials (or use an `ant auth login` profile). |
@@ -1779,11 +1832,15 @@ Aim for a **balanced set** — enough `should_catch` cases to measure recall and
 | `WHETSTONE_LLM_API_KEY_ENV` | `build_llm_client` | Name of the env var holding the API key, if the backend needs one. |
 | `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Per-request timeout in seconds for OpenAI-compatible backends (raise it for slow local hardware). |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
+| `JIRA_TOKEN` | Jira connector | API token (Cloud) or personal access token (Server/DC). Name configurable via `--jira-token-env` / `token_env`. |
 | `WHETSTONE_LIVE_LLM` | `tests/live/` | Set to `1` to run the opt-in live-model tests. |
+| `WHETSTONE_ENV_FILE` | `config` | Load this `.env` instead of discovering one. Same as `--env-file`. |
 | `WHETSTONE_SKILLS_ROOT` | `config` | Skill registry path, overriding `whetstone.toml`. |
 | `WHETSTONE_SKILLS_REPO` | `config` | Git repo containing the registry. |
 | `WHETSTONE_RUNS_DIR` | `config` | Where run records are stored. |
 | `WHETSTONE_CANDIDATES_DIR` | `config` | Where the triage queue is read from. |
+| `WHETSTONE_UI_HOST` / `WHETSTONE_UI_PORT` | `config` | Console bind address and port. |
+| `WHETSTONE_READ_ONLY` / `WHETSTONE_PRACTICE_MODE` | `config` | Console modes. An *empty* value counts as unset, so a shell-quoting accident cannot switch read-only off. |
 
 ---
 

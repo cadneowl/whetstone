@@ -18,7 +18,9 @@ ever gets hot, it's a library swap, not a platform decision.
 - Models/validation: **pydantic v2** (strict).
 - CLI: **typer**. Tests: **pytest**. Lint/format: **ruff**. Types: **mypy**.
 - HTTP (connectors): **httpx** + **respx** cassettes for hermetic tests.
-- Config/skills: YAML (**pyyaml**).
+- Config/skills: YAML (**pyyaml**). `.env`: **python-dotenv** — the parsing has real edge cases
+  (quoting, `export` prefixes, `#` inside a quoted value, BOMs from Windows editors), and every one
+  of them mangles a *secret* into a confusing auth error rather than a clean failure.
 
 ## ADR-003 — Plugin boundary
 Core loop imports **zero** provider code. Providers implement capability Protocols
