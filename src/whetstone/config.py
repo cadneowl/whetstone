@@ -80,6 +80,29 @@ class ReviewsConfig(BaseModel):
     dir: Path = Path(".whetstone/reviews")
 
 
+class WatchConfig(BaseModel):
+    """Polling merge requests on a schedule, so signal arrives without anyone going to look.
+
+    Off by default. A tool that reaches out to a forge on a timer should do so because someone
+    asked it to, not because they installed it.
+    """
+
+    enabled: bool = False
+    interval_minutes: int = Field(default=30, ge=1)
+    projects: list[str] = []
+    gitlab_url: str = ""
+    token_env: str = "GITLAB_TOKEN"
+    # How far back the very first sweep of a project looks. Later sweeps start from the watermark.
+    lookback_days: int = Field(default=14, ge=1)
+    max_clean_files: int = 40
+    # Optional defect pairing — the strongest recall signal, since it is what review demonstrably
+    # missed. Needs both a tracker URL and a project to do anything.
+    tracker_url: str = ""
+    tracker_project: str = ""
+    tracker_token_env: str = "JIRA_TOKEN"
+    tracker_email: str = ""
+
+
 class Config(BaseModel):
     skills: SkillsConfig = SkillsConfig()
     candidates: CandidatesConfig = CandidatesConfig()
@@ -88,6 +111,7 @@ class Config(BaseModel):
     runs: RunsConfig = RunsConfig()
     gate: GateDefaults = GateDefaults()
     reviews: ReviewsConfig = ReviewsConfig()
+    watch: WatchConfig = WatchConfig()
     # Directory the config was loaded from; relative paths resolve against it. None when defaulted.
     source_dir: Path | None = Field(default=None, exclude=True)
 

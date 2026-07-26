@@ -20,8 +20,10 @@ from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.ui.errors import NotFound, install_handlers
 from whetstone.ui.routers import authoring, candidates, meta, runs, skills
+from whetstone.ui.routers import inbox as inbox_router
 from whetstone.ui.routers import jobs as jobs_router
 from whetstone.ui.routers import reviews as reviews_router
+from whetstone.watch import Watcher
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -69,6 +71,9 @@ def create_app(
     app.state.reviews = reviews or ReviewStore(resolved.reviews_dir)
     # One runner per server. In memory by design: see `jobs.py`.
     app.state.jobs = JobStore()
+    # Sweeps merge requests on an interval when [watch] enables it; inert otherwise.
+    app.state.watcher = Watcher(resolved)
+    app.state.watcher.start()
 
     install_handlers(app)
     app.include_router(meta.router, prefix="/api")
@@ -78,6 +83,7 @@ def create_app(
     app.include_router(candidates.router, prefix="/api")
     app.include_router(reviews_router.router, prefix="/api")
     app.include_router(jobs_router.router, prefix="/api")
+    app.include_router(inbox_router.router, prefix="/api")
     if serve_console:
         _mount_console(app)
     return app

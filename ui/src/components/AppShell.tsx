@@ -28,12 +28,15 @@ export function AppShell() {
           <NavLink to="/" className="text-[15px] font-semibold">
             Whetstone
           </NavLink>
+          {/* Ordered as the loop runs: what needs doing, the signal behind it, the skills it
+              changes, and the evidence it produced. */}
           <nav className="flex gap-4 text-sm">
             <Tab to="/" end>
-              Skills
+              Inbox
             </Tab>
-            <Tab to="/reviews">Reviews</Tab>
             <Tab to="/triage">Triage</Tab>
+            <Tab to="/reviews">Reviews</Tab>
+            <Tab to="/skills">Skills</Tab>
             <Tab to="/runs">Runs</Tab>
           </nav>
 

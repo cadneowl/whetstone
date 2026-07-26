@@ -41,6 +41,13 @@ export type Job = Schemas['Job']
 export type JobKind = Job['kind']
 export type JobState = Job['state']
 export type Plan = Schemas['Plan']
+export type InboxView = Schemas['InboxView']
+export type Attention = Schemas['Attention']
+export type NextAction = Schemas['NextAction']
+export type ActionKind = NextAction['kind']
+export type Signal = Schemas['Signal']
+export type WatchState = Schemas['WatchState']
+export type Sweep = Schemas['Sweep']
 export type JobRequest = {
   skill_id: string
   trials?: number | null
@@ -115,6 +122,7 @@ export const keys = {
   proposal: (id: string) => ['proposal', id] as const,
   reviews: (skillId?: string) => ['reviews', skillId ?? 'all'] as const,
   review: (id: string) => ['review', id] as const,
+  inbox: ['inbox'] as const,
   jobs: ['jobs'] as const,
   job: (id: string) => ['job', id] as const,
 }
@@ -401,6 +409,8 @@ const POLL_MS = 900
 /** What a finished job invalidates — the same reads its result just changed. */
 function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
   void client.invalidateQueries({ queryKey: keys.jobs })
+  // Every job kind moves a skill along the pipeline, which is exactly what an inbox row reports.
+  void client.invalidateQueries({ queryKey: keys.inbox })
   if (job.kind === 'eval') {
     void client.invalidateQueries({ queryKey: ['runs'] })
     void client.invalidateQueries({ queryKey: keys.skill(job.skill_id) })
@@ -439,5 +449,33 @@ export function useStageProposal(skillId: string) {
     mutationFn: (body: string) =>
       send<Record<string, string>>('POST', '/api/jobs/improve/stage', { skill_id: skillId, body }),
     onSuccess: () => invalidateSkill(client, skillId),
+  })
+}
+
+// --- the inbox ----------------------------------------------------------------
+
+/**
+ * What happened since you last looked, and what to do about it.
+ *
+ * Refetched whenever a job settles, because every job kind changes at least one of the facts a row
+ * is derived from — a score, a gate verdict, a staged branch.
+ */
+export function useInbox() {
+  return useQuery({
+    queryKey: keys.inbox,
+    queryFn: () => get<InboxView>('/api/inbox'),
+    refetchInterval: (query) => (query.state.data?.watch.polling ? POLL_MS : false),
+  })
+}
+
+/** Sweep the watched projects now rather than waiting for the interval. */
+export function useCheckNow() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => send<Sweep>('POST', '/api/inbox/check'),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.inbox })
+      void client.invalidateQueries({ queryKey: keys.candidates })
+    },
   })
 }

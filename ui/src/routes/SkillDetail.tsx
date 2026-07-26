@@ -1,5 +1,5 @@
 import * as Tabs from '@radix-ui/react-tabs'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useSkill, type CaseSummary } from '@/api/client'
 import { Guidance } from '@/components/Guidance'
 import { GuidanceEditor } from '@/components/GuidanceEditor'
@@ -8,6 +8,7 @@ import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/prim
 
 export function SkillDetail() {
   const { skillId = '' } = useParams()
+  const [params, setParams] = useSearchParams()
   const { data, isLoading, error } = useSkill(skillId)
 
   if (isLoading) return <Loading />
@@ -32,7 +33,12 @@ export function SkillDetail() {
         )}
       </header>
 
-      <Tabs.Root defaultValue="guidance">
+      {/* The tab lives in the URL so the inbox can send you straight to the step it named, and
+          so a reload lands where you were rather than back on the overview. */}
+      <Tabs.Root
+        value={params.get('tab') ?? 'guidance'}
+        onValueChange={(tab) => setParams(tab === 'guidance' ? {} : { tab }, { replace: true })}
+      >
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">
           <Trigger value="guidance">Guidance</Trigger>
           <Trigger value="edit">Edit</Trigger>

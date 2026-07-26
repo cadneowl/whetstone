@@ -199,6 +199,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Inbox */
+        get: operations["get_inbox_api_inbox_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/inbox/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Now
+         * @description Sweep the watched projects immediately, rather than waiting for the interval.
+         *
+         *     A write because it reaches out to a forge and adds to the triage queue — read-only consoles do
+         *     not go poking at other people's systems.
+         */
+        post: operations["check_now_api_inbox_check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs": {
         parameters: {
             query?: never;
@@ -681,6 +721,76 @@ export interface components {
             content: string;
             /** Line */
             line: number;
+        };
+        /**
+         * Attention
+         * @description One skill's row in the inbox: what arrived, what is known, and what to do.
+         */
+        Attention: {
+            action: components["schemas"]["NextAction"];
+            /**
+             * Blocked Reason
+             * @default
+             */
+            blocked_reason: string;
+            /**
+             * Can Propose
+             * @default false
+             */
+            can_propose: boolean;
+            /**
+             * Failing Cases
+             * @default 0
+             */
+            failing_cases: number;
+            /** Fp Rate */
+            fp_rate?: number | null;
+            /**
+             * Last Run At
+             * @default
+             */
+            last_run_at: string;
+            /**
+             * Last Run Id
+             * @default
+             */
+            last_run_id: string;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /**
+             * New Signals
+             * @default 0
+             */
+            new_signals: number;
+            /** Recall */
+            recall?: number | null;
+            /**
+             * Scored
+             * @default false
+             */
+            scored: boolean;
+            /** Signals */
+            signals?: components["schemas"]["Signal"][];
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Staged
+             * @default false
+             */
+            staged: boolean;
+            /**
+             * Stale Run
+             * @default false
+             */
+            stale_run: boolean;
+            /**
+             * Total Cases
+             * @default 0
+             */
+            total_cases: number;
         };
         /** BackendInfo */
         BackendInfo: {
@@ -1455,6 +1565,21 @@ export interface components {
              */
             stale_ok: boolean;
         };
+        /** Inbox */
+        Inbox: {
+            /** Attention */
+            attention?: components["schemas"]["Attention"][];
+            /**
+             * Unrouted
+             * @default 0
+             */
+            unrouted: number;
+        };
+        /** InboxView */
+        InboxView: {
+            inbox: components["schemas"]["Inbox"];
+            watch: components["schemas"]["WatchState"];
+        };
         /**
          * IngestFinding
          * @description One comment the skill made. `skill_id` is not repeated — the upload names it once.
@@ -1575,6 +1700,23 @@ export interface components {
             expect_head?: string | null;
             /** Meta Yaml */
             meta_yaml: string;
+        };
+        /**
+         * NextAction
+         * @description What to do about this skill, and the evidence for saying so.
+         */
+        NextAction: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "propose" | "gate" | "triage" | "score" | "improve" | "nothing";
+            /** Label */
+            label: string;
+            /** Rank */
+            rank: number;
+            /** Why */
+            why: string;
         };
         /**
          * Plan
@@ -2293,6 +2435,45 @@ export interface components {
          * @enum {integer}
          */
         Severity: 10 | 20 | 30;
+        /**
+         * Signal
+         * @description One thing that happened in a real review, waiting to become an eval case.
+         *
+         *     `ref` is the merge request it came from. It is on this object because the provenance is what
+         *     makes a signal worth acting on — "four unwraps shipped in !812, !814 and !820" is a reason to
+         *     change a rule; "4 candidates" is a number.
+         */
+        Signal: {
+            /** Candidate Id */
+            candidate_id: string;
+            /**
+             * Confidence
+             * @default 0
+             */
+            confidence: number;
+            /**
+             * Human Signal
+             * @default
+             */
+            human_signal: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Path
+             * @default
+             */
+            path: string;
+            /**
+             * Rationale
+             * @default
+             */
+            rationale: string;
+            /**
+             * Ref
+             * @default
+             */
+            ref: string;
+        };
         /** Skill */
         Skill: {
             /**
@@ -2529,6 +2710,46 @@ export interface components {
             proposal: components["schemas"]["Proposal"];
         };
         /**
+         * Sweep
+         * @description One poll of every configured project.
+         */
+        Sweep: {
+            /**
+             * Already Decided
+             * @default 0
+             */
+            already_decided: number;
+            /**
+             * Already Queued
+             * @default 0
+             */
+            already_queued: number;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /**
+             * Duration S
+             * @default 0
+             */
+            duration_s: number;
+            /**
+             * Error
+             * @default
+             */
+            error: string;
+            /**
+             * Found
+             * @default 0
+             */
+            found: number;
+            /** Projects */
+            projects?: string[];
+            /** Skipped */
+            skipped?: string[];
+        };
+        /**
          * TrialRecord
          * @description One reviewer pass over one case: everything it said, and how each expectation resolved.
          */
@@ -2616,6 +2837,36 @@ export interface components {
         VerdictResponse: {
             candidate: components["schemas"]["CandidateCase"];
             record: components["schemas"]["ReviewRecord"];
+        };
+        /**
+         * WatchState
+         * @description Everything the console needs to say when it last looked and what it saw.
+         */
+        WatchState: {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** History */
+            history?: components["schemas"]["Sweep"][];
+            /**
+             * Interval Minutes
+             * @default 30
+             */
+            interval_minutes: number;
+            last_sweep?: components["schemas"]["Sweep"] | null;
+            /** Next Sweep At */
+            next_sweep_at?: string | null;
+            /**
+             * Polling
+             * @default false
+             */
+            polling: boolean;
+            /** Since */
+            since?: {
+                [key: string]: string;
+            };
         };
         /**
          * WikiEntry
@@ -2962,6 +3213,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GitState"];
+                };
+            };
+        };
+    };
+    get_inbox_api_inbox_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxView"];
+                };
+            };
+        };
+    };
+    check_now_api_inbox_check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sweep"];
                 };
             };
         };

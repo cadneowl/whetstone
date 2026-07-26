@@ -136,11 +136,19 @@ def reviews(tmp_path: Path) -> ReviewStore:
 
 @pytest.fixture
 def config(repo: Path, skills_root: Path, tmp_path: Path) -> Config:
-    return Config(
+    config = Config(
         skills=SkillsConfig(root=skills_root, repo=repo),
         candidates=CandidatesConfig(dir=tmp_path / "candidates"),
         ui=UIConfig(read_only=False),
     )
+    # Every store under tmp_path, including the ones the fixtures below do not pass in explicitly.
+    # Left at their defaults these resolve against the working directory, so a test run would read
+    # and write the developer's own `.whetstone/` — which it did, until the watcher's state file
+    # made it visible.
+    config.runs.dir = tmp_path / ".whetstone" / "runs"
+    config.gate.dir = tmp_path / ".whetstone" / "gates"
+    config.reviews.dir = tmp_path / ".whetstone" / "reviews"
+    return config
 
 
 @pytest.fixture
