@@ -33,11 +33,24 @@
 
 html {
   color-scheme: light dark;
+  /* Always show the scrollbar track, so the viewport is the same width on every page. Without
+     this, navigating from a page that fits to one that scrolls narrows the viewport by the
+     scrollbar's width and every centred element shifts sideways on the way.
+     `overflow-y: scroll` rather than `scrollbar-gutter: stable`, which reads better and does
+     nothing here: the root element's overflow is propagated to the viewport, so `html` is not
+     itself the scroll container the gutter would apply to. It computes, reserves nothing, and the
+     width still changes. */
+  overflow-y: scroll;
 }
 
 body {
   @apply bg-canvas text-ink antialiased;
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
 }
 
 /* Data-dense screens read better with tabular figures — columns of scores line up. */

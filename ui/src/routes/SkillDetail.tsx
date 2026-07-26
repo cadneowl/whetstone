@@ -19,17 +19,26 @@ export function SkillDetail() {
 
   return (
     <div>
-      <header className="mb-5">
-        <div className="flex flex-wrap items-baseline gap-3">
-          <h1 className="text-lg font-semibold">{skill.name || skill.id}</h1>
-          <span className="font-mono text-sm text-muted">v{skill.version}</span>
-          {skill.owner && <span className="text-sm text-muted">{skill.owner}</span>}
+      <header className="mb-5 flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="flex flex-wrap items-baseline gap-3">
+            <h1 className="text-lg font-semibold">{skill.name || skill.id}</h1>
+            <span className="font-mono text-sm text-muted">v{skill.version}</span>
+            {skill.owner && <span className="text-sm text-muted">{skill.owner}</span>}
+          </div>
+          {skill.description && <p className="mt-1 text-sm text-muted">{skill.description}</p>}
+          {skill.triggers.paths.length > 0 && (
+            <p className="mt-2 font-mono text-xs text-muted">
+              triggers: {skill.triggers.paths.join(', ')}
+            </p>
+          )}
         </div>
-        {skill.description && <p className="mt-1 text-sm text-muted">{skill.description}</p>}
-        {skill.triggers.paths.length > 0 && (
-          <p className="mt-2 font-mono text-xs text-muted">
-            triggers: {skill.triggers.paths.join(', ')}
-          </p>
+        {/* Scoring belongs on the header, not inside a tab. It is the most repeated action in the
+            whole loop — you re-run it after every guidance edit — and it used to live behind the
+            History tab, which is named for the records it produces rather than the thing it does.
+            Here it is reachable from whichever tab you are on, Edit above all. */}
+        {cases.length > 0 && (
+          <LaunchButton kind="eval" request={{ skill_id: skill.id }} label="Run evals" />
         )}
       </header>
 
@@ -43,47 +52,57 @@ export function SkillDetail() {
           <Trigger value="guidance">Guidance</Trigger>
           <Trigger value="edit">Edit</Trigger>
           <Trigger value="cases">Eval cases ({cases.length})</Trigger>
-          <Trigger value="runs">Runs ({runs.length})</Trigger>
+          {/* "History", not "Runs": the top nav already has a Runs, and two screens by that name —
+              only one of which could start a run — is how someone ends up on the wrong one. */}
+          <Trigger value="runs">History ({runs.length})</Trigger>
           <Trigger value="meta">Metadata</Trigger>
         </Tabs.List>
 
         <Tabs.Content value="guidance">
+          <TabIntro>
+            The rules as they stand on <code className="font-mono">main</code> — the exact prose the
+            reviewer is given, and the only thing the improve loop ever changes. Each rule shows the
+            merge requests that justified it.
+          </TabIntro>
           <Guidance detail={data} />
         </Tabs.Content>
 
         <Tabs.Content value="edit">
+          <TabIntro>
+            Change the rules. Draft one from the last run's failures or write it yourself, read the
+            diff, then Stage on branch — never the working tree, never{' '}
+            <code className="font-mono">main</code>. Staged guidance cannot be proposed until a gate
+            proves it broke nothing.
+          </TabIntro>
           {/* Mounted only while selected, so the draft starts from what is on disk each time the
               tab is opened rather than from a stale copy taken at page load. */}
           <GuidanceEditor detail={data} />
         </Tabs.Content>
 
         <Tabs.Content value="cases">
+          <TabIntro>
+            Real review outcomes this skill is held to: <em>should catch</em> means a human flagged
+            it, <em>should not flag</em> means a human deliberately did not. They are what tells a
+            better rule from a worse one — and what the gate measures a change against. Open one for
+            the diff, the expectation and the merge request behind it.
+          </TabIntro>
           <CaseTable skillId={skill.id} cases={cases} />
         </Tabs.Content>
 
         <Tabs.Content value="runs">
-          <section className="mb-4 rounded-lg border border-line bg-surface/50 p-3">
-            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-              <h3 className="text-sm font-medium">Score this skill</h3>
-              <span className="text-xs text-muted">
-                {cases.length} eval case{cases.length === 1 ? '' : 's'}
-              </span>
-            </div>
-            {cases.length === 0 ? (
-              <p className="text-sm text-muted italic">
-                No eval cases to score. Promote some from the triage queue first.
-              </p>
-            ) : (
-              <LaunchButton
-                kind="eval"
-                request={{ skill_id: skill.id }}
-                label="Run evals"
-              />
-            )}
-          </section>
+          <TabIntro>
+            Every time this skill was scored. Open one to see, case by case, what the reviewer said
+            and why the judge did or did not accept it — which is how you tell a bad rule from a bad
+            eval case.
+          </TabIntro>
+          {cases.length === 0 && (
+            <p className="mb-4 text-sm text-muted italic">
+              No eval cases to score. Promote some from the triage queue first.
+            </p>
+          )}
 
           {runs.length === 0 ? (
-            <Empty>Never evaluated. Run the evals above to record one.</Empty>
+            <Empty>Never evaluated. Run evals above to record one.</Empty>
           ) : (
             <ul className="space-y-1.5">
               {runs.map((run) => (
@@ -105,6 +124,11 @@ export function SkillDetail() {
         </Tabs.Content>
 
         <Tabs.Content value="meta">
+          <TabIntro>
+            Who owns this skill, which files it claims, and how much its scores are worth.{' '}
+            <em>Precision evidence</em> is the one to read: a false-positive rate computed mostly
+            from merges nobody commented on is measuring silence, not correctness.
+          </TabIntro>
           <dl className="space-y-3 text-sm">
             <Field label="Owner">{skill.owner || <Muted>unset</Muted>}</Field>
             <Field label="Rules">
@@ -197,6 +221,17 @@ function CaseTable({ skillId, cases }: { skillId: string; cases: CaseSummary[] }
       ))}
     </ul>
   )
+}
+
+/**
+ * What a tab is for, above its contents.
+ *
+ * Five tabs whose names are all nouns from the same domain — Guidance, Edit, Eval cases, History,
+ * Metadata — read as five views of the same thing rather than five different jobs. One sentence
+ * each is what turns them back into steps.
+ */
+function TabIntro({ children }: { children: React.ReactNode }) {
+  return <p className="mb-4 max-w-3xl text-sm text-muted">{children}</p>
 }
 
 function Trigger({ value, children }: { value: string; children: React.ReactNode }) {

@@ -12,19 +12,29 @@ import { Badge } from './primitives'
  */
 const WIDE_ROUTES = ['/triage', '/reviews/']
 
+/**
+ * The header does NOT follow the body's width.
+ *
+ * It used to, on the reasoning that the nav should line up with the content beneath it. But the two
+ * widths are centred, so every navigation between a document route and a workspace route slid the
+ * whole header sideways by a few hundred pixels — the tab you were aiming at moved while you were
+ * moving towards it. Chrome that stays put is worth far more than chrome that lines up: the nav is
+ * anchored to the viewport, and only the content column below it changes measure.
+ */
+const HEADER = 'mx-auto max-w-[120rem]'
+
 export function AppShell() {
   const { data: config } = useConsoleConfig()
   const { data: git } = useGitStatus()
   const location = useLocation()
 
   const wide = WIDE_ROUTES.some((route) => location.pathname.startsWith(route))
-  // Header and body share one container so the nav still lines up with the content beneath it.
   const container = wide ? 'mx-auto max-w-[120rem]' : 'mx-auto max-w-6xl'
 
   return (
     <div className="min-h-screen">
       <header className="border-b border-line">
-        <div className={`${container} flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3`}>
+        <div className={`${HEADER} flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3`}>
           <NavLink to="/" className="text-[15px] font-semibold">
             Whetstone
           </NavLink>

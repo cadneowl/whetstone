@@ -5,6 +5,7 @@ import {
   Badge,
   Empty,
   ErrorNote,
+  Intro,
   Loading,
   Metric,
   OUTCOME_TITLE,
@@ -77,6 +78,13 @@ function Header({ run }: { run: RunRecord }) {
       </div>
 
       <p className="mt-1 font-mono text-xs text-muted">{run.id}</p>
+
+      <Intro>
+        One scoring pass, with the whole chain behind every number. Expand a case to see what the
+        reviewer reported, which findings the region and severity filters even let through, and the
+        judge's reason for accepting or rejecting each one — because a failing case means either the
+        guidance is wrong or the eval case is, and this is how you tell which.
+      </Intro>
 
       <div className="mt-3 flex flex-wrap gap-2">
         <Metric label="recall" value={score(s.recall)} />
@@ -175,13 +183,7 @@ function TrialBlock({ trial, total }: { trial: TrialRecord; total: number }) {
   )
 }
 
-function ExpectationBlock({
-  outcome,
-  trial,
-}: {
-  outcome: ExpectationOutcome
-  trial: TrialRecord
-}) {
+function ExpectationBlock({ outcome, trial }: { outcome: ExpectationOutcome; trial: TrialRecord }) {
   const judged = new Set(outcome.verdicts.map((v) => v.finding_index))
   const unjudged = outcome.eligible_finding_indices.filter((i) => !judged.has(i))
   const excluded = excludedFindings(outcome, trial)
@@ -206,8 +208,8 @@ function ExpectationBlock({
             <li key={v.finding_index}>
               <FindingLine finding={trial.findings[v.finding_index]} />
               <p className={`mt-0.5 ml-4 text-[13px] ${v.matched ? 'text-good' : 'text-bad'}`}>
-                judge: {v.matched ? 'MATCHED' : 'NOT MATCHED'} (confidence{' '}
-                {v.confidence.toFixed(2)}) — {v.reason || 'no reason given'}
+                judge: {v.matched ? 'MATCHED' : 'NOT MATCHED'} (confidence {v.confidence.toFixed(2)}
+                ) — {v.reason || 'no reason given'}
               </p>
             </li>
           ))}
