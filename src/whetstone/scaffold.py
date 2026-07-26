@@ -195,6 +195,93 @@ index:
 """
 
 
+TRIAGE_STEP = """\
+# How a mined signal becomes an expectation this skill can be judged against.
+#
+# Used by the console's "Draft it" button beside the Semantic field in Triage.
+#
+# The miner seeds `semantic` from whatever text sat nearest the signal — the first review comment,
+# a tracker summary, or the skill's own finding. Rewriting that into a standalone description of
+# the problem is the one irreducible human step in triage, and the one that does not scale. This
+# drafts it; a person still accepts, edits or discards every result.
+
+description: Draft an eval case's expectation from the review evidence.
+
+inputs:
+  draft:
+    # The review thread, capped. Enough to see what was actually objected to; not so much that one
+    # unusually chatty merge request costs more than the rest of the queue combined.
+    max_comments: 6
+    max_comment_chars: 1200
+    # The diff for the file the expectation is about, in bytes.
+    max_diff_bytes: 2000
+
+prompt: prompt.md
+
+# model:
+#   llm: ollama
+#   model: qwen2.5-coder:7b
+#   effort: medium
+
+# Instead of `prompt:`, set `run:` and Whetstone invokes your own program: the bounded evidence
+# arrives as JSON on stdin, and it must print {"semantic": ..., "rationale": ...} on stdout.
+#
+# run: ["python", "draft.py"]
+"""
+
+TRIAGE_PROMPT = """\
+A reviewer looked at a real merge request and something happened. Write the one sentence that says
+what was actually wrong (or right) with the code at that location.
+
+## What happened
+
+Case:      {{candidate_id}}
+Kind:      {{kind}}
+File:      {{path}}
+Source:    {{ref}}
+Outcome:   {{human_signal}}
+
+Merge request title: {{mr_title}}
+
+### The review conversation
+
+{{comments}}
+
+### The reviewer's proposed replacement
+
+{{suggestion}}
+
+### The change
+
+```diff
+{{diff}}
+```
+
+### What the miner guessed the expectation should be
+
+{{seeded}}
+
+## What to write
+
+One sentence, describing the underlying problem at that location.
+
+- Standalone. Somebody who never saw this merge request has to be able to read your sentence and
+  decide whether a given review comment is about the same issue.
+- Name the construct and say why it is a problem *here* — "unwrap on the DB lookup panics when the
+  row is absent, which is a normal error path" rather than "error handling issue".
+- Do not quote the reviewer, address anyone, or propose a fix.
+- Do not write "this change", "the above" or "the comment". There is no context to refer to.
+- For a `should_not_flag` case, describe what is CORRECT about the code, so that a reviewer
+  objecting to it can be recognised as wrong.
+
+You have deliberately not been shown the skill's guidance. Describe what the evidence shows, not
+what any rule says — an expectation written in the rules' own words would match the reviewer's
+output automatically and the case would pass forever without measuring anything.
+
+Return the sentence, and a one-line rationale for the wording you chose.
+"""
+
+
 def scaffold_files() -> dict[str, str]:
     """The starter step folders, as relative path → contents.
 
@@ -205,6 +292,8 @@ def scaffold_files() -> dict[str, str]:
         f"evaluate/{STEP_FILE}": EVALUATE_STEP,
         f"improve/{STEP_FILE}": IMPROVE_STEP,
         "improve/prompt.md": IMPROVE_PROMPT,
+        f"triage/{STEP_FILE}": TRIAGE_STEP,
+        "triage/prompt.md": TRIAGE_PROMPT,
         f"update/{STEP_FILE}": UPDATE_STEP,
     }
 

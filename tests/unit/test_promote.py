@@ -350,3 +350,67 @@ def test_whole_file_expectations_skip_the_region_check(tmp_path: Path) -> None:
     edits = edits_from(entry)
     edits.line_range = None
     assert prepare(entry, edits, skills_root=tmp_path).case.expect[0].where.line_range is None
+
+
+# --- the expectation has to be judgeable ------------------------------------------
+
+
+def _ruling_entry(*, message: str) -> CandidateEntry:
+    """A candidate minted from a confirmed ruling on the skill's own finding.
+
+    `corpus/builder.py` seeds `semantic` from the finding's message when the person who ruled it
+    correct left no note, because there is nothing else to seed it from.
+    """
+    entry = _entry(semantic=message)
+    entry.candidate.provenance = Provenance(
+        source="skill_review", ref="acme/payments!1423", human_signal="finding confirmed"
+    )
+    return entry
+
+
+def test_an_empty_semantic_is_refused(tmp_path: Path) -> None:
+    """The judge compares every finding to this text; empty, its verdicts are noise."""
+    entry = _entry()
+    edits = edits_from(entry)
+    edits.semantic = "   "
+    with pytest.raises(SkillLoadError) as exc:
+        prepare(entry, edits, skills_root=tmp_path)
+    assert "ground truth" in str(exc.value)
+
+
+def test_a_case_that_grades_the_reviewer_against_itself_is_refused(tmp_path: Path) -> None:
+    """The bug this pins: such a case passes on the guidance that produced it, and forever after.
+
+    It cannot fail, so it constrains nothing — and unlike a badly worded expectation, nobody ever
+    finds out, because finding out means seeing it fail.
+    """
+    entry = _ruling_entry(message="`.unwrap()` panics when the row is absent")
+    edits = edits_from(entry)
+    with pytest.raises(SkillLoadError) as exc:
+        prepare(entry, edits, skills_root=tmp_path)
+    assert "word for word" in str(exc.value)
+
+
+def test_rewriting_it_is_all_that_is_asked(tmp_path: Path) -> None:
+    entry = _ruling_entry(message="`.unwrap()` panics when the row is absent")
+    edits = edits_from(entry)
+    edits.semantic = "a missing row is a routine 404 here, so panicking takes down the worker"
+    prepared = prepare(entry, edits, skills_root=tmp_path)
+    assert prepared.case.expect[0].semantic.startswith("a missing")
+
+
+def test_a_rejected_finding_may_keep_the_reviewers_own_words(tmp_path: Path) -> None:
+    """Not circular: the case asserts this exact complaint must NOT be made here again."""
+    entry = _ruling_entry(message="this line is too long")
+    entry.candidate.kind = "should_not_flag"
+    entry.candidate.expect[0].must = "not_appear"
+    entry.candidate.provenance.human_signal = "finding rejected"
+    edits = edits_from(entry)
+    assert prepare(entry, edits, skills_root=tmp_path).case.expect[0].must == "not_appear"
+
+
+def test_a_mined_comment_may_be_promoted_verbatim(tmp_path: Path) -> None:
+    """Poor practice, not a correctness hole: those are a human's words, not the skill's."""
+    entry = _entry(semantic="nit: use ? here")
+    edits = edits_from(entry)
+    assert prepare(entry, edits, skills_root=tmp_path).case.expect[0].semantic == "nit: use ? here"

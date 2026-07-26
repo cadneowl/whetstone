@@ -55,6 +55,14 @@ class Provenance(BaseModel):
     source: str = "manual"
     ref: str | None = None
     human_signal: str | None = None
+    # The model that drafted this case's expectation, when one did. Empty means a person wrote it,
+    # or it is still the raw text the miner seeded.
+    #
+    # Recorded because it is measurable and otherwise invisible: with it, "do drafted expectations
+    # behave differently?" is a query over the corpus and a meta-eval comparison. Without it, the
+    # two populations are indistinguishable and the question can only be argued about. The human
+    # signal above is untouched either way — what a reviewer *did* is not drafted by anyone.
+    semantic_drafted_by: str = ""
 
     @property
     def evidence(self) -> str:
