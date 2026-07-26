@@ -25,6 +25,15 @@ assembling; the same rule that makes `improve` safe at any corpus size.
 throw away, and `Provenance.semantic_drafted_by` records that a model wrote it. A bad expectation is
 durable in a way a bad guidance edit is not — nothing will ever fail because of it, so nobody finds
 out — which is exactly why a human stays on the accept.
+
+**Measured, not asserted.** Blindness stops the eval becoming a tautology; it does not make the
+sentence good, and "a standalone sentence beats 'nit: use ? here'" is a claim, not a fact.
+`meta_eval/drafting.py` scores it: the same judge, the same labelled probes, the same location, with
+only the expectation text differing between arms. It is worth reading what that measurement found
+before trusting a draft — on the fixture corpus the drafter picked the *wrong defect* on a case
+where two plausible problems sat on the same line, and wrote a confident sentence about the one that
+was not being tested. That is the failure the human accept exists to catch, and it does not announce
+itself.
 """
 
 from __future__ import annotations

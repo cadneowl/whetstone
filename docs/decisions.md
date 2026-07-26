@@ -360,3 +360,55 @@ catches the failure mode a generated rewrite actually has, at the moment it can 
 **Eval cases show their last outcome.** The pinned list previously showed ids and paths, which is
 decoration; which of them the skill currently gets *wrong* is the only thing that makes it worth
 reading while rewriting a rule.
+## ADR-018 — A drafted expectation has to beat the comment it replaces, measurably
+
+**Context.** The triage step offers to rewrite a case's `semantic` — the ground truth every future
+score is computed against — from the reviewer comment the corpus builder seeded it with. The
+argument was intuitive: "nit: use ? here" describes nothing, so a standalone sentence must be
+better. `drafting.py` already guaranteed the drafter never sees the guidance, which stops the eval
+becoming a tautology. That is a different property from the sentence being *good*, and only the
+first one had ever been checked.
+
+The asymmetry is what makes this worth a decision. A bad guidance edit fails a gate and never
+ships. A bad expectation ships silently and stays: nothing downstream will ever fail because of it,
+so nobody finds out, and every score computed against it is quietly wrong from then on.
+
+**Decision.** The claim is a measured metric with a floor, alongside the judge's, in
+`meta_eval/drafting.py`. Each fixture case carries probe findings labelled by hand — one or more
+that genuinely describe the underlying problem, and one or more that describe a *different* real
+problem at the same location. Both arms face the same judge, the same probes and the same region;
+only the expectation text differs. `DRAFT_IMPROVEMENT_FLOOR` is deliberately above zero: a drafter
+that merely ties has bought a model call and a story.
+
+**The two error kinds are counted apart**, because they fail in opposite directions. A **missed**
+pair is a finding that was about the right problem, judged not to match — recall reads low and
+somebody goes hunting for a hole in guidance that works. A **spurious** pair is a finding about
+something else, judged to match — recall reads high and the case has stopped discriminating, which
+is worse because nothing ever goes red.
+
+**What it found** (qwen3-coder:30b via Ollama, 24 labelled probes over 8 cases, two runs):
+
+| arm | accuracy | missed | spurious |
+|---|---|---|---|
+| raw comment | 0.71 | 6 | 1 |
+| drafted | 0.88 – 0.92 | 1–2 | 1 |
+
+Improvement `+0.17` and `+0.21` on the two runs. The claim holds, and the dominant baseline failure
+is `missed` — vague comments do not cause wild matches, they cause real catches to be scored as
+misses. Left alone they make a working skill look broken.
+
+**It also found the failure the human accept exists to catch.** On the one case where two plausible
+defects sat on the same line — a mutex guard held across an `await`, and an `unwrap()` on the lock
+— the drafter described the second. That was the decoy, not the case. It produced a confident,
+well-formed, checkable sentence about the wrong problem, which is precisely the output that gets
+accepted on a reflex. Both of that run's drafted-arm errors came from that single case, so the
+report attributes failures to cases rather than only totalling them: two errors on one case is a
+drafter bug, one error each on two cases is judge variance, and the aggregate cannot tell them
+apart.
+
+**Known limits, stated so the number is not over-read.** The corpus is 8 hand-written cases, not
+mined history, so it measures the mechanism rather than any real team's review habits. 24 probes is
+small — the two runs differ by 0.04 on the drafted arm, which is one probe. And the `should_not_flag`
+case is the weakest label in the fixture: describing what is *correct* forces the judge to match a
+finding that takes the opposite stance on the same code, and it is genuinely arguable both ways.
+
