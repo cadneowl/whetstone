@@ -75,6 +75,39 @@ class LLMReviewer:
         ]
 
 
+# How much companion guidance may be inlined, across all pages, per review call.
+#
+# The same order as `WikiLimits.max_bytes` and for the same reason: this text is paid for on every
+# case of every trial on *both* sides of a gate, so the cap is what stops one large `reference/`
+# folder multiplying the cost of a run. Generous enough that a skill has to be genuinely large
+# before it bites, and when it does it is named rather than silently dropped.
+MAX_PAGE_BYTES = 24_000
+
+
+def render_pages(skill: Skill, *, max_bytes: int = MAX_PAGE_BYTES) -> tuple[str, list[str]]:
+    """The companion guidance, as prompt text, plus the pages that did not fit.
+
+    Whole pages, never a partial one. Half a page of rules reads to the model as a complete set,
+    and a rule cut off mid-sentence is worse than a rule that is honestly absent — so a page that
+    would overflow the budget is dropped intact and reported by name.
+    """
+    blocks: list[str] = []
+    dropped: list[str] = []
+    spent = 0
+    for page in skill.pages:
+        text = page.text.strip()
+        if not text:
+            continue
+        block = f"--- {page.path} ---\n{text}"
+        size = len(block.encode("utf-8"))
+        if spent + size > max_bytes:
+            dropped.append(page.path)
+            continue
+        blocks.append(block)
+        spent += size
+    return "\n\n".join(blocks), dropped
+
+
 def _system_prompt(skill: Skill, context: Retrieved) -> str:
     name = skill.name or skill.id
     parts = [
@@ -82,6 +115,23 @@ def _system_prompt(skill: Skill, context: Retrieved) -> str:
         "Apply ONLY the following review guidance — do not invent rules beyond it:\n\n"
         f"{skill.body}",
     ]
+    # Immediately after the body and before the wiki, because these pages *are* guidance — SKILL.md
+    # points at them by name, and a reviewer told to "apply only the guidance above" would otherwise
+    # be reading a pointer to a file it cannot open.
+    pages, dropped = render_pages(skill)
+    if pages:
+        parts.append(
+            "The guidance continues in these files, referenced from the rules above. Treat them "
+            "as part of the guidance, with the same force:\n\n"
+            f"{pages}"
+        )
+    if dropped:
+        # Said in the prompt, not only in a log. A model that believes it holds the complete rules
+        # reports confidently on the ones it cannot see.
+        parts.append(
+            "NOTE: these guidance files were too large to include and you have NOT been shown "
+            "them: " + ", ".join(dropped) + ". Do not assume the guidance above is complete."
+        )
     # After the guidance, never before it. The guidance is identical across every case in a run and
     # the retrieved context is not, so keeping the stable text first leaves the longest possible
     # cacheable prefix — and leaves the rules as the thing the model reads first.

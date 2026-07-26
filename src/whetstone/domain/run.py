@@ -244,11 +244,25 @@ def skill_hash(skill: Skill) -> str:
     passed against the old context must not still authorise publishing. A skill without a wiki
     hashes exactly as it did before the wiki existed, so no stored gate result is invalidated by
     the feature merely landing.
+
+    Guidance pages are here on the same principle, and were missing for longer. `SKILL.md` routinely
+    points at `patterns/rust.md` and friends, and that text is guidance by every meaning of the
+    word. While it sat outside this hash, rewriting a referenced page from "never unwrap" to
+    "always unwrap" left the digest byte for byte identical — so the console went on showing
+    `gated`, and *Propose MR* went on being enabled, for rules no gate had ever scored. A skill with
+    no pages hashes as it did before they existed, so landing this invalidates nothing.
     """
     h = hashlib.sha256()
     h.update(skill.id.encode("utf-8"))
     h.update(b"\0")
     h.update(skill.body.encode("utf-8"))
+    # Path as well as text: moving a rule between pages changes what the prompt says, and two
+    # skills that differ only in where a rule lives are not interchangeable for scoring.
+    for page in sorted(skill.pages, key=lambda p: p.path):
+        h.update(b"\0page\0")
+        h.update(page.path.encode("utf-8"))
+        h.update(b"\0")
+        h.update(page.text.encode("utf-8"))
     for case in sorted(skill.eval_cases, key=lambda c: c.id):
         h.update(b"\0case\0")
         h.update(case.model_dump_json().encode("utf-8"))
