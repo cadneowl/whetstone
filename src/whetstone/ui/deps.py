@@ -18,6 +18,7 @@ from typing import Annotated, Literal
 from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
+from whetstone import staging
 from whetstone.config import Config
 from whetstone.gates import GateStore
 from whetstone.gitio import author_from_config
@@ -87,14 +88,11 @@ def get_principal(request: Request) -> Principal:
 def relative_skills_root(config: Config) -> str:
     """The skills root as a repo-relative path, since commits address files that way."""
     try:
-        return config.skills_root.relative_to(config.skills_repo).as_posix()
-    except ValueError:
+        return staging.relative_skills_root(config)
+    except staging.StagingError as exc:
         # Nothing the caller sent is wrong — `whetstone.toml` points the two settings at unrelated
         # directories, so no write can address the files it would commit.
-        raise Misconfigured(
-            f"skills root {config.skills_root} is not inside the git repo "
-            f"{config.skills_repo}; set [skills] root and repo to matching locations"
-        ) from None
+        raise Misconfigured(str(exc)) from None
 
 
 def require_writable(request: Request) -> None:

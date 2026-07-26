@@ -33,6 +33,8 @@ inputs:
 prompt: prompt.md
 
 # model:
+#   llm: ollama
+#   model: qwen2.5-coder:7b
 #   effort: high
 
 # Instead of `prompt:`, a step may set `run:` to have Whetstone invoke your own program: the

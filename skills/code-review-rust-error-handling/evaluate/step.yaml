@@ -31,5 +31,10 @@ inputs:
     max_bytes: 24000
 
 model:
-  # Omit any of these to inherit whatever the command resolved (--llm / --model / WHETSTONE_LLM).
+  # Pin this skill to a particular backend. Anything set here is the default; a flag on the command
+  # line still wins. Omit a key to inherit whatever the command resolved (--llm / --model /
+  # WHETSTONE_LLM). Pinning to a local runner is how a skill stays off a metered API by default.
+  # llm: ollama
+  # model: qwen2.5-coder:7b
+  # base_url: http://localhost:11434/v1
   # effort: high

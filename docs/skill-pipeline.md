@@ -103,8 +103,14 @@ inputs:
     max_bytes: 24000
 
 model:
-  effort: high            # omit anything here to inherit --llm / --model / WHETSTONE_LLM
+  llm: ollama             # pin this skill to a backend; omit a key to inherit the command's
+  model: qwen2.5-coder:7b
+  effort: high
 ```
+
+The `model:` block is how a skill stays off a metered API by default. `eval run`, `eval gate` and
+`skills improve` all read it, and `--llm` / `--model` / `--base-url` / `--effort` override it per
+command — the skill sets the default, the operator running it gets the last word.
 
 ### Sampling, and why a sampled gate is still legitimate
 
@@ -148,15 +154,53 @@ prompt: prompt.md
 Run it:
 
 ```bash
-uv run whetstone skills improve --skill skills/<id>
+uv run whetstone skills improve --skill skills/<id> --apply     # stage it, ready to gate
 uv run whetstone skills improve --skill skills/<id> --dry-run   # see the prompt; no model call
-uv run whetstone skills improve --skill skills/<id> --out /tmp/new-SKILL.md
+uv run whetstone skills improve --skill skills/<id> \
+  --instruction "focus on false positives in test files"
 ```
 
 It reads the skill's most recent stored run (`--run <id>` to pick another), builds the digest, and
 returns a complete rewritten guidance body, a rationale, and the eval case ids the change is meant
-to fix. **Nothing is written to the skill** — the output is a proposal. Gate it, then paste it into
-the console's guidance editor or diff the `--out` file.
+to fix.
+
+### `--apply`, and why you want it
+
+`--apply` stages the proposal on `whetstone/skill/<id>` — the same branch the console's guidance
+editor writes to, through the same `prepare_guidance` path. That means the frontmatter is preserved,
+the version is bumped once per proposal, the result is validated by loading it back, and your
+working tree is untouched. It then prints a gate command you can run **as printed**:
+
+```
+staged v2 on whetstone/skill/code-review-rust-error-handling (5ae78876bb)
+
+gate it, then Propose MR in the console unlocks:
+  whetstone eval gate --repo . --skill-path skills/code-review-rust-error-handling \
+    --base-ref main --candidate-ref whetstone/skill/code-review-rust-error-handling \
+    --targeted unwrap-in-handler
+```
+
+Without `--apply` you get the raw body on stdout (or in `--out`) and the job of splicing it into a
+`SKILL.md` yourself. **That is a body, not a file.** Overwriting `SKILL.md` with it drops `id`,
+`version` and `triggers` — the id then falls back to the folder name, and a gate run on that folder
+records its evidence under a skill that does not exist, which C6 can never match. The command says
+so when you use `--out`, but `--apply` is the path that cannot go wrong.
+
+### The run has to describe the skill you have
+
+If the skill has been edited since the run was scored, `skills improve` refuses:
+
+```
+run 2026…-6d01a7 scored a different version of this skill (33d4959ad7, now 68c51c5159).
+Its failures describe a reviewer that no longer exists — the guidance, the eval cases or
+the wiki changed since. Re-run `whetstone eval run` first, or pass --stale-ok.
+```
+
+Improving from stale failures produces a confident proposal aimed at a problem that may already be
+fixed. `--stale-ok` proceeds anyway when you know better.
+
+A run with no failures at all does not spend a call either — there is nothing to learn from. Pass
+`--instruction` if you want the guidance rewritten regardless.
 
 ### Clustering is the whole point
 
@@ -191,6 +235,11 @@ would cheerfully improve a skill it was shown nothing about.
 | `{{cases_scored}}` | eval cases the run actually scored |
 | `{{recall}}` / `{{fp_rate}}` | the run's scores, or `n/a` |
 | `{{wiki}}` | repo context for the files the run failed on |
+| `{{instruction}}` | whatever `--instruction` passed, or empty |
+
+`{{instruction}}` lets the template decide where a one-off steer is read. Leave it out and a passed
+instruction is appended at the end instead — it is never silently dropped, because a flag that
+sometimes does nothing is worse than no flag.
 
 Whetstone supplies the output *structure* (body, rationale, targeted cases), so `prompt.md` only has
 to say how to think about the change. Case ids the model returns are validated against the skill;
@@ -234,6 +283,11 @@ index:
 ```bash
 uv run whetstone skills update --skill skills/<id> --repo /path/to/source/repo
 ```
+
+The generated wiki is **staged on `whetstone/skill/<id>`**, not written into your checked-out
+folder — the same branch guidance edits go to, so the console and the CLI never disagree about what
+this skill's content is. `--working-tree` writes the files out instead when you just want a look;
+a wiki left only in the working tree is invisible to the console, which reads the branch first.
 
 Substituted into `run`: `{{repo}}`, `{{out_dir}}`, `{{skill_id}}`. It is a **list of arguments,
 never a string** — nothing is re-split on spaces and no shell is involved, so a path containing a
@@ -311,20 +365,19 @@ when it reviews?
 # 1. Score it. Records the run the improve step will read.
 uv run whetstone eval run --skill skills/<id>
 
-# 2. Draft a change from what it got wrong.
-uv run whetstone skills improve --skill skills/<id> --out /tmp/new-SKILL.md
+# 2. Draft a change from what it got wrong and stage it on the skill's branch.
+uv run whetstone skills improve --skill skills/<id> --apply
 
-# 3. Apply it to a copy and prove it earned its keep.
-cp -r skills/<id> /tmp/candidate && cp /tmp/new-SKILL.md /tmp/candidate/SKILL.md
-uv run whetstone eval gate \
-  --base skills/<id> --candidate /tmp/candidate \
-  --targeted <case-the-proposal-named>
+# 3. Run the gate command it just printed, verbatim. It carries --targeted already.
+uv run whetstone eval gate --repo . --skill-path skills/<id> \
+  --base-ref main --candidate-ref whetstone/skill/<id> --targeted <case>
 
 # 4. A passing gate is what unlocks Propose MR in the console.
 ```
 
-`whetstone skills improve` prints the exact `eval gate` command for step 3, with the targeted cases
-already filled in.
+Everything after step 1 addresses the skill by id and lands on one branch, so the gate evidence is
+filed where C6 looks for it. Review what was staged with `git diff main whetstone/skill/<id>`, or
+open the guidance editor in the console — it reads the same branch.
 
 Check what a skill defines, and that all of it loads:
 

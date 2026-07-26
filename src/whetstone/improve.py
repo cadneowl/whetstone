@@ -91,6 +91,9 @@ class Digest(BaseModel):
     wiki: str = ""
     recall: float | None = None
     fp_rate: float | None = None
+    # A one-off steer from the operator (`--instruction`). Empty for a plain run. Kept on the
+    # digest rather than bolted on at render time so a subprocess step receives it too.
+    instruction: str = ""
 
     def render_failures(self) -> str:
         if not self.clusters:
@@ -114,6 +117,7 @@ class Digest(BaseModel):
             "recall": "n/a" if self.recall is None else f"{self.recall:.3f}",
             "fp_rate": "n/a" if self.fp_rate is None else f"{self.fp_rate:.3f}",
             "wiki": self.wiki or "(no repo context indexed for this skill)",
+            "instruction": self.instruction,
         }
 
 
@@ -142,6 +146,7 @@ def build_digest(
     inputs: FailureInputs,
     *,
     wiki_text: str = "",
+    instruction: str = "",
 ) -> Digest:
     """Assemble the bounded view of `record` that an improve step will be shown."""
     cases = {c.id: c for c in skill.eval_cases}
@@ -157,6 +162,7 @@ def build_digest(
         wiki=wiki_text,
         recall=None if record is None else record.score.recall,
         fp_rate=None if record is None else record.score.fp_rate,
+        instruction=instruction.strip(),
     )
 
 
@@ -287,10 +293,21 @@ def propose(
     *,
     client: LLMClient | None = None,
     effort: Effort = "high",
+    instruction: str = "",
 ) -> ProposalResult:
-    """Run a skill's improve step and return the guidance change it proposes."""
-    wiki_text = _wiki_for(skill, record, spec)
-    digest = build_digest(skill, record, spec.inputs.failures, wiki_text=wiki_text)
+    """Run a skill's improve step and return the guidance change it proposes.
+
+    `instruction` is a one-off steer for this run — "focus on false positives", "R3 is too broad".
+    It reaches the prompt whether or not the template mentions `{{instruction}}`, because an
+    operator who passed one and saw no effect would have no way to tell that it was ignored.
+    """
+    digest = build_digest(
+        skill,
+        record,
+        spec.inputs.failures,
+        wiki_text=_wiki_for(skill, record, spec),
+        instruction=instruction,
+    )
 
     if spec.is_subprocess:
         proposal = _run_subprocess(spec, digest)
@@ -299,7 +316,7 @@ def propose(
         if client is None:
             raise StepError("this improve step calls a model, but no LLM client was provided")
         proposal = client.structured(
-            _SYSTEM, spec.render_prompt(digest.prompt_values()), GuidanceProposal, effort=effort
+            _SYSTEM, render_step_prompt(spec, digest), GuidanceProposal, effort=effort
         )
         calls = 1
 
@@ -309,6 +326,23 @@ def propose(
     return ProposalResult(
         proposal=proposal, digest=digest, unknown_cases=unknown, llm_calls=calls
     )
+
+
+def render_step_prompt(spec: StepSpec, digest: Digest) -> str:
+    """The prompt as sent, including an instruction the template forgot to place.
+
+    A template that references `{{instruction}}` decides where it goes. One that does not still
+    gets it, appended last and clearly labelled — silently dropping what an operator typed on the
+    command line is the one outcome that would make the flag untrustworthy.
+    """
+    text = spec.render_prompt(digest.prompt_values())
+    if digest.instruction and "{{instruction}}" not in (spec.prompt or ""):
+        text += (
+            "\n\n## Additional instruction for this run\n\n"
+            "This takes precedence over the general direction above where they conflict:\n\n"
+            f"{digest.instruction}\n"
+        )
+    return text
 
 
 _SYSTEM = (

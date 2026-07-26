@@ -14,39 +14,31 @@ API.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
-from pathlib import Path
-
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from whetstone import staging
 from whetstone.authoring import (
-    SKILL_FILE,
     PreparedSkill,
     SkillEdit,
-    frontmatter_version,
     prepare_guidance,
     prepare_meta,
 )
 from whetstone.config import Config
-from whetstone.core.loader import load_skill
 from whetstone.domain.run import skill_hash
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateStore, Verdict
 from whetstone.gitio import (
     Author,
     GitError,
-    branch_name,
     changed_paths,
     commits_ahead,
     current_head,
     diff_at,
-    read_at,
     ref_exists,
-    write_and_commit,
 )
 from whetstone.naming import is_safe_segment
+from whetstone.staging import BRANCH_KIND
 from whetstone.ui.deps import (
     ConfigDep,
     GatesDep,
@@ -56,13 +48,10 @@ from whetstone.ui.deps import (
     relative_skills_root,
 )
 from whetstone.ui.errors import Misconfigured, NotFound
-from whetstone.vcs import export_tree
 
 router = APIRouter(prefix="/skills", tags=["authoring"])
 
-# One branch per skill, so a session of edits accumulates into a single proposal instead of one
-# branch per save. Matches how triage accumulates cases onto a batch branch.
-BRANCH_KIND = "skill"
+__all__ = ["BRANCH_KIND", "router", "ungated_guidance"]
 
 
 class Proposal(BaseModel):
@@ -342,59 +331,26 @@ def _prepare_guidance(config: Config, skill_id: str, edit: SkillEdit) -> Prepare
 
 
 def _source(config: Config, skill_id: str) -> tuple[Skill, str]:
-    """The skill an edit starts from: the branch if one is staged, else the working tree.
+    """The skill an edit starts from — see `staging.source`, which the CLI uses too.
 
-    Reading the branch is what makes a second edit in one session additive rather than a rewrite of
-    the first — and it is what makes the resulting `skill_hash` describe the content that would
-    actually be published, which is the whole basis of the C6 check.
+    Shared deliberately. When the console and `whetstone skills improve` disagreed about what was
+    staged, the CLI's gate evidence was filed against a skill id C6 never looks up, and the failure
+    was invisible from both ends.
     """
-    if not is_safe_segment(skill_id):
-        raise NotFound(f"invalid skill id {skill_id!r}")
-
-    branch = _branch(config, skill_id)
-    if ref_exists(config.skills_repo, branch):
-        staged = _skill_at(config, branch, skill_id)
-        if staged is not None:
-            return staged
-
-    directory = config.skills_root / skill_id
-    if not (directory / SKILL_FILE).is_file():
-        raise NotFound(f"no skill {skill_id!r} under {config.skills_root}")
-    return load_skill(directory), (directory / SKILL_FILE).read_text(encoding="utf-8")
+    try:
+        return staging.source(config, skill_id)
+    except staging.NoSuchSkill as exc:
+        raise NotFound(str(exc)) from exc
+    except staging.StagingError as exc:
+        raise NotFound(str(exc)) from exc
 
 
 def _skill_at(config: Config, ref: str, skill_id: str) -> tuple[Skill, str] | None:
-    """Load a whole skill folder as it stands at a git ref.
-
-    Exported to a temp directory rather than read file by file: a skill is its guidance *and* its
-    eval cases, and `skill_hash` covers both. Reading only `SKILL.md` would hash a skill with no
-    cases and match evidence gathered for something else entirely.
-    """
-    relative = _skill_path(config, skill_id)
-    try:
-        root = export_tree(config.skills_repo, ref, relative)
-    except subprocess.CalledProcessError:
-        return None  # the branch exists but does not carry this skill
-    try:
-        directory = Path(root) / relative
-        if not (directory / SKILL_FILE).is_file():
-            return None
-        return load_skill(directory), (directory / SKILL_FILE).read_text(encoding="utf-8")
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    return staging.skill_at(config, ref, skill_id)
 
 
 def _base_version(config: Config, skill_id: str) -> int | None:
-    """The version on the branch this change is proposed *against*.
-
-    Bumping relative to this rather than to the staged file is what keeps a session of edits at one
-    version bump. Unknown — a skill not yet committed — means "bump from wherever it is now".
-    """
-    path = f"{_skill_path(config, skill_id)}/{SKILL_FILE}"
-    try:
-        return frontmatter_version(read_at(config.skills_repo, config.git.default_base, path))
-    except GitError:
-        return None
+    return staging.base_version(config, skill_id)
 
 
 def _commit(
@@ -405,15 +361,13 @@ def _commit(
     message: str,
     expect_head: str | None,
 ) -> str:
-    return write_and_commit(
-        config.skills_repo,
+    return staging.stage(
+        config,
+        prepared.skill_id,
         prepared.files,
         message,
-        branch=_branch(config, prepared.skill_id),
-        base=config.git.default_base,
         author=_author(config, principal),
         expect_head=expect_head,
-        protected=config.git.protected_branches,
     )
 
 
@@ -421,11 +375,11 @@ def _commit(
 
 
 def _branch(config: Config, skill_id: str) -> str:
-    return branch_name(BRANCH_KIND, skill_id, prefix=config.git.branch_prefix)
+    return staging.skill_branch(config, skill_id)
 
 
 def _skill_path(config: Config, skill_id: str) -> str:
-    return f"{relative_skills_root(config)}/{skill_id}"
+    return staging.skill_path(config, skill_id)
 
 
 def _expected_head(config: Config, branch: str, base: str) -> str | None:

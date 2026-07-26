@@ -219,3 +219,57 @@ none — an operator who trusts it once and is billed twice over will never trus
 
 **No confirmation available means abort, not proceed.** The failure mode of guessing wrong is
 somebody's invoice. CI passes `--yes`, which is the same consent given deliberately.
+
+## ADR-012 — One branch, addressed by id, for every writer
+
+**Context.** `whetstone skills improve` shipped handing the operator a guidance body and a gate
+command containing `<edited copy>`. Following the documented way of applying it — overwrite
+`SKILL.md` — dropped the frontmatter, so the skill's id fell back to the folder name. The gate then
+ran, passed, and stored its record under a skill that does not exist. Every step reported success
+and the result was unusable: C6 looks up evidence by id and would never find it.
+
+**Decision.** Staging primitives live in `staging.py` and both the console and the CLI use them.
+`skills improve --apply` and `skills update` write to `whetstone/skill/<id>` through the same
+`prepare_guidance` path the console's editor uses, which preserves the frontmatter, bumps the
+version once per proposal, and validates by loading the result back.
+
+**Skills are addressed by id, and that is now checked.** `prepare_guidance` builds
+`<skills_root>/<id>/SKILL.md` while the console looks up `<skills_root>/<id>`, so a folder whose
+name differs from its frontmatter id commits to a path that is not the folder the operator pointed
+at. Previously that was an unstated invariant; `_staging_id` now verifies it and names both paths
+when it does not hold. The bug it prevents is silent — the command says "staged" and the branch
+still holds the old guidance.
+
+**A body is not a file, and the CLI says so.** `--out` still exists and still emits the body alone,
+because diffing it is useful. It now labels the output as a body and points at `--apply`.
+
+## ADR-013 — Evidence must describe the skill you have
+
+**Context.** `skills improve` read the most recent stored run regardless of whether it scored the
+skill's current content, so editing the guidance and re-running produced a confident proposal aimed
+at failures that may already have been fixed.
+
+**Decision.** Refuse, naming both hashes, unless `--stale-ok`. The run record has carried
+`skill_hash` since it was written, and the console already badges the same condition on the runs
+list and on uploaded reviews; the improve path was the one place that ignored it.
+
+**Refuse rather than warn.** Improving from stale failures is not a degraded result, it is a wrong
+one, and it is indistinguishable from a good one by inspection. A warning on a command whose output
+is a page of plausible markdown would be read past.
+
+**A clean run does not spend a call either.** Nothing to learn from is not a reason to pay for a
+rewrite — unless the operator passed `--instruction`, which is them saying they want one anyway.
+
+## ADR-014 — A declared knob must do something
+
+**Context.** The step contract shipped with `model:` blocks on the evaluate and improve steps that
+nothing read, and an `inputs.guidance` flag that nothing read. The scaffold documented all of them.
+Someone pinning a skill to a local runner to keep it off a metered API would have been billed
+anyway, silently.
+
+**Decision.** `model:` is wired through `eval run`, `eval gate` and `skills improve` as the default
+under any command-line flag; `inputs.guidance` is deleted. The rule is that a key in a scaffold is a
+promise, and the scaffold is copied far more often than it is read.
+
+**The skill sets the default, the operator gets the last word.** A skill that knows it wants local
+hardware says so once; the person running it can still override per command.
