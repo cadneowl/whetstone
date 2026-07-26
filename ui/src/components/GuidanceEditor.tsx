@@ -12,6 +12,7 @@ import {
   type SkillDetail,
 } from '@/api/client'
 import { Guidance } from './Guidance'
+import { LaunchButton } from './LaunchButton'
 import { Badge, ErrorNote, Loading, when } from './primitives'
 
 /**
@@ -87,6 +88,8 @@ function Editor({
           <code className="font-mono">{proposal.base}</code>.
         </p>
       )}
+
+      <ImprovePanel skillId={skillId} onDrafted={setDraft} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-2">
@@ -184,6 +187,59 @@ function Conflict({ skillId, error }: { skillId: string; error: unknown }) {
   )
 }
 
+/**
+ * Drafting a guidance change from what the last run got wrong.
+ *
+ * The proposal lands in the editor above rather than being committed: a draft is a suggestion, and
+ * the person reading it is the one who decides whether it is an improvement. From there it takes
+ * the ordinary path — stage, gate, propose — so nothing about a machine-written rule can skip a
+ * step a hand-written one has to pass.
+ */
+function ImprovePanel({
+  skillId,
+  onDrafted,
+}: {
+  skillId: string
+  onDrafted: (body: string) => void
+}) {
+  const [instruction, setInstruction] = useState('')
+  const [note, setNote] = useState('')
+
+  return (
+    <section className="rounded-lg border border-line bg-surface/50 p-3">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-sm font-medium">Draft a change from the last run</h3>
+        <span className="text-xs text-muted">loads into the editor; commits nothing</span>
+      </div>
+      <LaunchButton
+        kind="improve"
+        request={{ skill_id: skillId, instruction }}
+        label="Draft a change"
+        onDone={(job) => {
+          const body = String((job.result as Record<string, unknown>).body ?? '')
+          if (!body) return
+          onDrafted(body)
+          const r = job.result as Record<string, unknown>
+          setNote(
+            `Drafted from ${String(r.total_failures)} failure(s). ${String(r.rationale ?? '')}`,
+          )
+        }}
+      >
+        <label className="block text-xs text-muted">
+          Steer this run (optional)
+          <input
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            placeholder="e.g. focus on false positives in test files"
+            className="mt-1 w-full rounded border border-line bg-surface px-2 py-1 text-sm text-ink outline-none focus:border-accent/60"
+          />
+        </label>
+      </LaunchButton>
+      {note && <p className="mt-2 text-xs text-muted">{note}</p>}
+    </section>
+  )
+}
+
 /** C6, made visible: what is staged, whether it may be published, and what would clear the block. */
 function ProposalPanel({
   proposal,
@@ -197,6 +253,7 @@ function ProposalPanel({
   const propose = usePropose()
   const { verdict } = proposal
   const evidence = verdict.evidence
+  const skillId = proposal.skill_id
   // An unsaved draft is not what the branch holds, so a gate covering the branch says nothing
   // about what is on screen. Publishing now would push the *previous* text, which is the one
   // surprise this panel must never spring on anyone.
@@ -247,14 +304,24 @@ function ProposalPanel({
         </p>
       )}
 
-      {proposal.staged && !verdict.can_propose && (
+      {/* The gate runs here. Until it did, this panel stated the rule that blocks publishing and
+          then sent you to a terminal to satisfy it — which made C6 read as an obstacle rather than
+          as the step it is. */}
+      {proposal.staged && !verdict.can_propose && !pendingEdit && (
         <div className="mt-3">
-          <p className="text-xs text-muted">
-            The console cannot launch runs yet, so gate it from a terminal:
-          </p>
-          <pre className="mt-1 overflow-x-auto rounded border border-line bg-bg p-2 font-mono text-xs">
-            {gateCommand(proposal, repo)}
-          </pre>
+          <LaunchButton
+            kind="gate"
+            request={{ skill_id: skillId }}
+            label="Run the gate"
+          />
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs text-muted hover:text-ink">
+              or run it yourself
+            </summary>
+            <pre className="mt-1 overflow-x-auto rounded border border-line bg-bg p-2 font-mono text-xs">
+              {gateCommand(proposal, repo)}
+            </pre>
+          </details>
         </div>
       )}
 

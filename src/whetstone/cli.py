@@ -5,7 +5,6 @@ import os
 import shutil
 import webbrowser
 from collections.abc import Callable
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -482,7 +481,7 @@ def eval_gate(
         )
         # Both sides are scored, so a gate costs twice what the same run would.
         if plan.estimate:
-            plan.estimate = replace(plan.estimate, calls=plan.estimate.calls * 2)
+            plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * 2})
             plan.details.append("both base and candidate are scored, so this is doubled")
         check_budget(plan, load_config().runs.max_llm_calls_per_run)
         _preflight(plan, yes)

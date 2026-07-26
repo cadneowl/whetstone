@@ -22,6 +22,7 @@ from whetstone import staging
 from whetstone.config import Config
 from whetstone.gates import GateStore
 from whetstone.gitio import author_from_config
+from whetstone.jobs import JobStore
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.ui.errors import Misconfigured
@@ -54,6 +55,11 @@ def get_store(request: Request) -> RunStore:
 def get_gates(request: Request) -> GateStore:
     gates: GateStore = request.app.state.gates
     return gates
+
+
+def get_jobs(request: Request) -> JobStore:
+    jobs: JobStore = request.app.state.jobs
+    return jobs
 
 
 def get_reviews(request: Request) -> ReviewStore:
@@ -108,6 +114,7 @@ def require_writable(request: Request) -> None:
 ConfigDep = Annotated[Config, Depends(get_config)]
 StoreDep = Annotated[RunStore, Depends(get_store)]
 GatesDep = Annotated[GateStore, Depends(get_gates)]
+JobsDep = Annotated[JobStore, Depends(get_jobs)]
 ReviewsDep = Annotated[ReviewStore, Depends(get_reviews)]
 SkillsRootDep = Annotated[Path, Depends(get_skills_root)]
 PrincipalDep = Annotated[Principal, Depends(get_principal)]

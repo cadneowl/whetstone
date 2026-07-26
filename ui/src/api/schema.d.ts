@@ -199,6 +199,211 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Jobs */
+        get: operations["list_jobs_api_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/eval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Eval
+         * @description Score a skill against its eval cases, in the background.
+         */
+        post: operations["launch_eval_api_jobs_eval_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/eval/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Eval Job */
+        post: operations["plan_eval_job_api_jobs_eval_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/gate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Gate
+         * @description Gate the skill's staged branch against the base — the evidence C6 requires to publish.
+         */
+        post: operations["launch_gate_api_jobs_gate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/gate/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Gate Job */
+        post: operations["plan_gate_job_api_jobs_gate_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/improve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Improve
+         * @description Draft a guidance change from a run's failures. Stages nothing — the console does that.
+         */
+        post: operations["launch_improve_api_jobs_improve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/improve/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Improve Job */
+        post: operations["plan_improve_job_api_jobs_improve_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/improve/stage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Stage Proposal
+         * @description Put a drafted body onto the skill's branch, through the path the editor uses.
+         *
+         *     Separate from the job so the operator reads the proposal before any of it is committed — the
+         *     whole value of the draft is that a person decides whether it is an improvement.
+         */
+        post: operations["stage_proposal_api_jobs_improve_stage_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Update
+         * @description Regenerate the skill's wiki by running its generator, and stage the result.
+         */
+        post: operations["launch_update_api_jobs_update_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Job */
+        get: operations["get_job_api_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Job */
+        post: operations["cancel_job_api_jobs__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reviews": {
         parameters: {
             query?: never;
@@ -871,6 +1076,16 @@ export interface components {
              */
             body: string;
         };
+        /**
+         * Estimate
+         * @description An upper bound on model calls, with the arithmetic that produced it.
+         */
+        Estimate: {
+            /** Basis */
+            basis: string;
+            /** Calls */
+            calls: number;
+        };
         /** EvalCase */
         EvalCase: {
             change: components["schemas"]["CodeChange"];
@@ -889,6 +1104,15 @@ export interface components {
              *     }
              */
             provenance: components["schemas"]["Provenance"];
+        };
+        /** EvalRequest */
+        EvalRequest: {
+            /** Sample */
+            sample?: number | null;
+            /** Skill Id */
+            skill_id: string;
+            /** Trials */
+            trials?: number | null;
         };
         /**
          * Expectation
@@ -1146,6 +1370,21 @@ export interface components {
             /** Skill Id */
             skill_id: string;
         };
+        /**
+         * GateRequest
+         * @description Gate the skill's staged branch against the base. The console never gates arbitrary folders —
+         *     the thing it needs a verdict about is always what `whetstone/skill/<id>` holds.
+         */
+        GateRequest: {
+            /** Sample */
+            sample?: number | null;
+            /** Skill Id */
+            skill_id: string;
+            /** Targeted */
+            targeted?: string[];
+            /** Trials */
+            trials?: number | null;
+        };
         /** GateResult */
         GateResult: {
             /**
@@ -1199,6 +1438,23 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** ImproveRequest */
+        ImproveRequest: {
+            /**
+             * Instruction
+             * @default
+             */
+            instruction: string;
+            /** Run Id */
+            run_id?: string | null;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Stale Ok
+             * @default false
+             */
+            stale_ok: boolean;
+        };
         /**
          * IngestFinding
          * @description One comment the skill made. `skill_id` is not repeated — the upload names it once.
@@ -1236,6 +1492,70 @@ export interface components {
             note: string;
         };
         /**
+         * Job
+         * @description One unit of console-launched work, and everything needed to watch it.
+         */
+        Job: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Error
+             * @default
+             */
+            error: string;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "eval" | "gate" | "improve" | "update";
+            plan?: components["schemas"]["Plan"] | null;
+            /**
+             * @default {
+             *       "completed": 0,
+             *       "label": "",
+             *       "total": 0
+             *     }
+             */
+            progress: components["schemas"]["JobProgress"];
+            /** Result */
+            result?: {
+                [key: string]: unknown;
+            };
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * State
+             * @default running
+             * @enum {string}
+             */
+            state: "running" | "done" | "failed" | "cancelled";
+        };
+        /** JobProgress */
+        JobProgress: {
+            /**
+             * Completed
+             * @default 0
+             */
+            completed: number;
+            /**
+             * Label
+             * @default
+             */
+            label: string;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /**
          * JudgeVerdictRecord
          * @description One judge call: which finding was judged against an expectation, and what it decided.
          */
@@ -1255,6 +1575,34 @@ export interface components {
             expect_head?: string | null;
             /** Meta Yaml */
             meta_yaml: string;
+        };
+        /**
+         * Plan
+         * @description What is about to run, against what, at what cost.
+         *
+         *     A pydantic model rather than a dataclass because the console shows this too: the browser must
+         *     be able to render the identical banner the CLI prints, or the two would drift into disagreeing
+         *     about what a run costs.
+         */
+        Plan: {
+            /** Action */
+            action: string;
+            /** Backend */
+            backend: string;
+            /** Base Url */
+            base_url?: string | null;
+            /**
+             * Billing
+             * @enum {string}
+             */
+            billing: "billed" | "local" | "unknown";
+            /** Details */
+            details?: string[];
+            estimate?: components["schemas"]["Estimate"] | null;
+            /** Model */
+            model: string;
+            /** Warnings */
+            warnings?: string[];
         };
         /**
          * PreparedCase
@@ -1998,6 +2346,19 @@ export interface components {
              * @default 1
              */
             version: number;
+            /**
+             * @default {
+             *       "entries": [],
+             *       "pages": {},
+             *       "source": {
+             *         "generated_at": "",
+             *         "generator": "",
+             *         "repo": "",
+             *         "revision": ""
+             *       }
+             *     }
+             */
+            wiki: components["schemas"]["SkillWiki"];
         };
         /** SkillDetail */
         SkillDetail: {
@@ -2132,6 +2493,27 @@ export interface components {
             version: number;
         };
         /**
+         * SkillWiki
+         * @description A skill's repo context: an ordered index plus the pages it names.
+         */
+        SkillWiki: {
+            /** Entries */
+            entries?: components["schemas"]["WikiEntry"][];
+            /** Pages */
+            pages?: {
+                [key: string]: components["schemas"]["WikiPage"];
+            };
+            /**
+             * @default {
+             *       "generated_at": "",
+             *       "generator": "",
+             *       "repo": "",
+             *       "revision": ""
+             *     }
+             */
+            source: components["schemas"]["WikiSource"];
+        };
+        /**
          * StagedSkill
          * @description What a save produced, plus the proposal state it left behind.
          *
@@ -2176,6 +2558,16 @@ export interface components {
              * @default []
              */
             paths: string[];
+        };
+        /** UpdateRequest */
+        UpdateRequest: {
+            /**
+             * Repo
+             * @default .
+             */
+            repo: string;
+            /** Skill Id */
+            skill_id: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -2224,6 +2616,55 @@ export interface components {
         VerdictResponse: {
             candidate: components["schemas"]["CandidateCase"];
             record: components["schemas"]["ReviewRecord"];
+        };
+        /**
+         * WikiEntry
+         * @description One index row: the source paths a page describes.
+         */
+        WikiEntry: {
+            /** Page */
+            page: string;
+            /** Paths */
+            paths?: string[];
+        };
+        /** WikiPage */
+        WikiPage: {
+            /** Id */
+            id: string;
+            /** Text */
+            text: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * WikiSource
+         * @description Where this wiki came from — recorded so a stale one is recognisable as stale.
+         *
+         *     Whetstone does not generate the wiki; `update/` shells out to the generator a team already runs.
+         *     That makes provenance the only way to answer "does this describe the code we are reviewing?",
+         *     so the revision it was built from is the field that matters most here.
+         */
+        WikiSource: {
+            /**
+             * Generated At
+             * @default
+             */
+            generated_at: string;
+            /**
+             * Generator
+             * @default
+             */
+            generator: string;
+            /**
+             * Repo
+             * @default
+             */
+            repo: string;
+            /**
+             * Revision
+             * @default
+             */
+            revision: string;
         };
     };
     responses: never;
@@ -2521,6 +2962,356 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GitState"];
+                };
+            };
+        };
+    };
+    list_jobs_api_jobs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"][];
+                };
+            };
+        };
+    };
+    launch_eval_api_jobs_eval_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_eval_job_api_jobs_eval_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_gate_api_jobs_gate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_gate_job_api_jobs_gate_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_improve_api_jobs_improve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImproveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_improve_job_api_jobs_improve_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImproveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stage_proposal_api_jobs_improve_stage_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_update_api_jobs_update_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_api_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_job_api_jobs__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
