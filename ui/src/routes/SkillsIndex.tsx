@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useSkills } from '@/api/client'
-import { Badge, Empty, ErrorNote, Loading, Sparkline, score } from '@/components/primitives'
+import { Badge, Empty, ErrorNote, Intro, Loading, Sparkline, score } from '@/components/primitives'
 
 /**
  * The landing page, ordered weakest first.
@@ -13,17 +13,33 @@ export function SkillsIndex() {
 
   if (isLoading) return <Loading />
   if (error) return <ErrorNote error={error} />
-  if (!data?.length) return <Empty>No skills found under the configured skills root.</Empty>
 
   return (
     <div>
-      <div className="mb-4 flex items-baseline justify-between">
-        <h1 className="text-lg font-semibold">Skills</h1>
-        <p className="text-xs text-muted">weakest first</p>
-      </div>
+      {/* Header before the empty check, not after. An empty screen is the one a first-time
+          operator sees, and returning bare `<Empty>` took the title and the explanation away from
+          exactly the person who had never seen the screen before. */}
+      <header className="mb-4">
+        <div className="flex items-baseline justify-between">
+          <h1 className="text-lg font-semibold">Skills</h1>
+          {Boolean(data?.length) && <p className="text-xs text-muted">weakest first</p>}
+        </div>
+        <Intro>
+          Every skill Whetstone can see, worst score first — so "which of ours is actually weak?" is
+          the sort order rather than something you assemble by hand. Open one to read its guidance,
+          edit it, see the cases holding it to account, and score it.
+        </Intro>
+      </header>
+
+      {!data?.length && (
+        <Empty>
+          No skills found under the configured skills root. A skill is a folder with a{' '}
+          <code className="font-mono">SKILL.md</code> in it.
+        </Empty>
+      )}
 
       <ul className="space-y-2">
-        {data.map((skill) => (
+        {(data ?? []).map((skill) => (
           <li key={skill.id}>
             <Link
               to={`/skills/${encodeURIComponent(skill.id)}`}
@@ -60,9 +76,7 @@ export function SkillsIndex() {
                   )}
                 </div>
               </div>
-              {skill.description && (
-                <p className="mt-1 text-sm text-muted">{skill.description}</p>
-              )}
+              {skill.description && <p className="mt-1 text-sm text-muted">{skill.description}</p>}
             </Link>
           </li>
         ))}

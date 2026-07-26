@@ -5,6 +5,7 @@ import {
   Badge,
   Empty,
   ErrorNote,
+  Intro,
   Loading,
   score,
   severityName,
@@ -25,6 +26,7 @@ export function CaseDetail() {
   const overlays: Overlay[] = evalCase.expect.map((e) => ({
     // No line_range means "anywhere in the file", which is a whole-file highlight.
     range: (e.where.line_range ?? [1, Number.MAX_SAFE_INTEGER]) as [number, number],
+    wholeFile: !e.where.line_range,
     path: e.where.path,
     kind: 'expectation',
     tone: isCatch ? 'accent' : 'warn',
@@ -39,17 +41,25 @@ export function CaseDetail() {
         </Link>
       </nav>
 
-      <header className="mb-4 flex flex-wrap items-baseline gap-3">
-        <h1 className="font-mono text-lg font-semibold">{evalCase.id}</h1>
-        <Badge tone={isCatch ? 'accent' : 'neutral'}>
-          {isCatch ? 'should catch' : 'should not flag'}
-        </Badge>
-        {evalCase.provenance.ref && (
-          <span className="font-mono text-xs text-muted">{evalCase.provenance.ref}</span>
-        )}
-        {evalCase.provenance.human_signal && (
-          <span className="text-xs text-muted">“{evalCase.provenance.human_signal}”</span>
-        )}
+      <header className="mb-4">
+        <div className="flex flex-wrap items-baseline gap-3">
+          <h1 className="font-mono text-lg font-semibold">{evalCase.id}</h1>
+          <Badge tone={isCatch ? 'accent' : 'neutral'}>
+            {isCatch ? 'should catch' : 'should not flag'}
+          </Badge>
+          {evalCase.provenance.ref && (
+            <span className="font-mono text-xs text-muted">{evalCase.provenance.ref}</span>
+          )}
+          {evalCase.provenance.human_signal && (
+            <span className="text-xs text-muted">“{evalCase.provenance.human_signal}”</span>
+          )}
+        </div>
+        <Intro>
+          One real review outcome, frozen as a test. The badge is what a human decided; the quoted
+          signal beside it is what they actually did on that merge request. The expectation on the
+          right is the ground truth every finding is judged against — and History is whether this
+          skill has been getting it right.
+        </Intro>
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_20rem]">
@@ -64,8 +74,7 @@ export function CaseDetail() {
               {evalCase.expect.map((e) => (
                 <li key={e.id} className="rounded-lg border border-line bg-surface px-3 py-2">
                   <p className="text-sm">
-                    must{' '}
-                    <strong className="font-semibold">{e.must.replace('_', ' ')}</strong>
+                    must <strong className="font-semibold">{e.must.replace('_', ' ')}</strong>
                   </p>
                   {e.semantic && <p className="mt-1 text-sm text-muted">{e.semantic}</p>}
                   <p className="mt-1 font-mono text-xs text-muted">

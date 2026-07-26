@@ -98,6 +98,22 @@ export function Empty({ children }: { children: ReactNode }) {
   return <p className="py-8 text-center text-sm text-muted italic">{children}</p>
 }
 
+/**
+ * What this screen is, and what you do on it. One or two sentences, on every screen.
+ *
+ * Whetstone's pipeline is not guessable from its nouns: nothing about the word "Triage" tells you
+ * that its output is a git branch, and "Reviews" and "Runs" both sound like "results" while one is
+ * a queue of decisions and the other is history. The alternative to a line of prose per screen is
+ * an operator who has to be told once, verbally, by someone who already knows — which does not
+ * scale past the person who wrote it.
+ *
+ * Kept to `what it is` + `what you do here`. Anything longer stops being read, and a rubric nobody
+ * reads is worse than none because it looks like the documentation exists.
+ */
+export function Intro({ children }: { children: ReactNode }) {
+  return <p className="mt-1 max-w-3xl text-sm text-muted">{children}</p>
+}
+
 export function Loading() {
   return <p className="py-8 text-center text-sm text-muted">Loading…</p>
 }

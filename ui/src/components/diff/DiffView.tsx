@@ -2,8 +2,16 @@ import { useMemo, useState } from 'react'
 import { parseDiff, type DiffLine } from './parse'
 
 export interface Overlay {
-  /** Inclusive new-file line range, matching `Region.line_range` on the server. */
+  /**
+   * Inclusive new-file line range, matching `Region.line_range` on the server.
+   *
+   * A server-side region with no `line_range` means "anywhere in this file". Callers express that
+   * by opening the range to `Number.MAX_SAFE_INTEGER`, which is right for deciding what to
+   * highlight and wrong to ever show a reader — the legend printed a literal
+   * `lines 1–9007199254740991`. `wholeFile` says so in words instead.
+   */
   range: [number, number]
+  wholeFile?: boolean
   path?: string
   kind: 'expectation' | 'finding'
   label?: string
@@ -192,7 +200,7 @@ function Legend({ overlays }: { overlays: Overlay[] }) {
           <span>
             {o.label}
             <span className="ml-1 opacity-70">
-              (lines {o.range[0]}–{o.range[1]})
+              {o.wholeFile ? '(anywhere in this file)' : `(lines ${o.range[0]}–${o.range[1]})`}
             </span>
           </span>
         </li>

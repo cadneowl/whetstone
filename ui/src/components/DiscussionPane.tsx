@@ -113,6 +113,24 @@ function Silence({ candidate }: { candidate: CandidateCase }) {
     )
   }
 
+  // A `should_catch` candidate is not an argument from silence, whatever the thread looks like:
+  // something in the provenance said a reviewer *did* object here. This branch used to tell every
+  // commentless candidate that "it asserts a reviewer should stay quiet", directly contradicting
+  // the `should catch` badge two inches above it.
+  if (candidate.kind === 'should_catch') {
+    return (
+      <div className="space-y-1.5 px-3 py-3 text-sm text-muted">
+        <p>No inline comment was captured for this merge request.</p>
+        <p className="text-xs">
+          The signal is the outcome, not the conversation:{' '}
+          <em>{signal || 'a human acted on this code'}</em>. That is real evidence, but it is
+          second-hand here — read the diff and open the merge request before promoting, because the
+          expectation below was written without a comment to draw on.
+        </p>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-1.5 px-3 py-3 text-sm text-muted">
       <p>Nobody left an inline comment on this merge request.</p>
