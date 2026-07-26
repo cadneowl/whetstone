@@ -24,8 +24,14 @@ from whetstone.gitio import (
     write_and_commit,
 )
 from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
-from whetstone.ui.deps import ConfigDep, Principal, PrincipalDep, Writable
-from whetstone.ui.errors import Misconfigured, NotFound
+from whetstone.ui.deps import (
+    ConfigDep,
+    Principal,
+    PrincipalDep,
+    Writable,
+    relative_skills_root,
+)
+from whetstone.ui.errors import NotFound
 
 router = APIRouter(prefix="/candidates", tags=["triage"])
 
@@ -190,7 +196,7 @@ def _prepare(
         if edits.rule_id and edits.skill_id
         else None
     )
-    return prepare(entry, edits, skills_root=_relative_skills_root(config), meta_yaml=meta)
+    return prepare(entry, edits, skills_root=relative_skills_root(config), meta_yaml=meta)
 
 
 def _meta_yaml(config: Config, skill_id: str, branch: str) -> str | None:
@@ -200,7 +206,7 @@ def _meta_yaml(config: Config, skill_id: str, branch: str) -> str | None:
     first one recorded exists only there, and starting from the working-tree copy would drop it.
     """
     if ref_exists(config.skills_repo, branch):
-        relative = f"{_relative_skills_root(config)}/{skill_id}/{META_FILE}"
+        relative = f"{relative_skills_root(config)}/{skill_id}/{META_FILE}"
         try:
             return read_at(config.skills_repo, branch, relative)
         except GitError:
@@ -233,16 +239,3 @@ def _load(config: Config, candidate_id: str) -> CandidateEntry:
         return _store(config).load(candidate_id)
     except KeyError as exc:
         raise NotFound(str(exc)) from exc
-
-
-def _relative_skills_root(config: Config) -> str:
-    """The skills root as a repo-relative path, since commits address files that way."""
-    try:
-        return config.skills_root.relative_to(config.skills_repo).as_posix()
-    except ValueError:
-        # Nothing the caller sent is wrong — `whetstone.toml` points the two settings at unrelated
-        # directories, so promotion cannot address the files it would commit.
-        raise Misconfigured(
-            f"skills root {config.skills_root} is not inside the git repo "
-            f"{config.skills_repo}; set [skills] root and repo to matching locations"
-        ) from None

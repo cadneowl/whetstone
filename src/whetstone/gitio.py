@@ -112,6 +112,25 @@ def read_at(repo: str | Path, ref: str, path: str) -> str:
     return _git(repo, "show", f"{ref}:{path}").decode("utf-8")
 
 
+def diff_at(repo: str | Path, base: str, ref: str, path: str | None = None) -> str:
+    """The unified diff `base..ref`, optionally narrowed to one path.
+
+    Three dots, not two: what a merge request would show. Two dots would also render everything that
+    landed on the base branch since this one forked, presenting other people's commits as part of
+    the change under review.
+    """
+    args = ["diff", f"{base}...{ref}"]
+    if path is not None:
+        args += ["--", _posix(path)]
+    return _git(repo, *args).decode("utf-8")
+
+
+def changed_paths(repo: str | Path, base: str, ref: str) -> list[str]:
+    """Repo-relative paths that `ref` changes relative to `base`."""
+    out = _git(repo, "diff", "--name-only", f"{base}...{ref}").decode("utf-8")
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 @lru_cache(maxsize=8)
 def author_from_config(repo: str | Path) -> Author:
     """The repo's configured identity — who a local, single-user console commits as.
@@ -172,7 +191,7 @@ def pending_batch(
         return Batch(branch=nxt, exists=False, proposed=False, commits=0)
 
     return Batch(
-        branch=branch, exists=True, proposed=False, commits=_count_commits(repo, base, branch)
+        branch=branch, exists=True, proposed=False, commits=commits_ahead(repo, base, branch)
     )
 
 
@@ -190,7 +209,8 @@ def _batch_numbers(repo: str | Path, pattern: str, offset: int) -> list[int]:
     return numbers
 
 
-def _count_commits(repo: str | Path, base: str, branch: str) -> int:
+def commits_ahead(repo: str | Path, base: str, branch: str) -> int:
+    """How many commits `branch` has that `base` does not. Zero for an unknown ref."""
     try:
         return int(_text(repo, "rev-list", "--count", f"{base}..{branch}"))
     except (GitError, ValueError):

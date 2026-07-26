@@ -164,12 +164,16 @@ export interface paths {
         put?: never;
         /**
          * Propose
-         * @description Publish a batch branch.
+         * @description Publish a branch.
          *
          *     Pushing is never implicit — this route exists so that it is always a deliberate action. Opening
          *     the merge request itself needs a provider implementing `WriteConnector`, which Milestone 1
          *     defines but does not implement; until one is registered this pushes the branch and says so
          *     rather than pretending a merge request was created.
+         *
+         *     A branch carrying a guidance change is refused unless a passing gate covers the exact content
+         *     it would publish (C6). This is the choke point rather than the editor, because the editor is
+         *     not the only way commits reach a branch.
          */
         post: operations["propose_api_git_propose_post"];
         delete?: never;
@@ -295,6 +299,89 @@ export interface paths {
         };
         /** Get Case */
         get: operations["get_case_api_skills__skill_id__cases__case_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/guidance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Guidance
+         * @description Stage a guidance edit on the skill's branch.
+         */
+        put: operations["put_guidance_api_skills__skill_id__guidance_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/guidance/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Guidance
+         * @description Validate an edit and return exactly what would be committed. Writes nothing.
+         */
+        post: operations["preview_guidance_api_skills__skill_id__guidance_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/meta": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Meta
+         * @description Stage a `meta.yaml` edit — owner, references, and rule provenance.
+         *
+         *     Lands on the same branch as a guidance edit, so metadata and the rules it documents travel
+         *     together. Never affects the C6 verdict: nothing in this file reaches the reviewer.
+         */
+        put: operations["put_meta_api_skills__skill_id__meta_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/proposal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Proposal
+         * @description What is staged for this skill, and whether it may be published (C6).
+         */
+        get: operations["get_proposal_api_skills__skill_id__proposal_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -772,6 +859,148 @@ export interface components {
             skill_id: string;
         };
         /**
+         * GateConfig
+         * @description Tolerances for promoting a skill change. Defaults are strict: no recall loss, no new false
+         *     positives, no case that used to pass may start failing.
+         */
+        GateConfig: {
+            /**
+             * Case Fp Ceiling
+             * @default 0.001
+             */
+            case_fp_ceiling: number;
+            /**
+             * Case Recall Floor
+             * @default 0.999
+             */
+            case_recall_floor: number;
+            /**
+             * Fp Tol
+             * @default 0
+             */
+            fp_tol: number;
+            /**
+             * Max Case Regressions
+             * @default 0
+             */
+            max_case_regressions: number;
+            /**
+             * Recall Tol
+             * @default 0
+             */
+            recall_tol: number;
+            /**
+             * Targeted Cases
+             * @default []
+             */
+            targeted_cases: string[];
+        };
+        /**
+         * GateRecord
+         * @description One comparison of a candidate skill against a baseline, and what it was run against.
+         */
+        GateRecord: {
+            /**
+             * Backend
+             * @default
+             */
+            backend: string;
+            /** Base Hash */
+            base_hash: string;
+            /**
+             * Base Ref
+             * @default
+             */
+            base_ref: string;
+            base_score: components["schemas"]["SkillScore"];
+            /** Candidate Hash */
+            candidate_hash: string;
+            /**
+             * Candidate Ref
+             * @default
+             */
+            candidate_ref: string;
+            candidate_score: components["schemas"]["SkillScore"];
+            /**
+             * @default {
+             *       "case_fp_ceiling": 0.001,
+             *       "case_recall_floor": 0.999,
+             *       "fp_tol": 0,
+             *       "max_case_regressions": 0,
+             *       "recall_tol": 0,
+             *       "targeted_cases": []
+             *     }
+             */
+            config: components["schemas"]["GateConfig"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Duration S
+             * @default 0
+             */
+            duration_s: number;
+            /** Id */
+            id: string;
+            /**
+             * K
+             * @default 1
+             */
+            k: number;
+            /**
+             * Llm Calls
+             * @default 0
+             */
+            llm_calls: number;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Practice Mode
+             * @default false
+             */
+            practice_mode: boolean;
+            /**
+             * Principal
+             * @default
+             */
+            principal: string;
+            result: components["schemas"]["GateResult"];
+            /** Skill Id */
+            skill_id: string;
+        };
+        /** GateResult */
+        GateResult: {
+            /**
+             * Fixed Cases
+             * @default []
+             */
+            fixed_cases: string[];
+            /** Fp Rate New */
+            fp_rate_new: number;
+            /** Fp Rate Old */
+            fp_rate_old: number;
+            /** Passed */
+            passed: boolean;
+            /** Reasons */
+            reasons: string[];
+            /** Recall New */
+            recall_new: number;
+            /** Recall Old */
+            recall_old: number;
+            /** Regressed Cases */
+            regressed_cases: string[];
+            /**
+             * Unfixed Cases
+             * @default []
+             */
+            unfixed_cases: string[];
+        };
+        /**
          * GitState
          * @description Repo state. `available` is false when the skills root isn't a git checkout at all — the
          *     console still works read-only, it just can't propose anything.
@@ -785,6 +1014,12 @@ export interface components {
              */
             message: string;
             status?: components["schemas"]["RepoStatus"] | null;
+        };
+        /** GuidanceRequest */
+        GuidanceRequest: {
+            edit: components["schemas"]["SkillEdit"];
+            /** Expect Head */
+            expect_head?: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -805,6 +1040,13 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** MetaRequest */
+        MetaRequest: {
+            /** Expect Head */
+            expect_head?: string | null;
+            /** Meta Yaml */
+            meta_yaml: string;
+        };
         /**
          * PreparedCase
          * @description A validated case, ready to write. `files` are repo-relative paths → contents.
@@ -819,6 +1061,34 @@ export interface components {
             };
             /** Skill Id */
             skill_id: string;
+        };
+        /**
+         * PreparedSkill
+         * @description A validated guidance edit, ready to commit. `files` are repo-relative paths → contents.
+         */
+        PreparedSkill: {
+            /** Files */
+            files: {
+                [key: string]: string;
+            };
+            /**
+             * Guidance Changed
+             * @description Whether this edit invalidates an existing gate result.
+             *
+             *     `skill_hash` covers the guidance body and the eval cases — the things that determine a
+             *     score. Renaming a skill or fixing a typo in its description leaves it unchanged, and
+             *     correctly so: neither can alter what the reviewer does, so neither should force a re-gate.
+             */
+            readonly guidance_changed: boolean;
+            /** Previous Hash */
+            previous_hash: string;
+            skill: components["schemas"]["Skill"];
+            /** Skill Hash */
+            skill_hash: string;
+            /** Skill Id */
+            skill_id: string;
+            /** Version */
+            version: number;
         };
         /**
          * Principal
@@ -854,6 +1124,41 @@ export interface components {
             /** Commit */
             commit: string;
             prepared: components["schemas"]["PreparedCase"];
+        };
+        /**
+         * Proposal
+         * @description The state of a skill's pending guidance change, and whether it may be published.
+         */
+        Proposal: {
+            /** Base */
+            base: string;
+            /**
+             * Body
+             * @default
+             */
+            body: string;
+            /** Branch */
+            branch: string;
+            /** Commits */
+            commits: number;
+            /**
+             * Diff
+             * @default
+             */
+            diff: string;
+            /** Head */
+            head?: string | null;
+            /** Path */
+            path: string;
+            /** Skill Hash */
+            skill_hash: string;
+            /** Skill Id */
+            skill_id: string;
+            /** Staged */
+            staged: boolean;
+            verdict: components["schemas"]["Verdict"];
+            /** Version */
+            version: number;
         };
         /** ProposeRequest */
         ProposeRequest: {
@@ -1222,6 +1527,22 @@ export interface components {
              */
             untested_rules: string[];
         };
+        /**
+         * SkillEdit
+         * @description A human's rewrite of a skill's guidance.
+         *
+         *     Only the fields a person edits as prose. Everything else in the frontmatter — `id`, `triggers`,
+         *     anything an operator hand-added — is carried through untouched, which is why the editor can be a
+         *     plain markdown box rather than a form that has to know every key.
+         */
+        SkillEdit: {
+            /** Body */
+            body: string;
+            /** Description */
+            description?: string | null;
+            /** Name */
+            name?: string | null;
+        };
         /** SkillScore */
         SkillScore: {
             /** Cases */
@@ -1303,6 +1624,21 @@ export interface components {
             version: number;
         };
         /**
+         * StagedSkill
+         * @description What a save produced, plus the proposal state it left behind.
+         *
+         *     The proposal is included so the editor can grey out *Propose* in the same round trip that saved
+         *     the edit — the moment when it is most important to say that the guidance now needs a gate.
+         */
+        StagedSkill: {
+            /** Branch */
+            branch: string;
+            /** Commit */
+            commit: string;
+            prepared: components["schemas"]["PreparedSkill"];
+            proposal: components["schemas"]["Proposal"];
+        };
+        /**
          * TrialRecord
          * @description One reviewer pass over one case: everything it said, and how each expectation resolved.
          */
@@ -1345,6 +1681,26 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * Verdict
+         * @description C6 applied to one version of a skill: may it be published, and on what evidence?
+         */
+        Verdict: {
+            /** Can Propose */
+            can_propose: boolean;
+            /**
+             * Caveat
+             * @default
+             */
+            caveat: string;
+            evidence?: components["schemas"]["GateRecord"] | null;
+            latest?: components["schemas"]["GateRecord"] | null;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
         };
     };
     responses: never;
@@ -1810,6 +2166,142 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CaseDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_guidance_api_skills__skill_id__guidance_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GuidanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StagedSkill"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_guidance_api_skills__skill_id__guidance_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GuidanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreparedSkill"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_meta_api_skills__skill_id__meta_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetaRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StagedSkill"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_proposal_api_skills__skill_id__proposal_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Proposal"];
                 };
             };
             /** @description Validation Error */

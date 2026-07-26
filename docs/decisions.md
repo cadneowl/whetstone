@@ -78,3 +78,62 @@ score whose arithmetic encodes a guess is harder to argue with than one that rep
 **Decision instead:** (a) generate genuinely sound negatives, from the replacement text an applied
 suggestion already carries and that was previously discarded; (b) surface the mix wherever the score
 is shown. The inference cannot be repaired. Hiding it was the fixable part.
+
+## ADR-008 — Permission to publish guidance is bound to content, not to a branch
+**Decision:** A gate result is persisted (`gates.py`) carrying the `skill_hash` of the candidate
+skill **as committed**. `GateStore.verdict_for(skill_id, hash)` is the sole authority on C6, and it
+is consulted both by `GET /api/skills/{id}/proposal` and by `POST /api/git/propose`.
+
+**The problem it solves:** until now the project could *measure* a guidance change but had nowhere
+to make one, and nothing structural stopped a change from being published unmeasured. `whetstone
+eval gate` printed a verdict and exited. A verdict that is not stored cannot be checked later, so
+"never ship a skill change you can't prove is an improvement" was a discipline, not a property.
+
+**Why content and not the branch.** Keying evidence on `whetstone/skill/<id>` would make one passing
+gate a standing licence: gate once, then keep editing. Keying on the hash means the permission
+evaporates the moment the guidance changes, which is the only version of the rule that cannot be
+gamed by ordinary use. It is also why `service.record_gate` hashes its *arguments* rather than the
+skills `gate_skills` scores — those carry the union of both sides' eval cases, a set that exists in
+neither commit.
+
+**Why `meta.yaml` edits do not retract it.** `skill_hash` covers the guidance body and the eval
+cases — what determines a score. Owner, references and provenance cannot change what the reviewer
+does, so forcing a re-gate after an owner change would be ceremony that teaches nobody anything.
+
+**Why a practice-mode gate is not evidence.** Practice mode (C4) substitutes the pattern reviewer
+and the deterministic judge so the console is explorable with no spend and nothing to authenticate
+with. Its PASS is a statement about a regex. Accepting it would let a demo mode wave the whole rule
+through.
+
+**Why the check sits at the push and not only in the editor.** The console's *Open in editor* escape
+hatch hands a branch to whatever tools someone prefers, and the resulting commits arrive like any
+others. A rule enforced only on the button most people happen to click is not enforced.
+
+**What the guard actually asks.** *Does this branch change what the skill would publish?*, not *did
+`SKILL.md` change?* The first draft asked the second question and had three bypasses: deleting an
+eval case (the cheapest way to raise a score without improving anything — drop the case the reviewer
+keeps failing), rewriting one into a vacuous form, and deleting `SKILL.md` outright, which the code
+skipped because there was no skill left to hash. `skill_hash` covers the eval cases precisely so
+that the first two count, so the guard now compares the skill at the base branch against the skill
+at the branch.
+
+**The one exemption is *adding* eval cases**, which is what lets triage batches push without a gate:
+a case the skill did not have before cannot make the reviewer worse at the ones it did. Removing or
+rewriting an existing case is not the same act and does not qualify. A skill that does not exist on
+the base branch is also exempt — there is no baseline to regress from, and `eval gate --base-ref`
+has nothing to load, so demanding evidence would make a new skill unpublishable rather than safe.
+
+**The guard fails closed.** If it cannot determine what a branch changes — overwhelmingly because
+`[git] default_base` names a branch the repo does not have — the push is refused and the
+misconfiguration is named. A safety check that silently approves when it cannot run is worse than no
+check, because it looks like one.
+
+**A pass is not withdrawn by a later failure, but the disagreement is shown.** An eval at `k=1` is
+noisy; letting a re-run revoke a demonstrated result would make publishing hostage to variance. So
+the pass still permits, and `Verdict.caveat` carries the contradiction to the console, which badges
+it *gated, with a caveat*. `reason` and `caveat` are separate fields so "you may not" and "you may,
+but" never have to share one string.
+
+**Consequences:** deleting `.whetstone/gates/` is not free the way deleting `.whetstone/runs/` is
+(C2). Runs are telemetry; gate records are load-bearing, and removing them costs the right to
+propose until the gates are re-run.

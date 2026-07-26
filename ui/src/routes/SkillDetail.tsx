@@ -2,6 +2,7 @@ import * as Tabs from '@radix-ui/react-tabs'
 import { Link, useParams } from 'react-router-dom'
 import { useSkill, type CaseSummary } from '@/api/client'
 import { Guidance } from '@/components/Guidance'
+import { GuidanceEditor } from '@/components/GuidanceEditor'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
 export function SkillDetail() {
@@ -33,6 +34,7 @@ export function SkillDetail() {
       <Tabs.Root defaultValue="guidance">
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">
           <Trigger value="guidance">Guidance</Trigger>
+          <Trigger value="edit">Edit</Trigger>
           <Trigger value="cases">Eval cases ({cases.length})</Trigger>
           <Trigger value="runs">Runs ({runs.length})</Trigger>
           <Trigger value="meta">Metadata</Trigger>
@@ -40,6 +42,12 @@ export function SkillDetail() {
 
         <Tabs.Content value="guidance">
           <Guidance detail={data} />
+        </Tabs.Content>
+
+        <Tabs.Content value="edit">
+          {/* Mounted only while selected, so the draft starts from what is on disk each time the
+              tab is opened rather than from a stale copy taken at page load. */}
+          <GuidanceEditor detail={data} />
         </Tabs.Content>
 
         <Tabs.Content value="cases">

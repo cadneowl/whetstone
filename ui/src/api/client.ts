@@ -24,6 +24,12 @@ export type PreparedCase = Schemas['PreparedCase']
 export type PromoteResponse = Schemas['PromoteResponse']
 export type Batch = Schemas['Batch']
 export type EvalKind = CaseEdits['kind']
+export type SkillEdit = Schemas['SkillEdit']
+export type PreparedSkill = Schemas['PreparedSkill']
+export type StagedSkill = Schemas['StagedSkill']
+export type Proposal = Schemas['Proposal']
+export type Verdict = Schemas['Verdict']
+export type GateRecord = Schemas['GateRecord']
 
 /** The shape the API returns for a handled failure — see `ui/errors.py`. */
 export interface ApiProblem {
@@ -86,6 +92,7 @@ export const keys = {
   run: (id: string) => ['run', id] as const,
   candidates: ['candidates'] as const,
   batch: ['batch'] as const,
+  proposal: (id: string) => ['proposal', id] as const,
 }
 
 export function useConsoleConfig() {
@@ -197,7 +204,11 @@ export function usePropose() {
   return useMutation({
     mutationFn: (branch: string) =>
       send<{ branch: string; message: string }>('POST', '/api/git/propose', { branch }),
-    onSuccess: () => invalidateTriage(client),
+    onSuccess: () => {
+      invalidateTriage(client)
+      // A guidance branch can be pushed from here too, and its proposal state changes.
+      void client.invalidateQueries({ queryKey: ['proposal'] })
+    },
   })
 }
 
@@ -206,4 +217,73 @@ function invalidateTriage(client: ReturnType<typeof useQueryClient>) {
   void client.invalidateQueries({ queryKey: keys.batch })
   // A promotion adds an eval case, so skill listings are stale too.
   void client.invalidateQueries({ queryKey: keys.skills })
+}
+
+// --- authoring ------------------------------------------------------------------
+
+/** What is staged for a skill, and whether C6 will let it be published. */
+export function useProposal(skillId: string) {
+  return useQuery({
+    queryKey: keys.proposal(skillId),
+    queryFn: () => get<Proposal>(`/api/skills/${encodeURIComponent(skillId)}/proposal`),
+  })
+}
+
+/** Validate an edit without writing — what the editor calls while someone is still typing. */
+export function usePreviewGuidance() {
+  return useMutation({
+    mutationFn: ({ skillId, edit }: { skillId: string; edit: SkillEdit }) =>
+      send<PreparedSkill>(
+        'POST',
+        `/api/skills/${encodeURIComponent(skillId)}/guidance/preview`,
+        { edit },
+      ),
+  })
+}
+
+export function useSaveGuidance() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      skillId,
+      edit,
+      expectHead,
+    }: {
+      skillId: string
+      edit: SkillEdit
+      expectHead?: string | null
+    }) =>
+      send<StagedSkill>('PUT', `/api/skills/${encodeURIComponent(skillId)}/guidance`, {
+        edit,
+        expect_head: expectHead ?? null,
+      }),
+    onSuccess: (staged) => invalidateSkill(client, staged.prepared.skill_id),
+  })
+}
+
+export function useSaveMeta() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      skillId,
+      metaYaml,
+      expectHead,
+    }: {
+      skillId: string
+      metaYaml: string
+      expectHead?: string | null
+    }) =>
+      send<StagedSkill>('PUT', `/api/skills/${encodeURIComponent(skillId)}/meta`, {
+        meta_yaml: metaYaml,
+        expect_head: expectHead ?? null,
+      }),
+    onSuccess: (staged) => invalidateSkill(client, staged.prepared.skill_id),
+  })
+}
+
+function invalidateSkill(client: ReturnType<typeof useQueryClient>, skillId: string) {
+  void client.invalidateQueries({ queryKey: keys.proposal(skillId) })
+  void client.invalidateQueries({ queryKey: keys.skill(skillId) })
+  void client.invalidateQueries({ queryKey: keys.skills })
+  void client.invalidateQueries({ queryKey: keys.git })
 }

@@ -195,7 +195,7 @@ def test_targeted_case_must_be_fixed_end_to_end() -> None:
     )
     assert not outcome.result.passed
     assert outcome.result.unfixed_cases == ["newly-documented"]
-    assert "Gate: FAIL" in format_gate(outcome)
+    assert "Gate: FAIL" in format_gate(outcome.result)
 
 
 def _reviewed() -> ReviewedChange:
@@ -288,4 +288,60 @@ def test_format_helpers() -> None:
     outcome = gate_skills(
         load_skill(SKILL_DIR), load_skill(SKILL_DIR), FakeLLMClient(_flag_handler(flag_tests=False))
     )
-    assert "Gate: PASS" in format_gate(outcome)
+    assert "Gate: PASS" in format_gate(outcome.result)
+
+
+# --- the gate record C6 rests on ----------------------------------------------
+
+
+def test_record_gate_hashes_the_committed_skills_not_the_scored_ones() -> None:
+    """The subtlety the whole rule turns on.
+
+    `gate_skills` scores both sides over the *union* of their cases, so the two skills it actually
+    evaluates carry a case set that exists in neither commit. Recording a hash of those would let a
+    change be published against evidence gathered for content nobody can check out.
+    """
+    from whetstone.domain.run import skill_hash
+    from whetstone.service import record_gate
+
+    shared = _catch_case("known", "src/known.rs")
+    extra = _catch_case("newly-documented", "src/missed.rs")
+    base = Skill(id="s", version=1, body="old guidance", eval_cases=[shared])
+    candidate = Skill(id="s", version=2, body="new guidance", eval_cases=[shared, extra])
+
+    record = record_gate(base, candidate, FakeLLMClient(_flags_only("src/known.rs")))
+
+    assert record.base_hash == skill_hash(base)
+    assert record.candidate_hash == skill_hash(candidate)
+    # Both were scored over two cases even though the baseline commits only one.
+    assert len(record.candidate_score.cases) == 2
+    assert len(record.base_score.cases) == 2
+
+
+def test_a_gate_record_counts_what_it_spent() -> None:
+    from whetstone.service import record_gate
+
+    record = record_gate(
+        load_skill(SKILL_DIR),
+        load_skill(SKILL_DIR),
+        FakeLLMClient(_flag_handler(flag_tests=False)),
+        backend="ollama",
+        model="qwen2.5-coder:7b",
+    )
+    assert record.llm_calls > 0
+    assert record.skill_id == "code-review-rust-error-handling"
+    assert record.backend == "ollama"
+    assert record.result.passed
+
+
+def test_a_practice_gate_is_recorded_but_not_evidential() -> None:
+    from whetstone.service import record_gate
+
+    record = record_gate(
+        load_skill(SKILL_DIR),
+        load_skill(SKILL_DIR),
+        FakeLLMClient(_flag_handler(flag_tests=False)),
+        practice_mode=True,
+    )
+    assert record.result.passed
+    assert not record.evidential

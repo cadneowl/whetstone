@@ -34,6 +34,7 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunRecord, skill_hash
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
+from whetstone.gates import GateRecord, new_gate_id
 from whetstone.judge.llm_judge import LLMJudge
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.counting import CountingClient
@@ -147,9 +148,9 @@ def gate_skills(
     pooled recall against a baseline that never had to answer it, and the gate read that as a
     regression — failing exactly the change the corpus builder exists to produce.
 
-    Note for whoever adds run recording here: the two skills scored below carry a case set that
-    exists in neither commit, so their `skill_hash` matches nothing in git. Store one and the
-    console's stale-version detection has a phantom to reason about.
+    The two skills scored below carry a case set that exists in neither commit, so their
+    `skill_hash` matches nothing in git — which is why `record_gate` hashes the arguments to this
+    function rather than anything it constructs.
     """
     cases = union_cases(base, candidate)
     base_score = run_eval(base.model_copy(update={"eval_cases": cases}), client, trials=trials)
@@ -158,6 +159,57 @@ def gate_skills(
     )
     result = gate(base_score, candidate_score, cfg)
     return GateOutcome(result=result, base=base_score, candidate=candidate_score)
+
+
+def record_gate(
+    base: Skill,
+    candidate: Skill,
+    client: LLMClient,
+    *,
+    cfg: GateConfig | None = None,
+    trials: int = 1,
+    base_ref: str = "",
+    candidate_ref: str = "",
+    backend: str = "",
+    model: str = "",
+    practice_mode: bool = False,
+    principal: str = "",
+    now: datetime | None = None,
+) -> GateRecord:
+    """Gate a candidate against a baseline and return a storable record of the comparison.
+
+    This is the primitive the console's gate-before-propose rule (C6) rests on: `gate_skills`
+    computes a verdict, and this attaches the identity of the content that verdict was about.
+    `candidate_hash` is taken from the skill as committed — not from the union-cased copy that was
+    scored — so evidence can only ever be matched to guidance someone can actually publish.
+    """
+    counted = CountingClient(client)
+    started_at = now or datetime.now(UTC)
+    clock = time.perf_counter()
+    outcome = gate_skills(base, candidate, counted, cfg=cfg, trials=trials)
+    duration = time.perf_counter() - clock
+
+    candidate_hash = skill_hash(candidate)
+    return GateRecord(
+        id=new_gate_id(candidate.id, candidate_hash, started_at),
+        created_at=started_at,
+        principal=principal,
+        skill_id=candidate.id,
+        base_ref=base_ref,
+        candidate_ref=candidate_ref,
+        base_hash=skill_hash(base),
+        candidate_hash=candidate_hash,
+        backend=backend,
+        model=model,
+        k=trials,
+        practice_mode=practice_mode,
+        duration_s=duration,
+        llm_calls=counted.calls,
+        config=cfg or GateConfig(),
+        result=outcome.result,
+        base_score=outcome.base,
+        candidate_score=outcome.candidate,
+    )
 
 
 def pull_corpus(
@@ -427,8 +479,7 @@ def format_score(score: SkillScore) -> str:
     return "\n".join(lines)
 
 
-def format_gate(outcome: GateOutcome) -> str:
-    r = outcome.result
+def format_gate(r: GateResult) -> str:
     head = "PASS" if r.passed else "FAIL"
     lines = [
         f"Gate: {head}",

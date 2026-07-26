@@ -9,7 +9,9 @@ dist/
 # Virtualenv (managed by uv; recreate with `uv sync`)
 .venv/
 
-# Run records + derived index (telemetry, not source of truth — safe to delete)
+# Run records + derived index (telemetry, safe to delete) and gate records (evidence: deleting
+# them costs the right to propose a guidance change until the gates are re-run — see ADR-008).
+# Both stay out of git: they are machine-local, and a team enforces the gate in CI instead.
 .whetstone/
 
 # Console frontend: built assets are generated at packaging time, never committed

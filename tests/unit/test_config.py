@@ -148,3 +148,19 @@ def test_gate_tolerances_are_read_from_the_file(tmp_path: Path) -> None:
     )
     cfg = load_config(start=tmp_path)
     assert (cfg.gate.recall_tol, cfg.gate.fp_tol) == (0.05, 0.02)
+
+
+def test_gates_dir_resolves_against_the_config_file(tmp_path: Path) -> None:
+    (tmp_path / "whetstone.toml").write_text("[gate]\ndir = 'evidence'\n", encoding="utf-8")
+    assert load_config(start=tmp_path).gates_dir == (tmp_path / "evidence").resolve()
+
+
+def test_gates_dir_defaults_next_to_the_runs(tmp_path: Path) -> None:
+    assert load_config(start=tmp_path).gate.dir == Path(".whetstone/gates")
+
+
+def test_the_environment_can_move_the_gate_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WHETSTONE_GATES_DIR", str(tmp_path / "elsewhere"))
+    assert load_config(start=tmp_path).gates_dir == (tmp_path / "elsewhere").resolve()
