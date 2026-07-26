@@ -795,16 +795,28 @@ body plus the eval case ids the change should fix.
 | Option | Default | Meaning |
 |---|---|---|
 | `--skill PATH` | *(required)* | Skill folder. |
+| `--apply` | off | Stage the proposal on `whetstone/skill/<id>`, ready to gate. |
+| `--instruction TEXT`, `-i` | — | Steer this one run without editing `prompt.md`. |
 | `--run ID` | most recent | Improve from a specific stored run. |
-| `--out PATH` | stdout | Write the proposed guidance here. |
+| `--stale-ok` | off | Use a run that scored different content anyway. |
+| `--out PATH` | stdout | Write the guidance **body** here (no frontmatter). |
 | `--dry-run` | off | Print the rendered prompt; no model call. |
 | `--yes` | off | Skip the cost confirmation. |
-| `--llm/--model/--base-url/--api-key-env` | — | Backend selection, as elsewhere. |
+| `--llm/--model/--base-url/--api-key-env` | step's `model:` block | Backend selection, as elsewhere. |
 
-Nothing is written to the skill — the output is a proposal, and it prints the `eval gate` command
-that would prove it. Failures are grouped by cause with one representative per group, so what
-reaches the model is one example of each *kind* of failure rather than N copies of the commonest
-one. That is what keeps this affordable at a corpus of any size.
+**Use `--apply`.** It stages the proposal through the same `prepare_guidance` path the console's
+editor uses — frontmatter preserved, version bumped, working tree untouched — and prints a gate
+command that runs verbatim, `--targeted` already filled in. The bare output is a guidance *body*:
+overwriting a `SKILL.md` with it drops `id`, `version` and `triggers`, and a gate on the result
+files its evidence under a skill id C6 never looks up.
+
+Refuses to run against a stale run — one that scored a version of the skill you have since edited —
+because its failures describe a reviewer that no longer exists. Refuses to spend a call on a run
+with no failures at all, unless you pass `--instruction`.
+
+Failures are grouped by cause with one representative per group, so what reaches the model is one
+example of each *kind* of failure rather than N copies of the commonest one. That is what keeps this
+affordable at a corpus of any size.
 
 ### `whetstone skills update`
 
@@ -816,10 +828,13 @@ not summarize repositories; it invokes yours, checks the output is indexable, an
 |---|---|---|
 | `--skill PATH` | *(required)* | Skill folder. |
 | `--repo PATH` | `.` | The source repository to summarize. |
+| `--working-tree` | off | Write into the checked-out folder instead of staging on the branch. |
 | `--no-write` | off | Report what changed without writing it. |
 
-The wiki is part of `skill_hash`, so a refresh that changes any page **retracts the skill's passing
-gate** and it must be re-gated before it can be proposed.
+The generated wiki is staged on `whetstone/skill/<id>`, the same branch guidance edits go to, so the
+console and the CLI never disagree about this skill's content. The wiki is part of `skill_hash`, so
+a refresh that changes any page **retracts the skill's passing gate** and it must be re-gated before
+it can be proposed.
 
 Full reference: **[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
 

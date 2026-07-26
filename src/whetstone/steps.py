@@ -91,7 +91,6 @@ class FailureInputs(BaseModel):
 class StepInputs(BaseModel):
     failures: FailureInputs = FailureInputs()
     wiki: WikiLimits = WikiLimits()
-    guidance: bool = True
 
 
 class SamplePolicy(BaseModel):

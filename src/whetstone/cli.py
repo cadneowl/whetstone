@@ -13,19 +13,22 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 
+from whetstone import staging
+from whetstone.authoring import SkillEdit, prepare_guidance
 from whetstone.config import Config, load_config
 from whetstone.core.gate import GateConfig
-from whetstone.core.loader import load_skill, load_skills
+from whetstone.core.loader import SkillLoadError, load_skill, load_skills
 from whetstone.corpus.builder import DEFAULT_MAX_CLEAN_FILES, DEFAULT_MAX_DEFECT_FILES
 from whetstone.domain.change import CodeChange, parse_unified_diff
 from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import MergeRequestRef
-from whetstone.domain.run import RunEvent, RunRecord
+from whetstone.domain.run import RunEvent, RunRecord, skill_hash
 from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
-from whetstone.improve import build_digest, propose
+from whetstone.gitio import GitError
+from whetstone.improve import build_digest, propose, render_step_prompt
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
 from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval, render
@@ -55,7 +58,9 @@ from whetstone.vcs import export_tree
 app = typer.Typer()
 eval_app = typer.Typer(help="Score skills and gate skill changes.")
 corpus_app = typer.Typer(help="Turn GitLab MR history into candidate eval cases.")
-skills_app = typer.Typer(help="Inspect the skill registry.")
+skills_app = typer.Typer(
+    help="Inspect skills, and run the pipeline each one carries: scaffold, improve, update."
+)
 providers_app = typer.Typer(help="Inspect provider plugins.")
 llm_app = typer.Typer(help="Choose and health-check the model backend (cloud or local).")
 runs_app = typer.Typer(help="Inspect stored run records.")
@@ -239,6 +244,28 @@ def _step(skill_dir: Path, kind: str, *, required: bool = False) -> StepSpec | N
     return spec
 
 
+def _backend_for(
+    spec: StepSpec | None, llm: str | None, model: str | None, base_url: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """The backend a step asks for, with any command-line flag overriding it.
+
+    A skill pinned to local hardware says so in its own `model:` block; the operator running it
+    still gets the last word. Silently ignoring the block would be worse than not offering it —
+    someone would set `llm: ollama` to avoid a bill and be billed anyway.
+    """
+    if spec is None:
+        return llm, model, base_url
+    return (
+        llm or spec.model.llm,
+        model or spec.model.model,
+        base_url or spec.model.base_url,
+    )
+
+
+def _effort_for(spec: StepSpec | None, effort: str | None, default: str = "high") -> str:
+    return effort or (spec.model.effort if spec else None) or default
+
+
 def _sample_policy(spec: StepSpec | None, max_cases: int | None, seed: int | None) -> (
     SamplePolicy | None
 ):
@@ -286,7 +313,7 @@ def eval_run(
     model: ModelOpt = None,
     base_url: BaseUrlOpt = None,
     api_key_env: KeyEnvOpt = None,
-    effort: Annotated[str, typer.Option()] = "high",
+    effort: Annotated[str | None, typer.Option()] = None,
     trials: Annotated[int | None, typer.Option(min=1)] = None,
     sample: SampleOpt = None,
     sample_seed: SeedOpt = None,
@@ -324,18 +351,20 @@ def eval_run(
     trials = trials if trials is not None else (policy.trials if policy else 1)
     drawn = _sample_policy(policy, sample, sample_seed)
     limits = policy.inputs.wiki if policy else None
-    backend = _resolve(llm, model, base_url)
+    pick = _backend_for(policy, llm, model, base_url)
+    reviewer_effort = _effort_for(policy, effort)
+    backend = _resolve(*pick)
     scored = min(drawn.max_cases or len(sk.eval_cases), len(sk.eval_cases)) if drawn else None
     plan = plan_eval(sk, backend, trials=trials, cases=scored, wiki_limits=limits)
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
 
-    client = _client(llm, model, base_url, api_key_env)
+    client = _client(*pick, api_key_env)
     record = record_eval(
         sk,
         client,
         trials=trials,
-        reviewer_effort=effort,
+        reviewer_effort=reviewer_effort,
         backend=backend.name,
         model=backend.model,
         max_workers=workers,
@@ -440,7 +469,8 @@ def eval_gate(
         gate_trials = trials if trials is not None else (policy.trials if policy else 1)
         drawn = _sample_policy(policy, sample, sample_seed)
         limits = policy.inputs.wiki if policy else None
-        backend = _resolve(llm, model, base_url)
+        pick = _backend_for(policy, llm, model, base_url)
+        backend = _resolve(*pick)
 
         union = len(
             {c.id for c in base_skill.eval_cases} | {c.id for c in candidate_skill.eval_cases}
@@ -460,7 +490,7 @@ def eval_gate(
         record = record_gate(
             base_skill,
             candidate_skill,
-            _client(llm, model, base_url, api_key_env),
+            _client(*pick, api_key_env),
             cfg=tolerances,
             trials=gate_trials,
             base_ref=base_ref or str(base_dir),
@@ -886,10 +916,25 @@ def skills_improve(
     base_url: BaseUrlOpt = None,
     api_key_env: KeyEnvOpt = None,
     runs_dir: RunsDirOpt = None,
+    instruction: Annotated[
+        str | None,
+        typer.Option(
+            "--instruction", "-i",
+            help="Steer this one run, e.g. 'focus on false positives'. Does not edit prompt.md.",
+        ),
+    ] = None,
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Stage the proposal on the skill's branch, ready to gate"),
+    ] = False,
     out: Annotated[
         Path | None,
-        typer.Option("--out", help="Write the proposed guidance here instead of stdout"),
+        typer.Option("--out", help="Write the proposed guidance BODY here (no frontmatter)"),
     ] = None,
+    stale_ok: Annotated[
+        bool,
+        typer.Option("--stale-ok", help="Improve from a run that scored different content anyway"),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show the digest that would be sent; no model call")
     ] = False,
@@ -902,38 +947,56 @@ def skills_improve(
     the first N of the same one — and returns a rewritten guidance body plus the eval cases the
     change is meant to fix.
 
-    Nothing is written to the skill. The output is a proposal: gate it, then paste it into the
-    console's guidance editor or `--out` it and diff.
+    `--apply` is the useful form: it stages the proposal on `whetstone/skill/<id>` through the same
+    path the console's editor uses, preserving the frontmatter and bumping the version, and prints a
+    gate command you can run as printed. Without it you get raw markdown and the job of splicing it
+    into a `SKILL.md` yourself — which loses `id`, `version` and `triggers` if you overwrite the
+    file wholesale, and produces gate evidence filed under the wrong skill.
     """
     sk = load_skill(skill)
     spec = _step(skill, "improve", required=True)
-    assert spec is not None  # `required=True` raised otherwise
+    if spec is None:  # unreachable: `required=True` raised
+        raise typer.BadParameter(f"{skill} has no improve step")
 
-    record = _run_to_improve_from(sk.id, run_id, runs_dir)
+    record = _run_to_improve_from(sk, run_id, runs_dir, stale_ok=stale_ok)
     if dry_run:
-        digest = build_digest(sk, record, spec.inputs.failures)
-        typer.echo(spec.render_prompt(digest.prompt_values()) if spec.prompt else
-                   digest.model_dump_json(indent=2))
+        digest = build_digest(
+            sk, record, spec.inputs.failures, instruction=instruction or ""
+        )
+        typer.echo(
+            render_step_prompt(spec, digest) if spec.prompt else digest.model_dump_json(indent=2)
+        )
+        return
+
+    if record is not None and not _worth_improving(record, instruction):
         return
 
     client = None
+    effort = spec.model.effort or "high"
     if spec.calls_a_model:
-        backend = _resolve(llm or spec.model.llm, model or spec.model.model, base_url)
+        # The step's own `model:` block is the default; a flag on the command line overrides it.
+        pick = (llm or spec.model.llm, model or spec.model.model, base_url or spec.model.base_url)
+        backend = _resolve(*pick)
         plan = plan_calls(
             "skills improve",
             backend,
             calls=1,
             basis="one call: the guidance rewrite",
-            details=[f"digest: up to {spec.inputs.failures.max} clustered failure(s)"],
+            details=[
+                f"digest: up to {spec.inputs.failures.max} clustered failure(s)",
+                *(["steered by --instruction"] if instruction else []),
+            ],
         )
         _preflight(plan, yes)
-        client = _client(llm or spec.model.llm, model or spec.model.model, base_url, api_key_env)
+        client = _client(*pick, api_key_env)
     else:
         typer.echo(f"running {' '.join(spec.run)} — Whetstone is not calling a model; "
                    f"what your program does is its own business", err=True)
 
     try:
-        result = propose(spec, sk, record, client=client)
+        result = propose(
+            spec, sk, record, client=client, effort=effort, instruction=instruction or ""
+        )
     except StepError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
@@ -957,14 +1020,107 @@ def skills_improve(
 
     if out is not None:
         out.write_text(result.proposal.body.rstrip() + "\n", encoding="utf-8")
-        typer.echo(f"wrote {out}", err=True)
-    else:
+        typer.echo(f"wrote {out} (guidance body only — splice it under the existing "
+                   f"frontmatter, or use --apply)", err=True)
+    elif not apply:
         typer.echo(result.proposal.body)
 
-    typer.echo("\n# gate it before publishing:", err=True)
     targeted = "".join(f" --targeted {c}" for c in result.proposal.targeted_cases)
-    typer.echo(f"#   whetstone eval gate --base {skill} --candidate <edited copy>{targeted}",
-               err=True)
+    if apply:
+        _apply_proposal(skill, sk, result.proposal.body, targeted)
+        return
+
+    typer.echo(
+        "\n# --apply would stage this and print a runnable gate command. Without it, splice the "
+        "body under the existing frontmatter yourself and gate the folder you edited:\n"
+        f"#   whetstone eval gate --base {skill} --candidate <your edited copy>{targeted}",
+        err=True,
+    )
+
+
+def _staging_id(config: Config, skill_dir: Path, sk: Skill) -> str:
+    """The id to stage under, having checked the folder actually is that skill.
+
+    Everything that writes a skill addresses it by id — `prepare_guidance` builds
+    `<skills_root>/<id>/SKILL.md`, and the console looks up `<skills_root>/<id>`. A folder whose
+    name differs from its frontmatter id, or one outside the configured skills root, therefore
+    commits to a path that is not the folder the operator pointed at: the command reports success
+    and the branch still holds the old guidance. Caught here rather than discovered later from a
+    gate whose score never moves.
+    """
+    expected = (config.skills_root / sk.id).resolve()
+    if expected != skill_dir.resolve():
+        raise typer.BadParameter(
+            f"{skill_dir} holds the skill {sk.id!r}, which Whetstone addresses as {expected}. "
+            f"Staging writes by id, so committing this would land at a path that is not this "
+            f"folder. Rename the folder to {sk.id!r} so it matches its frontmatter, or run from "
+            f"the repo whose [skills] root contains it."
+        )
+    return sk.id
+
+
+def _apply_proposal(skill_dir: Path, sk: Skill, body: str, targeted: str) -> None:
+    """Stage a proposed body on the skill's branch, the same way the console's editor does.
+
+    Routed through `prepare_guidance` rather than written to a file: it preserves the frontmatter
+    the body does not carry, bumps the version once per proposal, and validates by loading the
+    result back. Writing the body over `SKILL.md` instead silently drops `id`, `version` and
+    `triggers` — and a gate on a skill whose id came from a temp folder name records evidence C6
+    can never match.
+    """
+    config = load_config()
+    skill_id = _staging_id(config, skill_dir, sk)
+    try:
+        base, current = staging.source(config, skill_id)
+        prepared = prepare_guidance(
+            base,
+            current,
+            SkillEdit(body=body),
+            skills_root=staging.relative_skills_root(config),
+            base_version=staging.base_version(config, skill_id),
+        )
+        commit = staging.stage(
+            config,
+            skill_id,
+            prepared.files,
+            f"guidance: {sk.id} v{prepared.version}\n\n"
+            f"Proposed by `whetstone skills improve`. Needs a passing gate before it can ship.",
+        )
+    except (SkillLoadError, staging.StagingError, staging.NoSuchSkill) as exc:
+        typer.echo(f"could not stage the proposal: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except GitError as exc:
+        typer.echo(f"could not stage the proposal: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    branch = staging.skill_branch(config, skill_id)
+    typer.echo(f"staged v{prepared.version} on {branch} ({commit[:10]})", err=True)
+    if not prepared.guidance_changed:
+        typer.echo("note: the guidance is unchanged, so any existing gate still stands", err=True)
+        return
+    typer.echo(
+        f"\ngate it, then Propose MR in the console unlocks:\n"
+        f"  whetstone eval gate --repo {config.skills_repo} "
+        f"--skill-path {staging.skill_path(config, skill_id)} "
+        f"--base-ref {config.git.default_base} --candidate-ref {branch}{targeted}"
+    )
+
+
+def _worth_improving(record: RunRecord, instruction: str | None) -> bool:
+    """Whether there is anything to learn from. Refuses to spend a call on a clean run.
+
+    Unless the operator steered it: `--instruction "tighten R2"` is a legitimate reason to rewrite
+    guidance that is currently passing everything it is measured on.
+    """
+    if record.score.recall >= 1.0 and record.score.fp_rate <= 0.0 and not instruction:
+        typer.echo(
+            f"run {record.id} has no failures to learn from (recall 1.000, fp_rate 0.000). "
+            f"Nothing to improve — promote harder cases from triage, or pass --instruction to "
+            f"rewrite the guidance anyway.",
+            err=True,
+        )
+        return False
+    return True
 
 
 @skills_app.command("update")
@@ -975,23 +1131,38 @@ def skills_update(
     ] = Path("."),
     write: Annotated[
         bool,
-        typer.Option("--write/--no-write", help="Write the generated wiki into the skill folder"),
+        typer.Option("--write/--no-write", help="Stage the generated wiki; off just reports"),
     ] = True,
+    working_tree: Annotated[
+        bool,
+        typer.Option(
+            "--working-tree",
+            help="Write into the checked-out folder instead of staging on the skill's branch",
+        ),
+    ] = False,
 ) -> None:
     """Regenerate this skill's repo wiki by running the generator its update step names.
 
     Whetstone does not summarize repositories — this invokes yours, checks the output is indexable,
-    and writes it under `wiki/`. The wiki is part of `skill_hash`, so a refresh that changes any
-    page retracts the skill's passing gate and it must be re-gated before it can be proposed.
+    and stages it under `wiki/` on `whetstone/skill/<id>`, the same branch the console's guidance
+    editor writes to. The wiki is part of `skill_hash`, so a refresh that changes any page retracts
+    the skill's passing gate and it must be re-gated before it can be proposed.
+
+    `--working-tree` writes the files into the checked-out folder instead. Convenient for a look,
+    but the console reads the branch first, so a wiki left only in the working tree is invisible to
+    it and the two will disagree about what this skill's content is.
     """
     sk = load_skill(skill)
     spec = _step(skill, "update", required=True)
-    assert spec is not None
+    if spec is None:  # unreachable: `required=True` raised
+        raise typer.BadParameter(f"{skill} has no update step")
 
     typer.echo(f"running {' '.join(spec.run)}", err=True)
+    config = load_config()
     try:
-        result = refresh_wiki(spec, repo=repo, current=sk.wiki, skills_root=str(skill.parent))
-    except StepError as exc:
+        root = str(skill.parent) if working_tree else staging.relative_skills_root(config)
+        result = refresh_wiki(spec, repo=repo, current=sk.wiki, skills_root=root)
+    except (StepError, staging.StagingError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
 
@@ -1002,39 +1173,78 @@ def skills_update(
         typer.echo("--no-write: nothing written")
         return
 
-    for relative, content in result.files.items():
-        path = Path(relative)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-    typer.echo(f"wrote {len(result.files)} file(s) under {skill / 'wiki'}")
+    if working_tree:
+        for relative, content in result.files.items():
+            path = Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        typer.echo(f"wrote {len(result.files)} file(s) under {skill / 'wiki'} (working tree only)")
+        return
+
+    try:
+        commit = staging.stage(
+            config,
+            _staging_id(config, skill, sk),
+            result.files,
+            f"wiki: {sk.id}\n\nRegenerated by `whetstone skills update`. "
+            f"Changes what the reviewer reads, so this needs a fresh gate.",
+        )
+    except (GitError, staging.StagingError) as exc:
+        typer.echo(
+            f"could not stage the wiki: {exc}\n"
+            f"(--working-tree writes the files into the checked-out folder instead)",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+
+    branch = staging.skill_branch(config, sk.id)
+    typer.echo(f"staged {len(result.files)} file(s) on {branch} ({commit[:10]})")
     typer.echo(
         f"\nthe reviewer's context changed, so re-gate before proposing:\n"
-        f"  whetstone eval gate --repo . --skill-path {skill} "
-        f"--base-ref main --candidate-ref <your branch>"
+        f"  whetstone eval gate --repo {config.skills_repo} "
+        f"--skill-path {staging.skill_path(config, sk.id)} "
+        f"--base-ref {config.git.default_base} --candidate-ref {branch}"
     )
 
 
 def _run_to_improve_from(
-    skill_id: str, run_id: str | None, runs_dir: Path | None
+    skill: Skill, run_id: str | None, runs_dir: Path | None, *, stale_ok: bool = False
 ) -> RunRecord | None:
     """The run whose failures an improve step learns from.
 
     A missing run is not fatal: improving from no evidence at all is legitimate for a brand-new
     skill, and the digest says plainly that it saw none rather than pretending the skill is perfect.
+
+    A *stale* run is fatal. If the skill has been edited since it was scored, its failures describe
+    a reviewer that no longer exists, and improving from them produces a confident proposal aimed at
+    a problem that may already be fixed. The record carries `skill_hash` for exactly this check, and
+    the console already badges the same condition on runs and on uploaded reviews.
     """
     store = _store(runs_dir)
     if run_id is not None:
-        return store.load(run_id)
-    recent = store.list(skill_id=skill_id, limit=1)
-    if not recent:
-        typer.echo(
-            f"no stored run for {skill_id} — improving from guidance alone. "
-            f"`whetstone eval run --skill <folder>` first for a far better proposal.",
-            err=True,
+        record = store.load(run_id)
+    else:
+        recent = store.list(skill_id=skill.id, limit=1)
+        if not recent:
+            typer.echo(
+                f"no stored run for {skill.id} — improving from guidance alone. "
+                f"`whetstone eval run --skill <folder>` first for a far better proposal.",
+                err=True,
+            )
+            return None
+        record = store.load(recent[0].id)
+
+    current = skill_hash(skill)
+    if record.skill_hash != current and not stale_ok:
+        raise typer.BadParameter(
+            f"run {record.id} scored a different version of this skill "
+            f"({record.skill_hash[:10]}, now {current[:10]}). Its failures describe a reviewer "
+            f"that no longer exists — the guidance, the eval cases or the wiki changed since. "
+            f"Re-run `whetstone eval run --skill <folder>` first, or pass --stale-ok to use it "
+            f"anyway."
         )
-        return None
-    typer.echo(f"improving from run {recent[0].id}", err=True)
-    return store.load(recent[0].id)
+    typer.echo(f"improving from run {record.id}", err=True)
+    return record
 
 
 @runs_app.command("list")

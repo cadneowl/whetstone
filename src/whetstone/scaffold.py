@@ -51,7 +51,12 @@ inputs:
     max_bytes: 24000
 
 model:
-  # Omit any of these to inherit whatever the command resolved (--llm / --model / WHETSTONE_LLM).
+  # Pin this skill to a particular backend. Anything set here is the default; a flag on the command
+  # line still wins. Omit a key to inherit whatever the command resolved (--llm / --model /
+  # WHETSTONE_LLM). Pinning to a local runner is how a skill stays off a metered API by default.
+  # llm: ollama
+  # model: qwen2.5-coder:7b
+  # base_url: http://localhost:11434/v1
   # effort: high
 """
 
@@ -91,6 +96,8 @@ inputs:
 prompt: prompt.md
 
 # model:
+#   llm: ollama
+#   model: qwen2.5-coder:7b
 #   effort: high
 
 # Instead of `prompt:`, a step may set `run:` to have Whetstone invoke your own program: the
@@ -125,6 +132,8 @@ failure, largest group first.
 
 Rewrite the guidance so those failures would not recur.
 
+{{instruction}}
+
 - Keep every rule that is already working. You are seeing a sample of failures, not the whole
   picture, and a rule you have no evidence about is still load-bearing.
 - Prefer sharpening an existing rule over adding a new one. Guidance that grows a rule per failure
@@ -136,6 +145,10 @@ Rewrite the guidance so those failures would not recur.
 
 Return the complete new guidance body, the rationale for the change, and the ids of the eval cases
 this change is meant to fix.
+
+`{{instruction}}` above is whatever was passed to `--instruction` on this run, and is empty on a
+plain run. Move it wherever you want it read; delete it and a passed instruction is appended at the
+end instead, so it is never silently dropped.
 """
 
 UPDATE_STEP = """\
