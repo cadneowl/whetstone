@@ -18,6 +18,7 @@ from whetstone.core.harness import EventSink, run_skill_recorded
 from whetstone.corpus.builder import (
     DEFAULT_MAX_CLEAN_FILES,
     DEFAULT_MAX_DEFECT_FILES,
+    SkipHandler,
     pull_candidates,
     pull_defect_candidates,
 )
@@ -219,10 +220,13 @@ def pull_corpus(
     skills: list[Skill] | None = None,
     *,
     max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
+    on_skip: SkipHandler | None = None,
 ) -> list[CandidateCase]:
     """Walk a GitLab project's reviewed changes into candidate eval cases for human promotion."""
     repo = RepoRef.parse(f"gitlab:{project}")
-    return pull_candidates(connector, repo, since, skills, max_clean_files=max_clean_files)
+    return pull_candidates(
+        connector, repo, since, skills, max_clean_files=max_clean_files, on_skip=on_skip
+    )
 
 
 def pull_defects(
@@ -234,6 +238,7 @@ def pull_defects(
     skills: list[Skill] | None = None,
     *,
     max_files: int = DEFAULT_MAX_DEFECT_FILES,
+    on_skip: SkipHandler | None = None,
 ) -> list[CandidateCase]:
     """Pair a tracker's resolved defects with the merge requests that fixed them.
 
@@ -243,7 +248,8 @@ def pull_defects(
     """
     repo = RepoRef.parse(f"gitlab:{project}")
     return pull_defect_candidates(
-        reviews, issues, repo, tracker_project, since, skills, max_files=max_files
+        reviews, issues, repo, tracker_project, since, skills,
+        max_files=max_files, on_skip=on_skip,
     )
 
 

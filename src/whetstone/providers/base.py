@@ -10,6 +10,16 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import FileBlob, MergeRequestRef, ReviewedChange
 
 
+class ConnectorError(Exception):
+    """A provider could not answer: the forge refused, failed, or was unreachable after retries.
+
+    Provider-neutral on purpose. `GitLabHttp` exists so "the core never sees a 429 or a pagination
+    header", and a caller that wants to survive one bad merge request should not have to import
+    `httpx` to say so — nor reach for a network failure and accidentally catch a bug in our own
+    normalization instead.
+    """
+
+
 class Capability(StrEnum):
     source = "source"
     review = "review"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,8 @@ from whetstone.corpus.model import CandidateCase
 from whetstone.domain.change import AddedLine, CodeChange, FileChange
 from whetstone.domain.eval_model import Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
+from whetstone.domain.review import MergeRequestRef
+from whetstone.providers.base import ConnectorError
 
 runner = CliRunner()
 SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
@@ -124,6 +127,84 @@ def test_refresh_rewrites_an_undecided_candidate(tmp_path: Path, stub_pull: None
     (out / "acme-payments-812-t0" / "case.yaml").write_text("stale", encoding="utf-8")
     assert _pull(out, "--refresh").exit_code == 0
     assert "stale" not in (out / "acme-payments-812-t0" / "case.yaml").read_text(encoding="utf-8")
+
+
+def test_unreachable_merge_requests_are_counted_in_the_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A skipped merge request has to reach the final counts.
+
+    The per-skip warning scrolls away over a long crawl, so a run that quietly dropped 600 of 1000
+    would end on "1 candidate(s) written" and read like a quiet quarter.
+    """
+    mr = MergeRequestRef(repo=RepoRef.parse("gitlab:acme/payments"), iid=813)
+
+    def pull(*args: object, on_skip: Callable[..., None], **kw: object) -> list[CandidateCase]:
+        on_skip(mr, ConnectorError("acme/payments!813: Server disconnected"))
+        return [_pull_candidate()]
+
+    monkeypatch.setattr("whetstone.cli.pull_corpus", pull)
+    result = _pull(tmp_path / "candidates")
+    assert result.exit_code == 0
+    assert "1 merge request(s) unreachable" in result.stdout
+    assert "acme/payments!813" in result.stdout
+
+
+def test_mismatched_jira_flags_are_caught_before_the_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checking this afterwards costs a full history crawl to learn you mistyped a flag."""
+
+    def never(*args: object, **kw: object) -> list[CandidateCase]:
+        raise AssertionError("the walk must not start")
+
+    monkeypatch.setattr("whetstone.cli.pull_corpus", never)
+    result = _pull(tmp_path / "candidates", "--jira-url", "https://acme.atlassian.net")
+    assert result.exit_code != 0
+    assert "must be given together" in result.output
+
+
+# --- TLS behind a corporate proxy ----------------------------------------------
+
+
+def test_requests_ca_bundle_is_adopted_as_ssl_cert_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """httpx reads `SSL_CERT_FILE` and ignores `REQUESTS_CA_BUNDLE`; proxies set the latter.
+
+    Bridging them once covers GitLab, Jira and both model backends — including the Anthropic SDK's
+    own client, which no per-client `verify=` argument of ours could reach.
+    """
+    bundle = tmp_path / "corp-root.pem"
+    bundle.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(bundle))
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+
+    assert runner.invoke(app, ["providers", "list"]).exit_code == 0
+    assert os.environ["SSL_CERT_FILE"] == str(bundle)
+
+
+def test_an_explicit_ssl_cert_file_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`SSL_CERT_FILE` is the one httpx actually reads, so it has to stay the one in effect."""
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "bundle.pem"))
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "chosen.pem"))
+
+    assert runner.invoke(app, ["providers", "list"]).exit_code == 0
+    assert os.environ["SSL_CERT_FILE"] == str(tmp_path / "chosen.pem")
+
+
+def test_a_ca_bundle_that_is_not_there_is_reported_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise it surfaces as an opaque SSL error on the first request, far from the cause."""
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "missing.pem"))
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+
+    result = runner.invoke(app, ["providers", "list"])
+    assert result.exit_code != 0
+    assert "REQUESTS_CA_BUNDLE" in result.output
 
 
 def test_a_decided_candidate_is_never_rewritten(tmp_path: Path, stub_pull: None) -> None:

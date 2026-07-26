@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from whetstone.core.loader import load_skill
 from whetstone.corpus.builder import (
     build_candidates,
@@ -28,6 +30,7 @@ from whetstone.domain.review import (
     Suggestion,
 )
 from whetstone.domain.skill import Skill, Triggers
+from whetstone.providers.base import ConnectorError
 from whetstone.providers.fake.provider import FakeProvider
 
 REPO = RepoRef.parse("gitlab:acme/payments")
@@ -474,6 +477,86 @@ def test_pull_candidates_over_connector() -> None:
     cands = pull_candidates(fake, REPO, datetime(2026, 1, 1), [RUST_SKILL])
     assert [c.kind for c in cands] == ["should_catch", "should_not_flag"]
     assert all(c.provenance.ref == "acme/payments!812" for c in cands)
+
+
+# --- one bad merge request must not end the walk -------------------------------
+
+
+class _FlakyProvider(FakeProvider):
+    """A provider that fails `get_review` for chosen merge requests."""
+
+    def __init__(self, *, fail_iids: set[int], error: Exception) -> None:
+        super().__init__()
+        self._fail_iids = fail_iids
+        self._error = error
+
+    def get_review(self, mr: MergeRequestRef) -> ReviewedChange:
+        if mr.iid in self._fail_iids:
+            raise self._error
+        return super().get_review(mr)
+
+
+def _flaky(fail_iids: set[int], error: Exception | None = None) -> _FlakyProvider:
+    fake = _FlakyProvider(
+        fail_iids=fail_iids, error=error or ConnectorError("acme/payments!813: Server disconnected")
+    )
+    for iid in (812, 813):
+        review = _reviewed([_applied_suggestion_thread()])
+        fake.add_review(review.model_copy(update={"mr": review.mr.model_copy(update={"iid": iid})}))
+    return fake
+
+
+def test_an_unreachable_merge_request_is_skipped_when_the_caller_can_report_it() -> None:
+    skipped: list[tuple[str, str]] = []
+    cands = pull_candidates(
+        _flaky({813}),
+        REPO,
+        datetime(2026, 1, 1),
+        [RUST_SKILL],
+        on_skip=lambda mr, exc: skipped.append((f"{mr.repo.path}!{mr.iid}", str(exc))),
+    )
+
+    # The reachable one still produced its candidates...
+    assert [c.kind for c in cands] == ["should_catch", "should_not_flag"]
+    # ...and the caller was handed enough to say which one was lost and why.
+    assert skipped == [("acme/payments!813", "acme/payments!813: Server disconnected")]
+
+
+def test_without_a_way_to_report_it_the_walk_still_fails_loudly() -> None:
+    """The default must not be silent tolerance.
+
+    A walk that drops merge requests with nobody listening finishes with a candidate count that
+    looks like a quiet quarter rather than a broken crawl.
+    """
+    with pytest.raises(ConnectorError):
+        pull_candidates(_flaky({813}), REPO, datetime(2026, 1, 1), [RUST_SKILL])
+
+
+def test_a_bug_in_our_own_code_is_not_mistaken_for_an_unreachable_forge() -> None:
+    """`ConnectorError` only. Catching `Exception` here would turn a normalization bug into an
+    empty corpus that looks like a repo with no reviewed history."""
+    with pytest.raises(KeyError):
+        pull_candidates(
+            _flaky({813}, KeyError("changed_files")),
+            REPO,
+            datetime(2026, 1, 1),
+            [RUST_SKILL],
+            on_skip=lambda mr, exc: None,
+        )
+
+
+def test_a_defect_walk_skips_the_same_way() -> None:
+    fake = _FlakyProvider(fail_iids={910}, error=ConnectorError("acme/payments!910: timed out"))
+    fake.add_review(_fix_mr())
+    fake.add_issue(_defect())
+    skipped: list[str] = []
+
+    cands = pull_defect_candidates(
+        fake, fake, REPO, "PAY", datetime(2026, 1, 1),
+        on_skip=lambda mr, exc: skipped.append(str(exc)),
+    )
+    assert cands == []
+    assert skipped == ["acme/payments!910: timed out"]
 
 
 def test_candidate_roundtrips_through_skill_format(tmp_path: Path) -> None:

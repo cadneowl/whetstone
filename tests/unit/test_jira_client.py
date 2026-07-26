@@ -108,6 +108,29 @@ def test_rate_limit_is_retried() -> None:
 
 
 @respx.mock
+def test_a_dropped_connection_is_retried() -> None:
+    """Kept in step with the GitLab client: a recycled connection is not the caller's problem."""
+    route = respx.get(url__regex=r".*/search/jql.*").mock(
+        side_effect=[
+            httpx.RemoteProtocolError("Server disconnected without sending a response"),
+            httpx.Response(200, json={"issues": [{"key": "PAY-1"}]}),
+        ]
+    )
+    assert len(list(_http().search(SEARCH, "project = PAY", "summary"))) == 1
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_transport_retries_are_bounded() -> None:
+    route = respx.get(url__regex=r".*/search/jql.*").mock(
+        side_effect=httpx.ConnectError("no route to host")
+    )
+    with pytest.raises(httpx.ConnectError):
+        list(_http(max_retries=2).search(SEARCH, "project = PAY", "summary"))
+    assert route.call_count == 3  # the original plus two retries
+
+
+@respx.mock
 def test_retries_are_bounded() -> None:
     route = respx.get(url__regex=r".*/search/jql.*").mock(
         return_value=httpx.Response(503)
