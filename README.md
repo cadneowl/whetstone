@@ -541,6 +541,22 @@ whetstone corpus pull \
   --skills-root skills
 ```
 
+**One unreachable MR does not end the walk.** After the connector has exhausted its retries, that
+merge request is skipped and the crawl continues — a long history walk should not be lost to a
+single deleted or permission-restricted MR. Skips are never silent: each prints a warning as it
+happens, and the run ends with a count and the refs, because a warning from forty minutes ago has
+scrolled away and a total that quietly omits 600 of 1000 MRs reads exactly like a quieter quarter.
+
+```
+⚠ skipped acme/payments!813: Server disconnected without sending a response
+…
+412 candidate(s) written to candidates
+⚠ 3 merge request(s) unreachable, not looked at: acme/payments!813, acme/payments!907, …
+```
+
+Only connector failures are skipped. A bug in Whetstone's own normalization still stops the run —
+a walk that swallowed those would report an empty corpus instead of the defect that produced one.
+
 With a tracker, so shipped defects become cases too:
 
 ```bash
@@ -1456,9 +1472,19 @@ conn = build_provider({"kind": "gitlab", "base_url": "https://gitlab.acme.com"})
 ### GitLab connector
 
 Implements `SourceConnector` + `ReviewConnector` against GitLab API v4. Owns auth, **429/5xx retry
-with backoff**, and **`x-next-page` pagination** internally, so the core never sees a rate limit or
-a page header. Maps GitLab's `suggestions[].applied` flag onto `Suggestion.applied` — the cleanest
-accept/reject training signal there is.
+with backoff**, **dropped-connection retry**, and **`x-next-page` pagination** internally, so the
+core never sees a rate limit or a page header. Maps GitLab's `suggestions[].applied` flag onto
+`Suggestion.applied` — the cleanest accept/reject training signal there is.
+
+Retries cover the transport as well as the status line: a crawl of a few thousand merge requests
+outlives connections, and a proxy recycling one arrives as `RemoteProtocolError` rather than a 502.
+The retry set is named explicitly (`TimeoutException`, `NetworkError`, `RemoteProtocolError`) rather
+than the whole `httpx.TransportError` subtree, which also covers malformed requests of our own —
+retrying those only makes the failure slower.
+
+What survives the retries is raised as **`ConnectorError`** (`providers/base.py`), a provider-neutral
+type. That is what lets a corpus walk survive one unreachable merge request without importing
+`httpx` to ask — or catching a bug in our own normalization while reaching for a network failure.
 
 ```python
 from whetstone.providers.gitlab.provider import GitLabConnector
@@ -1963,6 +1989,8 @@ Two things worth knowing, both about values being read back exactly as written:
 | `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Per-request timeout in seconds for OpenAI-compatible backends (raise it for slow local hardware). |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
 | `JIRA_TOKEN` | Jira connector | API token (Cloud) or personal access token (Server/DC). Name configurable via `--jira-token-env` / `token_env`. |
+| `SSL_CERT_FILE` | every HTTPS client | CA bundle to verify against — how you point Whetstone at a corporate root behind a TLS-inspecting proxy. Read by `httpx` itself, so it covers GitLab, Jira and both model backends with no configuration of ours. |
+| `REQUESTS_CA_BUNDLE` | every HTTPS client | Accepted as an alias for `SSL_CERT_FILE`, since that is the variable corporate proxy installers actually set. Copied across at startup when `SSL_CERT_FILE` is unset; a path that is not a file is an error, not a shrug. |
 | `WHETSTONE_LIVE_LLM` | `tests/live/` | Set to `1` to run the opt-in live-model tests. |
 | `WHETSTONE_ENV_FILE` | `config` | Load this `.env` instead of discovering one. Same as `--env-file`. |
 | `WHETSTONE_SKILLS_ROOT` | `config` | Skill registry path, overriding `whetstone.toml`. |

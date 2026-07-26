@@ -9,6 +9,10 @@ import httpx
 
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
+# See `gitlab/client.py`: the transport-level equivalent of `RETRY_STATUS`, kept in step with it
+# because a dropped connection is no more the caller's problem here than it is there.
+RETRY_TRANSPORT = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+
 # Jira Cloud's current search endpoint. Server/Data Center is still on the older
 # `/rest/api/2/search`, so this is configurable rather than hard-coded — see `JiraConnector`.
 DEFAULT_SEARCH_PATH = "/rest/api/3/search/jql"
@@ -72,7 +76,14 @@ class JiraHttp:
     ) -> httpx.Response:
         attempt = 0
         while True:
-            resp = self._client.request(method, self._url(path), params=params)
+            try:
+                resp = self._client.request(method, self._url(path), params=params)
+            except RETRY_TRANSPORT:
+                if attempt >= self._max_retries:
+                    raise
+                attempt += 1
+                self._sleep(_retry_after_seconds(None, attempt))
+                continue
             if resp.status_code in RETRY_STATUS and attempt < self._max_retries:
                 attempt += 1
                 self._sleep(_retry_after_seconds(resp.headers.get("retry-after"), attempt))

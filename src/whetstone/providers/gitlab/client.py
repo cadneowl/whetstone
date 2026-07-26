@@ -8,6 +8,13 @@ import httpx
 
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
+# The transport-level equivalent of `RETRY_STATUS`: a walk of a few thousand merge requests holds a
+# connection open for a long time, and a proxy recycling it surfaces as an exception rather than a
+# status code. Named individually rather than catching `httpx.TransportError`, whose subtree also
+# covers `UnsupportedProtocol` and `LocalProtocolError` — mistakes in the request we built, which
+# retrying only makes slower.
+RETRY_TRANSPORT = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+
 
 def _retry_after_seconds(header: str | None, attempt: int) -> float:
     """Backoff delay: honor a numeric `Retry-After` (seconds); ignore an HTTP-date form (the spec
@@ -52,7 +59,16 @@ class GitLabHttp:
     ) -> httpx.Response:
         attempt = 0
         while True:
-            resp = self._client.request(method, self._url(path), params=params)
+            try:
+                resp = self._client.request(method, self._url(path), params=params)
+            except RETRY_TRANSPORT:
+                if attempt >= self._max_retries:
+                    raise
+                attempt += 1
+                # No response, so no `Retry-After` to honor — the header argument is what tells
+                # `_retry_after_seconds` to fall straight through to backoff.
+                self._sleep(_retry_after_seconds(None, attempt))
+                continue
             if resp.status_code in RETRY_STATUS and attempt < self._max_retries:
                 attempt += 1
                 self._sleep(_retry_after_seconds(resp.headers.get("retry-after"), attempt))

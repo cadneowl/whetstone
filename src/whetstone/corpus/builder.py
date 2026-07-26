@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
@@ -27,7 +27,7 @@ from whetstone.domain.issue import Issue
 from whetstone.domain.refs import Region, RepoRef
 from whetstone.domain.review import MergeRequestRef, ReviewedChange, ReviewThread
 from whetstone.domain.skill import Skill
-from whetstone.providers.base import IssueConnector, ReviewConnector
+from whetstone.providers.base import ConnectorError, IssueConnector, ReviewConnector
 
 # Confidence by signal strength.
 #
@@ -55,6 +55,10 @@ DEFAULT_MAX_CLEAN_FILES = 5
 DEFAULT_MAX_DEFECT_FILES = 3
 
 
+# Told about each merge request the walk gave up on, so the caller can report it. See below.
+SkipHandler = Callable[[MergeRequestRef, ConnectorError], None]
+
+
 def pull_candidates(
     connector: ReviewConnector,
     repo: RepoRef,
@@ -62,16 +66,38 @@ def pull_candidates(
     skills: list[Skill] | None = None,
     *,
     max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
+    on_skip: SkipHandler | None = None,
 ) -> list[CandidateCase]:
     """Walk a repo's reviewed changes since `since`, emitting candidate eval cases to review."""
     candidates: list[CandidateCase] = []
     for mr in connector.list_reviewed_changes(repo, since):
-        candidates.extend(
-            build_candidates(
-                connector.get_review(mr), skills, max_clean_files=max_clean_files
-            )
-        )
+        reviewed = _review_or_skip(connector, mr, on_skip)
+        if reviewed is None:
+            continue
+        candidates.extend(build_candidates(reviewed, skills, max_clean_files=max_clean_files))
     return candidates
+
+
+def _review_or_skip(
+    connector: ReviewConnector, mr: MergeRequestRef, on_skip: SkipHandler | None
+) -> ReviewedChange | None:
+    """Fetch one merge request, or skip it if the caller has somewhere to report the skip.
+
+    Without `on_skip` this re-raises, and that default is the point. A walk of a thousand merge
+    requests should not end because one of them is unreachable — but one that quietly drops them
+    finishes with "412 candidate(s) written" and no hint that 600 were never looked at, which reads
+    exactly like a smaller quarter. Tolerating a gap is allowed; hiding it is not.
+
+    Only `ConnectorError` is caught. A `KeyError` out of our own normalization is a bug, and a walk
+    that swallowed it would report an empty corpus rather than the defect that produced one.
+    """
+    try:
+        return connector.get_review(mr)
+    except ConnectorError as exc:
+        if on_skip is None:
+            raise
+        on_skip(mr, exc)
+        return None
 
 
 class _Signal(NamedTuple):
@@ -300,6 +326,7 @@ def pull_defect_candidates(
     skills: list[Skill] | None = None,
     *,
     max_files: int = DEFAULT_MAX_DEFECT_FILES,
+    on_skip: SkipHandler | None = None,
 ) -> list[CandidateCase]:
     """Pair resolved tracker defects with the merge requests that fixed them, and build cases.
 
@@ -314,11 +341,10 @@ def pull_defect_candidates(
         if not issue.is_defect:
             continue
         for mr in fixes_for(issue, merge_requests):
-            candidates.extend(
-                defect_candidates(
-                    issue, reviews.get_review(mr), skills, max_files=max_files
-                )
-            )
+            fix = _review_or_skip(reviews, mr, on_skip)
+            if fix is None:
+                continue
+            candidates.extend(defect_candidates(issue, fix, skills, max_files=max_files))
     return candidates
 
 

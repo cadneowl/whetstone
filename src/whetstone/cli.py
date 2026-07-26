@@ -17,12 +17,14 @@ from whetstone.core.gate import GateConfig
 from whetstone.core.loader import load_skill, load_skills
 from whetstone.corpus.builder import DEFAULT_MAX_CLEAN_FILES, DEFAULT_MAX_DEFECT_FILES
 from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
+from whetstone.domain.review import MergeRequestRef
 from whetstone.domain.run import RunEvent, RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, build_llm_client, resolve_backend
+from whetstone.providers.base import ConnectorError
 from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
 from whetstone.providers.registry import available_providers
@@ -77,6 +79,33 @@ def main(
         load_env_file()
     except FileNotFoundError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    # After the env file, because the bundle path is exactly the sort of thing that lives in one.
+    _adopt_requests_ca_bundle()
+
+
+def _adopt_requests_ca_bundle() -> None:
+    """Let `REQUESTS_CA_BUNDLE` stand in for `SSL_CERT_FILE`.
+
+    Behind a TLS-inspecting proxy every HTTPS call needs the organization's root, and `httpx`
+    already honors `SSL_CERT_FILE` for every client we build — GitLab, Jira, the OpenAI-compatible
+    client and the Anthropic SDK's own — so that case needs no code at all. What it does not honor
+    is `REQUESTS_CA_BUNDLE`, a `requests` convention those proxies and their installers set anyway.
+
+    Copying one to the other, once, covers all four. Passing `verify=` per client would cover only
+    the ones we remembered to patch, and `verify=<str>` is deprecated in httpx 0.28 besides.
+    """
+    bundle = os.environ.get("REQUESTS_CA_BUNDLE")
+    # An explicit `SSL_CERT_FILE` wins: it is the one httpx reads, so silently overwriting it would
+    # mean the variable you set is not the variable in effect.
+    if not bundle or os.environ.get("SSL_CERT_FILE"):
+        return
+    if not Path(bundle).is_file():
+        # Left unchecked this surfaces much later as an opaque SSL error on the first request.
+        raise typer.BadParameter(
+            f"REQUESTS_CA_BUNDLE points at {bundle!r}, which is not a file — "
+            "unset it, or point it at your organization's CA bundle."
+        )
+    os.environ["SSL_CERT_FILE"] = bundle
 
 
 RunsDirOpt = Annotated[
@@ -358,18 +387,32 @@ def corpus_pull(
     """
     from whetstone.corpus.builder import write_candidate
 
-    connector = GitLabConnector.from_config({"base_url": base_url, "token_env": token_env})
-    skills = load_skills(skills_root) if skills_root else []
-    candidates = pull_corpus(connector, project, since, skills, max_clean_files=max_clean_files)
-
+    # Before the walk, not after it: this pairing is checkable in nanoseconds, and reporting it at
+    # the end means the operator waits out a full history crawl to be told they mistyped a flag.
     if bool(jira_url) != bool(jira_project):
         raise typer.BadParameter("--jira-url and --jira-project must be given together")
+
+    connector = GitLabConnector.from_config({"base_url": base_url, "token_env": token_env})
+    skills = load_skills(skills_root) if skills_root else []
+
+    skipped: list[str] = []
+
+    def note_skip(mr: MergeRequestRef, exc: ConnectorError) -> None:
+        """One unreachable merge request costs that merge request, not the whole walk."""
+        skipped.append(f"{mr.repo.path}!{mr.iid}")
+        typer.echo(f"⚠ skipped {exc}", err=True)
+
+    candidates = pull_corpus(
+        connector, project, since, skills, max_clean_files=max_clean_files, on_skip=note_skip
+    )
+
     if jira_url and jira_project:
         tracker = JiraConnector.from_config(
             {"base_url": jira_url, "token_env": jira_token_env, "email": jira_email or ""}
         )
         defects = pull_defects(
-            connector, tracker, project, jira_project, since, skills, max_files=max_defect_files
+            connector, tracker, project, jira_project, since, skills,
+            max_files=max_defect_files, on_skip=note_skip,
         )
         typer.echo(f"{len(defects)} candidate(s) from resolved {jira_project} defects")
         candidates.extend(defects)
@@ -396,6 +439,13 @@ def corpus_pull(
         typer.echo(f"{existing} already in the queue (use --refresh to rewrite)")
     if decided:
         typer.echo(f"{decided} already decided, left untouched")
+    if skipped:
+        # Said again at the end, where the counts are. A warning printed 40 minutes ago has scrolled
+        # away, and a total that silently omits them reads like a quieter quarter than it was.
+        shown = ", ".join(skipped[:5])
+        if len(skipped) > 5:
+            shown += f" (+{len(skipped) - 5} more)"
+        typer.echo(f"⚠ {len(skipped)} merge request(s) unreachable, not looked at: {shown}")
 
 
 @corpus_app.command("promote")

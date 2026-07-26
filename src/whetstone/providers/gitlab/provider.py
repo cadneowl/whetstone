@@ -5,10 +5,12 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
+import httpx
+
 from whetstone.domain.change import CodeChange
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import FileBlob, MergeRequestRef, ReviewedChange, ReviewThread
-from whetstone.providers.base import Capability
+from whetstone.providers.base import Capability, ConnectorError
 from whetstone.providers.gitlab.client import GitLabHttp
 from whetstone.providers.gitlab.normalize import file_change, mr_ref, review_thread
 
@@ -55,6 +57,15 @@ class GitLabConnector:
         return [mr_ref(repo, m) for m in self._http.paginate(endpoint, params)]
 
     def get_review(self, mr: MergeRequestRef) -> ReviewedChange:
+        try:
+            return self._fetch_review(mr)
+        except httpx.HTTPError as exc:
+            # Translated at the adapter boundary so a corpus walk can decide whether one unreachable
+            # merge request is worth abandoning the other thousand — without importing `httpx` to
+            # ask, and without a blanket `except Exception` that would swallow our own bugs too.
+            raise ConnectorError(f"{mr.repo.path}!{mr.iid}: {exc}") from exc
+
+    def _fetch_review(self, mr: MergeRequestRef) -> ReviewedChange:
         base = f"/api/v4/projects/{self._pid(mr.repo)}/merge_requests/{mr.iid}"
         detail = self._http.get_json(base)
         ref = mr_ref(mr.repo, detail)
