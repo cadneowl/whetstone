@@ -3,15 +3,28 @@ import { useConsoleConfig, useGitStatus } from '@/api/client'
 import { ErrorBoundary } from './ErrorBoundary'
 import { Badge } from './primitives'
 
+/**
+ * Routes that are workspaces rather than documents.
+ *
+ * `max-w-6xl` is right for reading a skill's guidance and wrong for triage, which is three panes —
+ * queue, evidence, form — and on a wide monitor was rendering all of them inside 1152px with the
+ * rest of the screen left empty. Prose still gets a measure; the workbench gets the desk.
+ */
+const WIDE_ROUTES = ['/triage', '/reviews/']
+
 export function AppShell() {
   const { data: config } = useConsoleConfig()
   const { data: git } = useGitStatus()
   const location = useLocation()
 
+  const wide = WIDE_ROUTES.some((route) => location.pathname.startsWith(route))
+  // Header and body share one container so the nav still lines up with the content beneath it.
+  const container = wide ? 'mx-auto max-w-[120rem]' : 'mx-auto max-w-6xl'
+
   return (
     <div className="min-h-screen">
       <header className="border-b border-line">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3">
+        <div className={`${container} flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-3`}>
           <NavLink to="/" className="text-[15px] font-semibold">
             Whetstone
           </NavLink>
@@ -19,6 +32,7 @@ export function AppShell() {
             <Tab to="/" end>
               Skills
             </Tab>
+            <Tab to="/reviews">Reviews</Tab>
             <Tab to="/triage">Triage</Tab>
             <Tab to="/runs">Runs</Tab>
           </nav>
@@ -45,7 +59,7 @@ export function AppShell() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-5 py-6">
+      <main className={`${container} px-5 py-6`}>
         {/* Keyed on the route so a crash on one page does not wedge the others. */}
         <ErrorBoundary key={location.pathname}>
           <Outlet />

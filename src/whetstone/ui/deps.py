@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from whetstone.config import Config
 from whetstone.gates import GateStore
 from whetstone.gitio import author_from_config
+from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.ui.errors import Misconfigured
 
@@ -52,6 +53,11 @@ def get_store(request: Request) -> RunStore:
 def get_gates(request: Request) -> GateStore:
     gates: GateStore = request.app.state.gates
     return gates
+
+
+def get_reviews(request: Request) -> ReviewStore:
+    reviews: ReviewStore = request.app.state.reviews
+    return reviews
 
 
 def get_skills_root(request: Request) -> Path:
@@ -104,6 +110,7 @@ def require_writable(request: Request) -> None:
 ConfigDep = Annotated[Config, Depends(get_config)]
 StoreDep = Annotated[RunStore, Depends(get_store)]
 GatesDep = Annotated[GateStore, Depends(get_gates)]
+ReviewsDep = Annotated[ReviewStore, Depends(get_reviews)]
 SkillsRootDep = Annotated[Path, Depends(get_skills_root)]
 PrincipalDep = Annotated[Principal, Depends(get_principal)]
 Writable = Depends(require_writable)

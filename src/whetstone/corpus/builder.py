@@ -9,13 +9,15 @@ from typing import Any, NamedTuple
 import yaml
 
 from whetstone.corpus.linking import fixes_for
-from whetstone.corpus.model import CandidateCase
+from whetstone.corpus.model import CandidateCase, Discussion, DiscussionComment
 from whetstone.domain.change import CodeChange, FileChange, replace_added_lines
 from whetstone.domain.eval_model import (
     SIGNAL_APPLIED,
     SIGNAL_CLEAN,
     SIGNAL_DECLINED,
     SIGNAL_ESCAPED_DEFECT,
+    SIGNAL_FINDING_CONFIRMED,
+    SIGNAL_FINDING_REJECTED,
     SIGNAL_OPEN,
     SIGNAL_RESOLVED,
     SIGNAL_SUGGESTED_FIX,
@@ -23,6 +25,7 @@ from whetstone.domain.eval_model import (
     Expectation,
     Provenance,
 )
+from whetstone.domain.finding import Finding
 from whetstone.domain.issue import Issue
 from whetstone.domain.refs import Region, RepoRef
 from whetstone.domain.review import MergeRequestRef, ReviewedChange, ReviewThread
@@ -199,6 +202,7 @@ def build_candidates(
                 confidence=signal.confidence,
                 suggested_skill=route_to_skill(path, skills, labels),
                 rationale=signal.rationale,
+                discussion=_discussion(reviewed, thread),
             )
         )
         counterpart = _fixed_counterpart(reviewed, thread, path, ref, skills, index=i)
@@ -208,6 +212,25 @@ def build_candidates(
     if not saw_diff_feedback:
         candidates.extend(_clean_merge_candidates(reviewed, ref, skills, limit=max_clean_files))
     return candidates
+
+
+def _discussion(reviewed: ReviewedChange, thread: ReviewThread | None) -> Discussion:
+    """The conversation behind one candidate, carried forward so triage can see what we saw.
+
+    `thread is None` is the comment-free merge: the merge request is still named and linked, because
+    "nobody said anything about this" is a claim a person should be able to go and check.
+    """
+    base = Discussion(mr_title=reviewed.mr.title, mr_url=reviewed.mr.web_url)
+    if thread is None:
+        return base
+    return base.model_copy(
+        update={
+            "comments": [DiscussionComment(author=c.author, body=c.body) for c in thread.comments],
+            "resolved": thread.resolved,
+            "suggestion": thread.suggestion.proposed if thread.suggestion else "",
+            "suggestion_applied": bool(thread.suggestion and thread.suggestion.applied),
+        }
+    )
 
 
 def _fixed_counterpart(
@@ -269,6 +292,7 @@ def _fixed_counterpart(
             "The reviewer's suggestion, applied. Flagging this would be a false positive on the "
             "very pattern the rule targets — precision evidence that does not rest on silence."
         ),
+        discussion=_discussion(reviewed, thread),
     )
 
 
@@ -309,9 +333,150 @@ def _clean_merge_candidates(
                 confidence=_CONF_CLEAN,
                 suggested_skill=route_to_skill(file.path, skills, labels),
                 rationale=rationale,
+                discussion=_discussion(reviewed, None),
             )
         )
     return out
+
+
+# --- adjudicated findings -------------------------------------------------------
+
+# A ruling on the skill's own output, on code a person is looking at right now. Every other signal
+# reads a conversation between humans and infers what the reviewer should have said; these two skip
+# the inference.
+#
+# The rejection outranks the confirmation, which looks backwards until you write both cases out. A
+# rejected finding becomes "the reviewer must stay silent here", and that assertion is complete on
+# its own — it does not depend on any text being right. A confirmed finding becomes "the reviewer
+# must say *this*", and `this` is the reviewer's own message, so until a human rewrites it the case
+# grades the reviewer against its own words and passes forever.
+_CONF_FINDING_REJECTED = 0.95
+_CONF_FINDING_CONFIRMED = 0.9
+
+
+def candidate_from_finding(
+    finding: Finding,
+    change: CodeChange,
+    *,
+    correct: bool,
+    candidate_id: str,
+    ref: str,
+    note: str = "",
+    skills: list[Skill] | None = None,
+    labels: Sequence[str] = (),
+) -> CandidateCase:
+    """One adjudicated finding as a candidate eval case.
+
+    `note` is the person's own account of why the finding was right or wrong, and for a *confirmed*
+    finding it is the better expectation: it describes the problem, where the finding describes what
+    the reviewer said about it. Seeding the case from it is what breaks the circularity — otherwise
+    the expectation is the reviewer's own message and the case grades it against its own words.
+
+    On a rejected finding the reviewer's message stays the expectation, because the assertion is
+    "this must not be said again" and that is the thing that must not be said. The note becomes the
+    rationale: why it was wrong is what the next person reading the case needs.
+
+    Raises `ValueError` when the finding names a file the change does not contain — a reviewer can
+    cite a path that is not in the diff, and a case built on an empty change asserts nothing and
+    would be rejected by `promote` later, with far less to say about why.
+    """
+    file = change.file(finding.path)
+    if file is None:
+        raise ValueError(
+            f"the finding names {finding.path!r}, which this change does not touch — "
+            "there is no diff to build a case from"
+        )
+    skills = skills or []
+    line_range = (finding.line, finding.line) if finding.line is not None else None
+    # A cited line that misses every hunk is widened to the whole file rather than refused.
+    #
+    # `promote._check_region` rejects such a region, so leaving it would mint a case that could
+    # only fail, two screens later. But refusing the *ruling* would be worse: a finding pointing at
+    # the wrong line is a false positive, and "you may not record that" is the opposite of the
+    # answer. Whole-file is what `where.line_range` already means when omitted, and the region is
+    # right there in the triage form to tighten with the diff on screen.
+    stray_line = line_range is not None and not file.covers(line_range)
+    if stray_line:
+        line_range = None
+    explained = correct and bool(note.strip())
+
+    return CandidateCase(
+        id=candidate_id,
+        kind="should_catch" if correct else "should_not_flag",
+        change=change.narrowed_to(finding.path),
+        expect=[
+            Expectation(
+                id="e1",
+                must="appear" if correct else "not_appear",
+                where=Region(path=finding.path, line_range=line_range),
+                semantic=note.strip() if explained else finding.message,
+            )
+        ],
+        provenance=Provenance(
+            source="skill_review",
+            ref=ref,
+            human_signal=SIGNAL_FINDING_CONFIRMED if correct else SIGNAL_FINDING_REJECTED,
+        ),
+        confidence=_CONF_FINDING_CONFIRMED if correct else _CONF_FINDING_REJECTED,
+        # The finding's own skill wins over path routing. `route_to_skill` guesses from trigger
+        # globs and returns the *first* match, so in any real registry — where several skills
+        # answer for the same language — it would file a rust-errors finding under whichever rust
+        # skill sorts first. A mined review comment has to be guessed at; a finding already knows
+        # which guidance produced it. Routing is the fallback for a skill no longer in the registry.
+        suggested_skill=_owning_skill(finding, skills, labels),
+        # Carried through so promoting the case also files the source under the rule that fired,
+        # which is the whole point of adjudicating: the rule gets a test *and* its evidence.
+        suggested_rule_id=finding.rule_id or "",
+        rationale=_ruling_rationale(
+            correct=correct, explained=explained, note=note, stray_line=stray_line, finding=finding
+        ),
+    )
+
+
+def _owning_skill(finding: Finding, skills: list[Skill], labels: Sequence[str]) -> str | None:
+    """Which skill an adjudicated finding's case belongs to.
+
+    Its own, whenever that skill is still in the registry. Falling back to `route_to_skill` covers
+    a finding whose skill has since been renamed or removed — better a routed guess than a target
+    the promote form cannot offer.
+    """
+    if any(s.id == finding.skill_id for s in skills):
+        return finding.skill_id
+    return route_to_skill(finding.path, skills, labels) or finding.skill_id or None
+
+
+def _ruling_rationale(
+    *, correct: bool, explained: bool, note: str, stray_line: bool, finding: Finding
+) -> str:
+    reason = _ruling_reason(correct=correct, explained=explained, note=note)
+    if not stray_line:
+        return reason
+    return (
+        f"{reason} The finding cited line {finding.line}, which this change does not touch, so the "
+        "expectation covers the whole file — narrow it below if you can."
+    )
+
+
+def _ruling_reason(*, correct: bool, explained: bool, note: str) -> str:
+    if not correct:
+        text = (
+            "The skill raised this and a person ruled it wrong. As a case it asserts the reviewer "
+            "must stay silent here — the gate then refuses any guidance that brings the false "
+            "positive back."
+        )
+        return f"{text} They said: {note.strip()}" if note.strip() else text
+    if explained:
+        # Worth stating, because the "unedited" badge in triage will still fire: the expectation
+        # differs from the finding, so it *looks* untouched while already being the human's words.
+        return (
+            "The skill raised this and a person confirmed it, in their own words — the expectation "
+            "below is their explanation, not the reviewer's message, so it does not grade the "
+            "reviewer against itself."
+        )
+    return (
+        "The skill raised this and a person confirmed it. Promoting it locks the behaviour in, so "
+        "a later rewrite of the guidance cannot quietly lose it."
+    )
 
 
 # --- escaped defects ----------------------------------------------------------
@@ -417,6 +582,9 @@ def defect_candidates(
             confidence=confidence,
             suggested_skill=route_to_skill(file.path, skills, labels),
             rationale=rationale,
+            # No thread: nobody reviewed this into existence, which is the entire point of the
+            # signal. The merge request that *fixed* it is still linked.
+            discussion=_discussion(fix, None),
         )
         for j, file in enumerate(sampled)
     ]

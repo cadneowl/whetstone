@@ -1,0 +1,10 @@
+diff --git a/src/handlers/settle.rs b/src/handlers/settle.rs
+--- a/src/handlers/settle.rs
++++ b/src/handlers/settle.rs
+@@ -55,4 +55,5 @@ impl SettlementHandler {
+     pub fn settle(&self, batch: Batch) -> Response {
+-        self.ledger.write(&batch)?;
++        let _ = self.ledger.write(&batch);
+         Response::accepted()
+     }
+ }

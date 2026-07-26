@@ -73,6 +73,13 @@ class GateDefaults(BaseModel):
     dir: Path = Path(".whetstone/gates")
 
 
+class ReviewsConfig(BaseModel):
+    # Where live-review records are stored: the skill's findings on a real change, plus the rulings
+    # a person made on them. Rulings mint triage candidates, so losing this directory costs the
+    # adjudication work but nothing already promoted.
+    dir: Path = Path(".whetstone/reviews")
+
+
 class Config(BaseModel):
     skills: SkillsConfig = SkillsConfig()
     candidates: CandidatesConfig = CandidatesConfig()
@@ -80,6 +87,7 @@ class Config(BaseModel):
     ui: UIConfig = UIConfig()
     runs: RunsConfig = RunsConfig()
     gate: GateDefaults = GateDefaults()
+    reviews: ReviewsConfig = ReviewsConfig()
     # Directory the config was loaded from; relative paths resolve against it. None when defaulted.
     source_dir: Path | None = Field(default=None, exclude=True)
 
@@ -102,6 +110,10 @@ class Config(BaseModel):
     @property
     def gates_dir(self) -> Path:
         return self._resolve(self.gate.dir)
+
+    @property
+    def reviews_dir(self) -> Path:
+        return self._resolve(self.reviews.dir)
 
     def _resolve(self, path: Path) -> Path:
         if path.is_absolute() or self.source_dir is None:
@@ -162,6 +174,10 @@ def _apply_env(config: Config) -> Config:
     gates_dir = os.environ.get("WHETSTONE_GATES_DIR")
     if gates_dir:
         config.gate.dir = Path(gates_dir).resolve()
+
+    reviews_dir = os.environ.get("WHETSTONE_REVIEWS_DIR")
+    if reviews_dir:
+        config.reviews.dir = Path(reviews_dir).resolve()
 
     host = os.environ.get("WHETSTONE_UI_HOST")
     if host:

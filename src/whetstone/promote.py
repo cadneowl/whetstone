@@ -86,6 +86,7 @@ def edits_from(entry: CandidateEntry, *, skill_id: str | None = None) -> CaseEdi
         line_range=first.where.line_range if first else None,
         severity_min=first.severity_min if first else None,
         expectation_id=first.id if first else "e1",
+        rule_id=candidate.suggested_rule_id,
     )
 
 

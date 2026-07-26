@@ -13,16 +13,22 @@ import {
   type QueueItem,
 } from '@/api/client'
 import { DiffView, type Overlay, type Selection } from '@/components/diff/DiffView'
+import { DiscussionPane } from '@/components/DiscussionPane'
 import { Badge, Empty, ErrorNote, Loading, severityName } from '@/components/primitives'
+import { SIGNALS, SignalBadge, signalMeta } from '@/components/signals'
 
 /**
  * The triage queue.
  *
+ * Three panes, left to right: what is queued, the evidence, and what will be recorded. The middle
+ * one leads with the review conversation rather than the diff, because the diff alone is just a
+ * code change — the reason it is a candidate at all is what somebody said about it.
+ *
  * `corpus/builder.py` sets a candidate's expectation to the raw body of the first review comment —
  * "nit: use ? here", "see above", "👍" — and that text becomes the ground truth the judge scores
- * every finding against. So the raw comment and the editable field are shown side by side, both
- * visible: the job is to *rewrite* the signal, not to accept it. The region is dragged on the diff
- * rather than typed, because an auto-generated line range is the field most likely to be wrong.
+ * every finding against. So the thread and the editable field are both on screen: the job is to
+ * *rewrite* the signal, not to accept it. The region is dragged on the diff rather than typed,
+ * because an auto-generated line range is the field most likely to be wrong.
  */
 export function Triage() {
   const { data: queue, isLoading, error } = useQueue()
@@ -30,21 +36,34 @@ export function Triage() {
   const { data: config } = useConsoleConfig()
   const { data: skills } = useSkills()
 
-  const [index, setIndex] = useState(0)
+  const [rawIndex, setIndex] = useState(0)
   const [edits, setEdits] = useState<CaseEdits | null>(null)
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set())
 
-  const items = useMemo(() => queue?.items ?? [], [queue])
-  const current: QueueItem | undefined = items[Math.min(index, items.length - 1)]
+  const all = useMemo(() => queue?.items ?? [], [queue])
+  const items = useMemo(
+    () => all.filter((i) => !hidden.has(signalOf(i))),
+    [all, hidden],
+  )
+  const index = Math.min(rawIndex, Math.max(0, items.length - 1))
+  const current: QueueItem | undefined = items[index]
 
   const preview = usePreview()
   const promote = usePromote()
   const reject = useReject()
   const propose = usePropose()
 
-  // Reset the form whenever the selected candidate changes.
+  // Reset the form whenever the selected candidate changes — keyed on its *content*, not its id.
+  //
+  // A candidate minted from a review ruling keeps a stable id when the ruling is changed, so an
+  // id-keyed reset left the kind and semantic showing the previous ruling while the "As generated"
+  // box beside them showed the new one. Promoting then wrote the ruling that had been withdrawn.
+  // Serializing is cheap and a no-op refetch produces an identical string, so nothing resets under
+  // someone mid-edit unless the candidate really did change.
+  const editsKey = current ? JSON.stringify(current.edits) : ''
   useEffect(() => {
     setEdits(current ? { ...current.edits } : null)
     setRejecting(false)
@@ -52,7 +71,7 @@ export function Triage() {
     preview.reset()
     promote.reset()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.entry.candidate.id])
+  }, [editsKey])
 
   const move = useCallback(
     (delta: number) => setIndex((i) => Math.max(0, Math.min(items.length - 1, i + delta))),
@@ -148,18 +167,48 @@ export function Triage() {
         )}
       </header>
 
+      <SignalFilter items={all} hidden={hidden} onToggle={setHidden} />
+
       {notice && (
         <p className="mb-3 rounded-lg border border-good/40 bg-good/5 px-3 py-2 text-sm">{notice}</p>
       )}
       {propose.error && <ErrorNote error={propose.error} />}
 
-      {items.length === 0 ? (
+      {all.length === 0 ? (
         <Empty>Queue is clear — every candidate has been decided.</Empty>
+      ) : items.length === 0 ? (
+        <Empty>
+          Every one of the {all.length} pending candidates is hidden by the filter above.{' '}
+          <button
+            type="button"
+            onClick={() => setHidden(new Set())}
+            className="underline hover:text-ink"
+          >
+            Show all
+          </button>
+        </Empty>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[15rem_1fr_21rem]">
+        // `minmax(0, …)` on the middle track, not `1fr`: a grid track sizes to its content's
+        // intrinsic minimum by default, so one long unbroken path in a diff would widen the column
+        // and push the form off the screen.
+        // One viewport tall, with each pane scrolling itself. Stacked-and-scrolling wasted the
+        // bottom half of a wide screen on nothing while pushing the promote button off the
+        // bottom — and a hundred queued candidates must not be able to shove the diff out of view.
+        // `grid-rows-[minmax(0,1fr)]` as well as a height: a grid row is auto-sized by default and
+        // grows past its container, so without it the panes size to their content and `h-full`
+        // measures a row that is already 2000px tall. Both tracks need the same `minmax(0, …)`.
+        <div className="grid gap-4 xl:h-[calc(100vh-13rem)] xl:min-h-[28rem] xl:grid-cols-[15rem_minmax(0,1fr)_22rem] xl:grid-rows-[minmax(0,1fr)] 2xl:grid-cols-[17rem_minmax(0,1fr)_26rem]">
           <QueuePane items={items} index={index} onPick={setIndex} />
 
-          <div>
+          <div className="flex min-w-0 flex-col gap-4 xl:h-full xl:min-h-0">
+            {/* Capped rather than fixed: a short thread gives its space to the diff, a long one
+                scrolls instead of burying it. */}
+            {current && (
+              <div className="shrink-0 xl:max-h-[45%] xl:overflow-y-auto">
+                <DiscussionPane candidate={current.entry.candidate} />
+              </div>
+            )}
+            <div className="min-h-0 flex-1 xl:overflow-y-auto">
             {current && edits && (
               <DiffView
                 diff={current.entry.diff}
@@ -178,6 +227,7 @@ export function Triage() {
                 overlays={overlaysFor(edits)}
               />
             )}
+            </div>
           </div>
 
           {current && edits && (
@@ -208,6 +258,83 @@ export function Triage() {
   )
 }
 
+function signalOf(item: QueueItem): string {
+  return item.entry.candidate.provenance.human_signal ?? ''
+}
+
+/**
+ * Filter the queue by what each candidate is evidence *of*.
+ *
+ * A comment-free merge yields one `merged clean` candidate per changed file, so a repo that
+ * reviews by talking rather than by commenting inline produces a queue that is mostly those —
+ * and they are the weakest thing the builder makes. Sorted strongest-first they sit at the
+ * bottom, but "scroll until it gets boring" is not a filter. This is.
+ *
+ * Doubles as the legend: every chip carries the signal's meaning on hover.
+ */
+function SignalFilter({
+  items,
+  hidden,
+  onToggle,
+}: {
+  items: QueueItem[]
+  hidden: ReadonlySet<string>
+  onToggle: (next: ReadonlySet<string>) => void
+}) {
+  const counts = useMemo(() => {
+    const out = new Map<string, number>()
+    for (const item of items) out.set(signalOf(item), (out.get(signalOf(item)) ?? 0) + 1)
+    return out
+  }, [items])
+
+  // Builder order for the ones we know, then anything unrecognized (hand-written, or a signal
+  // added since this shipped) so a chip never silently disappears from the queue's account of itself.
+  const present = [
+    ...SIGNALS.map((s) => s.id).filter((id) => counts.has(id)),
+    ...[...counts.keys()].filter((id) => !SIGNALS.some((s) => s.id === id)),
+  ]
+  if (present.length < 2) return null
+
+  return (
+    <div className="mb-4 flex flex-wrap items-center gap-1.5">
+      {present.map((id) => {
+        const off = hidden.has(id)
+        const meta = signalMeta(id)
+        return (
+          <button
+            key={id}
+            type="button"
+            title={meta.meaning}
+            aria-pressed={!off}
+            onClick={() => {
+              const next = new Set(hidden)
+              if (off) next.delete(id)
+              else next.add(id)
+              onToggle(next)
+            }}
+            className={`rounded-full border px-2.5 py-0.5 text-xs transition-colors ${
+              off
+                ? 'border-line text-muted line-through opacity-50 hover:opacity-80'
+                : 'border-line hover:border-accent/50'
+            }`}
+          >
+            {meta.id} <span className="tabular text-muted">{counts.get(id)}</span>
+          </button>
+        )
+      })}
+      {hidden.size > 0 && (
+        <button
+          type="button"
+          onClick={() => onToggle(new Set())}
+          className="px-1.5 text-xs text-muted underline hover:text-ink"
+        >
+          show all
+        </button>
+      )}
+    </div>
+  )
+}
+
 type Severity = NonNullable<CaseEdits['severity_min']>
 const SEVERITIES: Severity[] = [10, 20, 30]
 
@@ -233,39 +360,52 @@ function QueuePane({
   onPick: (i: number) => void
 }) {
   return (
-    <aside>
-      <ul className="space-y-1">
+    <aside className="flex min-w-0 flex-col gap-3 xl:h-full xl:min-h-0">
+      <ul className="min-h-0 flex-1 space-y-1 xl:overflow-y-auto">
         {items.map((item, i) => {
           const c = item.entry.candidate
+          const comments = c.discussion?.comments?.length ?? 0
           return (
             <li key={c.id}>
               <button
                 type="button"
                 onClick={() => onPick(i)}
-                className={`w-full rounded-lg border px-2.5 py-2 text-left text-sm transition-colors ${
+                className={`w-full min-w-0 rounded-lg border px-2.5 py-2 text-left text-sm transition-colors ${
                   i === index
                     ? 'border-accent bg-accent/10'
                     : 'border-line bg-surface hover:border-accent/40'
                 }`}
               >
-                <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-xs">{c.id}</span>
-                  <span
-                    className="ml-auto tabular text-xs text-muted"
-                    title="corpus builder confidence"
-                  >
+                {/* Signal first. The id is a slug nobody reads and the confidence is a number
+                    whose meaning *is* the signal, so leading with those made every row look
+                    alike — which is how a queue of weak candidates passes for a queue. */}
+                <div className="flex items-center gap-1.5">
+                  <SignalBadge id={c.provenance.human_signal} short />
+                  <span className="ml-auto tabular text-xs text-muted" title="builder confidence">
                     {c.confidence.toFixed(2)}
                   </span>
                 </div>
-                <div className="mt-0.5 truncate text-xs text-muted">
-                  {c.suggested_skill ?? 'unrouted'}
+                <div className="mt-1 flex items-baseline gap-2">
+                  {/* `min-w-0` + `truncate`: without it a long project slug in the id widens the
+                      button past its track and the confidence escapes the pane. */}
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">
+                    {c.id}
+                  </span>
+                  {comments > 0 && (
+                    <span className="shrink-0 text-[11px] text-muted" title="comments in the thread">
+                      💬 {comments}
+                    </span>
+                  )}
                 </div>
+                <div className="truncate text-xs text-muted">{c.suggested_skill ?? 'unrouted'}</div>
               </button>
             </li>
           )
         })}
       </ul>
-      <p className="mt-3 text-[11px] leading-relaxed text-muted">
+      {/* Pinned below the scrolling list rather than after it, so the shortcuts stay readable at
+          the hundredth candidate as well as the first. */}
+      <p className="shrink-0 text-[11px] leading-relaxed text-muted">
         <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>a</kbd> promote · <kbd>x</kbd> reject ·{' '}
         <kbd>Enter</kbd> promote
       </p>
@@ -315,15 +455,10 @@ function FormPane({
   const inverted = range != null && range[0] > range[1]
 
   return (
-    <aside className="space-y-4 text-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge tone="accent">{candidate.confidence.toFixed(2)} confidence</Badge>
-        {candidate.provenance.ref && (
-          <span className="font-mono text-xs text-muted">{candidate.provenance.ref}</span>
-        )}
-      </div>
-      {candidate.rationale && <p className="text-xs text-muted">{candidate.rationale}</p>}
-
+    // Signal, source and rationale live in the discussion pane now, beside the evidence for them.
+    // This column is only what will be written.
+    <aside className="flex min-w-0 flex-col text-sm xl:h-full xl:min-h-0">
+      <div className="min-h-0 flex-1 space-y-4 xl:overflow-y-auto xl:pr-1">
       <Field label="Kind">
         <div className="flex gap-3">
           {(['should_catch', 'should_not_flag'] as EvalKind[]).map((kind) => (
@@ -444,8 +579,11 @@ function FormPane({
       </Field>
 
       <div>
-        <p className="mb-1 text-[11px] tracking-wide text-muted uppercase">Original comment</p>
-        <blockquote className="rounded border border-line bg-surface px-2 py-1.5 text-xs text-muted italic">
+        {/* What the builder generated, kept beside the field it seeded so "unedited" is checkable
+            rather than asserted. For an escaped defect this is the tracker summary, which appears
+            nowhere else on the screen. */}
+        <p className="mb-1 text-[11px] tracking-wide text-muted uppercase">As generated</p>
+        <blockquote className="max-h-24 overflow-y-auto rounded border border-line bg-surface px-2 py-1.5 text-xs break-words text-muted italic">
           {rawComment || <span className="not-italic">(none)</span>}
         </blockquote>
       </div>
@@ -469,6 +607,12 @@ function FormPane({
         />
       </div>
 
+      </div>
+
+      {/* Pinned below the scrolling fields. Triage is a volume activity and the form is long
+          enough to push the verdict off the bottom; having to scroll to say yes is how a queue
+          stops getting worked. */}
+      <div className="shrink-0 space-y-3 pt-3">
       {error != null && <ErrorNote error={error} />}
       {validated && !error && (
         <p className="rounded border border-good/40 bg-good/5 px-2 py-1.5 text-xs text-good">
@@ -530,6 +674,7 @@ function FormPane({
           </button>
         </div>
       )}
+      </div>
     </aside>
   )
 }

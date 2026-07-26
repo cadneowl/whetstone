@@ -1,0 +1,5 @@
+owner: "@demo"
+provenance:
+  R1:
+    - source: gitlab_mr
+      ref: "acme/payments!812"

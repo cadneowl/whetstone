@@ -1,0 +1,17 @@
+# The precision half. v1's R1 says "no `.unwrap()` in service code" but never says what service
+# code is, so a reviewer applying it has nothing telling it to leave a `#[test]` alone. This is the
+# case that makes the demo's fp_rate move.
+id: unwrap-in-test
+kind: should_not_flag
+repo: "gitlab:acme/payments"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/payments!845"
+  human_signal: "suggestion declined"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: src/handlers/charge_test.rs
+    semantic: "unwrap inside a #[test] is idiomatic and must not be flagged"

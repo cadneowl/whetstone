@@ -15,9 +15,11 @@ from fastapi.staticfiles import StaticFiles
 
 from whetstone.config import Config, load_config
 from whetstone.gates import GateStore
+from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.ui.errors import NotFound, install_handlers
 from whetstone.ui.routers import authoring, candidates, meta, runs, skills
+from whetstone.ui.routers import reviews as reviews_router
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -42,6 +44,7 @@ def create_app(
     *,
     store: RunStore | None = None,
     gates: GateStore | None = None,
+    reviews: ReviewStore | None = None,
     serve_console: bool = True,
 ) -> FastAPI:
     """Build the console app.
@@ -61,6 +64,7 @@ def create_app(
     app.state.config = resolved
     app.state.store = store or RunStore(resolved.runs_dir)
     app.state.gates = gates or GateStore(resolved.gates_dir)
+    app.state.reviews = reviews or ReviewStore(resolved.reviews_dir)
 
     install_handlers(app)
     app.include_router(meta.router, prefix="/api")
@@ -68,6 +72,7 @@ def create_app(
     app.include_router(authoring.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
     app.include_router(candidates.router, prefix="/api")
+    app.include_router(reviews_router.router, prefix="/api")
     if serve_console:
         _mount_console(app)
     return app

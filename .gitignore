@@ -20,6 +20,9 @@ src/whetstone/ui/static/
 ui/openapi.json
 .playwright-mcp/
 
+# The throwaway skills repo the sharpening demo builds; recreated on every run.
+examples/*/workspace/
+
 # Tooling caches
 .mypy_cache/
 .pytest_cache/

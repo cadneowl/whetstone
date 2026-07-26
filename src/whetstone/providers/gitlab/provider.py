@@ -56,6 +56,19 @@ class GitLabConnector:
         params = {"state": "merged", "updated_after": since.isoformat(), "order_by": "updated_at"}
         return [mr_ref(repo, m) for m in self._http.paginate(endpoint, params)]
 
+    def get_merge_request(self, repo: RepoRef, iid: int) -> MergeRequestRef:
+        """One merge request by iid — **open or merged**.
+
+        `list_reviewed_changes` filters to merged, because mining history has no use for a branch
+        still being argued about. Reviewing one live is the opposite case: the whole point is that
+        it has not landed yet.
+        """
+        endpoint = f"/api/v4/projects/{self._pid(repo)}/merge_requests/{iid}"
+        try:
+            return mr_ref(repo, self._http.get_json(endpoint))
+        except httpx.HTTPError as exc:
+            raise ConnectorError(f"{repo.path}!{iid}: {exc}") from exc
+
     def get_review(self, mr: MergeRequestRef) -> ReviewedChange:
         try:
             return self._fetch_review(mr)

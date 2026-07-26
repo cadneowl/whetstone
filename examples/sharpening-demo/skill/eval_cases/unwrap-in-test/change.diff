@@ -1,0 +1,11 @@
+diff --git a/src/handlers/charge_test.rs b/src/handlers/charge_test.rs
+--- a/src/handlers/charge_test.rs
++++ b/src/handlers/charge_test.rs
+@@ -10,3 +10,7 @@ mod tests {
+     use super::*;
++    #[test]
++    fn charges_a_known_row() {
++        let row = db().get(1).unwrap();
++        assert_eq!(row.amount, 500);
++    }
+ }
