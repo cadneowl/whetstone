@@ -177,9 +177,9 @@ function Header({ record, stale }: { record: ReviewRecord; stale: boolean }) {
         </Link>
         <span>v{record.skill_version}</span>
         {record.model && <span>{record.model}</span>}
-        {record.head_ref && <span title="the commit these findings are about">
-          @{record.head_ref.slice(0, 8)}
-        </span>}
+        {record.head_ref && (
+          <span title="the commit these findings are about">@{record.head_ref.slice(0, 8)}</span>
+        )}
         {record.skill_hash_assumed && (
           <Badge
             tone="neutral"

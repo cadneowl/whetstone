@@ -154,10 +154,7 @@ function inline(text: string): ReactNode[] {
       )
     } else {
       nodes.push(
-        <code
-          key={match.index}
-          className="rounded bg-line/60 px-1 py-px font-mono text-[0.85em]"
-        >
+        <code key={match.index} className="rounded bg-line/60 px-1 py-px font-mono text-[0.85em]">
           {token.slice(1, -1)}
         </code>,
       )
