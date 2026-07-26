@@ -53,6 +53,9 @@ class CaseEdits(BaseModel):
     # in `meta.yaml`, which is the only record of *why* a piece of guidance exists. Left empty, the
     # case still lands — plenty of cases test a skill without justifying any one rule.
     rule_id: str = ""
+    # Set when a triage step drafted the semantic and the operator kept it. Carried into the case's
+    # provenance, so a corpus can be asked how its expectations were written.
+    semantic_drafted_by: str = ""
 
     @property
     def must(self) -> str:
@@ -112,6 +115,8 @@ def render_case_yaml(entry: CandidateEntry, edits: CaseEdits) -> str:
         provenance["ref"] = candidate.provenance.ref
     if candidate.provenance.human_signal:
         provenance["human_signal"] = candidate.provenance.human_signal
+    if edits.semantic_drafted_by:
+        provenance["semantic_drafted_by"] = edits.semantic_drafted_by
 
     payload: dict[str, Any] = {
         "id": edits.case_id,
@@ -160,6 +165,43 @@ def render_meta_yaml(existing: str | None, rule_id: str, provenance: Provenance)
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
 
 
+def _check_semantic(entry: CandidateEntry, edits: CaseEdits) -> None:
+    """Refuse an expectation nothing could be judged against.
+
+    Two ways to write one, both of which produce a case that looks fine and measures nothing.
+
+    **Empty.** `semantic` is what the LLM judge compares every finding to. Omitted, the judge is
+    asked whether a finding matches "" and its verdicts are noise — so the case's outcome is noise,
+    and it still counts towards recall like any other.
+
+    **The skill's own words.** A confirmed ruling on the skill's own finding seeds `semantic` from
+    that finding's message, because there is nothing else to seed it from. Promoted unedited, the
+    case asks whether the reviewer says what the reviewer already said: it passes on the guidance
+    that produced it and on any guidance that phrases the same complaint, so it can never fail and
+    never constrains a change. That is the one case worth blocking rather than warning about,
+    because unlike a badly-worded expectation it will never be discovered by failing.
+    """
+    semantic = edits.semantic.strip()
+    if not semantic:
+        raise SkillLoadError(
+            "expectation needs a semantic: it is the ground truth every finding is judged "
+            "against, and an empty one makes the case's result meaningless"
+        )
+
+    candidate = entry.candidate
+    seeded = (candidate.expect[0].semantic or "").strip() if candidate.expect else ""
+    if (
+        candidate.provenance.source == "skill_review"
+        and candidate.kind == "should_catch"
+        and semantic == seeded
+    ):
+        raise SkillLoadError(
+            "this expectation is still the skill's own finding, word for word. A case asserting "
+            "that the reviewer says what it already said can never fail, so it would constrain "
+            "nothing. Rewrite it as a standalone description of the problem."
+        )
+
+
 def prepare(
     entry: CandidateEntry,
     edits: CaseEdits,
@@ -180,6 +222,7 @@ def prepare(
         raise SkillLoadError("case id is required")
     if not edits.path:
         raise SkillLoadError("expectation needs a file path")
+    _check_semantic(entry, edits)
 
     # Both become path segments in a commit, so neither may traverse.
     for value, what in ((edits.skill_id, "target skill"), (edits.case_id, "case id")):

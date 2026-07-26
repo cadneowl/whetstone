@@ -12,8 +12,10 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, StringConstraints
 
+from whetstone import drafting
 from whetstone.candidates import CandidateEntry, CandidateStore, Decision, new_decision
 from whetstone.config import Config
+from whetstone.drafting import SemanticDraft
 from whetstone.gitio import (
     Author,
     Batch,
@@ -23,7 +25,11 @@ from whetstone.gitio import (
     ref_exists,
     write_and_commit,
 )
+from whetstone.llm.base import LLMClient
+from whetstone.llm.factory import Backend, build_llm_client, resolve_backend
+from whetstone.preflight import Plan, plan_calls
 from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
+from whetstone.steps import StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
     Principal,
@@ -31,7 +37,7 @@ from whetstone.ui.deps import (
     Writable,
     relative_skills_root,
 )
-from whetstone.ui.errors import NotFound
+from whetstone.ui.errors import NotFound, Unprocessable
 
 router = APIRouter(prefix="/candidates", tags=["triage"])
 
@@ -105,6 +111,94 @@ def get_batch(config: ConfigDep) -> Batch:
 def get_candidate(candidate_id: str, config: ConfigDep) -> QueueItem:
     entry = _load(config, candidate_id)
     return QueueItem(entry=entry, edits=edits_from(entry))
+
+
+class DraftRequest(BaseModel):
+    """Which skill's triage step to use. Usually the one the candidate is routed to."""
+
+    skill_id: str = ""
+
+
+class DraftResponse(BaseModel):
+    draft: SemanticDraft
+    # What the operator would be accepting, recorded on the case if they do.
+    drafted_by: str
+
+
+@router.post("/{candidate_id}/draft/plan", response_model=Plan)
+def plan_draft(candidate_id: str, request: DraftRequest, config: ConfigDep) -> Plan:
+    _load(config, candidate_id)
+    _, backend = _draft_step(config, candidate_id, request)
+    return plan_calls(
+        "triage draft",
+        backend,
+        calls=1,
+        basis="one call: rewriting this candidate's expectation",
+        details=[
+            "the drafter is shown the review comment, the diff and the outcome — never the "
+            "guidance, so the expectation cannot be phrased in the rules' own words"
+        ],
+    )
+
+
+@router.post("/{candidate_id}/draft", response_model=DraftResponse, dependencies=[Writable])
+def draft_expectation(
+    candidate_id: str, request: DraftRequest, config: ConfigDep
+) -> DraftResponse:
+    """Draft this candidate's `semantic` from the evidence. Writes nothing.
+
+    The result goes back into the triage form for a person to accept, edit or discard. Nothing is
+    promoted here: a wrong expectation is durable in a way a wrong guidance edit is not, because
+    nothing will ever fail on account of it.
+    """
+    entry = _load(config, candidate_id)
+    spec, backend = _draft_step(config, candidate_id, request)
+    try:
+        draft = drafting.draft_semantic(
+            spec,
+            entry,
+            client=_draft_client(spec) if spec.calls_a_model else None,
+            effort=spec.model.effort or "medium",
+        )
+    except StepError as exc:
+        raise Unprocessable(str(exc)) from exc
+    return DraftResponse(draft=draft, drafted_by=backend.model)
+
+
+def _draft_step(
+    config: Config, candidate_id: str, request: DraftRequest
+) -> tuple[StepSpec, Backend]:
+    entry = _load(config, candidate_id)
+    skill_id = request.skill_id or entry.candidate.suggested_skill or ""
+    if not skill_id:
+        raise Unprocessable(
+            "this candidate is not routed to a skill, so there is no triage step to draft with — "
+            "choose a target skill first"
+        )
+    try:
+        spec = load_step(config.skills_root / skill_id, "triage", skill_id=skill_id)
+    except StepError as exc:
+        raise Unprocessable(str(exc)) from exc
+    if spec is None:
+        raise Unprocessable(
+            f"{skill_id} has no triage/ step. Run `whetstone skills scaffold --skill "
+            f"{skill_id}` to write a starter one, then edit its prompt."
+        )
+    try:
+        backend = resolve_backend(spec.model.llm, model=spec.model.model,
+                                  base_url=spec.model.base_url)
+    except ValueError as exc:
+        raise Unprocessable(str(exc)) from exc
+    return spec, backend
+
+
+def _draft_client(spec: StepSpec) -> LLMClient:
+    try:
+        return build_llm_client(
+            spec.model.llm, model=spec.model.model, base_url=spec.model.base_url
+        )
+    except ValueError as exc:
+        raise Unprocessable(str(exc)) from exc
 
 
 @router.post("/{candidate_id}/preview", response_model=PreparedCase, dependencies=[Writable])

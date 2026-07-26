@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   useBatch,
   useConsoleConfig,
+  useDraftPlan,
+  useDraftSemantic,
   usePreview,
   usePromote,
   usePropose,
@@ -14,7 +16,7 @@ import {
 } from '@/api/client'
 import { DiffView, type Overlay, type Selection } from '@/components/diff/DiffView'
 import { DiscussionPane } from '@/components/DiscussionPane'
-import { Badge, Empty, ErrorNote, Loading, severityName } from '@/components/primitives'
+import { Badge, Empty, ErrorNote, Intro, Loading, severityName } from '@/components/primitives'
 import { SIGNALS, SignalBadge, signalMeta } from '@/components/signals'
 
 /**
@@ -30,6 +32,16 @@ import { SIGNALS, SignalBadge, signalMeta } from '@/components/signals'
  * *rewrite* the signal, not to accept it. The region is dragged on the diff rather than typed,
  * because an auto-generated line range is the field most likely to be wrong.
  */
+// Shared by the populated screen and the empty one, so the two cannot describe the job differently.
+const TRIAGE_INTRO = (
+  <>
+    Signal mined from merge requests, waiting to become eval cases. For each one: check the evidence
+    in the middle, fix the fields on the right — <em>rewrite the semantic</em>, it arrives as the
+    raw review comment — then Promote. Promoted cases land on a batch branch you propose as one MR.
+    Reject anything the miner guessed wrong.
+  </>
+)
+
 export function Triage() {
   const { data: queue, isLoading, error } = useQueue()
   const { data: batch } = useBatch()
@@ -44,10 +56,7 @@ export function Triage() {
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set())
 
   const all = useMemo(() => queue?.items ?? [], [queue])
-  const items = useMemo(
-    () => all.filter((i) => !hidden.has(signalOf(i))),
-    [all, hidden],
-  )
+  const items = useMemo(() => all.filter((i) => !hidden.has(signalOf(i))), [all, hidden])
   const index = Math.min(rawIndex, Math.max(0, items.length - 1))
   const current: QueueItem | undefined = items[index]
 
@@ -97,7 +106,9 @@ export function Triage() {
       { id: current.entry.candidate.id, edits },
       {
         onSuccess: (result) => {
-          setNotice(`${result.prepared.case_id} → ${result.branch} (${result.batch_commits} queued)`)
+          setNotice(
+            `${result.prepared.case_id} → ${result.branch} (${result.batch_commits} queued)`,
+          )
           setIndex((i) => Math.min(i, Math.max(0, items.length - 2)))
         },
       },
@@ -129,48 +140,65 @@ export function Triage() {
   if (isLoading) return <Loading />
   if (error) return <ErrorNote error={error} />
   if (!queue?.available) {
+    // Titled and explained even when empty: this is the screen a first-time operator reaches
+    // before anything has been mined, so a bare error is the worst possible first impression of it.
     return (
-      <Empty>
-        No candidate directory at <code className="font-mono">{queue?.root}</code>. Run{' '}
-        <code className="font-mono">whetstone corpus pull --out {queue?.root ?? 'candidates'}</code>{' '}
-        to fill the queue.
-      </Empty>
+      <div>
+        <header className="mb-4">
+          <h1 className="text-lg font-semibold">Triage</h1>
+          <Intro>{TRIAGE_INTRO}</Intro>
+        </header>
+        <Empty>
+          Nothing mined yet — no candidate directory at{' '}
+          <code className="font-mono">{queue?.root}</code>. Turn on{' '}
+          <code className="font-mono">[watch]</code> in whetstone.toml, or run{' '}
+          <code className="font-mono">
+            whetstone corpus pull --out {queue?.root ?? 'candidates'}
+          </code>
+          .
+        </Empty>
+      </div>
     )
   }
 
   return (
     <div>
-      <header className="mb-4 flex flex-wrap items-baseline gap-3">
-        <h1 className="text-lg font-semibold">Triage</h1>
-        <span className="text-sm text-muted">
-          {queue.counts.pending} pending · {queue.counts.promoted} promoted ·{' '}
-          {queue.counts.rejected} rejected
-        </span>
-        {batch && (
-          <span className="ml-auto flex items-center gap-3 text-sm">
-            <span className="font-mono text-xs text-muted">{batch.branch}</span>
-            {batch.commits > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  propose.mutate(batch.branch, {
-                    onSuccess: (r) => setNotice(r.message),
-                  })
-                }
-                disabled={config?.read_only || propose.isPending}
-                className="rounded-lg border border-accent/50 px-3 py-1 text-accent transition-colors hover:bg-accent/10 disabled:opacity-40"
-              >
-                Propose {batch.commits} case{batch.commits === 1 ? '' : 's'}
-              </button>
-            )}
+      <header className="mb-4">
+        <div className="flex flex-wrap items-baseline gap-3">
+          <h1 className="text-lg font-semibold">Triage</h1>
+          <span className="text-sm text-muted">
+            {queue.counts.pending} pending · {queue.counts.promoted} promoted ·{' '}
+            {queue.counts.rejected} rejected
           </span>
-        )}
+          {batch && (
+            <span className="ml-auto flex items-center gap-3 text-sm">
+              <span className="font-mono text-xs text-muted">{batch.branch}</span>
+              {batch.commits > 0 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    propose.mutate(batch.branch, {
+                      onSuccess: (r) => setNotice(r.message),
+                    })
+                  }
+                  disabled={config?.read_only || propose.isPending}
+                  className="rounded-lg border border-accent/50 px-3 py-1 text-accent transition-colors hover:bg-accent/10 disabled:opacity-40"
+                >
+                  Propose {batch.commits} case{batch.commits === 1 ? '' : 's'}
+                </button>
+              )}
+            </span>
+          )}
+        </div>
+        <Intro>{TRIAGE_INTRO}</Intro>
       </header>
 
       <SignalFilter items={all} hidden={hidden} onToggle={setHidden} />
 
       {notice && (
-        <p className="mb-3 rounded-lg border border-good/40 bg-good/5 px-3 py-2 text-sm">{notice}</p>
+        <p className="mb-3 rounded-lg border border-good/40 bg-good/5 px-3 py-2 text-sm">
+          {notice}
+        </p>
       )}
       {propose.error && <ErrorNote error={propose.error} />}
 
@@ -209,24 +237,24 @@ export function Triage() {
               </div>
             )}
             <div className="min-h-0 flex-1 xl:overflow-y-auto">
-            {current && edits && (
-              <DiffView
-                diff={current.entry.diff}
-                selection={
-                  edits.line_range
-                    ? { path: edits.path, range: edits.line_range as [number, number] }
-                    : null
-                }
-                onSelect={(s: Selection) =>
-                  applyEdits({
-                    ...edits,
-                    path: s?.path ?? edits.path,
-                    line_range: s?.range ?? null,
-                  })
-                }
-                overlays={overlaysFor(edits)}
-              />
-            )}
+              {current && edits && (
+                <DiffView
+                  diff={current.entry.diff}
+                  selection={
+                    edits.line_range
+                      ? { path: edits.path, range: edits.line_range as [number, number] }
+                      : null
+                  }
+                  onSelect={(s: Selection) =>
+                    applyEdits({
+                      ...edits,
+                      path: s?.path ?? edits.path,
+                      line_range: s?.range ?? null,
+                    })
+                  }
+                  overlays={overlaysFor(edits)}
+                />
+              )}
             </div>
           </div>
 
@@ -244,9 +272,7 @@ export function Triage() {
               onCancelReject={() => setRejecting(false)}
               onReject={doReject}
               onPromote={doPromote}
-              onValidate={() =>
-                preview.mutate({ id: current.entry.candidate.id, edits })
-              }
+              onValidate={() => preview.mutate({ id: current.entry.candidate.id, edits })}
               busy={promote.isPending || reject.isPending}
               error={promote.error ?? preview.error ?? reject.error}
               validated={preview.data ?? null}
@@ -350,6 +376,102 @@ function overlaysFor(edits: CaseEdits): Overlay[] {
   ]
 }
 
+/**
+ * Draft the expectation, in two clicks like every other spend.
+ *
+ * Rewriting the mined comment into a standalone description of the problem is the one genuinely
+ * irreducible step in triage, and the one that stops being possible at a hundred thousand
+ * promotions. The draft is never adopted: it lands in the field beside it for a person to accept,
+ * edit or throw away, and `semantic_drafted_by` records which model wrote it so the two populations
+ * stay tellable apart.
+ */
+function DraftButton({
+  candidateId,
+  skillId,
+  disabled,
+  onDrafted,
+}: {
+  candidateId: string
+  skillId: string
+  disabled?: boolean
+  onDrafted: (semantic: string, by: string) => void
+}) {
+  const plan = useDraftPlan()
+  const draft = useDraftSemantic()
+
+  if (draft.data?.draft.rationale && !plan.data) {
+    return (
+      <span className="ml-auto text-[11px] normal-case" title={draft.data.draft.rationale}>
+        <button
+          type="button"
+          onClick={() => plan.mutate({ id: candidateId, skillId })}
+          className="text-muted transition-colors hover:text-accent"
+        >
+          redraft
+        </button>
+      </span>
+    )
+  }
+
+  if (plan.data) {
+    return (
+      <span className="ml-auto flex items-center gap-2 normal-case">
+        <span className="text-[11px] text-warn" title={plan.data.estimate?.basis}>
+          {plan.data.backend} · 1 call
+        </span>
+        <button
+          type="button"
+          disabled={draft.isPending}
+          onClick={() =>
+            draft.mutate(
+              { id: candidateId, skillId },
+              {
+                onSuccess: (r) => {
+                  onDrafted(r.draft.semantic, r.drafted_by)
+                  plan.reset()
+                },
+              },
+            )
+          }
+          className="rounded border border-accent/50 px-1.5 py-0.5 text-[11px] text-accent hover:bg-accent/10"
+        >
+          {draft.isPending ? 'Drafting…' : 'Yes, draft it'}
+        </button>
+        <button
+          type="button"
+          onClick={() => plan.reset()}
+          className="text-[11px] text-muted hover:text-ink"
+        >
+          no
+        </button>
+      </span>
+    )
+  }
+
+  return (
+    <span className="ml-auto normal-case">
+      <button
+        type="button"
+        disabled={disabled || plan.isPending || !skillId}
+        title={
+          skillId
+            ? 'Rewrite this from the review evidence. The drafter is not shown the guidance.'
+            : 'Choose a target skill first — the triage step lives in the skill folder.'
+        }
+        onClick={() => plan.mutate({ id: candidateId, skillId })}
+        className="text-[11px] text-muted transition-colors hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        {plan.isPending ? 'checking…' : 'draft it'}
+      </button>
+      {(plan.error || draft.error) && (
+        <span className="ml-2 text-[11px] text-bad">
+          {String((plan.error ?? draft.error) as Error)}
+        </span>
+      )}
+    </span>
+  )
+}
+
 function QueuePane({
   items,
   index,
@@ -392,7 +514,10 @@ function QueuePane({
                     {c.id}
                   </span>
                   {comments > 0 && (
-                    <span className="shrink-0 text-[11px] text-muted" title="comments in the thread">
+                    <span
+                      className="shrink-0 text-[11px] text-muted"
+                      title="comments in the thread"
+                    >
                       💬 {comments}
                     </span>
                   )}
@@ -451,6 +576,10 @@ function FormPane({
   const candidate = item.entry.candidate
   const rawComment = item.edits.semantic
   const rewritten = edits.semantic !== rawComment
+  // A confirmed ruling seeds the expectation from the skill's own finding — the one case where
+  // leaving it unedited is not merely weak but circular, and the server refuses it.
+  const mustRewrite =
+    !rewritten && edits.kind === 'should_catch' && candidate.provenance.source === 'skill_review'
   const range = edits.line_range
   const inverted = range != null && range[0] > range[1]
 
@@ -459,221 +588,255 @@ function FormPane({
     // This column is only what will be written.
     <aside className="flex min-w-0 flex-col text-sm xl:h-full xl:min-h-0">
       <div className="min-h-0 flex-1 space-y-4 xl:overflow-y-auto xl:pr-1">
-      <Field label="Kind">
-        <div className="flex gap-3">
-          {(['should_catch', 'should_not_flag'] as EvalKind[]).map((kind) => (
-            <label key={kind} className="flex items-center gap-1.5">
-              <input
-                type="radio"
-                checked={edits.kind === kind}
-                onChange={() => onChange({ ...edits, kind })}
-                disabled={readOnly}
-              />
-              <span>{kind === 'should_catch' ? 'should catch' : 'should not flag'}</span>
-            </label>
-          ))}
-        </div>
-      </Field>
+        <Field label="Kind">
+          <div className="flex gap-3">
+            {(['should_catch', 'should_not_flag'] as EvalKind[]).map((kind) => (
+              <label key={kind} className="flex items-center gap-1.5">
+                <input
+                  type="radio"
+                  checked={edits.kind === kind}
+                  onChange={() => onChange({ ...edits, kind })}
+                  disabled={readOnly}
+                />
+                <span>{kind === 'should_catch' ? 'should catch' : 'should not flag'}</span>
+              </label>
+            ))}
+          </div>
+        </Field>
 
-      <Field label="Target skill">
-        <select
-          value={edits.skill_id}
-          onChange={(e) => onChange({ ...edits, skill_id: e.target.value })}
-          disabled={readOnly}
-          className="w-full rounded border border-line bg-canvas px-2 py-1"
-        >
-          <option value="">— choose a skill —</option>
-          {skillIds.map((id) => (
-            <option key={id} value={id}>
-              {id}
-            </option>
-          ))}
-        </select>
-      </Field>
+        <Field label="Target skill">
+          <select
+            value={edits.skill_id}
+            onChange={(e) => onChange({ ...edits, skill_id: e.target.value })}
+            disabled={readOnly}
+            className="w-full rounded border border-line bg-canvas px-2 py-1"
+          >
+            <option value="">— choose a skill —</option>
+            {skillIds.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </select>
+        </Field>
 
-      <Field label="Case id">
-        <input
-          value={edits.case_id}
-          onChange={(e) => onChange({ ...edits, case_id: e.target.value })}
-          disabled={readOnly}
-          className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
-        />
-      </Field>
+        <Field label="Case id">
+          <input
+            value={edits.case_id}
+            onChange={(e) => onChange({ ...edits, case_id: e.target.value })}
+            disabled={readOnly}
+            className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
+          />
+        </Field>
 
-      <Field label="Evidence for rule">
-        {/* Optional. Set it and the source MR is filed under that rule in the skill's meta.yaml,
+        <Field label="Evidence for rule">
+          {/* Optional. Set it and the source MR is filed under that rule in the skill's meta.yaml,
             in the same commit — the only record of why a piece of guidance exists, and the thing
             nobody remembers to update in a follow-up. */}
-        <input
-          value={edits.rule_id}
-          onChange={(e) => onChange({ ...edits, rule_id: e.target.value.toUpperCase() })}
-          disabled={readOnly}
-          placeholder="R1 — optional"
-          className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
-        />
-        <p className="mt-1 text-xs text-muted">
-          {edits.rule_id
-            ? `Cites ${candidate.provenance.ref ?? 'this MR'} as evidence for ${edits.rule_id}.`
-            : 'Leave empty if this case tests the skill without justifying one rule.'}
-        </p>
-      </Field>
-
-      <Field label="Region">
-        <p className="mb-1 font-mono text-xs break-all">{edits.path}</p>
-        {/* Typed entry as well as dragging: dragging is faster, but it is mouse-only and imprecise
-            at the edges of a hunk, and this is the field most likely to be wrong. */}
-        <div className="flex items-center gap-1.5">
-          <LineInput
-            value={edits.line_range?.[0] ?? null}
+          <input
+            value={edits.rule_id}
+            onChange={(e) => onChange({ ...edits, rule_id: e.target.value.toUpperCase() })}
             disabled={readOnly}
-            label="first line"
-            onChange={(v) => onChange({ ...edits, line_range: withLine(edits.line_range, 0, v) })}
+            placeholder="R1 — optional"
+            className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
           />
-          <span className="text-muted">–</span>
-          <LineInput
-            value={edits.line_range?.[1] ?? null}
-            disabled={readOnly}
-            label="last line"
-            onChange={(v) => onChange({ ...edits, line_range: withLine(edits.line_range, 1, v) })}
-          />
-          {edits.line_range ? (
-            <button
-              type="button"
-              onClick={() => onChange({ ...edits, line_range: null })}
-              disabled={readOnly}
-              className="ml-1 text-xs text-muted hover:text-ink"
-            >
-              whole file
-            </button>
-          ) : (
-            <span className="ml-1 text-xs text-muted">whole file</span>
-          )}
-        </div>
-        {inverted && (
-          <p className="mt-1 text-xs text-bad">
-            first line is after the last — this region can never match
+          <p className="mt-1 text-xs text-muted">
+            {edits.rule_id
+              ? `Cites ${candidate.provenance.ref ?? 'this MR'} as evidence for ${edits.rule_id}.`
+              : 'Leave empty if this case tests the skill without justifying one rule.'}
           </p>
-        )}
-      </Field>
+        </Field>
 
-      <Field label="Severity floor">
-        <select
-          value={edits.severity_min ?? ''}
-          onChange={(e) =>
-            onChange({
-              ...edits,
-              // Severity is a closed IntEnum on the wire; keep the union rather than widening it.
-              severity_min: e.target.value ? (Number(e.target.value) as Severity) : null,
-            })
-          }
-          disabled={readOnly}
-          className="w-full rounded border border-line bg-canvas px-2 py-1"
-        >
-          <option value="">none</option>
-          {SEVERITIES.map((value) => (
-            <option key={value} value={value}>
-              {severityName(value)}
-            </option>
-          ))}
-        </select>
-      </Field>
+        <Field label="Region">
+          <p className="mb-1 font-mono text-xs break-all">{edits.path}</p>
+          {/* Typed entry as well as dragging: dragging is faster, but it is mouse-only and imprecise
+            at the edges of a hunk, and this is the field most likely to be wrong. */}
+          <div className="flex items-center gap-1.5">
+            <LineInput
+              value={edits.line_range?.[0] ?? null}
+              disabled={readOnly}
+              label="first line"
+              onChange={(v) => onChange({ ...edits, line_range: withLine(edits.line_range, 0, v) })}
+            />
+            <span className="text-muted">–</span>
+            <LineInput
+              value={edits.line_range?.[1] ?? null}
+              disabled={readOnly}
+              label="last line"
+              onChange={(v) => onChange({ ...edits, line_range: withLine(edits.line_range, 1, v) })}
+            />
+            {edits.line_range ? (
+              <button
+                type="button"
+                onClick={() => onChange({ ...edits, line_range: null })}
+                disabled={readOnly}
+                className="ml-1 text-xs text-muted hover:text-ink"
+              >
+                whole file
+              </button>
+            ) : (
+              <span className="ml-1 text-xs text-muted">whole file</span>
+            )}
+          </div>
+          {inverted && (
+            <p className="mt-1 text-xs text-bad">
+              first line is after the last — this region can never match
+            </p>
+          )}
+        </Field>
 
-      <div>
-        {/* What the builder generated, kept beside the field it seeded so "unedited" is checkable
+        <Field label="Severity floor">
+          <select
+            value={edits.severity_min ?? ''}
+            onChange={(e) =>
+              onChange({
+                ...edits,
+                // Severity is a closed IntEnum on the wire; keep the union rather than widening it.
+                severity_min: e.target.value ? (Number(e.target.value) as Severity) : null,
+              })
+            }
+            disabled={readOnly}
+            className="w-full rounded border border-line bg-canvas px-2 py-1"
+          >
+            <option value="">none</option>
+            {SEVERITIES.map((value) => (
+              <option key={value} value={value}>
+                {severityName(value)}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <div>
+          {/* What the builder generated, kept beside the field it seeded so "unedited" is checkable
             rather than asserted. For an escaped defect this is the tracker summary, which appears
             nowhere else on the screen. */}
-        <p className="mb-1 text-[11px] tracking-wide text-muted uppercase">As generated</p>
-        <blockquote className="max-h-24 overflow-y-auto rounded border border-line bg-surface px-2 py-1.5 text-xs break-words text-muted italic">
-          {rawComment || <span className="not-italic">(none)</span>}
-        </blockquote>
-      </div>
+          <p className="mb-1 text-[11px] tracking-wide text-muted uppercase">As generated</p>
+          <blockquote className="max-h-24 overflow-y-auto rounded border border-line bg-surface px-2 py-1.5 text-xs break-words text-muted italic">
+            {rawComment || <span className="not-italic">(none)</span>}
+          </blockquote>
+        </div>
 
-      <div>
-        <p className="mb-1 flex items-center gap-2 text-[11px] tracking-wide text-muted uppercase">
-          Semantic
-          {!rewritten && (
-            <Badge tone="warn" title="This is still the raw review comment — the judge scores findings against it">
-              unedited
-            </Badge>
+        <div>
+          <p className="mb-1 flex items-center gap-2 text-[11px] tracking-wide text-muted uppercase">
+            Semantic
+            {edits.semantic_drafted_by ? (
+              <Badge
+                tone="accent"
+                title={`Drafted by ${edits.semantic_drafted_by} from the evidence, not from the guidance. Read it before promoting.`}
+              >
+                drafted
+              </Badge>
+            ) : (
+              !rewritten && (
+                <Badge
+                  tone="warn"
+                  title="This is still the raw review comment — the judge scores findings against it"
+                >
+                  unedited
+                </Badge>
+              )
+            )}
+            <DraftButton
+              candidateId={candidate.id}
+              skillId={edits.skill_id}
+              disabled={readOnly}
+              onDrafted={(semantic, by) =>
+                onChange({ ...edits, semantic, semantic_drafted_by: by })
+              }
+            />
+          </p>
+          <textarea
+            value={edits.semantic}
+            onChange={(e) => onChange({ ...edits, semantic: e.target.value })}
+            disabled={readOnly}
+            rows={4}
+            className="w-full rounded border border-line bg-canvas px-2 py-1.5 text-sm"
+            placeholder="Describe the issue as the judge should understand it…"
+          />
+          {/* Said here, beside the field, rather than only as a rejection after the click. The
+            server refuses this case either way; being told why while you can still fix it is the
+            difference between a guard rail and a wall. */}
+          {mustRewrite && (
+            <p className="mt-1 text-xs text-warn">
+              This is the skill's own finding, word for word. A case asserting that the reviewer
+              says what it already said can never fail — rewrite it as a standalone description of
+              the problem.
+            </p>
           )}
-        </p>
-        <textarea
-          value={edits.semantic}
-          onChange={(e) => onChange({ ...edits, semantic: e.target.value })}
-          disabled={readOnly}
-          rows={4}
-          className="w-full rounded border border-line bg-canvas px-2 py-1.5 text-sm"
-          placeholder="Describe the issue as the judge should understand it…"
-        />
-      </div>
-
+          {!edits.semantic.trim() && (
+            <p className="mt-1 text-xs text-warn">
+              Required: this is the ground truth every finding is judged against.
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Pinned below the scrolling fields. Triage is a volume activity and the form is long
           enough to push the verdict off the bottom; having to scroll to say yes is how a queue
           stops getting worked. */}
       <div className="shrink-0 space-y-3 pt-3">
-      {error != null && <ErrorNote error={error} />}
-      {validated && !error && (
-        <p className="rounded border border-good/40 bg-good/5 px-2 py-1.5 text-xs text-good">
-          Valid — would commit {validated.case_id}
-        </p>
-      )}
+        {error != null && <ErrorNote error={error} />}
+        {validated && !error && (
+          <p className="rounded border border-good/40 bg-good/5 px-2 py-1.5 text-xs text-good">
+            Valid — would commit {validated.case_id}
+          </p>
+        )}
 
-      {rejecting ? (
-        <div className="space-y-2 rounded-lg border border-bad/40 p-3">
-          <label className="block text-xs text-muted">
-            Why is this not a good eval case? Rejections tune the builder's confidence.
-          </label>
-          <textarea
-            value={reason}
-            onChange={(e) => onReason(e.target.value)}
-            rows={2}
-            autoFocus
-            className="w-full rounded border border-line bg-canvas px-2 py-1.5 text-sm"
-          />
-          <div className="flex gap-2">
+        {rejecting ? (
+          <div className="space-y-2 rounded-lg border border-bad/40 p-3">
+            <label className="block text-xs text-muted">
+              Why is this not a good eval case? Rejections tune the builder's confidence.
+            </label>
+            <textarea
+              value={reason}
+              onChange={(e) => onReason(e.target.value)}
+              rows={2}
+              autoFocus
+              className="w-full rounded border border-line bg-canvas px-2 py-1.5 text-sm"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={onReject}
+                disabled={!reason.trim() || busy}
+                className="rounded border border-bad/50 px-3 py-1 text-bad hover:bg-bad/10 disabled:opacity-40"
+              >
+                Reject
+              </button>
+              <button type="button" onClick={onCancelReject} className="px-2 py-1 text-muted">
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={onReject}
-              disabled={!reason.trim() || busy}
-              className="rounded border border-bad/50 px-3 py-1 text-bad hover:bg-bad/10 disabled:opacity-40"
+              onClick={onPromote}
+              disabled={readOnly || busy}
+              className="rounded-lg border border-good/50 px-3 py-1.5 text-good transition-colors hover:bg-good/10 disabled:opacity-40"
+            >
+              Promote
+            </button>
+            <button
+              type="button"
+              onClick={onValidate}
+              disabled={readOnly || busy}
+              className="rounded-lg border border-line px-3 py-1.5 text-muted transition-colors hover:text-ink disabled:opacity-40"
+            >
+              Validate
+            </button>
+            <button
+              type="button"
+              onClick={onStartReject}
+              disabled={readOnly || busy}
+              className="rounded-lg border border-line px-3 py-1.5 text-muted transition-colors hover:text-bad disabled:opacity-40"
             >
               Reject
             </button>
-            <button type="button" onClick={onCancelReject} className="px-2 py-1 text-muted">
-              Cancel
-            </button>
           </div>
-        </div>
-      ) : (
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={onPromote}
-            disabled={readOnly || busy}
-            className="rounded-lg border border-good/50 px-3 py-1.5 text-good transition-colors hover:bg-good/10 disabled:opacity-40"
-          >
-            Promote
-          </button>
-          <button
-            type="button"
-            onClick={onValidate}
-            disabled={readOnly || busy}
-            className="rounded-lg border border-line px-3 py-1.5 text-muted transition-colors hover:text-ink disabled:opacity-40"
-          >
-            Validate
-          </button>
-          <button
-            type="button"
-            onClick={onStartReject}
-            disabled={readOnly || busy}
-            className="rounded-lg border border-line px-3 py-1.5 text-muted transition-colors hover:text-bad disabled:opacity-40"
-          >
-            Reject
-          </button>
-        </div>
-      )}
+        )}
       </div>
     </aside>
   )

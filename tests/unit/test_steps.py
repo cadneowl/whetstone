@@ -139,9 +139,24 @@ def test_scaffold_writes_steps_that_load(tmp_path: Path) -> None:
     (tmp_path / "SKILL.md").write_text("---\nid: x\n---\n\nRules.\n", encoding="utf-8")
     write_scaffold(tmp_path)
     found = load_steps(tmp_path, skill_id="x")
-    assert sorted(found) == ["evaluate", "improve", "update"]
+    assert sorted(found) == ["evaluate", "improve", "triage", "update"]
     assert found["improve"].prompt is not None
     assert found["update"].run[0] == "openwiki"
+    assert found["triage"].prompt is not None
+
+
+def test_the_scaffolded_triage_prompt_never_asks_for_the_guidance(tmp_path: Path) -> None:
+    """The property the drafting step rests on, asserted where someone might edit it away.
+
+    A drafter shown `SKILL.md` writes the expectation in the rules' own vocabulary; the reviewer
+    then produces findings in that vocabulary and the judge matches two paraphrases of one
+    sentence. The corpus would score 1.00 and measure nothing.
+    """
+    write_scaffold(tmp_path)
+    spec = load_steps(tmp_path, skill_id="x")["triage"]
+    assert spec.prompt is not None
+    assert "{{guidance}}" not in spec.prompt
+    assert "not been shown the skill's guidance" in spec.prompt
 
 
 def test_scaffold_does_not_clobber_an_edited_prompt(tmp_path: Path) -> None:

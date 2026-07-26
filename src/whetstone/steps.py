@@ -41,8 +41,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from whetstone.wiki import WikiEntry, WikiLimits
 
-StepKind = Literal["evaluate", "improve", "update"]
-STEP_KINDS: tuple[StepKind, ...] = ("evaluate", "improve", "update")
+StepKind = Literal["evaluate", "improve", "update", "triage"]
+STEP_KINDS: tuple[StepKind, ...] = ("evaluate", "improve", "update", "triage")
 STEP_FILE = "step.yaml"
 
 # Annotated so the default factory below carries the Literal type rather than plain `str`.
@@ -88,9 +88,23 @@ class FailureInputs(BaseModel):
     )
 
 
+class DraftInputs(BaseModel):
+    """How much evidence a triage step may see when drafting an expectation.
+
+    Lives here with the other caps rather than in `drafting.py`, because the rule is the same one:
+    the host bounds the inputs and the step declares its appetite. A step that could reach past
+    these would be a step that could blow the context on one unusually chatty merge request.
+    """
+
+    max_comments: int = Field(default=6, ge=1, le=50)
+    max_comment_chars: int = Field(default=1_200, ge=100, le=20_000)
+    max_diff_bytes: int = Field(default=2_000, ge=0, le=100_000)
+
+
 class StepInputs(BaseModel):
     failures: FailureInputs = FailureInputs()
     wiki: WikiLimits = WikiLimits()
+    draft: DraftInputs = DraftInputs()
 
 
 class SamplePolicy(BaseModel):
@@ -247,6 +261,11 @@ def _validate(spec: StepSpec, path: Path) -> None:
         raise StepError(
             f"{path}: an improve step needs a 'prompt' file or a 'run' command — "
             f"there is nothing here that could produce a guidance change"
+        )
+    if spec.kind == "triage" and spec.prompt is None and not spec.run:
+        raise StepError(
+            f"{path}: a triage step needs a 'prompt' file or a 'run' command — there is nothing "
+            f"here that could turn a review comment into an expectation"
         )
     if spec.kind == "update" and not spec.run:
         raise StepError(
