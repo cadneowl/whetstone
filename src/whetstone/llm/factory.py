@@ -19,8 +19,12 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from whetstone.llm.base import LLMClient
+
+if TYPE_CHECKING:
+    from whetstone.steps import StepSpec
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,34 @@ class Backend:
     @property
     def label(self) -> str:
         return self.preset.label
+
+@dataclass(frozen=True)
+class ModelSelection:
+    """The backend the console is currently set to use, layered over each step's own default.
+
+    Seeded from `[llm]` in `whetstone.toml` and changeable at runtime from the console. It is not a
+    replacement for a step's `model:` block but a layer above it: a non-empty field here wins over
+    the step (and over the environment), while an empty field defers to the step, then the
+    environment, then the preset default — exactly the resolution that existed before this. So the
+    empty selection every existing deployment starts with changes nothing.
+    """
+
+    provider: str = ""
+    model: str = ""
+    base_url: str = ""
+
+    def layer(self, spec: StepSpec | None) -> tuple[str | None, str | None, str | None]:
+        """Fold this selection over a step's model block, as `(provider, model, base_url)`.
+
+        The selection wins field by field; the step fills whatever the selection leaves blank. Empty
+        strings become `None`, which is what `resolve_backend`/`build_llm_client` read as "inherit".
+        """
+        step = spec.model if spec else None
+        provider = self.provider or (step.llm if step else None)
+        model = self.model or (step.model if step else None)
+        base_url = self.base_url or (step.base_url if step else None)
+        return provider or None, model or None, base_url or None
+
 
 # Aliases resolve to the generic custom slot — so `--llm openai-compatible` / `--llm pi` etc. work.
 _CUSTOM_ALIASES = {"custom", "openai-compatible", "openai_compatible", "compatible"}

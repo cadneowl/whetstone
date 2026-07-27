@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useConsoleConfig, useGitStatus } from '@/api/client'
 import { ErrorBoundary } from './ErrorBoundary'
+import { ModelPicker } from './ModelPicker'
 import { Badge } from './primitives'
 
 /**
@@ -51,6 +52,7 @@ export function AppShell() {
           </nav>
 
           <div className="ml-auto flex items-center gap-2 text-xs text-muted">
+            {config && <ModelPicker readOnly={config.read_only} />}
             {config?.read_only && (
               <Badge tone="warn" title="Mutating routes are disabled server-side">
                 read-only

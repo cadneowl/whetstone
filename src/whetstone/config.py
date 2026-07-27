@@ -87,6 +87,30 @@ class ReviewsConfig(BaseModel):
     dir: Path = Path(".whetstone/reviews")
 
 
+class LLMConfig(BaseModel):
+    """The default backend for everything the console runs against a model — the live review, an
+    eval, a gate, and the improve and triage drafters.
+
+    Empty is the default and means "resolve the way the CLI does": the `WHETSTONE_LLM*` environment,
+    then the built-in Anthropic model. Setting `provider`/`model` here pins a default that does not
+    depend on which shell the server started in — and it is what the console shows as the current
+    model and lets an operator change while it runs. A change made in the console lasts for the
+    server's lifetime; this block is the default it starts from.
+
+    Precedence: a value set here (or chosen in the console) wins over both a skill step's own
+    `model:` block and the `WHETSTONE_LLM*` environment — it is the deployment's explicit default.
+    Leave it empty to defer to the step and the environment, which is the pre-existing behaviour.
+
+    `base_url` exists for a deployment whose default is a custom OpenAI-compatible gateway. It is
+    deliberately not changeable from the browser: the console lets an operator pick among known
+    providers, whose hosts are fixed, but never redirect model traffic to an arbitrary URL.
+    """
+
+    provider: str = ""
+    model: str = ""
+    base_url: str = ""
+
+
 class WatchConfig(BaseModel):
     """Polling merge requests on a schedule, so signal arrives without anyone going to look.
 
@@ -118,6 +142,7 @@ class Config(BaseModel):
     runs: RunsConfig = RunsConfig()
     gate: GateDefaults = GateDefaults()
     reviews: ReviewsConfig = ReviewsConfig()
+    llm: LLMConfig = LLMConfig()
     watch: WatchConfig = WatchConfig()
     # Directory the config was loaded from; relative paths resolve against it. None when defaulted.
     source_dir: Path | None = Field(default=None, exclude=True)

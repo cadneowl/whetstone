@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from whetstone.config import Config, load_config
 from whetstone.gates import GateStore
 from whetstone.jobs import JobStore
+from whetstone.llm.factory import ModelSelection
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.ui.errors import NotFound, install_handlers
@@ -71,6 +72,14 @@ def create_app(
     app.state.reviews = reviews or ReviewStore(resolved.reviews_dir)
     # One runner per server. In memory by design: see `jobs.py`.
     app.state.jobs = JobStore()
+    # The model everything the console launches resolves to. Seeded from `[llm]`, changeable at
+    # runtime through `/api/config/model`. In memory like the job runner: a restart returns to the
+    # file's default, which is the one place the choice is durable.
+    app.state.model_selection = ModelSelection(
+        provider=resolved.llm.provider,
+        model=resolved.llm.model,
+        base_url=resolved.llm.base_url,
+    )
     # Sweeps merge requests on an interval when [watch] enables it; inert otherwise.
     app.state.watcher = Watcher(resolved)
     app.state.watcher.start()

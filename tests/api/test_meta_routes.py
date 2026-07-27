@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from whetstone.config import Config, SkillsConfig, UIConfig
+from whetstone.config import Config, LLMConfig, SkillsConfig, UIConfig
 from whetstone.runs import RunStore
 from whetstone.ui.app import create_app
 
@@ -48,6 +48,78 @@ def test_trusted_proxy_without_headers_is_anonymous(config: Config, store: RunSt
     with TestClient(create_app(config, store=store)) as client:
         body = client.get("/api/config").json()
     assert body["principal"]["mode"] == "anonymous"
+
+
+def test_model_defaults_to_anthropic_with_no_override(client: TestClient) -> None:
+    body = client.get("/api/config/model").json()
+    # No `[llm]` set: the override is empty and resolution falls to the built-in default.
+    assert body["provider"] == ""
+    assert body["resolved_backend"] == "anthropic"
+    assert body["resolved_model"]  # the DEFAULT_MODEL
+    assert body["billing"] == "billed"
+    assert any(b["name"] == "ollama" for b in body["available"])
+
+
+def test_config_seeds_the_model_override(
+    config: Config, store: RunStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WHETSTONE_LLM_MODEL", "should-be-overridden")
+    config.llm = LLMConfig(provider="anthropic", model="claude-from-config")
+    with TestClient(create_app(config, store=store)) as client:
+        body = client.get("/api/config/model").json()
+    # The file's `[llm]` wins over the environment — it is the deployment's explicit default.
+    assert body["provider"] == "anthropic"
+    assert body["resolved_model"] == "claude-from-config"
+
+
+def test_setting_the_model_changes_what_a_run_resolves_to(client: TestClient) -> None:
+    put = client.put("/api/config/model", json={"provider": "anthropic", "model": "claude-picked"})
+    assert put.status_code == 200
+    assert put.json()["resolved_model"] == "claude-picked"
+
+    # It sticks for the next reader…
+    assert client.get("/api/config/model").json()["resolved_model"] == "claude-picked"
+    # …and every launch the console plans now quotes it, which is the whole point.
+    plan = client.post("/api/jobs/review/plan", json={"skill_id": "rust-errors"}).json()
+    assert plan["model"] == "claude-picked"
+
+
+def test_clearing_the_provider_returns_to_the_default(client: TestClient) -> None:
+    client.put("/api/config/model", json={"provider": "anthropic", "model": "claude-picked"})
+    body = client.put("/api/config/model", json={"provider": "", "model": ""}).json()
+    assert body["provider"] == ""
+    assert body["resolved_backend"] == "anthropic"
+    assert body["resolved_model"] != "claude-picked"
+
+
+def test_unknown_provider_is_refused(client: TestClient) -> None:
+    response = client.put("/api/config/model", json={"provider": "gpt5-local", "model": "m"})
+    assert response.status_code == 422
+    assert "unknown provider" in response.json()["message"]
+
+
+def test_provider_needing_a_model_without_one_is_refused(client: TestClient) -> None:
+    # `openai` has no default model, so choosing it with an empty model must fail at the click.
+    response = client.put("/api/config/model", json={"provider": "openai", "model": ""})
+    assert response.status_code == 422
+    assert "needs a model" in response.json()["message"]
+
+
+def test_base_url_is_never_taken_from_the_browser(client: TestClient) -> None:
+    # `custom` needs a base URL, and one cannot be supplied over the wire — so it is refused rather
+    # than silently letting the browser point model traffic somewhere.
+    response = client.put("/api/config/model", json={"provider": "custom", "model": "m"})
+    assert response.status_code == 422
+    assert "unknown provider" in response.json()["message"] or "base URL" in response.json()[
+        "message"
+    ]
+
+
+def test_setting_the_model_is_blocked_read_only(config: Config, store: RunStore) -> None:
+    config.ui.read_only = True
+    with TestClient(create_app(config, store=store)) as client:
+        response = client.put("/api/config/model", json={"provider": "anthropic", "model": "x"})
+    assert response.status_code == 403
 
 
 def test_git_status_reports_the_repo(client: TestClient) -> None:

@@ -12,6 +12,8 @@ export type RunRecord = Schemas['RunRecord']
 export type RunListItem = Schemas['RunListItem']
 export type RunSummary = Schemas['RunSummary']
 export type ConsoleConfig = Schemas['ConsoleConfig']
+export type BackendInfo = Schemas['BackendInfo']
+export type ModelChoice = Schemas['ModelChoice']
 export type GitState = Schemas['GitState']
 export type TrialRecord = Schemas['TrialRecord']
 export type CaseRun = Schemas['CaseRun']
@@ -121,6 +123,7 @@ async function get<T>(path: string): Promise<T> {
 
 export const keys = {
   config: ['config'] as const,
+  model: ['model'] as const,
   git: ['git'] as const,
   skills: ['skills'] as const,
   skill: (id: string) => ['skill', id] as const,
@@ -147,6 +150,27 @@ export function useConsoleConfig() {
 
 export function useGitStatus() {
   return useQuery({ queryKey: keys.git, queryFn: () => get<GitState>('/api/git/status') })
+}
+
+/** The model everything the console launches resolves to right now — reviews, runs, gates, drafts. */
+export function useModelChoice() {
+  return useQuery({ queryKey: keys.model, queryFn: () => get<ModelChoice>('/api/config/model') })
+}
+
+/**
+ * Change that model for the server's lifetime. The provider must be one the backend knows; an
+ * empty provider clears the override back to the configured default. Plans quote the resolved
+ * backend, so every launch banner is invalidated on success.
+ */
+export function useSetModel() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { provider: string; model: string }) =>
+      send<ModelChoice>('PUT', '/api/config/model', body),
+    onSuccess: (choice) => {
+      client.setQueryData(keys.model, choice)
+    },
+  })
 }
 
 export function useSkills() {
