@@ -40,7 +40,7 @@ from whetstone.domain.skill import Skill
 from whetstone.gitio import GitError, pending_batch
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
-from whetstone.llm.factory import Backend, build_llm_client, resolve_backend
+from whetstone.llm.factory import Backend, ModelSelection, build_llm_client, resolve_backend
 from whetstone.llm.transcript import RecordingClient, Transcript, transcript_path
 from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval
 from whetstone.providers.base import ConnectorError
@@ -52,6 +52,7 @@ from whetstone.ui.deps import (
     GatesDep,
     JobsDep,
     ReviewsDep,
+    SelectionDep,
     SkillsRootDep,
     StoreDep,
     Writable,
@@ -153,25 +154,32 @@ def cancel_job(job_id: str, jobs: JobsDep) -> Job:
 
 
 @router.post("/eval/plan", response_model=Plan)
-def plan_eval_job(request: EvalRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
+def plan_eval_job(
+    request: EvalRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
     skill, _ = _skill_to_score(config, root, request)
-    return _eval_plan(config, skill, request)
+    return _eval_plan(config, selection, skill, request)
 
 
 @router.post("/eval", response_model=Job, dependencies=[Writable])
 def launch_eval(
-    request: EvalRequest, config: ConfigDep, root: SkillsRootDep, store: StoreDep, jobs: JobsDep
+    request: EvalRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    store: StoreDep,
+    jobs: JobsDep,
+    selection: SelectionDep,
 ) -> Job:
     """Score a skill against its eval cases, in the background."""
     skill, ref = _skill_to_score(config, root, request)
-    plan = _eval_plan(config, skill, request)
+    plan = _eval_plan(config, selection, skill, request)
     # The evaluate step always comes from the working tree: it is how the operator's machine runs a
     # model, not part of the guidance under test, and taking it from a branch would let a staged
     # change quietly alter the harness measuring it.
     spec = _step(root, skill, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)
     policy = _sample(spec, request.sample)
-    backend = _backend(config, spec)
+    backend = _backend(selection, spec)
 
     def work(handle: JobHandle) -> dict[str, Any]:
         total = len(sample_cases(skill.eval_cases, policy).cases)
@@ -208,6 +216,7 @@ def launch_eval(
                 _client(
                     config,
                     spec,
+                    selection,
                     label=f"eval-{skill.id}",
                     on_retry=lambda note: handle.log(LogLine(text=f"retry: {note}")),
                 ),
@@ -240,9 +249,13 @@ def launch_eval(
 
 
 @router.post("/gate/plan", response_model=Plan)
-def plan_gate_job(request: GateRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
+def plan_gate_job(
+    request: GateRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
     _, candidate = _gate_sides(config, request.skill_id)
-    plan = _eval_plan(config, candidate, EvalRequest(**request.model_dump(exclude={"targeted"})))
+    plan = _eval_plan(
+        config, selection, candidate, EvalRequest(**request.model_dump(exclude={"targeted"}))
+    )
     plan.action = "gate"
     if plan.estimate:
         plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * 2})
@@ -252,14 +265,19 @@ def plan_gate_job(request: GateRequest, config: ConfigDep, root: SkillsRootDep) 
 
 @router.post("/gate", response_model=Job, dependencies=[Writable])
 def launch_gate(
-    request: GateRequest, config: ConfigDep, root: SkillsRootDep, gates: GatesDep, jobs: JobsDep
+    request: GateRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    gates: GatesDep,
+    jobs: JobsDep,
+    selection: SelectionDep,
 ) -> Job:
     """Gate the skill's staged branch against the base — the evidence C6 requires to publish."""
     base, candidate = _gate_sides(config, request.skill_id)
-    plan = plan_gate_job(request, config, root)
+    plan = plan_gate_job(request, config, root, selection)
     spec = _step(root, candidate, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)
-    backend = _backend(config, spec)
+    backend = _backend(selection, spec)
     cfg = GateConfig(
         recall_tol=config.gate.recall_tol,
         fp_tol=config.gate.fp_tol,
@@ -295,7 +313,7 @@ def launch_gate(
             record = record_gate(
                 base,
                 candidate,
-                _client(config, spec, label=f"gate-{candidate.id}"),
+                _client(config, spec, selection, label=f"gate-{candidate.id}"),
                 cfg=cfg,
                 trials=trials,
                 base_ref=config.git.default_base,
@@ -329,7 +347,11 @@ def launch_gate(
 
 @router.post("/improve/plan", response_model=Plan)
 def plan_improve_job(
-    request: ImproveRequest, config: ConfigDep, root: SkillsRootDep, store: StoreDep
+    request: ImproveRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    store: StoreDep,
+    selection: SelectionDep,
 ) -> Plan:
     skill = _skill_being_edited(config, root, request.skill_id)
     spec = _require_step(root, skill, "improve")
@@ -343,7 +365,7 @@ def plan_improve_job(
         )
     plan = plan_calls(
         "improve",
-        _backend(config, spec),
+        _backend(selection, spec),
         calls=1,
         basis="one call: the guidance rewrite",
         details=[f"digest: up to {spec.inputs.failures.max} clustered failure(s)"],
@@ -392,11 +414,12 @@ def launch_improve(
     root: SkillsRootDep,
     store: StoreDep,
     jobs: JobsDep,
+    selection: SelectionDep,
 ) -> Job:
     """Draft a guidance change from a run's failures. Stages nothing — the console does that."""
     skill = _skill_being_edited(config, root, request.skill_id)
     spec = _require_step(root, skill, "improve")
-    plan = plan_improve_job(request, config, root, store)
+    plan = plan_improve_job(request, config, root, store, selection)
     record = _run_for(store, skill, request)
 
     def work(handle: JobHandle) -> dict[str, Any]:
@@ -407,7 +430,7 @@ def launch_improve(
             skill,
             record,
             client=(
-                _client(config, spec, label=f"improve-{skill.id}")
+                _client(config, spec, selection, label=f"improve-{skill.id}")
                 if spec.calls_a_model
                 else None
             ),
@@ -479,11 +502,13 @@ def stage_proposal(
 
 
 @router.post("/review/plan", response_model=Plan)
-def plan_review_job(request: ReviewRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
+def plan_review_job(
+    request: ReviewRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
     skill = _skill(root, request.skill_id)
     plan = plan_calls(
         "review",
-        _backend(config, _step(root, skill, "evaluate")),
+        _backend(selection, _step(root, skill, "evaluate")),
         calls=1,
         basis="one call: the reviewer over this change. No judge — there is nothing to judge yet",
         details=["the findings are stored unruled; you decide which are right"],
@@ -500,6 +525,7 @@ def launch_review(
     root: SkillsRootDep,
     reviews: ReviewsDep,
     jobs: JobsDep,
+    selection: SelectionDep,
 ) -> Job:
     """Review a live change and store what the skill said, for a human to rule on.
 
@@ -508,8 +534,8 @@ def launch_review(
     """
     skill = _skill(root, request.skill_id)
     spec = _step(root, skill, "evaluate")
-    backend = _backend(config, spec)
-    plan = plan_review_job(request, config, root)
+    backend = _backend(selection, spec)
+    plan = plan_review_job(request, config, root, selection)
     change, source, ref, url, title = _review_change(config, request)
 
     def work(handle: JobHandle) -> dict[str, Any]:
@@ -518,7 +544,7 @@ def launch_review(
         record = record_review(
             skill,
             change,
-            _client(config, spec, label=f"review-{skill.id}"),
+            _client(config, spec, selection, label=f"review-{skill.id}"),
             source=source,
             ref=ref,
             url=url,
@@ -921,15 +947,12 @@ def _sample(spec: StepSpec | None, override: int | None) -> Any:
     return resolved if resolved.max_cases is not None else None
 
 
-def _backend(config: Config, spec: StepSpec | None) -> Backend:
-    # Backend selection is env + step, never per-request: the browser cannot choose a model.
-    del config
+def _backend(selection: ModelSelection, spec: StepSpec | None) -> Backend:
+    # The console's live model choice layered over the step's own default — not a raw per-request
+    # value: the browser picks a provider whose host is fixed, never a base URL of its own.
+    provider, model, base_url = selection.layer(spec)
     try:
-        return resolve_backend(
-            spec.model.llm if spec else None,
-            model=spec.model.model if spec else None,
-            base_url=spec.model.base_url if spec else None,
-        )
+        return resolve_backend(provider, model=model, base_url=base_url)
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
 
@@ -937,16 +960,15 @@ def _backend(config: Config, spec: StepSpec | None) -> Backend:
 def _client(
     config: Config,
     spec: StepSpec | None,
+    selection: ModelSelection,
     *,
     label: str = "job",
     on_retry: Callable[[str], None] | None = None,
 ) -> Any:
+    provider, model, base_url = selection.layer(spec)
     try:
         client = build_llm_client(
-            spec.model.llm if spec else None,
-            model=spec.model.model if spec else None,
-            base_url=spec.model.base_url if spec else None,
-            on_retry=on_retry,
+            provider, model=model, base_url=base_url, on_retry=on_retry
         )
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
@@ -959,14 +981,16 @@ def _client(
     )
 
 
-def _eval_plan(config: Config, skill: Skill, request: EvalRequest) -> Plan:
+def _eval_plan(
+    config: Config, selection: ModelSelection, skill: Skill, request: EvalRequest
+) -> Plan:
     spec = _step(config.skills_root, skill, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)
     policy = _sample(spec, request.sample)
     scored = len(sample_cases(skill.eval_cases, policy).cases)
     plan = plan_eval(
         skill,
-        _backend(config, spec),
+        _backend(selection, spec),
         trials=trials,
         cases=scored,
         wiki_limits=spec.inputs.wiki if spec else None,

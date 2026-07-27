@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from whetstone.llm.factory import build_llm_client
+from whetstone.llm.factory import ModelSelection, build_llm_client
 from whetstone.llm.openai_client import OpenAICompatibleClient
+from whetstone.steps import ModelOverride, StepSpec
+
+
+def _spec(**model: str | None) -> StepSpec:
+    return StepSpec(
+        kind="evaluate", skill_id="s", directory="s/evaluate", model=ModelOverride(**model)
+    )
 
 
 def test_ollama_preset_builds_openai_client_with_default_endpoint() -> None:
@@ -85,6 +92,47 @@ def test_openai_compatible_requires_a_model(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("WHETSTONE_LLM_MODEL", raising=False)
     with pytest.raises(ValueError, match="needs a model"):
         build_llm_client("ollama")
+
+
+# --- ModelSelection.layer ------------------------------------------------------
+
+
+def test_empty_selection_defers_entirely_to_the_step() -> None:
+    # The default every existing deployment starts with: the step (then env, then default) decides.
+    spec = _spec(llm="ollama", model="qwen2.5-coder:7b", base_url="http://pi:11434/v1")
+    assert ModelSelection().layer(spec) == ("ollama", "qwen2.5-coder:7b", "http://pi:11434/v1")
+
+
+def test_empty_selection_and_no_step_is_all_none() -> None:
+    assert ModelSelection().layer(None) == (None, None, None)
+
+
+def test_selection_wins_over_the_step_field_by_field() -> None:
+    spec = _spec(llm="ollama", model="qwen2.5-coder:7b")
+    # Provider and model chosen in the console override the step's pin.
+    assert ModelSelection(provider="anthropic", model="claude-x").layer(spec) == (
+        "anthropic",
+        "claude-x",
+        None,
+    )
+
+
+def test_selection_fills_only_the_fields_it_sets() -> None:
+    # A selection that names only a model keeps the step's provider and base_url.
+    spec = _spec(llm="ollama", base_url="http://pi:11434/v1")
+    assert ModelSelection(model="qwen2.5-coder:14b").layer(spec) == (
+        "ollama",
+        "qwen2.5-coder:14b",
+        "http://pi:11434/v1",
+    )
+
+
+def test_selection_applies_with_no_step_at_all() -> None:
+    assert ModelSelection(provider="anthropic", model="claude-x").layer(None) == (
+        "anthropic",
+        "claude-x",
+        None,
+    )
 
 
 def test_default_provider_is_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:

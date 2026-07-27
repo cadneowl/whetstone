@@ -194,6 +194,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/config/model": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Model
+         * @description What the console is currently set to send every review, run, gate and drafter to.
+         */
+        get: operations["get_model_api_config_model_get"];
+        /**
+         * Set Model
+         * @description Change the model used for everything the console launches, for this server's lifetime.
+         *
+         *     The provider must be one Whetstone knows (a preset), so the browser can only redirect model
+         *     traffic among hosts the deployment already configured — never to an arbitrary URL. The chosen
+         *     selection is resolved here, before it is stored, so an unusable combination (a provider that
+         *     needs a model and was given none) is refused at the click rather than at the next run.
+         */
+        put: operations["set_model_api_config_model_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/git/propose": {
         parameters: {
             query?: never;
@@ -1966,6 +1995,55 @@ export interface components {
             skill_id: string;
         };
         /**
+         * ModelChoice
+         * @description The backend the console is set to use, and what that resolves to right now.
+         *
+         *     `provider`/`model` are the override the operator has set — empty means "defer to the
+         *     environment and the built-in default". The `resolved_*` fields are what any run launched now
+         *     would actually use, so the console can show the effective model without re-deriving it. A
+         *     skill's own step may still pin something different; the per-launch plan is the exact word.
+         *
+         *     `note` carries the resolution error when a selection cannot be turned into a usable backend
+         *     (a custom provider seeded in config with no base URL, say), so the UI can explain it rather
+         *     than showing a blank.
+         */
+        ModelChoice: {
+            /** Available */
+            available: components["schemas"]["BackendInfo"][];
+            /** Base Url */
+            base_url?: string | null;
+            /**
+             * Billing
+             * @default unknown
+             * @enum {string}
+             */
+            billing: "billed" | "local" | "unknown";
+            /** Model */
+            model: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /** Provider */
+            provider: string;
+            /**
+             * Resolved Backend
+             * @default
+             */
+            resolved_backend: string;
+            /**
+             * Resolved Label
+             * @default
+             */
+            resolved_label: string;
+            /**
+             * Resolved Model
+             * @default
+             */
+            resolved_model: string;
+        };
+        /**
          * NextAction
          * @description What to do about this skill, and the evidence for saying so.
          */
@@ -2834,6 +2912,24 @@ export interface components {
             semantic: string;
         };
         /**
+         * SetModelRequest
+         * @description A provider to use, and optionally a model id on it. Empty provider clears the override back
+         *     to the configured/environment default. `base_url` is intentionally absent: the console chooses
+         *     among providers whose hosts are fixed, never a URL of its own.
+         */
+        SetModelRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+        };
+        /**
          * Severity
          * @description Ordered so `>=` comparisons express a minimum-severity threshold.
          * @enum {integer}
@@ -3663,6 +3759,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConsoleConfig"];
+                };
+            };
+        };
+    };
+    get_model_api_config_model_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelChoice"];
+                };
+            };
+        };
+    };
+    set_model_api_config_model_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetModelRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelChoice"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

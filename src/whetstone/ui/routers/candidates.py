@@ -26,7 +26,7 @@ from whetstone.gitio import (
     write_and_commit,
 )
 from whetstone.llm.base import LLMClient
-from whetstone.llm.factory import Backend, build_llm_client, resolve_backend
+from whetstone.llm.factory import Backend, ModelSelection, build_llm_client, resolve_backend
 from whetstone.preflight import Plan, plan_calls
 from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
 from whetstone.steps import StepError, StepSpec, load_step
@@ -34,6 +34,7 @@ from whetstone.ui.deps import (
     ConfigDep,
     Principal,
     PrincipalDep,
+    SelectionDep,
     Writable,
     relative_skills_root,
 )
@@ -149,9 +150,11 @@ class DraftResponse(BaseModel):
 
 
 @router.post("/{candidate_id}/draft/plan", response_model=Plan)
-def plan_draft(candidate_id: str, request: DraftRequest, config: ConfigDep) -> Plan:
+def plan_draft(
+    candidate_id: str, request: DraftRequest, config: ConfigDep, selection: SelectionDep
+) -> Plan:
     _load(config, candidate_id)
-    _, backend = _draft_step(config, candidate_id, request)
+    _, backend = _draft_step(config, selection, candidate_id, request)
     return plan_calls(
         "triage draft",
         backend,
@@ -166,7 +169,7 @@ def plan_draft(candidate_id: str, request: DraftRequest, config: ConfigDep) -> P
 
 @router.post("/{candidate_id}/draft", response_model=DraftResponse, dependencies=[Writable])
 def draft_expectation(
-    candidate_id: str, request: DraftRequest, config: ConfigDep
+    candidate_id: str, request: DraftRequest, config: ConfigDep, selection: SelectionDep
 ) -> DraftResponse:
     """Draft this candidate's `semantic` from the evidence. Writes nothing.
 
@@ -175,12 +178,12 @@ def draft_expectation(
     nothing will ever fail on account of it.
     """
     entry = _load(config, candidate_id)
-    spec, backend = _draft_step(config, candidate_id, request)
+    spec, backend = _draft_step(config, selection, candidate_id, request)
     try:
         draft = drafting.draft_semantic(
             spec,
             entry,
-            client=_draft_client(spec) if spec.calls_a_model else None,
+            client=_draft_client(spec, selection) if spec.calls_a_model else None,
             effort=spec.model.effort or "medium",
         )
     except StepError as exc:
@@ -189,7 +192,7 @@ def draft_expectation(
 
 
 def _draft_step(
-    config: Config, candidate_id: str, request: DraftRequest
+    config: Config, selection: ModelSelection, candidate_id: str, request: DraftRequest
 ) -> tuple[StepSpec, Backend]:
     entry = _load(config, candidate_id)
     skill_id = request.skill_id or entry.candidate.suggested_skill or ""
@@ -207,19 +210,18 @@ def _draft_step(
             f"{skill_id} has no triage/ step. Run `whetstone skills scaffold --skill "
             f"{skill_id}` to write a starter one, then edit its prompt."
         )
+    provider, model, base_url = selection.layer(spec)
     try:
-        backend = resolve_backend(spec.model.llm, model=spec.model.model,
-                                  base_url=spec.model.base_url)
+        backend = resolve_backend(provider, model=model, base_url=base_url)
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
     return spec, backend
 
 
-def _draft_client(spec: StepSpec) -> LLMClient:
+def _draft_client(spec: StepSpec, selection: ModelSelection) -> LLMClient:
+    provider, model, base_url = selection.layer(spec)
     try:
-        return build_llm_client(
-            spec.model.llm, model=spec.model.model, base_url=spec.model.base_url
-        )
+        return build_llm_client(provider, model=model, base_url=base_url)
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
 
