@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel
@@ -152,9 +153,66 @@ def _system_prompt(skill: Skill, context: Retrieved) -> str:
     return "\n\n".join(parts)
 
 
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def number_diff(diff: str) -> str:
+    """A unified diff with each line's new-file line number in a left gutter.
+
+    Every finding is anchored to a line, and an expectation covers an exact range — so a finding
+    reported two lines off is scored as a miss even when it names the right defect. Handing over a
+    bare diff makes that failure routine: the only way to answer "which line in the new file" is to
+    add up hunk offsets while reading, and models get it wrong (measured 0/5 on a four-line hunk;
+    5/5 with this gutter). It is a number we already know, so we state it rather than asking for
+    arithmetic and grading the result.
+
+    Deleted lines get a blank gutter and do not advance the counter: they have no line in the new
+    file, which is exactly what a finding may not be anchored to. Text outside any hunk — the
+    `diff --git` and `---`/`+++` headers, which begin with the same characters as removals — passes
+    through untouched, so the diff still reads as a diff.
+    """
+    out: list[str] = []
+    width = max((len(str(n)) for n in _new_line_numbers(diff)), default=1)
+    blank = " " * width
+    line_no: int | None = None
+    for line in diff.splitlines():
+        hunk = _HUNK.match(line)
+        if hunk:
+            line_no = int(hunk.group(1))
+            out.append(f"{blank} | {line}")
+            continue
+        if line_no is None or line.startswith(("diff --git", "--- ", "+++ ", "index ", "\\")):
+            out.append(f"{blank} | {line}")
+            continue
+        if line.startswith("-"):
+            out.append(f"{blank} | {line}")
+            continue
+        out.append(f"{line_no:>{width}} | {line}")
+        line_no += 1
+    return "\n".join(out)
+
+
+def _new_line_numbers(diff: str) -> list[int]:
+    """Every new-file line number the gutter will hold, for sizing it."""
+    numbers: list[int] = []
+    line_no: int | None = None
+    for line in diff.splitlines():
+        hunk = _HUNK.match(line)
+        if hunk:
+            line_no = int(hunk.group(1))
+            continue
+        if line_no is None or line.startswith(("diff --git", "--- ", "+++ ", "index ", "\\", "-")):
+            continue
+        numbers.append(line_no)
+        line_no += 1
+    return numbers
+
+
 def _user_prompt(change: CodeChange) -> str:
     return (
-        "Review this change and report findings per the guidance. Line numbers refer to the new "
-        "file.\n\n"
-        f"{change.to_unified_diff()}"
+        "Review this change and report findings per the guidance.\n\n"
+        "Each line below is prefixed with its line number in the NEW file, then ` | `. Report that "
+        "number verbatim — do not count lines yourself. Lines with a blank number were deleted and "
+        "cannot be the subject of a finding.\n\n"
+        f"{number_diff(change.to_unified_diff())}"
     )

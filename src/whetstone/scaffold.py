@@ -120,9 +120,16 @@ failure, largest group first.
 
 {{failures}}
 
-## Current guidance
+## Current guidance — SKILL.md
 
 {{guidance}}
+
+## Current guidance — companion pages
+
+These are part of the same guidance and reach the reviewer verbatim, under the paths shown. If a
+rule you need to change lives here, change it here.
+
+{{pages}}
 
 ## Repo context
 
@@ -142,9 +149,11 @@ Rewrite the guidance so those failures would not recur.
 - A miss usually means a rule is too abstract to recognise the pattern in a diff. Say what the code
   looks like.
 - Write rules that a reader can apply to a diff without access to the rest of the repository.
+- Fix a rule in the file that holds it. Restating a page's rule in `SKILL.md` leaves two copies to
+  disagree with each other, and the reviewer is sent both.
 
-Return the complete new guidance body, the rationale for the change, and the ids of the eval cases
-this change is meant to fix.
+Return the complete new `SKILL.md` body, the complete new text of any companion page you changed
+keyed by its path, the rationale for the change, and the ids of the eval cases it is meant to fix.
 
 `{{instruction}}` above is whatever was passed to `--instruction` on this run, and is empty on a
 plain run. Move it wherever you want it read; delete it and a passed instruction is appended at the

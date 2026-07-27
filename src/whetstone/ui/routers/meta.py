@@ -121,19 +121,28 @@ def propose(request: ProposeRequest, config: ConfigDep, gates: GatesDep) -> Prop
             f"no git remote configured, so {request.branch!r} cannot be pushed; "
             "the branch exists locally and can be pushed by hand"
         )
-    push(
+    offered = push(
         config.skills_repo,
         request.branch,
         remote=remote,
         prefix=config.git.branch_prefix,
         protected=config.git.protected_branches,
     )
+    # The forge answers a push of a new branch with the address of its own "open a merge request"
+    # page. Nothing here has to know GitLab from GitHub to hand it over, and saying "open it in your
+    # git host" while holding that link was sending people to go and find a page we already had.
     return ProposeResponse(
         branch=request.branch,
         remote=remote,
         pushed=True,
+        merge_request_url=offered or None,
         message=(
-            f"pushed {request.branch} to {remote}. Open the merge request in your git host — "
-            "automatic creation needs a provider implementing WriteConnector."
+            f"pushed {request.branch} to {remote}. Open the merge request to finish publishing."
+            if offered
+            else (
+                f"pushed {request.branch} to {remote}, and the remote offered no link for opening "
+                "a merge request — open one from the branch in your git host. Whetstone does not "
+                "create it: that needs a provider implementing WriteConnector, and none ships yet."
+            )
         ),
     )

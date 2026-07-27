@@ -51,7 +51,7 @@ def stub_pull(monkeypatch: pytest.MonkeyPatch) -> list[datetime]:
         asked.append(since)
         return [_candidate(f"case-{len(asked)}")]
 
-    monkeypatch.setattr("whetstone.watch.pull_corpus", fake_pull)
+    monkeypatch.setattr("whetstone.watch.stream_corpus", fake_pull)
     monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
     monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
     return asked
@@ -101,7 +101,7 @@ def test_a_failed_sweep_does_not_advance_the_watermark(
         asked.append(since)
         raise ConnectorError("gitlab said 401")
 
-    monkeypatch.setattr("whetstone.watch.pull_corpus", boom)
+    monkeypatch.setattr("whetstone.watch.stream_corpus", boom)
     monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
     monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
 
@@ -120,7 +120,7 @@ def test_a_failed_sweep_is_state_not_an_exception(
     def explode(*a: object, **k: object):
         raise RuntimeError("something nobody anticipated")
 
-    monkeypatch.setattr("whetstone.watch.pull_corpus", explode)
+    monkeypatch.setattr("whetstone.watch.stream_corpus", explode)
     monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
     monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
 
@@ -141,7 +141,7 @@ def test_re_finding_the_same_candidate_does_not_double_count(
 ) -> None:
     """Overlapping windows are normal; the second sighting is already-queued, not new."""
     monkeypatch.setattr(
-        "whetstone.watch.pull_corpus", lambda *a, **k: [_candidate("same-case")]
+        "whetstone.watch.stream_corpus", lambda *a, **k: [_candidate("same-case")]
     )
     monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
     monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)

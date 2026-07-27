@@ -31,11 +31,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, Field, computed_field
 
 from whetstone.core.loader import SkillLoadError, load_skill
 from whetstone.domain.run import skill_hash
-from whetstone.domain.skill import Skill
+from whetstone.domain.skill import GuidancePage, Skill
 from whetstone.naming import describe_unsafe, is_safe_segment
 
 SKILL_FILE = "SKILL.md"
@@ -51,6 +51,10 @@ class SkillEdit(BaseModel):
     """
 
     body: str
+    # Rewritten companion pages, keyed by their path within the skill folder. A skill is a folder
+    # and `SKILL.md` is its entry point, so for many skills the rules being edited are not in `body`
+    # at all. Omitted paths are untouched; only pages the skill already has may be written.
+    pages: dict[str, str] = Field(default_factory=dict)
     name: str | None = None
     description: str | None = None
 
@@ -127,14 +131,54 @@ def prepare_guidance(
             "owner": loaded.owner or base.owner,
         }
     )
+    pages = _edited_pages(base, edit)
+    if pages:
+        staged = staged.model_copy(
+            update={
+                "pages": [
+                    GuidancePage(path=p.path, text=pages.get(p.path, p.text)) for p in base.pages
+                ]
+            }
+        )
+    files = {f"{skills_root}/{base.id}/{SKILL_FILE}": text}
+    files.update({f"{skills_root}/{base.id}/{path}": text for path, text in pages.items()})
     return PreparedSkill(
         skill_id=base.id,
-        files={f"{skills_root}/{base.id}/{SKILL_FILE}": text},
+        files=files,
         skill=staged,
         skill_hash=skill_hash(staged),
         previous_hash=skill_hash(base),
         version=version,
     )
+
+
+def _edited_pages(base: Skill, edit: SkillEdit) -> dict[str, str]:
+    """Companion pages this edit rewrites, validated against the skill it edits.
+
+    Only paths the skill already carries, and only where the text actually differs. Restricting to
+    known pages is what makes this safe without a second path validator: every accepted path came
+    from the loader walking this skill's own folder, so none of them can escape it, name a reserved
+    directory, or create a file nothing references. Writing a *new* page is a real thing to want and
+    a larger change — it needs somewhere in `SKILL.md` to reference it, or the reviewer never reads
+    it — so it is deliberately not smuggled in here.
+    """
+    known = {page.path: page.text for page in base.pages}
+    unknown = sorted(path for path in edit.pages if path not in known)
+    if unknown:
+        raise SkillLoadError(
+            f"{base.id} has no guidance page(s) {', '.join(unknown)}. An edit may rewrite the "
+            f"pages a skill already has ({', '.join(sorted(known)) or 'none'}), not add one."
+        )
+    edited = {
+        path: text for path, text in edit.pages.items() if text.strip() != known[path].strip()
+    }
+    empty = sorted(path for path, text in edited.items() if not text.strip())
+    if empty:
+        raise SkillLoadError(
+            f"guidance page(s) {', '.join(empty)} would be emptied. A page the reviewer is sent "
+            f"must say something — delete the file in a merge request of its own instead."
+        )
+    return edited
 
 
 def prepare_meta(base: Skill, meta_yaml: str, *, skills_root: str) -> PreparedSkill:

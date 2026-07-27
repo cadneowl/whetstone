@@ -348,3 +348,55 @@ def test_a_staged_wiki_changes_the_hash_the_gate_must_cover(workspace: Path) -> 
     staged = staging.skill_at(config, f"whetstone/skill/{SKILL_ID}", SKILL_ID)
     assert staged is not None
     assert skill_hash(staged[0]) != before
+
+
+# --- a skill that is a folder ---------------------------------------------------
+
+
+def test_apply_stages_a_rewritten_companion_page(workspace: Path, monkeypatch) -> None:
+    """`--apply` carried only the body, so a proposal that fixed a rule in `patterns/*.md` staged a
+    version bump and nothing else — reporting success while dropping the whole change."""
+    page = _skill(workspace) / "patterns" / "panics.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("- **R7** the rule as it stands.\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(workspace), "add", "."], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-m", "split the rules"],
+        check=True, capture_output=True,
+    )
+
+    fixed = "- **R7** the rule, sharpened by the improve step.\n"
+
+    def rewrites_the_page(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        if schema is GuidanceProposal:
+            return GuidanceProposal(body=load_skill(_skill(workspace)).body,
+                                    pages={"patterns/panics.md": fixed})
+        return _handler(system, user, schema)
+
+    monkeypatch.setattr(cli, "_client", lambda *a, **k: FakeLLMClient(rewrites_the_page))
+    _run_eval(workspace)
+    result = _improve(workspace, "--apply")
+    assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
+
+    staged = _at(workspace, f"whetstone/skill/{SKILL_ID}", f"skills/{SKILL_ID}/patterns/panics.md")
+    assert "sharpened by the improve step" in staged
+
+
+def test_a_page_rewrite_is_named_when_it_is_not_applied(workspace: Path, monkeypatch) -> None:
+    """Without this the printed body is unchanged, which reads as "the step proposed nothing"."""
+    page = _skill(workspace) / "patterns" / "panics.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("- **R7** the rule as it stands.\n", encoding="utf-8")
+
+    def rewrites_the_page(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        if schema is GuidanceProposal:
+            return GuidanceProposal(body=load_skill(_skill(workspace)).body,
+                                    pages={"patterns/panics.md": "- **R7** sharpened.\n"})
+        return _handler(system, user, schema)
+
+    monkeypatch.setattr(cli, "_client", lambda *a, **k: FakeLLMClient(rewrites_the_page))
+    _run_eval(workspace)
+    result = _improve(workspace)
+
+    assert "patterns/panics.md" in result.output  # type: ignore[attr-defined]
+    assert "only --apply writes these" in result.output  # type: ignore[attr-defined]

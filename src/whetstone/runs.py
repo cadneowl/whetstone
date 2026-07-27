@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS runs (
     skill_id      TEXT NOT NULL,
     skill_version INTEGER NOT NULL,
     skill_hash    TEXT NOT NULL,
+    guidance_hash TEXT NOT NULL DEFAULT '',
     backend       TEXT NOT NULL,
     model         TEXT NOT NULL,
     k             INTEGER NOT NULL,
@@ -62,6 +63,19 @@ CREATE TABLE IF NOT EXISTS case_runs (
 CREATE INDEX IF NOT EXISTS case_runs_by_case ON case_runs (skill_id, case_id, created_at DESC);
 """
 
+# Bump whenever the tables above change shape.
+#
+# Emptying the derived tables is only half of it: `list()` decides whether to rebuild by comparing
+# `indexed_files` to the number of record files, so leaving that counter behind says the now-empty
+# index is current and nothing ever refills it. The console showed every run vanish. So the counter
+# goes with the tables, and the next read repopulates from the files, which are the truth.
+_SCHEMA_VERSION = 2
+_DROP = (
+    "DROP TABLE IF EXISTS runs;"
+    "DROP TABLE IF EXISTS case_runs;"
+    "DELETE FROM meta WHERE key = 'indexed_files';"
+)
+
 
 class CaseOutcome(BaseModel):
     """How one eval case fared in one run — the case-history row."""
@@ -83,6 +97,7 @@ class RunSummary(BaseModel):
     skill_id: str
     skill_version: int
     skill_hash: str
+    guidance_hash: str = ""
     backend: str = ""
     model: str = ""
     k: int = 1
@@ -226,7 +241,18 @@ class RunStore:
         conn.row_factory = sqlite3.Row
         try:
             with closing(conn):
+                # `CREATE TABLE IF NOT EXISTS` leaves an existing table at its old shape, so a new
+                # column would meet an index built by an older version and fail every write. The
+                # index is derived from the record files and disposable by design, so a version
+                # change discards it rather than migrating: the next call rebuilds from the files.
+                #
+                # Created before the version is read, so `meta` exists to be read from and to be
+                # deleted from — on a fresh database both steps would otherwise hit missing tables.
                 conn.executescript(_SCHEMA)
+                if _schema_version(conn) != _SCHEMA_VERSION:
+                    conn.executescript(_DROP)
+                    conn.executescript(_SCHEMA)
+                    _set_schema_version(conn)
                 yield conn
                 conn.commit()
         except sqlite3.DatabaseError:
@@ -252,9 +278,10 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
     score = record.score
     conn.execute(
         """
-        INSERT INTO runs (id, created_at, skill_id, skill_version, skill_hash, backend, model,
+        INSERT INTO runs (id, created_at, skill_id, skill_version, skill_hash, guidance_hash,
+                          backend, model,
                           k, practice_mode, recall, fp_rate, precision, f2, duration_s, llm_calls)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at
         """,
         (
@@ -263,6 +290,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
             record.skill_id,
             record.skill_version,
             record.skill_hash,
+            record.guidance_hash,
             record.backend,
             record.model,
             record.k,
@@ -319,4 +347,18 @@ def _set_indexed_file_count(conn: sqlite3.Connection, count: int) -> None:
 
 def _indexed_file_count(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT value FROM meta WHERE key = 'indexed_files'").fetchone()
+    return int(row["value"]) if row is not None else -1
+
+
+def _set_schema_version(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(_SCHEMA_VERSION),),
+    )
+
+
+def _schema_version(conn: sqlite3.Connection) -> int:
+    """The version the index on disk was built at, or -1 for one written before versioning."""
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     return int(row["value"]) if row is not None else -1

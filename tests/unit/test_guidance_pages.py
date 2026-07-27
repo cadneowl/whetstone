@@ -222,3 +222,46 @@ def test_the_scan_does_not_walk_the_corpus(tmp_path: Path) -> None:
     with unittest.mock.patch.object(Path, "read_text", spy):
         load_skill(d)
     assert not any(n == "notes.md" for n in walked), "the corpus was read while scanning for pages"
+
+
+# --- what the console believes a paged skill declares ------------------------------
+
+
+def test_rules_declared_in_a_page_are_counted_as_the_skill_s_rules(tmp_path: Path) -> None:
+    """`SKILL.md` is routinely a table of contents whose rules live in `patterns/*.md`.
+
+    Reading only the body made such a skill declare no rules at all, which quietly emptied
+    everything keyed on this — above all the untested-guidance check, whose whole job is to name
+    rules nothing has exercised. A check that reports "nothing untested" because it can see no
+    rules is worse than one that is absent.
+    """
+    from whetstone.service import rule_ids
+
+    d = _skill(
+        tmp_path,
+        patterns__rust="- **R3** no unwrap.\n",
+        patterns__async="- **R4** no lock.\n",
+    )
+
+    assert rule_ids(load_skill(d)) == ["R3", "R4"]
+
+
+def test_a_rule_in_a_page_can_be_reported_untested(tmp_path: Path) -> None:
+    """The consequence that makes the above worth fixing rather than merely tidy."""
+    from datetime import UTC, datetime
+
+    from whetstone.domain.run import RunRecord
+    from whetstone.domain.score import SkillScore
+    from whetstone.service import untested_rules
+
+    skill = load_skill(_skill(tmp_path, patterns__rust="- **R3** no unwrap.\n"))
+    record = RunRecord(
+        id="r1",
+        created_at=datetime(2026, 7, 27, tzinfo=UTC),
+        skill_id=skill.id,
+        skill_version=1,
+        skill_hash="h",
+        score=SkillScore(skill_id=skill.id, version=1, k=1, cases=[]),
+    )
+
+    assert untested_rules(skill, record) == ["R3"]

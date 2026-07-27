@@ -102,6 +102,66 @@ def source(config: Config, skill_id: str) -> tuple[Skill, str]:
     return load_skill(directory), (directory / SKILL_FILE).read_text(encoding="utf-8")
 
 
+def with_promoted_cases(config: Config, skill: Skill) -> Skill:
+    """A skill carrying the eval cases waiting on the triage batch as well as its own.
+
+    The single definition of "what is under test" for a skill mid-loop, used by the gate and by the
+    C6 check that reads the gate's verdict. They must agree by construction: they key on
+    `skill_hash`, so a gate that scored one case set and a publish check that hashed another can
+    never match, and *Propose* stays disabled forever with a passing gate on screen.
+
+    It exists because promoted cases live on `whetstone/cases/batch-N` while a guidance draft lives
+    on `whetstone/skill/<id>`, and neither branch has the other's work. Gating the skill branch
+    alone therefore compared two guidance versions over zero of the cases just curated — a
+    comparison that cost two model calls per case, of which there were none, and proved nothing.
+
+    Best-effort: no git, no batch, or a batch that does not carry this skill all mean "nothing to
+    add". Enriching is an improvement to the evidence, never a precondition for having any.
+    """
+    from whetstone.gitio import pending_batch
+
+    try:
+        batch = pending_batch(
+            config.skills_repo,
+            base=config.git.default_base,
+            prefix=config.git.branch_prefix,
+            remote=config.git.push_remote,
+        )
+        if not batch.exists or batch.commits == 0:
+            return skill
+        promoted = skill_at(config, batch.branch, skill.id)
+    except (StagingError, NoSuchSkill, GitError, OSError):
+        return skill
+    if promoted is None:
+        return skill
+
+    return merge_cases(skill, promoted[0])
+
+
+def merge_cases(skill: Skill, promoted: Skill) -> Skill:
+    """`skill` with the promoted skill's eval cases folded in — the guidance from one, cases from
+    both.
+
+    Pure, and shared by everything that scores a batch: the console's eval, the gate, and the C6
+    check that reads the gate's verdict all have their own reasons to fail when a batch is missing,
+    but none of them may disagree about what "with the promoted cases" *means*. Two copies of this
+    merge is exactly how a run and the gate come to score different content while reporting the
+    same name for it.
+    """
+    # By id, the batch winning: it is cut from the base, so it already carries every merged case,
+    # and where both sides have one the batch's is the newer text.
+    cases = {case.id: case for case in skill.eval_cases}
+    cases.update({case.id: case for case in promoted.eval_cases})
+    merged = sorted(cases.values(), key=lambda c: c.id)
+    # Compared by content, not by count. A batch that *rewrites* a case it already had leaves the
+    # count untouched, so a length check reads that as "nothing new" and quietly scores the old
+    # text. `skill_hash` sorts cases itself, so returning the skill unchanged here is about avoiding
+    # a pointless copy — not about hash stability, which holds either way.
+    if merged == sorted(skill.eval_cases, key=lambda c: c.id):
+        return skill
+    return skill.model_copy(update={"eval_cases": merged})
+
+
 def base_version(config: Config, skill_id: str) -> int | None:
     """The version on the branch this change is proposed *against*.
 

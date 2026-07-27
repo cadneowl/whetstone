@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
@@ -62,6 +62,63 @@ DEFAULT_MAX_DEFECT_FILES = 3
 SkipHandler = Callable[[MergeRequestRef, ConnectorError], None]
 
 
+class WalkProgress(NamedTuple):
+    """Where a corpus walk has got to, reported after each item is fetched.
+
+    A backfill over a company's real history is hundreds of merge requests, each one a network
+    round-trip for its diff and its discussion. Without this the operator watches a silent terminal
+    for many minutes with no way to tell a slow crawl from a hung one.
+    """
+
+    done: int
+    total: int
+    ref: str
+    found: int
+
+
+ProgressHandler = Callable[[WalkProgress], None]
+
+
+def iter_candidates(
+    connector: ReviewConnector,
+    repo: RepoRef,
+    since: datetime,
+    skills: list[Skill] | None = None,
+    *,
+    max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
+    on_skip: SkipHandler | None = None,
+    on_progress: ProgressHandler | None = None,
+) -> Iterator[CandidateCase]:
+    """Walk a repo's reviewed changes since `since`, yielding candidates as each one is built.
+
+    A generator, and that is the point. Accumulating the whole walk before returning meant nothing
+    reached the triage queue until the last merge request had been fetched — on a real project, an
+    empty console for many minutes, indistinguishable from a misconfiguration. Worse, a crawl
+    interrupted at minute nine wrote nothing at all: every round-trip already paid for was thrown
+    away, and the next attempt started from the beginning.
+
+    Newest first, because the walk may be stopped at any point and what survives should be the
+    review history most likely to still describe how the team works.
+
+    The listing itself is materialised rather than streamed. It costs one cheap request per hundred
+    merge requests and no diffs, and having the total is what makes progress a fraction rather than
+    a rising number with no end in sight.
+    """
+    merge_requests = connector.list_reviewed_changes(repo, since)
+    total = len(merge_requests)
+    for done, mr in enumerate(merge_requests, start=1):
+        reviewed = _review_or_skip(connector, mr, on_skip)
+        found = (
+            build_candidates(reviewed, skills, max_clean_files=max_clean_files)
+            if reviewed is not None
+            else []
+        )
+        if on_progress is not None:
+            ref = f"{mr.repo.path}!{mr.iid}"
+            on_progress(WalkProgress(done=done, total=total, ref=ref, found=len(found)))
+        yield from found
+
+
 def pull_candidates(
     connector: ReviewConnector,
     repo: RepoRef,
@@ -71,14 +128,16 @@ def pull_candidates(
     max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
     on_skip: SkipHandler | None = None,
 ) -> list[CandidateCase]:
-    """Walk a repo's reviewed changes since `since`, emitting candidate eval cases to review."""
-    candidates: list[CandidateCase] = []
-    for mr in connector.list_reviewed_changes(repo, since):
-        reviewed = _review_or_skip(connector, mr, on_skip)
-        if reviewed is None:
-            continue
-        candidates.extend(build_candidates(reviewed, skills, max_clean_files=max_clean_files))
-    return candidates
+    """Walk a repo's reviewed changes since `since`, emitting candidate eval cases to review.
+
+    The whole walk, collected. `iter_candidates` is the primitive; this exists for callers that
+    genuinely need the list — the watcher counts what it found before deciding whether to notify.
+    """
+    return list(
+        iter_candidates(
+            connector, repo, since, skills, max_clean_files=max_clean_files, on_skip=on_skip
+        )
+    )
 
 
 def _review_or_skip(
@@ -482,7 +541,7 @@ def _ruling_reason(*, correct: bool, explained: bool, note: str) -> str:
 # --- escaped defects ----------------------------------------------------------
 
 
-def pull_defect_candidates(
+def iter_defect_candidates(
     reviews: ReviewConnector,
     issues: IssueConnector,
     repo: RepoRef,
@@ -492,25 +551,34 @@ def pull_defect_candidates(
     *,
     max_files: int = DEFAULT_MAX_DEFECT_FILES,
     on_skip: SkipHandler | None = None,
-) -> list[CandidateCase]:
+    on_progress: ProgressHandler | None = None,
+) -> Iterator[CandidateCase]:
     """Pair resolved tracker defects with the merge requests that fixed them, and build cases.
 
     The merge requests are listed once and matched in memory: a backfill over a year of history is
     a few hundred MRs against a few hundred issues, and doing it the other way round would be a
     tracker round-trip per merge request.
+
+    Yielded as they are built, for the same reason as `iter_candidates`: this is the slower of the
+    two walks — a tracker round-trip per issue on top of the forge — and it used to run entirely
+    after the review walk had finished, so its results appeared last or, on an interrupted run,
+    never.
     """
     merge_requests = reviews.list_reviewed_changes(repo, since)
-    candidates: list[CandidateCase] = []
-    for ref in issues.list_resolved_issues(project, since):
+    resolved = issues.list_resolved_issues(project, since)
+    total = len(resolved)
+    for done, ref in enumerate(resolved, start=1):
         issue = issues.get_issue(ref)
-        if not issue.is_defect:
-            continue
-        for mr in fixes_for(issue, merge_requests):
-            fix = _review_or_skip(reviews, mr, on_skip)
-            if fix is None:
-                continue
-            candidates.extend(defect_candidates(issue, fix, skills, max_files=max_files))
-    return candidates
+        found: list[CandidateCase] = []
+        if issue.is_defect:
+            for mr in fixes_for(issue, merge_requests):
+                fix = _review_or_skip(reviews, mr, on_skip)
+                if fix is None:
+                    continue
+                found.extend(defect_candidates(issue, fix, skills, max_files=max_files))
+        if on_progress is not None:
+            on_progress(WalkProgress(done=done, total=total, ref=str(ref), found=len(found)))
+        yield from found
 
 
 def defect_candidates(
@@ -678,3 +746,23 @@ def candidate_to_case_dict(candidate: CandidateCase) -> dict[str, Any]:
         "provenance": prov,
         "expect": expectations,
     }
+
+
+def pull_defect_candidates(
+    reviews: ReviewConnector,
+    issues: IssueConnector,
+    repo: RepoRef,
+    project: str,
+    since: datetime,
+    skills: list[Skill] | None = None,
+    *,
+    max_files: int = DEFAULT_MAX_DEFECT_FILES,
+    on_skip: SkipHandler | None = None,
+) -> list[CandidateCase]:
+    """The whole defect walk, collected. `iter_defect_candidates` is the primitive."""
+    return list(
+        iter_defect_candidates(
+            reviews, issues, repo, project, since, skills,
+            max_files=max_files, on_skip=on_skip,
+        )
+    )

@@ -7,6 +7,7 @@ export type SkillSummary = Schemas['SkillSummary']
 export type SkillDetail = Schemas['SkillDetail']
 export type CaseDetail = Schemas['CaseDetail']
 export type CaseSummary = Schemas['CaseSummary']
+export type PendingCase = Schemas['PendingCase']
 export type RunRecord = Schemas['RunRecord']
 export type RunListItem = Schemas['RunListItem']
 export type RunSummary = Schemas['RunSummary']
@@ -29,7 +30,7 @@ export type ReviewDetail = Schemas['ReviewDetail']
 export type FindingVerdict = Schemas['FindingVerdict']
 export type PreparedCase = Schemas['PreparedCase']
 export type PromoteResponse = Schemas['PromoteResponse']
-export type Batch = Schemas['Batch']
+export type Batch = Schemas['BatchView']
 export type EvalKind = CaseEdits['kind']
 export type SkillEdit = Schemas['SkillEdit']
 export type PreparedSkill = Schemas['PreparedSkill']
@@ -48,14 +49,15 @@ export type ActionKind = NextAction['kind']
 export type Signal = Schemas['Signal']
 export type WatchState = Schemas['WatchState']
 export type Sweep = Schemas['Sweep']
+export type ProposeResponse = Schemas['ProposeResponse']
 export type DraftResponse = Schemas['DraftResponse']
 /** The union of every job kind's request body. Each route validates its own shape server-side. */
 export type JobRequest = {
   skill_id: string
   trials?: number | null
   sample?: number | null
-  /** eval only: score the staged draft rather than the working tree. */
-  staged?: boolean
+  /** eval only: what to score — the working tree, the guidance draft, or the promoted case batch. */
+  scope?: 'working' | 'draft' | 'batch'
   targeted?: string[]
   instruction?: string
   stale_ok?: boolean
@@ -266,7 +268,9 @@ export function usePropose() {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (branch: string) =>
-      send<{ branch: string; message: string }>('POST', '/api/git/propose', { branch }),
+      // The generated type, not a hand-written subset: `merge_request_url` existed on the wire
+      // for months while this inline shape hid it from every caller.
+      send<ProposeResponse>('POST', '/api/git/propose', { branch }),
     onSuccess: () => {
       invalidateTriage(client)
       // A guidance branch can be pushed from here too, and its proposal state changes.
@@ -471,15 +475,9 @@ export function useCancelJob() {
   })
 }
 
-/** Commit a drafted guidance body to the skill's branch — the same branch the editor writes to. */
-export function useStageProposal(skillId: string) {
-  const client = useQueryClient()
-  return useMutation({
-    mutationFn: (body: string) =>
-      send<Record<string, string>>('POST', '/api/jobs/improve/stage', { skill_id: skillId, body }),
-    onSuccess: () => invalidateSkill(client, skillId),
-  })
-}
+// No `useStageProposal` here on purpose. A drafted change lands in the editor and is staged by
+// `useSaveGuidance` like any hand edit — one write path, so a machine-written rule cannot skip a
+// step a human-written one has to pass. `POST /api/jobs/improve/stage` still exists for scripts.
 
 // --- the inbox ----------------------------------------------------------------
 

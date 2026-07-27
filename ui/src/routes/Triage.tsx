@@ -15,6 +15,7 @@ import {
   type QueueItem,
 } from '@/api/client'
 import { DiffView, type Overlay, type Selection } from '@/components/diff/DiffView'
+import { LaunchButton } from '@/components/LaunchButton'
 import { DiscussionPane } from '@/components/DiscussionPane'
 import { Badge, Empty, ErrorNote, Intro, Loading, severityName } from '@/components/primitives'
 import { SIGNALS, SignalBadge, signalMeta } from '@/components/signals'
@@ -37,14 +38,18 @@ const TRIAGE_INTRO = (
   <>
     Signal mined from merge requests, waiting to become eval cases. For each one: check the evidence
     in the middle, fix the fields on the right — <em>rewrite the semantic</em>, it arrives as the
-    raw review comment — then Promote. Promoted cases land on a batch branch you propose as one MR.
-    Reject anything the miner guessed wrong.
+    raw review comment — then Promote. Promoted cases land on a batch branch: score the skill
+    against them to see what it misses before you propose them as one MR. Reject anything the miner
+    guessed wrong.
   </>
 )
 
 export function Triage() {
   const { data: queue, isLoading, error } = useQueue()
   const { data: batch } = useBatch()
+  // A batch can hold cases for more than one skill. Offer the score button only when it is
+  // unambiguous; with several, the Skills page is the place to pick one.
+  const skillOnBatch = batch?.skills?.length === 1 ? batch.skills[0] : null
   const { data: config } = useConsoleConfig()
   const { data: skills } = useSkills()
 
@@ -52,7 +57,8 @@ export function Triage() {
   const [edits, setEdits] = useState<CaseEdits | null>(null)
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
-  const [notice, setNotice] = useState<string | null>(null)
+  // Text, plus an optional link the forge offered — only a push has one.
+  const [notice, setNotice] = useState<{ text: string; url?: string | null } | null>(null)
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set())
 
   const all = useMemo(() => queue?.items ?? [], [queue])
@@ -106,9 +112,9 @@ export function Triage() {
       { id: current.entry.candidate.id, edits },
       {
         onSuccess: (result) => {
-          setNotice(
-            `${result.prepared.case_id} → ${result.branch} (${result.batch_commits} queued)`,
-          )
+          setNotice({
+            text: `${result.prepared.case_id} → ${result.branch} (${result.batch_commits} queued)`,
+          })
           setIndex((i) => Math.min(i, Math.max(0, items.length - 2)))
         },
       },
@@ -121,7 +127,7 @@ export function Triage() {
       { id: current.entry.candidate.id, reason },
       {
         onSuccess: () => {
-          setNotice(`rejected ${current.entry.candidate.id}`)
+          setNotice({ text: `rejected ${current.entry.candidate.id}` })
           setRejecting(false)
           setReason('')
         },
@@ -173,12 +179,24 @@ export function Triage() {
           {batch && (
             <span className="ml-auto flex items-center gap-3 text-sm">
               <span className="font-mono text-xs text-muted">{batch.branch}</span>
+              {/* Promoting writes cases to this branch and never to the working tree, so until
+                  this existed the cases just curated were invisible to every way of running the
+                  skill — the only route to "does the reviewer catch these?" was to merge the merge
+                  request and find out afterwards. Which is backwards: testing against a case is
+                  the reason to promote it. */}
+              {batch.commits > 0 && skillOnBatch && (
+                <LaunchButton
+                  kind="eval"
+                  request={{ skill_id: skillOnBatch, scope: 'batch' }}
+                  label="Score these cases"
+                />
+              )}
               {batch.commits > 0 && (
                 <button
                   type="button"
                   onClick={() =>
                     propose.mutate(batch.branch, {
-                      onSuccess: (r) => setNotice(r.message),
+                      onSuccess: (r) => setNotice({ text: r.message, url: r.merge_request_url }),
                     })
                   }
                   disabled={config?.read_only || propose.isPending}
@@ -197,7 +215,23 @@ export function Triage() {
 
       {notice && (
         <p className="mb-3 rounded-lg border border-good/40 bg-good/5 px-3 py-2 text-sm">
-          {notice}
+          {notice.text}
+          {/* The forge hands back the address of its own "open a merge request" page when a new
+              branch is pushed. Offering it here is the difference between finishing the job and
+              being told to go and find the page yourself. */}
+          {notice.url && (
+            <>
+              {' '}
+              <a
+                href={notice.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent underline"
+              >
+                Open the merge request →
+              </a>
+            </>
+          )}
         </p>
       )}
       {propose.error && <ErrorNote error={propose.error} />}

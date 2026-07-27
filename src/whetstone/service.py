@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,8 +20,11 @@ from whetstone.core.harness import EventSink, run_skill_recorded
 from whetstone.corpus.builder import (
     DEFAULT_MAX_CLEAN_FILES,
     DEFAULT_MAX_DEFECT_FILES,
+    ProgressHandler,
     SkipHandler,
     candidate_from_finding,
+    iter_candidates,
+    iter_defect_candidates,
     pull_candidates,
     pull_defect_candidates,
     write_candidate,
@@ -36,7 +40,7 @@ from whetstone.domain.eval_model import (
     Provenance,
 )
 from whetstone.domain.refs import RepoRef
-from whetstone.domain.run import RunRecord, skill_hash
+from whetstone.domain.run import RunRecord, guidance_hash, skill_hash
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord, new_gate_id
@@ -134,6 +138,7 @@ def record_eval(
         skill_id=skill.id,
         skill_version=skill.version,
         skill_hash=skill_hash(skill),
+        guidance_hash=guidance_hash(skill),
         backend=backend,
         model=model,
         reviewer_effort=reviewer_effort,
@@ -418,6 +423,44 @@ def pull_corpus(
     )
 
 
+def stream_corpus(
+    connector: ReviewConnector,
+    project: str,
+    since: datetime,
+    skills: list[Skill] | None = None,
+    *,
+    max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
+    on_skip: SkipHandler | None = None,
+    on_progress: ProgressHandler | None = None,
+) -> Iterator[CandidateCase]:
+    """`pull_corpus`, yielded as it goes, so a caller can write each candidate immediately."""
+    repo = RepoRef.parse(f"gitlab:{project}")
+    return iter_candidates(
+        connector, repo, since, skills,
+        max_clean_files=max_clean_files, on_skip=on_skip, on_progress=on_progress,
+    )
+
+
+def stream_defects(
+    reviews: ReviewConnector,
+    issues: IssueConnector,
+    project: str,
+    tracker_project: str,
+    since: datetime,
+    skills: list[Skill] | None = None,
+    *,
+    max_files: int = DEFAULT_MAX_DEFECT_FILES,
+    on_skip: SkipHandler | None = None,
+    on_progress: ProgressHandler | None = None,
+) -> Iterator[CandidateCase]:
+    """`pull_defects`, yielded as it goes."""
+    repo = RepoRef.parse(f"gitlab:{project}")
+    return iter_defect_candidates(
+        reviews, issues, repo, tracker_project, since, skills,
+        max_files=max_files, on_skip=on_skip, on_progress=on_progress,
+    )
+
+
 def pull_defects(
     reviews: ReviewConnector,
     issues: IssueConnector,
@@ -456,6 +499,26 @@ class CaseSummary(BaseModel):
     last_recall: float | None = None
     last_fp_rate: float | None = None
     flaky: bool = False
+
+
+class PendingCase(BaseModel):
+    """An eval case promoted from triage, still on its batch branch.
+
+    Carries outcomes like `CaseSummary` does. It did not at first, on the reasoning that nothing had
+    ever been scored against a case that is not on disk — true until the console grew a button to
+    score the batch, which is the whole point of promoting cases before merging them. Leaving the
+    fields off then meant the one screen showing these cases could not show what the run had just
+    said about them, which is the only reason to look.
+
+    `None` still means genuinely unscored, and is the state a freshly promoted case starts in.
+    """
+
+    id: str
+    kind: EvalKind
+    path: str = ""
+    branch: str = ""
+    last_recall: float | None = None
+    last_fp_rate: float | None = None
 
 
 class SkillSummary(BaseModel):
@@ -498,6 +561,12 @@ class SkillDetail(BaseModel):
     # against the working tree while the textarea above it holds a staged branch, so a red MISSED
     # can sit directly under a change that already fixed it.
     scored_by: RunSummary | None = None
+    # Cases promoted from triage and sitting on the batch branch, not yet merged. Listed apart from
+    # `cases` because they are not on disk and nothing has scored them — but listed at all because
+    # they were invisible everywhere: an operator spent an afternoon curating cases, then opened the
+    # skill that is supposed to be constrained by them and saw only the three that were already
+    # there, with nothing on the screen admitting the others existed.
+    pending_cases: list[PendingCase] = []
 
 
 class CaseDetail(BaseModel):
@@ -513,9 +582,15 @@ _RULE_RE = re.compile(r"\*\*\s*([A-Z][A-Z0-9]*\d)\b")
 
 
 def rule_ids(skill: Skill) -> list[str]:
-    """Rule identifiers a skill declares, from its guidance body and its meta.yaml provenance."""
-    found = set(_RULE_RE.findall(skill.body)) | set(skill.provenance)
-    return sorted(found)
+    """Rule identifiers a skill declares — across its whole guidance folder, plus meta.yaml.
+
+    The pages count because a skill is a folder: `SKILL.md` is routinely a table of contents whose
+    rules live in `patterns/*.md`, and those reach the reviewer verbatim. Reading only the body made
+    such a skill declare *no rules at all*, which quietly disabled everything keyed on this — most
+    of all the untested-guidance check, whose entire job is to name rules nothing has exercised.
+    """
+    in_pages = {rule for page in skill.pages for rule in _RULE_RE.findall(page.text)}
+    return sorted(set(_RULE_RE.findall(skill.body)) | in_pages | set(skill.provenance))
 
 
 def precision_evidence(skill: Skill) -> dict[str, int]:
