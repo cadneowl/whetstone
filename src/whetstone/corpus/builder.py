@@ -11,12 +11,14 @@ import yaml
 from whetstone.corpus.linking import fixes_for
 from whetstone.corpus.model import CandidateCase, Discussion, DiscussionComment
 from whetstone.domain.change import CodeChange, FileChange, replace_added_lines
+from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import (
     SIGNAL_APPLIED,
     SIGNAL_CLEAN,
     SIGNAL_DECLINED,
     SIGNAL_ESCAPED_DEFECT,
     SIGNAL_FINDING_CONFIRMED,
+    SIGNAL_FINDING_MISSED,
     SIGNAL_FINDING_REJECTED,
     SIGNAL_OPEN,
     SIGNAL_RESOLVED,
@@ -411,6 +413,9 @@ def _clean_merge_candidates(
 # grades the reviewer against its own words and passes forever.
 _CONF_FINDING_REJECTED = 0.95
 _CONF_FINDING_CONFIRMED = 0.9
+# A miss confirmed on live code: as certain a recall signal as a rejected finding is a precision
+# one — a person looked at this exact change and said the skill should have spoken.
+_CONF_FINDING_MISSED = 0.95
 
 
 def candidate_from_finding(
@@ -476,6 +481,10 @@ def candidate_from_finding(
             ref=ref,
             human_signal=SIGNAL_FINDING_CONFIRMED if correct else SIGNAL_FINDING_REJECTED,
         ),
+        # The reviewer's message, so `promote` can tell an unedited confirmation (which grades the
+        # reviewer against its own words) from a note that has already restated the problem. Only a
+        # `should_catch` case has the circularity, so only a confirmation records the seed.
+        seed_semantic=finding.message if correct else "",
         confidence=_CONF_FINDING_CONFIRMED if correct else _CONF_FINDING_REJECTED,
         # The finding's own skill wins over path routing. `route_to_skill` guesses from trigger
         # globs and returns the *first* match, so in any real registry — where several skills
@@ -488,6 +497,63 @@ def candidate_from_finding(
         suggested_rule_id=finding.rule_id or "",
         rationale=_ruling_rationale(
             correct=correct, explained=explained, note=note, stray_line=stray_line, finding=finding
+        ),
+    )
+
+
+def candidate_from_miss(
+    change: CodeChange,
+    *,
+    path: str,
+    semantic: str,
+    candidate_id: str,
+    ref: str,
+    skill_id: str,
+    line_range: tuple[int, int] | None = None,
+    rule_id: str = "",
+    severity_min: Severity | None = None,
+    note: str = "",
+) -> CandidateCase:
+    """A place the skill stayed silent and a person judged it should not have, as a candidate.
+
+    The opposite of `candidate_from_finding`: there is no finding to adjudicate, because the whole
+    point is that the skill produced none. The expectation is therefore the human's own description
+    from the start, so there is no circular-seed problem — and `source` is `review_miss` rather than
+    `skill_review` precisely so `promote._check_semantic`, which guards the finding case, does not
+    mistake this legitimate human expectation for an unedited copy of a reviewer message.
+
+    Raises `ValueError` when `path` is not in the change — a case built on a file the diff does not
+    touch asserts nothing, and catching it here says so with the change in hand.
+    """
+    if change.file(path) is None:
+        touched = ", ".join(sorted(f.path for f in change.files)) or "(none)"
+        raise ValueError(
+            f"the change does not touch {path!r}; it touches: {touched}. A missed-case must point "
+            "at a file the reviewed change actually contains"
+        )
+    return CandidateCase(
+        id=candidate_id,
+        kind="should_catch",
+        change=change.narrowed_to(path),
+        expect=[
+            Expectation(
+                id="e1",
+                must="appear",
+                where=Region(path=path, line_range=line_range),
+                semantic=semantic.strip(),
+                severity_min=severity_min,
+            )
+        ],
+        provenance=Provenance(
+            source="review_miss", ref=ref, human_signal=SIGNAL_FINDING_MISSED
+        ),
+        confidence=_CONF_FINDING_MISSED,
+        suggested_skill=skill_id or None,
+        suggested_rule_id=rule_id,
+        rationale=(
+            "The skill said nothing here and a person judged it should have caught this. As a "
+            "should_catch case the gate refuses any guidance that keeps missing it."
+            + (f" They said: {note.strip()}" if note.strip() else "")
         ),
     )
 

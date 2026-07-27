@@ -1,12 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import {
-  useInbox,
-  useReviews,
-  useSkills,
-  type ReviewListItem,
-  type ReviewSummary,
-} from '@/api/client'
+import { useReviews, useSkills, type ReviewListItem, type ReviewSummary } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Intro, Loading, when } from '@/components/primitives'
 
@@ -61,22 +55,21 @@ export function ReviewsIndex() {
  * comes from the skill's own output was reachable only by people who already knew the commands.
  *
  * A pasted diff leads, because it works on the first day with nothing configured. The
- * merge-request field appears only when `[watch]` names a forge, rather than offering an input that
- * could only fail.
+ * merge-request field takes a URL pasted straight from the browser (or a bare number) and lets the
+ * server fetch the diff; whether the forge is reachable is the server's to report, so the field is
+ * always offered rather than hidden behind config the browser can only guess at.
  */
 function ReviewAChange() {
   const { data: skills } = useSkills()
-  const { data: inbox } = useInbox()
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [skillId, setSkillId] = useState('')
   const [diff, setDiff] = useState('')
   const [mr, setMr] = useState('')
 
-  const hasForge = Boolean(inbox?.watch.enabled)
   const chosen = skillId || skills?.[0]?.id || ''
-  const byMr = /^\d+$/.test(mr.trim())
-  const request = byMr ? { skill_id: chosen, mr: Number(mr) } : { skill_id: chosen, diff }
+  const byMr = mr.trim().length > 0
+  const request = byMr ? { skill_id: chosen, mr: mr.trim() } : { skill_id: chosen, diff }
   const ready = Boolean(chosen) && (diff.trim().length > 0 || byMr)
 
   if (!skills?.length) return null
@@ -136,21 +129,20 @@ function ReviewAChange() {
         />
       </label>
 
-      {hasForge && (
-        <label className="block text-xs text-muted">
-          …or a merge request number
-          <input
-            value={mr}
-            onChange={(e) => setMr(e.target.value)}
-            inputMode="numeric"
-            placeholder="1423"
-            className="mt-1 block w-32 rounded border border-line bg-canvas px-2 py-1.5 text-sm text-ink"
-          />
-          <span className="mt-1 block">
-            Fetched through the <code className="font-mono">[watch]</code> forge settings.
-          </span>
-        </label>
-      )}
+      <label className="block text-xs text-muted">
+        …or a GitLab merge-request URL or number
+        <input
+          value={mr}
+          onChange={(e) => setMr(e.target.value)}
+          placeholder="https://gitlab.example/acme/payments/-/merge_requests/1423"
+          className="mt-1 block w-full rounded border border-line bg-canvas px-2 py-1.5 font-mono text-xs text-ink"
+        />
+        <span className="mt-1 block">
+          Whetstone fetches the diff. A full URL needs only{' '}
+          <code className="font-mono">[watch] gitlab_url</code> and a token; a bare number also
+          needs <code className="font-mono">projects</code> set.
+        </span>
+      </label>
 
       {ready ? (
         <LaunchButton
@@ -164,7 +156,7 @@ function ReviewAChange() {
         />
       ) : (
         <p className="text-xs text-muted">
-          Paste a diff{hasForge ? ', or give a merge request number' : ''} to continue.
+          Paste a diff, or give a merge request URL or number, to continue.
         </p>
       )}
     </section>

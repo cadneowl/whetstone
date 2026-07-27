@@ -189,7 +189,15 @@ def _check_semantic(entry: CandidateEntry, edits: CaseEdits) -> None:
         )
 
     candidate = entry.candidate
-    seeded = (candidate.expect[0].semantic or "").strip() if candidate.expect else ""
+    # Compare against the reviewer's own message (`seed_semantic`) when the candidate recorded it,
+    # not against the current expectation. A confirmed finding promoted *with* a note has the note
+    # as its expectation and the reviewer's message as the seed — the note is a standalone
+    # description and must promote, while a still-unedited expectation (seed == expectation) must
+    # not. Falling back to `expect[0].semantic` keeps the check working for candidates written
+    # before `seed_semantic` existed.
+    seeded = (candidate.seed_semantic or "").strip()
+    if not seeded and candidate.expect:
+        seeded = (candidate.expect[0].semantic or "").strip()
     if (
         candidate.provenance.source == "skill_review"
         and candidate.kind == "should_catch"

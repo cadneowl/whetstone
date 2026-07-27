@@ -570,6 +570,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reviews/{review_id}/findings/{index}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Promote Finding
+         * @description Commit the eval case a ruling minted, without the trip through the triage screen.
+         *
+         *     The ruling already wrote a candidate; this promotes it onto the batch branch. For a rejection,
+         *     or a confirmation that carried a note, nothing more is needed. For a bare confirmation the
+         *     expectation is still the reviewer's own message — `prepare_promotion` refuses that, and the 422
+         *     it raises is the console's cue to ask for a description in `semantic`.
+         */
+        post: operations["promote_finding_api_reviews__review_id__findings__index__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reviews/{review_id}/findings/{index}/verdict": {
         parameters: {
             query?: never;
@@ -593,6 +618,31 @@ export interface paths {
          *     there — and a promotion is already a commit on a branch, which this cannot revert anyway.
          */
         delete: operations["undo_verdict_api_reviews__review_id__findings__index__verdict_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/reviews/{review_id}/missed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Promote Missed
+         * @description Turn a place the skill missed into a committed should-catch case.
+         *
+         *     The other half of teaching from a review: ruling handles what the skill *said*, this handles
+         *     what it *should* have said. A candidate is minted from the reviewed change and the human's
+         *     description, written into the queue for traceability, then promoted on the same path a ruling
+         *     takes — so a missed case and a confirmed one land identically on the batch branch.
+         */
+        post: operations["promote_missed_api_reviews__review_id__missed_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -932,6 +982,11 @@ export interface components {
              * @default
              */
             rationale: string;
+            /**
+             * Seed Semantic
+             * @default
+             */
+            seed_semantic: string;
             /**
              * Suggested Rule Id
              * @default
@@ -1878,6 +1933,39 @@ export interface components {
             meta_yaml: string;
         };
         /**
+         * MissedCaseRequest
+         * @description A place the skill stayed silent that a person judges it should have caught.
+         *
+         *     There is no finding to rule on — the case is minted straight from the human's description. Only
+         *     `skill_id`, `path` and `semantic` are required; an omitted line range makes the expectation
+         *     cover the whole file, which is the low-friction default for "it should have said *something*
+         *     here".
+         */
+        MissedCaseRequest: {
+            /**
+             * Case Id
+             * @default
+             */
+            case_id: string;
+            /** Line End */
+            line_end?: number | null;
+            /** Line Start */
+            line_start?: number | null;
+            /** Path */
+            path: string;
+            /**
+             * Rule Id
+             * @default
+             */
+            rule_id: string;
+            /** Semantic */
+            semantic: string;
+            /** Severity Min */
+            severity_min?: string | null;
+            /** Skill Id */
+            skill_id: string;
+        };
+        /**
          * NextAction
          * @description What to do about this skill, and the evidence for saying so.
          */
@@ -2018,6 +2106,38 @@ export interface components {
             mode: "local" | "proxy" | "anonymous";
             /** Name */
             name: string;
+        };
+        /**
+         * PromoteFindingRequest
+         * @description Overrides for turning a ruled finding straight into a committed eval case.
+         *
+         *     All optional: with nothing set, the candidate the ruling already minted is promoted as-is,
+         *     which is the one-click path for a rejection or a confirmation that carried a note. `semantic` is
+         *     the field a confirmation without a note needs — the expectation cannot be the reviewer's own
+         *     message, and this is where a standalone description is supplied.
+         */
+        PromoteFindingRequest: {
+            /**
+             * Case Id
+             * @default
+             */
+            case_id: string;
+            /** Line End */
+            line_end?: number | null;
+            /** Line Start */
+            line_start?: number | null;
+            /**
+             * Rule Id
+             * @default
+             */
+            rule_id: string;
+            /**
+             * Semantic
+             * @default
+             */
+            semantic: string;
+            /** Severity Min */
+            severity_min?: string | null;
         };
         /** PromoteRequest */
         PromoteRequest: {
@@ -2354,6 +2474,11 @@ export interface components {
          *     one the console leads with. `mr` reaches a real merge request through the `[watch]` connector
          *     settings — the same GitLab URL and token the watcher already uses, rather than a second place
          *     to configure the same forge.
+         *
+         *     `mr` is a string so it accepts either a bare number (which relies on `[watch]` for the project)
+         *     or a full merge-request URL the operator pasted from their browser (which carries the project
+         *     itself). A URL is only ever fetched from the host `[watch] gitlab_url` names, so the token is
+         *     never sent to a host a pasted link happened to point at.
          */
         ReviewRequest: {
             /**
@@ -2361,8 +2486,11 @@ export interface components {
              * @default
              */
             diff: string;
-            /** Mr */
-            mr?: number | null;
+            /**
+             * Mr
+             * @default
+             */
+            mr: string;
             /**
              * Project
              * @default
@@ -4142,6 +4270,42 @@ export interface operations {
             };
         };
     };
+    promote_finding_api_reviews__review_id__findings__index__promote_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_id: string;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromoteFindingRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromoteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     rule_on_finding_api_reviews__review_id__findings__index__verdict_post: {
         parameters: {
             query?: never;
@@ -4197,6 +4361,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReviewRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    promote_missed_api_reviews__review_id__missed_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MissedCaseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromoteResponse"];
                 };
             };
             /** @description Validation Error */

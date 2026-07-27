@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -13,6 +14,32 @@ from whetstone.domain.review import FileBlob, MergeRequestRef, ReviewedChange, R
 from whetstone.providers.base import Capability, ConnectorError
 from whetstone.providers.gitlab.client import GitLabHttp
 from whetstone.providers.gitlab.normalize import file_change, mr_ref, review_thread
+
+
+# A GitLab merge-request URL: `<base>/<group>/<project>/-/merge_requests/<iid>`, where the project
+# path may itself be nested groups (`a/b/c`). Anything after the number — `/diffs`, `#note_5`, a
+# query string — is ignored, so a link copied from anywhere in the MR still resolves.
+_MR_PATH = re.compile(r"^/(?P<project>.+?)/-/merge_requests/(?P<iid>\d+)(?:[/?#].*)?$")
+
+
+def parse_merge_request_url(url: str) -> tuple[str, str, int]:
+    """`(base_url, project_path, iid)` from a GitLab merge-request URL.
+
+    Splits the human URL a person copies from their browser into the three things the API needs. The
+    caller still decides whether the host is one it will send a token to — this only parses.
+
+    Raises `ValueError`, with the offending URL in the message, when it is not a merge-request URL.
+    """
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"{url!r} is not an http(s) URL")
+    match = _MR_PATH.match(parsed.path)
+    if not match:
+        raise ValueError(
+            f"{url!r} is not a GitLab merge-request URL "
+            "(expected …/<project>/-/merge_requests/<number>)"
+        )
+    return f"{parsed.scheme}://{parsed.netloc}", match.group("project"), int(match.group("iid"))
 
 
 class GitLabConnector:
