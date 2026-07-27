@@ -234,7 +234,7 @@ def preview_promotion(
     is still editing, instead of after the commit.
     """
     entry = _load(config, candidate_id)
-    return _prepare(config, entry, request.edits, get_batch(config).branch)
+    return prepare_promotion(config, entry, request.edits, get_batch(config).branch)
 
 
 @router.post("/{candidate_id}/promote", response_model=PromoteResponse, dependencies=[Writable])
@@ -246,22 +246,49 @@ def promote(
 ) -> PromoteResponse:
     entry = _load(config, candidate_id)
     batch = get_batch(config)
-    prepared = _prepare(config, entry, request.edits, batch.branch)
+    prepared = prepare_promotion(config, entry, request.edits, batch.branch)
+    return commit_promotion(
+        config,
+        principal,
+        candidate_id=candidate_id,
+        prepared=prepared,
+        message=(
+            f"eval case: {prepared.case_id} ({prepared.skill_id})\n\n"
+            f"Promoted from candidate {candidate_id}.\n"
+            f"Signal: {entry.candidate.provenance.human_signal or 'n/a'} "
+            f"({entry.candidate.provenance.ref or 'no ref'}), "
+            f"builder confidence {entry.candidate.confidence:.2f}."
+        ),
+        batch=batch,
+    )
 
+
+def commit_promotion(
+    config: Config,
+    principal: Principal,
+    *,
+    candidate_id: str,
+    prepared: PreparedCase,
+    message: str,
+    batch: BatchView | None = None,
+) -> PromoteResponse:
+    """Commit a prepared case onto the batch branch and record the promotion decision.
+
+    The one write path every promotion takes — the triage screen, and now a ruling or a missed-case
+    added from a review — so the commit, the decision record and the batch bookkeeping cannot drift
+    between them. `batch` is passed in when the caller already read it, so a promotion does not read
+    the branch twice and cannot straddle another promotion landing in between.
+    """
+    batch = batch or get_batch(config)
     commit = write_and_commit(
         config.skills_repo,
         prepared.files,
-        f"eval case: {prepared.case_id} ({prepared.skill_id})\n\n"
-        f"Promoted from candidate {candidate_id}.\n"
-        f"Signal: {entry.candidate.provenance.human_signal or 'n/a'} "
-        f"({entry.candidate.provenance.ref or 'no ref'}), "
-        f"builder confidence {entry.candidate.confidence:.2f}.",
+        message,
         branch=batch.branch,
         base=config.git.default_base,
         author=_author(config, principal),
         protected=config.git.protected_branches,
     )
-
     store = _store(config)
     decision = new_decision("promoted", principal=principal.label)
     decision.skill_id = prepared.skill_id
@@ -269,7 +296,6 @@ def promote(
     decision.branch = batch.branch
     decision.commit = commit
     store.decide(candidate_id, decision)
-
     return PromoteResponse(
         candidate_id=candidate_id,
         prepared=prepared,
@@ -304,7 +330,7 @@ def undo(candidate_id: str, config: ConfigDep) -> QueueItem:
     return QueueItem(entry=entry, edits=edits_from(entry))
 
 
-def _prepare(
+def prepare_promotion(
     config: Config, entry: CandidateEntry, edits: CaseEdits, branch: str
 ) -> PreparedCase:
     """Validate the edits against the state the commit would actually land on."""

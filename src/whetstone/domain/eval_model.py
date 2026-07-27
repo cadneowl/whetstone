@@ -27,6 +27,10 @@ SIGNAL_ESCAPED_DEFECT = "escaped defect"
 # people said to each other; these two are a direct ruling on what it actually said.
 SIGNAL_FINDING_CONFIRMED = "finding confirmed"
 SIGNAL_FINDING_REJECTED = "finding rejected"
+# The skill stayed silent on a live change and a person judged it should not have. Unlike the two
+# above there is no finding behind it — the evidence is the absence of one — so the case is minted
+# straight as a `should_catch` from the human's own description of what was missed.
+SIGNAL_FINDING_MISSED = "finding missed"
 
 # How strong a `should_not_flag` case's evidence is.
 #

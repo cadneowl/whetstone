@@ -63,7 +63,8 @@ export type JobRequest = {
   stale_ok?: boolean
   repo?: string
   diff?: string
-  mr?: number
+  /** review only: a merge-request URL (pasted from the browser) or a bare number. */
+  mr?: string
   project?: string
 }
 
@@ -386,6 +387,81 @@ export function useUndoFindingVerdict(reviewId: string) {
         `/api/reviews/${encodeURIComponent(reviewId)}/findings/${index}/verdict`,
       ),
     onSuccess: () => invalidateReview(client, reviewId),
+  })
+}
+
+/** Every field but the target is optional; the server fills the rest from the ruled candidate. */
+export interface PromoteFindingArgs {
+  index: number
+  semantic?: string
+  rule_id?: string
+  case_id?: string
+  line_start?: number | null
+  line_end?: number | null
+  severity_min?: string | null
+}
+
+/** A missed case is minted from scratch, so path and expectation are required; the rest optional. */
+export interface MissedCaseArgs {
+  skill_id: string
+  path: string
+  semantic: string
+  line_start?: number | null
+  line_end?: number | null
+  rule_id?: string
+  severity_min?: string | null
+  case_id?: string
+}
+
+/**
+ * Commit the eval case a ruling minted, straight from the review — no trip through triage.
+ *
+ * With no overrides it promotes the candidate as-is (a rejection, or a confirmation that carried a
+ * note). A bare confirmation comes back 422 asking for `semantic`, because the expectation cannot
+ * be the reviewer's own message — that is the console's cue to reveal the description field.
+ */
+export function usePromoteFinding(reviewId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ index, ...over }: PromoteFindingArgs) =>
+      send<PromoteResponse>(
+        'POST',
+        `/api/reviews/${encodeURIComponent(reviewId)}/findings/${index}/promote`,
+        {
+          semantic: over.semantic ?? '',
+          rule_id: over.rule_id ?? '',
+          case_id: over.case_id ?? '',
+          line_start: over.line_start ?? null,
+          line_end: over.line_end ?? null,
+          severity_min: over.severity_min ?? null,
+        },
+      ),
+    onSuccess: () => {
+      invalidateReview(client, reviewId)
+      void client.invalidateQueries({ queryKey: keys.skills })
+    },
+  })
+}
+
+/** Turn a place the skill stayed silent into a committed should-catch case. */
+export function usePromoteMissed(reviewId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (args: MissedCaseArgs) =>
+      send<PromoteResponse>('POST', `/api/reviews/${encodeURIComponent(reviewId)}/missed`, {
+        skill_id: args.skill_id,
+        path: args.path,
+        semantic: args.semantic,
+        line_start: args.line_start ?? null,
+        line_end: args.line_end ?? null,
+        rule_id: args.rule_id ?? '',
+        severity_min: args.severity_min ?? null,
+        case_id: args.case_id ?? '',
+      }),
+    onSuccess: () => {
+      invalidateReview(client, reviewId)
+      void client.invalidateQueries({ queryKey: keys.skills })
+    },
   })
 }
 

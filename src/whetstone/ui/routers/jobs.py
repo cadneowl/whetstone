@@ -113,11 +113,16 @@ class ReviewRequest(BaseModel):
     one the console leads with. `mr` reaches a real merge request through the `[watch]` connector
     settings — the same GitLab URL and token the watcher already uses, rather than a second place
     to configure the same forge.
+
+    `mr` is a string so it accepts either a bare number (which relies on `[watch]` for the project)
+    or a full merge-request URL the operator pasted from their browser (which carries the project
+    itself). A URL is only ever fetched from the host `[watch] gitlab_url` names, so the token is
+    never sent to a host a pasted link happened to point at.
     """
 
     skill_id: str
     diff: str = ""
-    mr: int | None = None
+    mr: str = ""
     project: str = ""
 
 
@@ -548,7 +553,8 @@ def launch_review(
 
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:
     """The change to review: a pasted diff, or a merge request pulled through `[watch]`'s forge."""
-    if request.diff.strip() and request.mr is not None:
+    mr = request.mr.strip()
+    if request.diff.strip() and mr:
         raise Unprocessable("give a diff or a merge request, not both")
 
     if request.diff.strip():
@@ -560,30 +566,75 @@ def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, st
             raise Unprocessable("the diff contains no file changes; there is nothing to review")
         return change, "diff", "pasted diff", "", ""
 
-    if request.mr is None:
-        raise Unprocessable("paste a diff, or give a merge request number to review")
+    if not mr:
+        raise Unprocessable("paste a diff, or give a merge request URL or number to review")
 
-    watch = config.watch
-    project = request.project or (watch.projects[0] if watch.projects else "")
-    if not watch.gitlab_url or not project:
-        raise Unprocessable(
-            "reviewing a merge request needs [watch] gitlab_url and a project in whetstone.toml — "
-            "or paste the diff instead, which needs no credentials"
-        )
     from whetstone.providers.gitlab.provider import GitLabConnector
 
+    project, iid = _resolve_mr(mr, config, project_hint=request.project)
+    watch = config.watch
+    # Always the configured host, never the one a pasted URL named: `_resolve_mr` has already
+    # confirmed any URL is for this forge, so the token cannot be sent anywhere else.
     connector = GitLabConnector.from_config(
         {"base_url": watch.gitlab_url, "token_env": watch.token_env}
     )
     repo = RepoRef.parse(f"gitlab:{project}")
     try:
-        found = connector.get_merge_request(repo, request.mr)
+        found = connector.get_merge_request(repo, iid)
         # base_sha..head_sha, not the target branch: an open MR's target moves under it, and
         # diffing against a moving base attributes other people's commits to this change.
         change = connector.get_change(repo, found.base_sha, found.head_sha)
     except ConnectorError as exc:
         raise Unprocessable(str(exc)) from exc
-    return change, "merge_request", f"{project}!{request.mr}", found.web_url, found.title
+    return change, "merge_request", f"{project}!{iid}", found.web_url, found.title
+
+
+def _resolve_mr(mr: str, config: Config, *, project_hint: str = "") -> tuple[str, int]:
+    """The `(project, iid)` a merge-request review targets, from a URL or a bare number.
+
+    A merge request always needs `[watch] gitlab_url`: it names the one host Whetstone will send the
+    token to. A URL then supplies its own project — so any merge request on that forge works without
+    listing its project in `[watch]` — but only after its host is checked against `gitlab_url`, so a
+    link pasted from somewhere else is refused rather than quietly handed the token. A bare number
+    carries no project, so it falls back to `[watch] projects` (or an explicit one).
+    """
+    from whetstone.providers.gitlab.provider import parse_merge_request_url
+
+    watch = config.watch
+    if not watch.gitlab_url:
+        raise Unprocessable(
+            "reviewing a merge request needs [watch] gitlab_url in whetstone.toml — it is the host "
+            "Whetstone reaches and the only one it will send your token to. Or paste the diff "
+            "instead, which needs no credentials"
+        )
+
+    if mr.isdigit():
+        project = project_hint or (watch.projects[0] if watch.projects else "")
+        if not project:
+            raise Unprocessable(
+                "a bare merge-request number has no project — set [watch] projects in "
+                "whetstone.toml, or paste the full merge-request URL, which carries its own project"
+            )
+        return project, int(mr)
+
+    try:
+        base_url, project, iid = parse_merge_request_url(mr)
+    except ValueError as exc:
+        raise Unprocessable(str(exc)) from exc
+    if _host(base_url) != _host(watch.gitlab_url):
+        raise Unprocessable(
+            f"that merge request is on {_host(base_url)}, but [watch] gitlab_url is "
+            f"{_host(watch.gitlab_url)} — Whetstone only sends your token to the configured forge. "
+            "Point them at the same host, or paste the diff instead"
+        )
+    return project, iid
+
+
+def _host(url: str) -> str:
+    """The lower-cased host of a URL, tolerating a `gitlab_url` written without a scheme."""
+    from urllib.parse import urlparse
+
+    return urlparse(url if "://" in url else f"https://{url}").netloc.lower()
 
 
 # --- update ----------------------------------------------------------------------

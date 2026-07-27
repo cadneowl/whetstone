@@ -55,6 +55,16 @@ class CandidateCase(BaseModel):
     # The rule this case is evidence for, when the source knew. A mined review comment does not;
     # an adjudicated finding does, because the reviewer reported which rule fired.
     suggested_rule_id: str = ""
+    # The raw text the expectation must be rewritten away from before it may be promoted — the
+    # reviewer's own message, for a confirmed finding. `promote._check_semantic` refuses an
+    # expectation still equal to this, because a case asserting the reviewer says what it already
+    # said can never fail. Empty for every other source, and for candidates written before the
+    # field existed, in which case the check falls back to comparing against the seeded expectation.
+    #
+    # Distinct from `expect[0].semantic`: when a person confirms a finding *with* a note, the note
+    # becomes the expectation while this stays the reviewer's message — so the note, being already a
+    # standalone description, promotes without being rejected as a copy of itself.
+    seed_semantic: str = ""
     rationale: str = ""
     # Defaulted, so candidate folders written before this field existed still load.
     discussion: Discussion = Field(default_factory=Discussion)

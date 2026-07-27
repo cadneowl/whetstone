@@ -14,6 +14,7 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import RepoRef
 from whetstone.reviews import ReviewRecord, ReviewStore
+from whetstone.runs import RunStore
 
 REPO = RepoRef.parse("gitlab:acme/payments")
 PATH = "src/handlers/charge.rs"
@@ -565,3 +566,238 @@ def test_a_minted_candidate_shows_up_in_triage(
     item = next(i for i in queue["items"] if i["entry"]["candidate"]["id"] == f"{record.id}-f1")
     assert item["edits"]["kind"] == "should_not_flag"
     assert item["edits"]["path"] == PATH
+
+
+# --- committing a case straight from the review ----------------------------------
+
+
+def _branch_has(config: Config, branch: str, path: str) -> bool:
+    from whetstone.gitio import read_at
+
+    try:
+        read_at(config.skills_repo, branch, path)
+        return True
+    except Exception:
+        return False
+
+
+def test_a_rejected_finding_is_committed_in_one_click(
+    client: TestClient, reviews: ReviewStore, config: Config
+) -> None:
+    """A false positive needs no rewrite — its expectation is "stay silent", complete as minted —
+    so the review screen can commit it without the detour through triage."""
+    record = _seed(reviews)
+    client.post(f"/api/reviews/{record.id}/findings/1/verdict", json={"correct": False})
+
+    response = client.post(f"/api/reviews/{record.id}/findings/1/promote", json={})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["prepared"]["case"]["kind"] == "should_not_flag"
+    branch = body["branch"]
+    case_id = body["prepared"]["case_id"]
+    assert _branch_has(config, branch, f"skills/rust-errors/eval_cases/{case_id}/case.yaml")
+
+
+def test_a_confirmed_finding_with_a_note_promotes_in_one_click(
+    client: TestClient, reviews: ReviewStore, config: Config
+) -> None:
+    """The note is already a standalone description, so it must not be rejected as a copy of the
+    reviewer's own message — the seed the guard compares against is that message, not the note."""
+    record = _seed(reviews)
+    client.post(
+        f"/api/reviews/{record.id}/findings/0/verdict",
+        json={"correct": True, "note": "the DB row can be absent on a normal path; handle None"},
+    )
+    response = client.post(f"/api/reviews/{record.id}/findings/0/promote", json={})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["prepared"]["case"]["kind"] == "should_catch"
+    assert (
+        body["prepared"]["case"]["expect"][0]["semantic"]
+        == "the DB row can be absent on a normal path; handle None"
+    )
+
+
+def test_a_bare_confirmation_asks_for_a_description_then_commits(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """Confirmed with no note: the expectation is still the reviewer's own message, which can never
+    fail. The commit is refused with the reason, and a supplied description unblocks it."""
+    record = _seed(reviews)
+    client.post(f"/api/reviews/{record.id}/findings/0/verdict", json={"correct": True})
+
+    refused = client.post(f"/api/reviews/{record.id}/findings/0/promote", json={})
+    assert refused.status_code == 422
+    assert "standalone description" in refused.json()["message"]
+
+    ok = client.post(
+        f"/api/reviews/{record.id}/findings/0/promote",
+        json={"semantic": "the DB row may be absent on a normal path and must be handled"},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["prepared"]["case"]["kind"] == "should_catch"
+
+
+def test_promoting_an_unruled_finding_is_refused(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    record = _seed(reviews)
+    response = client.post(f"/api/reviews/{record.id}/findings/0/promote", json={})
+    assert response.status_code == 422
+    assert "ruled" in response.json()["message"]
+
+
+def test_promoting_the_same_finding_twice_is_a_conflict(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    record = _seed(reviews)
+    client.post(f"/api/reviews/{record.id}/findings/1/verdict", json={"correct": False})
+    assert client.post(f"/api/reviews/{record.id}/findings/1/promote", json={}).status_code == 200
+    again = client.post(f"/api/reviews/{record.id}/findings/1/promote", json={})
+    assert again.status_code == 409
+    assert "already promoted" in again.json()["message"]
+
+
+# --- teaching a miss -------------------------------------------------------------
+
+
+def test_a_missed_case_is_committed_as_should_catch(
+    client: TestClient, reviews: ReviewStore, config: Config
+) -> None:
+    """The skill stayed silent and a person says it should not have — minted straight as a
+    should_catch from their own words, with no finding to rule on."""
+    record = _seed(reviews)
+    response = client.post(
+        f"/api/reviews/{record.id}/missed",
+        json={
+            "skill_id": "rust-errors",
+            "path": PATH,
+            "line_start": 41,
+            "line_end": 41,
+            "semantic": "unwrap here panics when the row is missing on a normal path",
+            "rule_id": "R1",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["prepared"]["case"]["kind"] == "should_catch"
+    assert body["prepared"]["case"]["provenance"]["human_signal"] == "finding missed"
+    case_id = body["prepared"]["case_id"]
+    assert _branch_has(config, body["branch"], f"skills/rust-errors/eval_cases/{case_id}/case.yaml")
+
+
+def test_a_missed_case_covering_the_whole_file_needs_no_line_range(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    record = _seed(reviews)
+    response = client.post(
+        f"/api/reviews/{record.id}/missed",
+        json={
+            "skill_id": "rust-errors",
+            "path": PATH,
+            "semantic": "this handler should validate its input before the DB call",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["prepared"]["case"]["expect"][0]["where"].get("line_range") is None
+
+
+def test_a_missed_case_outside_the_change_is_refused(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    record = _seed(reviews)
+    response = client.post(
+        f"/api/reviews/{record.id}/missed",
+        json={
+            "skill_id": "rust-errors",
+            "path": "src/does/not/exist.rs",
+            "semantic": "should have caught this",
+        },
+    )
+    assert response.status_code == 422
+    assert "does not touch" in response.json()["message"]
+
+
+def test_a_missed_case_needs_an_expectation(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    record = _seed(reviews)
+    response = client.post(
+        f"/api/reviews/{record.id}/missed",
+        json={"skill_id": "rust-errors", "path": PATH, "semantic": "   "},
+    )
+    assert response.status_code == 422
+    assert "expectation is required" in response.json()["message"]
+
+
+def test_a_missed_case_for_an_unknown_skill_is_refused(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    record = _seed(reviews)
+    response = client.post(
+        f"/api/reviews/{record.id}/missed",
+        json={"skill_id": "nope", "path": PATH, "semantic": "should have caught this"},
+    )
+    assert response.status_code == 422
+    assert "no skill" in response.json()["message"]
+
+
+def test_committing_from_a_review_is_refused_in_read_only_mode(
+    reviews: ReviewStore, config: Config, store: RunStore
+) -> None:
+    from whetstone.gates import GateStore
+    from whetstone.ui.app import create_app
+
+    _seed(reviews)
+    config.ui.read_only = True
+    gates = GateStore(config.gates_dir)
+    with TestClient(create_app(config, store=store, gates=gates, reviews=reviews)) as ro:
+        record_id = "20260701T120000Z-rust-errors-aaaaaa"
+        assert (
+            ro.post(f"/api/reviews/{record_id}/missed",
+                    json={"skill_id": "rust-errors", "path": PATH, "semantic": "x"}).status_code
+            == 403
+        )
+
+
+def test_a_missed_case_that_fails_validation_leaves_no_candidate(
+    client: TestClient, reviews: ReviewStore, config: Config
+) -> None:
+    """Validate before writing: a line the diff never touches is a 422, and nothing is left in the
+    queue for it — the panel used to write the candidate first and orphan it on failure."""
+    record = _seed(reviews)
+    response = client.post(
+        f"/api/reviews/{record.id}/missed",
+        json={
+            "skill_id": "rust-errors",
+            "path": PATH,
+            "line_start": 999,
+            "line_end": 999,
+            "semantic": "should have caught this",
+        },
+    )
+    assert response.status_code == 422
+    assert not (config.candidates_dir / f"{record.id}-miss-0").exists()
+
+
+def test_a_missed_case_will_not_clobber_an_existing_candidate(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """A supplied case id that already names a candidate is refused, not overwritten."""
+    record = _seed(reviews)
+    # Rule a finding to mint an ordinary candidate, then aim a missed case at its id.
+    minted = client.post(
+        f"/api/reviews/{record.id}/findings/0/verdict", json={"correct": True}
+    ).json()["candidate"]["id"]
+
+    response = client.post(
+        f"/api/reviews/{record.id}/missed",
+        json={
+            "skill_id": "rust-errors",
+            "path": PATH,
+            "semantic": "should have caught this",
+            "case_id": minted,
+        },
+    )
+    assert response.status_code == 409
+    assert "already exists" in response.json()["message"]
