@@ -40,7 +40,13 @@ from whetstone.domain.skill import Skill
 from whetstone.gitio import GitError, pending_batch
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
-from whetstone.llm.factory import Backend, ModelSelection, build_llm_client, resolve_backend
+from whetstone.llm.factory import (
+    PRESETS,
+    Backend,
+    ModelSelection,
+    build_llm_client,
+    resolve_backend,
+)
 from whetstone.llm.transcript import RecordingClient, Transcript, transcript_path
 from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval
 from whetstone.providers.base import ConnectorError
@@ -83,6 +89,13 @@ class EvalRequest(BaseModel):
     # "does the reviewer actually catch these?" was to merge the merge request first and find out
     # afterwards. That is precisely backwards: the point of promoting a case is to test against it.
     scope: EvalScope = "working"
+    # The backend for this one launch. Empty is the console default — the header picker, or `[llm]`.
+    # A provider here (one Whetstone knows) runs just this step on that model instead, so a single
+    # step can go to the cloud while everything else stays on the local box, or the reverse, without
+    # moving the default every other step inherits. A base URL is never taken from the browser, so
+    # the host is always the preset's. Resolved by `_pick`.
+    provider: str = ""
+    model: str = ""
 
 
 class GateRequest(BaseModel):
@@ -93,6 +106,9 @@ class GateRequest(BaseModel):
     trials: int | None = None
     sample: int | None = None
     targeted: list[str] = Field(default_factory=list)
+    # Per-launch backend; see `EvalRequest.provider` and `_pick`.
+    provider: str = ""
+    model: str = ""
 
 
 class ImproveRequest(BaseModel):
@@ -100,6 +116,9 @@ class ImproveRequest(BaseModel):
     run_id: str | None = None
     instruction: str = ""
     stale_ok: bool = False
+    # Per-launch backend; see `EvalRequest.provider` and `_pick`.
+    provider: str = ""
+    model: str = ""
 
 
 class UpdateRequest(BaseModel):
@@ -125,6 +144,9 @@ class ReviewRequest(BaseModel):
     diff: str = ""
     mr: str = ""
     project: str = ""
+    # Per-launch backend; see `EvalRequest.provider` and `_pick`.
+    provider: str = ""
+    model: str = ""
 
 
 @router.get("", response_model=list[Job])
@@ -157,6 +179,7 @@ def cancel_job(job_id: str, jobs: JobsDep) -> Job:
 def plan_eval_job(
     request: EvalRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
 ) -> Plan:
+    selection = _pick(request.provider, request.model, selection)
     skill, _ = _skill_to_score(config, root, request)
     return _eval_plan(config, selection, skill, request)
 
@@ -171,6 +194,7 @@ def launch_eval(
     selection: SelectionDep,
 ) -> Job:
     """Score a skill against its eval cases, in the background."""
+    selection = _pick(request.provider, request.model, selection)
     skill, ref = _skill_to_score(config, root, request)
     plan = _eval_plan(config, selection, skill, request)
     # The evaluate step always comes from the working tree: it is how the operator's machine runs a
@@ -252,6 +276,7 @@ def launch_eval(
 def plan_gate_job(
     request: GateRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
 ) -> Plan:
+    selection = _pick(request.provider, request.model, selection)
     _, candidate = _gate_sides(config, request.skill_id)
     plan = _eval_plan(
         config, selection, candidate, EvalRequest(**request.model_dump(exclude={"targeted"}))
@@ -273,6 +298,7 @@ def launch_gate(
     selection: SelectionDep,
 ) -> Job:
     """Gate the skill's staged branch against the base — the evidence C6 requires to publish."""
+    selection = _pick(request.provider, request.model, selection)
     base, candidate = _gate_sides(config, request.skill_id)
     plan = plan_gate_job(request, config, root, selection)
     spec = _step(root, candidate, "evaluate")
@@ -353,6 +379,7 @@ def plan_improve_job(
     store: StoreDep,
     selection: SelectionDep,
 ) -> Plan:
+    selection = _pick(request.provider, request.model, selection)
     skill = _skill_being_edited(config, root, request.skill_id)
     spec = _require_step(root, skill, "improve")
     if not spec.calls_a_model:
@@ -417,6 +444,7 @@ def launch_improve(
     selection: SelectionDep,
 ) -> Job:
     """Draft a guidance change from a run's failures. Stages nothing — the console does that."""
+    selection = _pick(request.provider, request.model, selection)
     skill = _skill_being_edited(config, root, request.skill_id)
     spec = _require_step(root, skill, "improve")
     plan = plan_improve_job(request, config, root, store, selection)
@@ -505,6 +533,7 @@ def stage_proposal(
 def plan_review_job(
     request: ReviewRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
 ) -> Plan:
+    selection = _pick(request.provider, request.model, selection)
     skill = _skill(root, request.skill_id)
     plan = plan_calls(
         "review",
@@ -532,6 +561,7 @@ def launch_review(
     The other direction from mining: `corpus pull` infers what a reviewer should have said from
     what people did months ago; this asks the skill directly about code nobody has labelled.
     """
+    selection = _pick(request.provider, request.model, selection)
     skill = _skill(root, request.skill_id)
     spec = _step(root, skill, "evaluate")
     backend = _backend(selection, spec)
@@ -945,6 +975,38 @@ def _sample(spec: StepSpec | None, override: int | None) -> Any:
         stratify=base.stratify,
     )
     return resolved if resolved.max_cases is not None else None
+
+
+def _pick(provider: str, model: str, base: ModelSelection) -> ModelSelection:
+    """The backend one launch resolves to: a per-launch choice when the operator made one, else the
+    console default (`base`).
+
+    This is what lets a single step run on a model of its own — draft a change on Anthropic while
+    evals stay on the local box, or the reverse — without changing the default every other step
+    inherits. An empty `provider` is exactly today's behaviour: the console default, layered over
+    the step's own `model:` pin.
+
+    Two guards, the same ones the header picker enforces, because a per-launch field must not be a
+    way around them: only a provider Whetstone knows is accepted, and a base URL is never taken from
+    the request — the browser chooses among fixed hosts, never points model traffic at an arbitrary
+    one. It is resolved with `inherit_env=False` and to a **concrete** model, so the choice is the
+    preset plus exactly what was picked: it neither inherits the deployment's `WHETSTONE_LLM_MODEL`
+    (a local default sent to Anthropic is a run that only fails at the first call) nor half-inherits
+    the step's `model:` pin (which `layer` would otherwise fill any blank field from).
+    """
+    if not provider:
+        return base
+    if provider not in PRESETS:
+        raise Unprocessable(
+            f"unknown provider {provider!r}; choose one of: {', '.join(sorted(PRESETS))}"
+        )
+    try:
+        backend = resolve_backend(provider, model=model or None, base_url=None, inherit_env=False)
+    except ValueError as exc:
+        # e.g. a local provider chosen with no model, or `custom` (which would need a base URL the
+        # browser is not allowed to supply). Refused at the click, not at the first call.
+        raise Unprocessable(str(exc)) from exc
+    return ModelSelection(provider=provider, model=backend.model, base_url=backend.base_url or "")
 
 
 def _backend(selection: ModelSelection, spec: StepSpec | None) -> Backend:

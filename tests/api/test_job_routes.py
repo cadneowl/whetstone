@@ -445,3 +445,102 @@ def test_progress_names_the_case_being_worked_on(
 
     # A label ending in the ellipsis announces work in flight rather than work completed.
     assert any(label.endswith("…") for label in labels), labels
+
+
+# --- per-launch model selection -------------------------------------------------
+
+
+def test_a_launch_can_pick_a_model_without_moving_the_default(
+    client: TestClient, steps: Path
+) -> None:
+    """The gap this closes: one step on another backend, the default left where it was."""
+    default = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"}).json()
+    assert default["billing"] == "billed"  # the console default is the cloud backend
+
+    picked = client.post(
+        "/api/jobs/eval/plan",
+        json={"skill_id": "rust-errors", "provider": "ollama", "model": "qwen2.5-coder:14b"},
+    ).json()
+    assert picked["backend"] == "ollama"
+    assert picked["model"] == "qwen2.5-coder:14b"
+    assert picked["billing"] == "local"  # billing follows the chosen backend, not the default
+
+    # The choice was for that launch only: the next plan with none is the cloud default again.
+    again = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"}).json()
+    assert again["billing"] == "billed"
+
+
+def test_every_llm_step_honours_the_per_launch_model(
+    client: TestClient, steps: Path, repo: Path
+) -> None:
+    """improve as well as all the others — the whole point of the request."""
+    _stage_guidance(client)
+    body = {"skill_id": "rust-errors", "provider": "ollama", "model": "qwen2.5-coder:14b"}
+    for path in ("eval/plan", "gate/plan", "improve/plan", "review/plan"):
+        plan = client.post(f"/api/jobs/{path}", json=body).json()
+        assert plan["backend"] == "ollama", path
+        assert plan["billing"] == "local", path
+
+
+def test_a_launched_run_records_the_per_launch_model(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    launched = client.post(
+        "/api/jobs/eval",
+        json={"skill_id": "rust-errors", "provider": "ollama", "model": "qwen2.5-coder:14b"},
+    )
+    assert launched.status_code == 200, launched.text
+    job = _await(client, launched.json()["id"])
+    record = store.load(job["result"]["run_id"])
+    assert record.backend == "ollama"
+    assert record.model == "qwen2.5-coder:14b"
+
+
+def test_a_launch_refuses_an_unknown_model_provider(client: TestClient, steps: Path) -> None:
+    response = client.post(
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "provider": "gpt5-local"}
+    )
+    assert response.status_code == 422
+    assert "unknown provider" in response.json()["message"]
+
+
+def test_a_local_provider_without_a_model_is_refused_at_the_click(
+    client: TestClient, steps: Path
+) -> None:
+    response = client.post(
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "provider": "ollama"}
+    )
+    assert response.status_code == 422
+    assert "needs a model" in response.json()["message"]
+
+
+def test_a_launch_cannot_point_model_traffic_at_a_custom_host(
+    client: TestClient, steps: Path
+) -> None:
+    # `custom` needs a base URL, which the browser is never allowed to supply, so it is refused
+    # rather than letting a launch silently point model traffic (and a key) at an arbitrary host.
+    response = client.post(
+        "/api/jobs/eval/plan",
+        json={"skill_id": "rust-errors", "provider": "custom", "model": "m"},
+    )
+    assert response.status_code == 422
+
+
+def test_per_launch_anthropic_ignores_a_local_default_model_env(
+    client: TestClient, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A box that defaults to local via env must not bleed its model id onto a cloud launch.
+
+    `WHETSTONE_LLM_MODEL` is the *default* model; a per-launch Anthropic choice with a blank model
+    must resolve to Anthropic's own default, not send `qwen…` to Anthropic (a run that only fails
+    at the first call).
+    """
+    from whetstone.llm.anthropic_client import DEFAULT_MODEL
+
+    monkeypatch.setenv("WHETSTONE_LLM_MODEL", "qwen2.5-coder:14b")
+    plan = client.post(
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "provider": "anthropic"}
+    ).json()
+    assert plan["backend"] == "anthropic"
+    assert plan["billing"] == "billed"
+    assert plan["model"] == DEFAULT_MODEL

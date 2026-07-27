@@ -170,16 +170,31 @@ def build_llm_client(
 
 
 def resolve_backend(
-    provider: str | None = None, *, model: str | None = None, base_url: str | None = None
+    provider: str | None = None,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    inherit_env: bool = True,
 ) -> Backend:
     """Resolve provider/model/base-URL the same way `build_llm_client` does, without constructing a
     client. Lets the CLI and the run recorder name the backend without paying for (or requiring
     credentials for) a real client.
+
+    ``inherit_env`` is on for resolving the process-wide default (arg → env → preset). A one-off,
+    explicit choice — the console's per-launch model picker — passes it off. The ``WHETSTONE_LLM*``
+    variables describe the *default* backend, so letting them fill the blanks of a different,
+    deliberately-chosen provider bleeds the default across: on a box that defaults to local via
+    ``WHETSTONE_LLM_MODEL``, picking Anthropic for one run would otherwise inherit that local model
+    id and send it to Anthropic. Off, a choice is the preset plus exactly what was passed.
     """
-    name = (provider or os.getenv("WHETSTONE_LLM") or "anthropic").lower()
-    resolved_base = base_url or os.getenv("WHETSTONE_LLM_BASE_URL")
+
+    def env(key: str) -> str | None:
+        return os.getenv(key) if inherit_env else None
+
+    name = (provider or env("WHETSTONE_LLM") or "anthropic").lower()
+    resolved_base = base_url or env("WHETSTONE_LLM_BASE_URL")
     preset = _resolve_preset(name, resolved_base)
-    resolved_model = model or os.getenv("WHETSTONE_LLM_MODEL")
+    resolved_model = model or env("WHETSTONE_LLM_MODEL")
 
     if preset.kind == "anthropic":
         from whetstone.llm.anthropic_client import DEFAULT_MODEL
