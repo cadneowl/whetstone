@@ -89,11 +89,18 @@ def _attention(
     pending: list[CandidateEntry],
 ) -> Attention:
     record = _latest(store, skill.id)
-    current = skill_hash(skill)
-    stale = record is not None and record.skill_hash != current
+    # Read once and merged into both the working tree and the staged draft below: two reads would
+    # cost twice the git for every skill on this page, and could disagree if a promotion lands
+    # between them.
+    promoted = staging.promoted_skill(config, skill.id)
+    under_test = skill if promoted is None else staging.merge_cases(skill, promoted)
+    # Compared against the batch-enriched skill, so a run that scored the promoted cases is not
+    # called stale for covering *more* than the working tree — which is the normal state right
+    # after triage, and would otherwise answer "re-run the evals" to a run that just finished.
+    stale = record is not None and record.skill_hash != skill_hash(under_test)
     failing = _failing(record) if record is not None and not stale else 0
 
-    staged, can_propose, blocked = _proposal_state(config, skill.id)
+    staged, can_propose, blocked = _proposal_state(config, skill.id, promoted)
     action = decide(
         new_signals=len(pending),
         staged=staged,
@@ -163,7 +170,9 @@ def _failing(record: RunRecord) -> int:
     )
 
 
-def _proposal_state(config: Config, skill_id: str) -> tuple[bool, bool, str]:
+def _proposal_state(
+    config: Config, skill_id: str, promoted: Skill | None = None
+) -> tuple[bool, bool, str]:
     """Whether a change is staged for this skill, and whether it may be published.
 
     Degrades rather than raises: a repo without the branch, or without git at all, means nothing is
@@ -181,7 +190,11 @@ def _proposal_state(config: Config, skill_id: str) -> tuple[bool, bool, str]:
         staged = staging.skill_at(config, branch, skill_id)
         if staged is None:
             return False, False, ""
-        verdict = GateStore(config.gates_dir).verdict_for(skill_id, skill_hash(staged[0]))
+        # Hashed as the gate scores it — with the promoted cases folded in. The third and last of
+        # the C6 read sites; missing it here left the inbox looking a passing gate up under a hash
+        # nothing ever records, so it went on saying "run the gate" after every run of the gate.
+        under_test = staged[0] if promoted is None else staging.merge_cases(staged[0], promoted)
+        verdict = GateStore(config.gates_dir).verdict_for(skill_id, skill_hash(under_test))
         return True, verdict.can_propose, verdict.reason
     except (GitError, staging.StagingError, OSError):
         return False, False, ""

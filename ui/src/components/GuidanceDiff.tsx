@@ -12,15 +12,29 @@ import { useMemo } from 'react'
  * plain longest-common-subsequence over lines — guidance files are tens of lines, so the quadratic
  * table is free, and the alternative is a dependency for something worth forty lines.
  */
-export function GuidanceDiff({ before, after }: { before: string; after: string }) {
+export function GuidanceDiff({
+  before,
+  after,
+  staged = false,
+}: {
+  before: string
+  after: string
+  staged?: boolean
+}) {
   const rows = useMemo(() => diffLines(before, after), [before, after])
   const added = rows.filter((r) => r.kind === 'add').length
   const removed = rows.filter((r) => r.kind === 'del').length
 
   if (added === 0 && removed === 0) {
+    // This pane compares the textarea against the *branch*, so it empties the moment an edit is
+    // staged — which is also the moment the branch has something to publish. Saying "nothing to
+    // publish" there put a flat contradiction directly above an enabled *Propose MR*, and sent
+    // people looking for a change the console was holding all along.
     return (
       <p className="px-3 py-2 text-sm text-muted italic">
-        Identical to what is staged — nothing to publish.
+        {staged
+          ? 'No unsaved edits — your change is already on the branch. What it would publish is under Proposal below.'
+          : 'Identical to what is on the base branch — nothing to stage yet.'}
       </p>
     )
   }

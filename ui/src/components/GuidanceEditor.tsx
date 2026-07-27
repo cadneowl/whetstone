@@ -84,14 +84,16 @@ function Editor({
    * rule a failing case was about, and the page beside it said to go and edit the file on disk —
    * outside the console, outside the branch, and outside the gate that has to cover it.
    */
-  const staged: Record<string, string> = { [SKILL_FILE]: proposal.body, ...proposal.pages }
-  const [drafts, setDrafts] = useState(staged)
+  const stagedFiles: Record<string, string> = { [SKILL_FILE]: proposal.body, ...proposal.pages }
+  const [drafts, setDrafts] = useState(stagedFiles)
   const [active, setActive] = useState(SKILL_FILE)
   const [pane, setPane] = useState<'diff' | 'preview'>('diff')
 
   const draft = drafts[active] ?? ''
   const setDraft = (text: string) => setDrafts((d) => ({ ...d, [active]: text }))
-  const edited = Object.keys(staged).filter((p) => (drafts[p] ?? '').trim() !== staged[p]!.trim())
+  const edited = Object.keys(stagedFiles).filter(
+    (p) => (drafts[p] ?? '').trim() !== stagedFiles[p]!.trim(),
+  )
   const dirty = edited.length > 0
   const conflict = save.error instanceof ApiError && save.error.status === 409
 
@@ -161,7 +163,7 @@ function Editor({
         <div className="space-y-2">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <FileTabs
-              files={Object.keys(staged)}
+              files={Object.keys(stagedFiles)}
               active={active}
               edited={edited}
               onPick={setActive}
@@ -182,9 +184,9 @@ function Editor({
           {/* The whole folder is one unit of guidance: every file above reaches the reviewer and is
               inside `skill_hash`, so all of them are staged together and gated together. Worth
               saying, because a rule moving between two files here is invisible in any single one. */}
-          {Object.keys(staged).length > 1 && (
+          {Object.keys(stagedFiles).length > 1 && (
             <p className="text-xs text-muted">
-              This skill's guidance spans {Object.keys(staged).length} files. All of them go to the
+              This skill's guidance spans {Object.keys(stagedFiles).length} files. All of them go to the
               reviewer, all of them are covered by the gate, and staging commits them together — fix
               a rule in the file that holds it.
             </p>
@@ -216,7 +218,11 @@ function Editor({
           </div>
           <div className="h-[28rem] overflow-y-auto rounded-lg border border-line bg-surface p-3">
             {pane === 'diff' ? (
-              <GuidanceDiff before={staged[active] ?? ''} after={draft} />
+              <GuidanceDiff
+                before={stagedFiles[active] ?? ''}
+                after={draft}
+                staged={proposal.staged}
+              />
             ) : (
               // Previews the one file being edited, so `pages` is emptied: the panel renders the
               // whole folder, and here the folder is not what is on screen.
@@ -253,7 +259,7 @@ function Editor({
         <button
           type="button"
           disabled={!dirty}
-          onClick={() => setDrafts(staged)}
+          onClick={() => setDrafts(stagedFiles)}
           className="text-sm text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
         >
           Discard changes
@@ -278,6 +284,31 @@ function Editor({
         skillId={skillId}
       />
     </div>
+  )
+}
+
+/**
+ * One gate metric, before → after, coloured only when it actually moved.
+ *
+ * A gate reports two numbers and a change usually moves one of them. Showing `1.00 → 1.00` in grey
+ * beside `1.00 → 0.00` in green is what makes the pair readable at a glance: the unchanged one
+ * recedes, and the improvement is the thing your eye lands on.
+ */
+function Moved({
+  from,
+  to,
+  higherIsBetter = false,
+}: {
+  from: number
+  to: number
+  higherIsBetter?: boolean
+}) {
+  const better = higherIsBetter ? to > from : to < from
+  const worse = higherIsBetter ? to < from : to > from
+  return (
+    <span className={better ? 'text-good' : worse ? 'text-bad' : undefined}>
+      {from.toFixed(2)} → {to.toFixed(2)}
+    </span>
   )
 }
 
@@ -526,17 +557,36 @@ function ProposalPanel({
         </span>
       </div>
 
+      {/* Both metrics, always. Reporting recall alone made a change that fixed a false positive —
+          fp 1.00 → 0.00, the whole point of it — read as "recall 1.00 → 1.00", which is a line
+          saying this accomplished nothing directly above the button that ships it. */}
       {evidence && (
         <p className="mt-2 text-xs text-muted">
           Cleared by gate <code className="font-mono">{evidence.id}</code> ·{' '}
-          {when(evidence.created_at)} · recall {evidence.result.recall_old.toFixed(2)} →{' '}
-          {evidence.result.recall_new.toFixed(2)}
+          {when(evidence.created_at)} · recall{' '}
+          <Moved from={evidence.result.recall_old} to={evidence.result.recall_new} higherIsBetter />{' '}
+          · fp <Moved from={evidence.result.fp_rate_old} to={evidence.result.fp_rate_new} />
           {evidence.result.fixed_cases.length > 0 &&
             ` · fixed ${evidence.result.fixed_cases.join(', ')}`}
         </p>
       )}
 
       {blocked && <p className="mt-2 text-sm text-warn">{reason}</p>}
+
+      {/* What this branch would actually publish, against the base — the one question *Propose MR*
+          asks you to answer, and the console was computing this diff server-side and discarding it.
+          The pane above compares the textarea to the branch, so it is empty precisely when there is
+          something to publish; this is the diff that is never empty when the button is live. */}
+      {proposal.staged && proposal.diff && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs text-muted hover:text-ink">
+            What this would publish — {proposal.branch} vs {proposal.base}
+          </summary>
+          <pre className="mt-1 max-h-64 overflow-auto rounded border border-line bg-bg p-2 font-mono text-xs">
+            {proposal.diff}
+          </pre>
+        </details>
+      )}
 
       {/* Shown even when the proposal is permitted: a green badge over a history that disagrees
           with itself is the one thing this panel must not do. */}

@@ -835,27 +835,10 @@ def _gate_sides(config: Config, skill_id: str) -> tuple[Skill, Skill]:
     # Looked up once and merged into both sides. `with_promoted_cases` would re-read the batch per
     # call, and the two sides must carry the *same* cases anyway — reading it twice is both slower
     # and, if a promotion lands between the two calls, wrong.
-    promoted = _promoted_skill(config, skill_id)
+    promoted = staging.promoted_skill(config, skill_id)
     if promoted is None:
         return base[0], candidate[0]
     return staging.merge_cases(base[0], promoted), staging.merge_cases(candidate[0], promoted)
-
-
-def _promoted_skill(config: Config, skill_id: str) -> Skill | None:
-    """This skill as it stands on the triage batch, or None when there is no batch to read."""
-    try:
-        batch = pending_batch(
-            config.skills_repo,
-            base=config.git.default_base,
-            prefix=config.git.branch_prefix,
-            remote=config.git.push_remote,
-        )
-        if not batch.exists or batch.commits == 0:
-            return None
-        found = staging.skill_at(config, batch.branch, skill_id)
-    except (staging.StagingError, staging.NoSuchSkill, GitError, OSError):
-        return None
-    return found[0] if found else None
 
 
 def _step(root: Path, skill: Skill, kind: Any) -> StepSpec | None:
