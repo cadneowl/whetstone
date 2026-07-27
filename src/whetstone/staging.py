@@ -118,6 +118,21 @@ def with_promoted_cases(config: Config, skill: Skill) -> Skill:
     Best-effort: no git, no batch, or a batch that does not carry this skill all mean "nothing to
     add". Enriching is an improvement to the evidence, never a precondition for having any.
     """
+    promoted = promoted_skill(config, skill.id)
+    return skill if promoted is None else merge_cases(skill, promoted)
+
+
+def promoted_skill(config: Config, skill_id: str) -> Skill | None:
+    """This skill as it stands on the triage batch, or None when there is nothing to read.
+
+    Separate from `with_promoted_cases` because a caller often needs to merge the same batch into
+    two skills — the inbox into the working tree *and* the staged draft, the gate into base *and*
+    candidate. Reading it once and merging twice halves the git calls and, more importantly, makes
+    the two results describe the same batch even if a promotion lands mid-request.
+
+    Best-effort: no git, no batch, or a batch that does not carry this skill all mean "nothing to
+    add". Enriching is an improvement to the evidence, never a precondition for having any.
+    """
     from whetstone.gitio import pending_batch
 
     try:
@@ -128,14 +143,11 @@ def with_promoted_cases(config: Config, skill: Skill) -> Skill:
             remote=config.git.push_remote,
         )
         if not batch.exists or batch.commits == 0:
-            return skill
-        promoted = skill_at(config, batch.branch, skill.id)
+            return None
+        found = skill_at(config, batch.branch, skill_id)
     except (StagingError, NoSuchSkill, GitError, OSError):
-        return skill
-    if promoted is None:
-        return skill
-
-    return merge_cases(skill, promoted[0])
+        return None
+    return found[0] if found else None
 
 
 def merge_cases(skill: Skill, promoted: Skill) -> Skill:

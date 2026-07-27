@@ -135,3 +135,71 @@ def test_the_inbox_survives_a_run_the_index_knows_about_but_cannot_load(
             path.unlink()
     row = _inbox(client)["inbox"]["attention"][0]
     assert row["scored"] is False
+
+
+def test_a_passing_gate_makes_the_inbox_offer_to_propose(client: TestClient) -> None:
+    """The inbox is the third C6 read site, and it was the one left behind.
+
+    A gate scores the staged skill with the promoted cases folded in and files its verdict under
+    that hash. Looking it up under the un-enriched hash finds nothing, so the row went on saying
+    "Run the gate" after every run of the gate — a passing verdict on screen and an action item
+    telling you to earn it again.
+    """
+    from datetime import UTC, datetime
+
+    from whetstone import staging
+    from whetstone.authoring import SkillEdit, prepare_guidance
+    from whetstone.domain.run import skill_hash
+    from whetstone.domain.score import SkillScore
+    from whetstone.gates import GateConfig, GateRecord, GateResult, GateStore, new_gate_id
+
+    config = client.app.state.config
+
+    # A promoted case, so the enriched and un-enriched hashes actually differ — without a batch
+    # both are the same string and the bug is invisible.
+    _queue(config.candidates_dir.parent)
+    edits = client.get("/api/candidates/mr-812-unwrap").json()["edits"]
+    promoted = client.post("/api/candidates/mr-812-unwrap/promote", json={"edits": edits})
+    assert promoted.status_code == 200, promoted.text
+
+    base, current = staging.source(config, "rust-errors")
+    prepared = prepare_guidance(
+        base,
+        current,
+        SkillEdit(body="# Rust errors\n\n- **R9 — a staged rule.**\n"),
+        skills_root=staging.relative_skills_root(config),
+        base_version=staging.base_version(config, "rust-errors"),
+    )
+    staging.stage(config, "rust-errors", prepared.files, "guidance: staged for this test")
+
+    staged, _ = staging.source(config, "rust-errors")
+    under_test = staging.with_promoted_cases(config, staged)
+    at = datetime(2026, 7, 27, tzinfo=UTC)
+    candidate_hash = skill_hash(under_test)
+    score = SkillScore(skill_id="rust-errors", version=1, k=1, cases=[])
+    GateStore(config.gates_dir).save(
+        GateRecord(
+            id=new_gate_id("rust-errors", candidate_hash, at),
+            created_at=at,
+            skill_id="rust-errors",
+            base_hash="0" * 64,
+            candidate_hash=candidate_hash,
+            config=GateConfig(),
+            result=GateResult(
+                passed=True,
+                reasons=[],
+                regressed_cases=[],
+                recall_old=1.0,
+                recall_new=1.0,
+                fp_rate_old=0.0,
+                fp_rate_new=0.0,
+            ),
+            base_score=score,
+            candidate_score=score,
+        )
+    )
+
+    row = client.get("/api/inbox").json()["inbox"]["attention"][0]
+
+    assert row["can_propose"] is True, row["blocked_reason"]
+    assert row["action"]["kind"] == "propose"
