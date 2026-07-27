@@ -60,6 +60,13 @@ export type JobRequest = {
   sample?: number | null
   /** eval only: what to score — the working tree, the guidance draft, or the promoted case batch. */
   scope?: 'working' | 'draft' | 'batch'
+  /**
+   * Backend for this one launch, overriding the console default. Empty/absent = the header pick.
+   * A known provider only (never a base URL); the server resolves and validates it. Applies to
+   * every LLM step — eval, gate, improve, review.
+   */
+  provider?: string
+  model?: string
   targeted?: string[]
   instruction?: string
   stale_ok?: boolean

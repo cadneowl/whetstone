@@ -1415,6 +1415,16 @@ export interface components {
         };
         /** EvalRequest */
         EvalRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
             /** Sample */
             sample?: number | null;
             /**
@@ -1690,6 +1700,16 @@ export interface components {
          *     the thing it needs a verdict about is always what `whetstone/skill/<id>` holds.
          */
         GateRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
             /** Sample */
             sample?: number | null;
             /** Skill Id */
@@ -1785,6 +1805,16 @@ export interface components {
              * @default
              */
             instruction: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
             /** Run Id */
             run_id?: string | null;
             /** Skill Id */
@@ -2565,6 +2595,11 @@ export interface components {
              */
             diff: string;
             /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
              * Mr
              * @default
              */
@@ -2574,6 +2609,11 @@ export interface components {
              * @default
              */
             project: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
             /** Skill Id */
             skill_id: string;
         };

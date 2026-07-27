@@ -3,6 +3,7 @@ import {
   useCancelJob,
   useJob,
   useLaunchJob,
+  useModelChoice,
   usePlanJob,
   type Job,
   type JobKind,
@@ -43,10 +44,36 @@ export function LaunchButton({
 }) {
   const [jobId, setJobId] = useState<string | null>(null)
   const [seen, setSeen] = useState<string | null>(null)
+  const [armed, setArmed] = useState(false)
+  // A backend chosen for *this* launch only (null = the console default). Kept here, not globally,
+  // so running one step on another model never moves the default every other step inherits.
+  const [model, setModel] = useState<{ provider: string; model: string } | null>(null)
   const plan = usePlanJob(kind)
   const launch = useLaunchJob(kind)
   const cancel = useCancelJob()
   const { data: job } = useJob(jobId)
+
+  // Fold a per-launch model choice into the request sent to both plan and launch, so the two never
+  // disagree about which backend the confirmed run will use.
+  const withModel = (r: JobRequest): JobRequest =>
+    model ? { ...r, provider: model.provider, model: model.model } : r
+
+  // A local/OpenAI provider has no default model, so a chosen provider with a blank model is an
+  // incomplete choice: planning it only 422s. Anthropic resolves a blank to its own default, so it
+  // is never incomplete. Skipping the plan keeps a guaranteed-to-fail request — and the red error
+  // it surfaces — off the screen until there is a model to run.
+  const incompleteModel = model != null && model.provider !== 'anthropic' && !model.model.trim()
+
+  // Plan — and re-plan on a model change — while armed, debounced so typing a model id does not
+  // spam the server. Driving it from here rather than from the model field's blur is deliberate: a
+  // blur-triggered re-plan fires *as* you click Yes, which blanks the plan and disables the button
+  // mid-click, so the launch takes two clicks. Nothing here reacts to the click.
+  useEffect(() => {
+    if (!armed || incompleteModel) return
+    const id = setTimeout(() => plan.mutate(withModel(request)), 200)
+    return () => clearTimeout(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [armed, incompleteModel, model?.provider, model?.model])
 
   // `onDone` fires once per job. The polling query re-renders on every tick, so without this the
   // callback would run several times for one result.
@@ -63,6 +90,8 @@ export function LaunchButton({
         onCancel={() => cancel.mutate(job!.id)}
         onDismiss={() => {
           setJobId(null)
+          setArmed(false)
+          setModel(null)
           plan.reset()
           launch.reset()
         }}
@@ -70,28 +99,56 @@ export function LaunchButton({
     )
   }
 
-  if (plan.data) {
+  if (armed) {
     return (
       <div className="rounded-lg border border-warn/40 bg-warn/5 p-3">
-        <PlanBanner plan={plan.data} />
+        {incompleteModel ? (
+          <p className="text-sm text-muted">
+            Enter a model id for <span className="font-mono">{model!.provider}</span> below to see
+            the cost.
+          </p>
+        ) : plan.data ? (
+          <PlanBanner plan={plan.data} />
+        ) : plan.isPending ? (
+          <p className="text-sm text-muted">Checking what this will cost…</p>
+        ) : null}
         {children && <div className="mt-3">{children}</div>}
+        {/* Choose the backend for this one launch. Changing it re-plans (via the effect above), so
+            the banner — its billing above all — always describes the model that would actually run. */}
+        <LaunchModel value={model} onChange={setModel} />
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <button
             type="button"
-            disabled={launch.isPending}
-            onClick={() => launch.mutate(request, { onSuccess: (started) => setJobId(started.id) })}
+            disabled={!plan.data || incompleteModel || launch.isPending}
+            onClick={() =>
+              launch.mutate(withModel(request), {
+                onSuccess: (started) => {
+                  setJobId(started.id)
+                  setArmed(false)
+                },
+              })
+            }
             className="rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:text-muted"
           >
             {launch.isPending ? 'Starting…' : `Yes, ${label.toLowerCase()}`}
           </button>
           <button
             type="button"
-            onClick={() => plan.reset()}
+            onClick={() => {
+              setArmed(false)
+              setModel(null)
+              plan.reset()
+            }}
             className="text-sm text-muted transition-colors hover:text-ink"
           >
             Cancel
           </button>
         </div>
+        {plan.error && !incompleteModel && (
+          <div className="mt-3">
+            <ErrorNote error={plan.error} />
+          </div>
+        )}
         {launch.error && (
           <div className="mt-3">
             <ErrorNote error={launch.error} />
@@ -105,18 +162,83 @@ export function LaunchButton({
     <div>
       <button
         type="button"
-        disabled={disabled || plan.isPending}
+        disabled={disabled}
         title={disabled ? disabledReason : undefined}
-        onClick={() => plan.mutate(request)}
+        onClick={() => setArmed(true)}
         className="rounded-lg border border-line px-3 py-1.5 text-sm transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:text-muted"
       >
-        {plan.isPending ? 'Checking…' : label}
+        {label}
       </button>
       {plan.error && (
         <div className="mt-3">
           <ErrorNote error={plan.error} />
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * Pick the backend for a single launch, defaulting to the console's current model.
+ *
+ * Only reports the choice via `onChange`; the parent's debounced effect is what re-plans, so the
+ * banner tracks the choice without this needing to know about planning. The provider list is the
+ * same closed set the header picker offers, minus any that need a base URL the browser cannot give
+ * (`custom`) — offering an option that can only ever error is worse than not offering it. A base
+ * URL is never entered here, so the browser can only choose among hosts Whetstone already knows.
+ */
+function LaunchModel({
+  value,
+  onChange,
+}: {
+  value: { provider: string; model: string } | null
+  onChange: (v: { provider: string; model: string } | null) => void
+}) {
+  const { data } = useModelChoice()
+  if (!data) return null
+  // Drop providers that need a base URL the browser is not allowed to supply — `custom` is the one
+  // preset with an OpenAI kind and no host, so it would 422 on every attempt. Anthropic has no host
+  // either but does not need one, so it stays.
+  const choosable = data.available.filter((b) => b.kind === 'anthropic' || b.base_url)
+  // A local provider (ollama and friends) has no default model, so a blank field there errors; only
+  // Anthropic resolves a blank to a default. Word the hint to match whichever is selected.
+  const needsModel = value != null && value.provider !== 'anthropic'
+  return (
+    <div className="mt-3 border-t border-warn/20 pt-3">
+      <label className="block text-xs text-muted">
+        Model for this run
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <select
+            value={value?.provider ?? ''}
+            onChange={(e) => {
+              const p = e.target.value
+              onChange(p ? { provider: p, model: value?.provider === p ? value.model : '' } : null)
+            }}
+            className="rounded border border-line bg-canvas px-2 py-1 text-sm text-ink"
+          >
+            <option value="">
+              Console default — {data.resolved_model || data.resolved_backend}
+            </option>
+            {choosable.map((b) => (
+              <option key={b.name} value={b.name}>
+                {b.label}
+              </option>
+            ))}
+          </select>
+          {value && (
+            <input
+              value={value.model}
+              onChange={(e) => onChange({ provider: value.provider, model: e.target.value })}
+              placeholder={needsModel ? 'model id (required)' : 'model id (blank = default)'}
+              spellCheck={false}
+              className="min-w-[10rem] flex-1 rounded border border-line bg-canvas px-2 py-1 font-mono text-xs text-ink"
+            />
+          )}
+        </div>
+      </label>
+      <p className="mt-1 text-xs text-muted">
+        Just this run — the console default stays whatever the header says.
+      </p>
     </div>
   )
 }
