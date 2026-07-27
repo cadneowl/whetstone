@@ -1,6 +1,12 @@
 import * as Tabs from '@radix-ui/react-tabs'
+import { useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { useSkill, type CaseSummary } from '@/api/client'
+import {
+  useSkill,
+  type CaseSummary,
+  type PendingCase,
+  type SkillDetail as Detail,
+} from '@/api/client'
 import { Guidance } from '@/components/Guidance'
 import { GuidanceEditor } from '@/components/GuidanceEditor'
 import { LaunchButton } from '@/components/LaunchButton'
@@ -37,9 +43,7 @@ export function SkillDetail() {
             whole loop — you re-run it after every guidance edit — and it used to live behind the
             History tab, which is named for the records it produces rather than the thing it does.
             Here it is reachable from whichever tab you are on, Edit above all. */}
-        {cases.length > 0 && (
-          <LaunchButton kind="eval" request={{ skill_id: skill.id }} label="Run evals" />
-        )}
+        <EvalLauncher detail={data} />
       </header>
 
       {/* The tab lives in the URL so the inbox can send you straight to the step it named, and
@@ -86,7 +90,19 @@ export function SkillDetail() {
             better rule from a worse one — and what the gate measures a change against. Open one for
             the diff, the expectation and the merge request behind it.
           </TabIntro>
-          <CaseTable skillId={skill.id} cases={cases} />
+          {/* The empty-state is suppressed when a batch is pending: "No eval cases. Nothing gates a
+              change" printed directly above a list of six is the self-contradiction to avoid — the
+              pending section below states the true position, that they gate once the branch merges. */}
+          {cases.length > 0 ? (
+            <CaseTable skillId={skill.id} cases={cases} />
+          ) : data.pending_cases.length === 0 ? (
+            <Empty>No eval cases. Nothing gates a change to this skill's guidance.</Empty>
+          ) : null}
+          {/* Promoting writes cases to a batch branch, never to disk, so a skill an operator had
+              just curated a set for showed none of them here. They do not gate anything until the
+              branch merges, but they are scorable now — via "Promoted cases" in the header — and a
+              cases tab that omits them is naming strictly less than what the skill is held to. */}
+          {data.pending_cases.length > 0 && <PendingCaseList cases={data.pending_cases} />}
         </Tabs.Content>
 
         <Tabs.Content value="runs">
@@ -95,9 +111,15 @@ export function SkillDetail() {
             and why the judge did or did not accept it — which is how you tell a bad rule from a bad
             eval case.
           </TabIntro>
-          {cases.length === 0 && (
+          {cases.length === 0 && data.pending_cases.length === 0 && (
             <p className="mb-4 text-sm text-muted italic">
               No eval cases to score. Promote some from the triage queue first.
+            </p>
+          )}
+          {cases.length === 0 && data.pending_cases.length > 0 && (
+            <p className="mb-4 text-sm text-muted italic">
+              No merged cases yet, but {data.pending_cases.length} promoted case(s) are waiting on
+              the triage batch — score them with <em>Promoted cases</em> in the header.
             </p>
           )}
 
@@ -160,6 +182,117 @@ export function SkillDetail() {
           </dl>
         </Tabs.Content>
       </Tabs.Root>
+    </div>
+  )
+}
+
+/** What the front-door "Run evals" control can be pointed at. Draft scoring lives in the Edit tab,
+ *  where the unmerged rewrite it measures is on screen; the two front-door scopes answer "how does
+ *  this skill do", not "did my edit help". */
+type FrontScope = 'working' | 'batch'
+
+/**
+ * Score this skill from its header — and choose what gets scored.
+ *
+ * The old control fired one working-tree run and hid even that whenever the skill had no *merged*
+ * cases. But "no merged cases" is the ordinary state right after triage: promoting writes cases to a
+ * batch branch and never to disk, so an operator who had just curated a set landed on a skill page
+ * with no way to run them. This offers the promoted batch as a first-class scope and makes it the
+ * default whenever cases are waiting, so the thing you just did is the thing the button does.
+ */
+function EvalLauncher({ detail }: { detail: Detail }) {
+  const pending = detail.pending_cases.length
+  const merged = detail.cases.length
+
+  const scopes: { id: FrontScope; label: string; count: number; hint: string }[] = []
+  // Batch first, so it is the default: a page with pending cases is a page reached straight from
+  // promoting them.
+  if (pending > 0)
+    scopes.push({
+      id: 'batch',
+      label: 'Promoted cases',
+      count: pending,
+      hint: `${pending} case(s) promoted from triage, waiting on the batch branch. Scores this skill against the set you just curated — the run the improve step then learns from.`,
+    })
+  if (merged > 0)
+    scopes.push({
+      id: 'working',
+      label: 'Working tree',
+      count: merged,
+      hint: `${merged} merged case(s), scored as the guidance sits on disk.`,
+    })
+
+  const [scope, setScope] = useState<FrontScope>(scopes[0]?.id ?? 'working')
+  if (scopes.length === 0) return null
+  const selected = scopes.find((s) => s.id === scope) ?? scopes[0]!
+
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      {scopes.length > 1 && (
+        <div className="flex rounded-lg border border-line p-0.5 text-xs">
+          {scopes.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => setScope(s.id)}
+              className={`rounded-md px-2.5 py-1 transition-colors ${
+                s.id === scope ? 'bg-accent/10 text-accent' : 'text-muted hover:text-ink'
+              }`}
+            >
+              {s.label} <span className="tabular text-muted">· {s.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {/* Keyed on scope so switching resets any open cost plan: the estimate is a function of the
+          case count, which is exactly what the scope changes. */}
+      <LaunchButton
+        key={scope}
+        kind="eval"
+        request={{ skill_id: detail.skill.id, scope: selected.id }}
+        label="Run evals"
+      />
+      <p className="max-w-xs text-right text-xs text-muted">{selected.hint}</p>
+    </div>
+  )
+}
+
+/**
+ * The cases promoted from triage that do not yet live on disk.
+ *
+ * Rendered flat, not as links: a pending case lives on the batch branch, and the case-detail route
+ * loads from the checked-out folder — so a link would 404 until the branch merges.
+ */
+function PendingCaseList({ cases }: { cases: PendingCase[] }) {
+  return (
+    <div className="mt-5">
+      <h3 className="mb-1 text-xs tracking-wide text-muted uppercase">
+        Promoted from triage, not merged yet ({cases.length})
+      </h3>
+      <p className="mb-2 max-w-3xl text-sm text-muted">
+        On <code className="font-mono">{cases[0]!.branch}</code>. They begin gating changes to this
+        guidance when that branch merges — until then, score them with <em>Promoted cases</em> in
+        the header, then draft a change from that run in the <em>Edit</em> tab.
+      </p>
+      <ul className="space-y-1.5">
+        {cases.map((c) => (
+          <li
+            key={c.id}
+            className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-dashed border-line bg-surface px-3 py-2 text-sm"
+          >
+            <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
+              {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
+            </Badge>
+            <span className="font-mono">{c.id}</span>
+            <span className="font-mono text-xs text-muted">{c.path}</span>
+            <span className="ml-auto tabular text-muted">
+              {c.kind === 'should_catch'
+                ? `recall ${score(c.last_recall, 2)}`
+                : `fp ${score(c.last_fp_rate, 2)}`}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
