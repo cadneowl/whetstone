@@ -293,18 +293,39 @@ def push(
     remote: str = "origin",
     prefix: str = DEFAULT_BRANCH_PREFIX,
     protected: Sequence[str] = ("main", "master"),
-) -> None:
-    """Publish a branch. Never called implicitly — a human triggers this.
+) -> str:
+    """Publish a branch, returning the URL the forge offered for opening a change request.
 
     Guarded the same way `write_and_commit` is, and for a stronger reason: publishing is the one
     thing here that cannot be undone locally. The console only ever creates `prefix`-named branches,
     so anything else asking to be pushed is a caller sending a branch it did not create — which
     would otherwise publish whatever the developer happens to have sitting on their local `main`.
+
+    The URL comes from the forge itself. GitLab and GitHub both answer a push of a new branch with a
+    `remote:` line offering exactly the link needed, and `_git` was capturing that output and
+    discarding it on success — so the console said "open the merge request in your git host" while
+    holding the address of the page that opens it. Empty when the remote offered nothing, which is
+    normal for a branch that already has an open request, or for a plain git server.
     """
     check_publishable(branch, prefix=prefix, protected=protected)
     if not ref_exists(repo, _full_ref(branch)):
         raise GitError(f"no local branch {branch!r} to push")
-    _git(repo, "push", "--set-upstream", remote, f"{_full_ref(branch)}:{_full_ref(branch)}")
+    ref = _full_ref(branch)
+    result = _run(repo, "push", "--set-upstream", remote, f"{ref}:{ref}")
+    if result.returncode != 0:
+        raise GitError(result.stderr.decode("utf-8", "replace").strip() or "git push failed")
+    return _offered_url(result.stderr)
+
+
+# Anything the forge prints back is prefixed `remote:`. Matched loosely on purpose: GitLab says
+# "To create a merge request", GitHub "Create a pull request", Gitea something else again, and the
+# wording is not worth depending on when the URL is unambiguous on its own.
+_REMOTE_URL = re.compile(rb"^remote:\s*(?:.*?\s)?(https?://\S+)", re.MULTILINE)
+
+
+def _offered_url(stderr: bytes) -> str:
+    match = _REMOTE_URL.search(stderr)
+    return match.group(1).decode("utf-8", "replace").rstrip(".,") if match else ""
 
 
 # --- internals ----------------------------------------------------------------
@@ -379,17 +400,27 @@ def _git(
     Byte-level throughout: text mode would apply newline translation on Windows and silently corrupt
     diffs and blob hashes.
     """
+    result = _run(repo, *args, env=env, stdin=stdin)
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip() or f"git {args[0]} failed"
+        raise GitError(detail)
+    return result.stdout
+
+
+def _run(
+    repo: str | Path,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+    stdin: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """The raw call, for the few callers that need git's stderr on success as well as its stdout."""
     full_env = {**os.environ, **(env or {})}
-    result = subprocess.run(
+    return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
         input=stdin,
         env=full_env,
     )
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace").strip() or f"git {args[0]} failed"
-        raise GitError(detail)
-    return result.stdout
 
 
 def _text(

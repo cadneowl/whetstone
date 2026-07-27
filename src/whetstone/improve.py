@@ -23,6 +23,7 @@ against the skill and unknown ones are reported rather than passed through.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections import defaultdict
 from typing import Literal
@@ -84,6 +85,14 @@ class Digest(BaseModel):
 
     skill_id: str
     guidance: str
+    # The rest of the skill folder: `patterns/rust.md` and friends, keyed by path.
+    #
+    # A skill is a folder and `SKILL.md` is its entry point, so for many skills the rules are not
+    # in `guidance` at all — that file says "the rules live in ./patterns/errors.md", and the
+    # reviewer is given the pages verbatim. Without them here the improve step was asked to fix
+    # failures caused by rules it had never been shown, and its rewrite landed in the one file that
+    # held none of them: the pages stayed as they were and `SKILL.md` grew a second, diverging copy.
+    pages: dict[str, str] = Field(default_factory=dict)
     total_cases: int
     scored_cases: int
     total_failures: int
@@ -104,11 +113,20 @@ class Digest(BaseModel):
             blocks.append(cluster.representative.render() + note)
         return "\n\n".join(blocks)
 
+    def render_pages(self) -> str:
+        """The companion guidance, each page under the path it must be returned as."""
+        if not self.pages:
+            return "(this skill is a single SKILL.md — it has no companion pages)"
+        return "\n\n".join(
+            f"### {path}\n\n{text.strip()}" for path, text in sorted(self.pages.items())
+        )
+
     def prompt_values(self) -> dict[str, str]:
         """Every `{{variable}}` an improve prompt may use."""
         return {
             "skill_id": self.skill_id,
             "guidance": self.guidance,
+            "pages": self.render_pages(),
             "failures": self.render_failures(),
             "failure_count": str(self.total_failures),
             "shown_count": str(len(self.clusters)),
@@ -122,15 +140,39 @@ class Digest(BaseModel):
 
 
 class GuidanceProposal(BaseModel):
-    """What an improve step returns: a rewritten guidance body and why.
+    """What an improve step returns: rewritten guidance and why.
 
     `targeted_cases` is the useful part operationally — it becomes `eval gate --targeted`, which is
     what turns "the score did not drop" into "the thing we set out to fix is actually fixed".
     """
 
     body: str
+    # Rewritten companion pages, keyed by the path they came in under. Absent means unchanged, which
+    # is why this is a partial map rather than the whole folder: a step that wants to fix one rule
+    # in `patterns/errors.md` must not have to restate every other page to avoid deleting it.
+    #
+    # Optional so a single-file skill, and any step written before pages existed, behaves exactly as
+    # it did — the common case stays a body and nothing else.
+    pages: dict[str, str] = Field(default_factory=dict)
     rationale: str = ""
     targeted_cases: list[str] = Field(default_factory=list)
+
+    def changed_pages(self, before: dict[str, str]) -> dict[str, str]:
+        """The pages this proposal actually rewrites, ignoring ones handed back unaltered.
+
+        A model asked for the pages it changed will often return all of them. Staging those would
+        write a commit touching files with identical content — noise in the diff whoever reviews the
+        merge request has to read past, and a version bump for nothing.
+
+        Paths the skill does not already have are dropped rather than created. Rewriting a rule the
+        model was shown is one thing; letting a model response create arbitrary files in the repo is
+        another, and a new page nothing references would not reach the reviewer anyway.
+        """
+        return {
+            path: text
+            for path, text in self.pages.items()
+            if path in before and text.strip() != before[path].strip()
+        }
 
 
 class ProposalResult(BaseModel):
@@ -155,6 +197,7 @@ def build_digest(
     return Digest(
         skill_id=skill.id,
         guidance=skill.body,
+        pages={page.path: page.text for page in skill.pages},
         total_cases=len(skill.eval_cases),
         scored_cases=0 if record is None else len(record.cases),
         total_failures=len(failures),
@@ -298,15 +341,27 @@ def propose(
     )
 
     if spec.is_subprocess:
+        # No rendered prompt to compare against: a subprocess step is handed the digest as JSON, so
+        # there is no template text it could be quoting back.
         proposal = _run_subprocess(spec, digest)
         calls = 0
     else:
         if client is None:
             raise StepError("this improve step calls a model, but no LLM client was provided")
-        proposal = client.structured(
-            _SYSTEM, render_step_prompt(spec, digest), GuidanceProposal, effort=effort
-        )
+        prompt = render_step_prompt(spec, digest)
+        proposal = client.structured(_SYSTEM, prompt, GuidanceProposal, effort=effort)
+        # Every guidance file, for every file checked: see `strip_prompt_echo`. Rules moved between
+        # files are still rules, whichever file they arrive in.
+        quoted = [skill.body, *digest.pages.values()]
+        proposal.body = strip_prompt_echo(proposal.body, prompt, quoted)
+        proposal.pages = {
+            path: strip_prompt_echo(text, prompt, quoted)
+            for path, text in proposal.pages.items()
+        }
         calls = 1
+
+    # Kept only where it changes something, and only for pages the skill already has.
+    proposal.pages = proposal.changed_pages(digest.pages)
 
     known = {c.id for c in skill.eval_cases}
     unknown = [c for c in proposal.targeted_cases if c not in known]
@@ -316,6 +371,81 @@ def propose(
     )
 
 
+# How much copied text is needed before a tail counts as echo rather than coincidence. A sentence
+# shared with the prompt is fair — guidance may well restate the vocabulary it was written in. A
+# paragraph of it is the model having appended the brief it was given.
+_ECHO_MIN_CHARS = 120
+
+
+def strip_prompt_echo(body: str, prompt: str, guidance: list[str]) -> str:
+    """Drop instructions the model copied out of its own prompt and into the guidance.
+
+    Asked to "return the complete new guidance body", a model will sometimes return the complete
+    *prompt* — rules first, then `## What to do`, then the bullet list telling it how to rewrite
+    them. Nothing downstream can tell the difference: the body is stored, staged, and handed to the
+    reviewer as rules, so the reviewer ends up being instructed to rewrite its own guidance. Seen
+    from a local 30B model on the first real run of this loop.
+
+    Matched on collapsed whitespace, because a model re-wraps what it copies: the same sentence
+    comes back broken at a different column, and comparing line by line finds nothing while a human
+    reads a verbatim quote. Only a trailing block is removed.
+
+    `guidance` is **every** guidance file the prompt quotes — `SKILL.md` and all its pages — not
+    just the one being checked. The prompt contains both instructions and rules, and only the
+    instructions are ours to strip: a model consolidating a rule, moving it verbatim out of
+    `patterns/errors.md` and into `SKILL.md`, is doing exactly what it was asked. Excluding only the
+    file under check left every *other* file counting as scaffold, so that rule was deleted on the
+    way to the editor and the guidance quietly lost it.
+    """
+    scaffold = _without(prompt, guidance)
+    if not scaffold:
+        return body
+
+    lines = body.splitlines()
+    cut = None
+    for index in range(len(lines) - 1, -1, -1):
+        tail = _collapse("\n".join(lines[index:]))
+        if not tail:
+            continue
+        if tail not in scaffold:
+            break
+        if len(tail) >= _ECHO_MIN_CHARS:
+            cut = index
+    if cut is None:
+        return body
+    return "\n".join(lines[:cut]).rstrip() + "\n"
+
+
+# Leading list markers and heading hashes, which a model reformats freely while copying: the same
+# sentence comes back as a paragraph instead of a bullet, or under `##` instead of `###`.
+_MARKER = re.compile(r"^(?:[-*+]\s+|#{1,6}\s+|\d+[.)]\s+)")
+
+
+def _collapse(text: str) -> str:
+    """The form two passages compare equal in when only their formatting differs.
+
+    Whitespace goes because a model re-wraps what it copies; list markers and heading levels go
+    because it re-styles it. Both were observed on consecutive runs of the same prompt against the
+    same model — the first came back as bullets, the second as paragraphs, and matching on the raw
+    text caught only the first.
+    """
+    stripped = [_MARKER.sub("", line.strip()) for line in text.splitlines()]
+    return " ".join(" ".join(stripped).split())
+
+
+def _without(prompt: str, guidance: list[str]) -> str:
+    """The prompt minus every passage of guidance it quotes — the instructions, and nothing else.
+
+    Longest first, so removing a short page cannot punch a hole in a longer one that contains it and
+    leave the remainder looking like scaffold.
+    """
+    scaffold = _collapse(prompt)
+    for quoted in sorted((_collapse(text) for text in guidance), key=len, reverse=True):
+        if quoted:
+            scaffold = scaffold.replace(quoted, " ")
+    return scaffold
+
+
 def render_step_prompt(spec: StepSpec, digest: Digest) -> str:
     """The prompt as sent, including an instruction the template forgot to place.
 
@@ -323,8 +453,22 @@ def render_step_prompt(spec: StepSpec, digest: Digest) -> str:
     gets it, appended last and clearly labelled — silently dropping what an operator typed on the
     command line is the one outcome that would make the flag untrustworthy.
     """
+    template = spec.prompt or ""
     text = spec.render_prompt(digest.prompt_values())
-    if digest.instruction and "{{instruction}}" not in (spec.prompt or ""):
+    # Same rule as `{{instruction}}`, for the same reason. Every skill scaffolded before pages were
+    # part of this prompt has a template that never mentions them, and those are exactly the skills
+    # that have grown companion pages — so leaving it to the template means the long-established
+    # skills stay the broken ones. A step that places `{{pages}}` decides where they go; one that
+    # does not still sends them.
+    if digest.pages and "{{pages}}" not in template:
+        text += (
+            "\n\n## Current guidance — companion pages\n\n"
+            "These are part of the same guidance and reach the reviewer verbatim, under the paths "
+            "shown. If a rule you need to change lives here, change it here, and return the page's "
+            "complete new text in `pages` under that path.\n\n"
+            f"{digest.render_pages()}\n"
+        )
+    if digest.instruction and "{{instruction}}" not in template:
         text += (
             "\n\n## Additional instruction for this run\n\n"
             "This takes precedence over the general direction above where they conflict:\n\n"
@@ -340,7 +484,20 @@ _SYSTEM = (
     "is already working — the cases you are shown are a sample, and rules you cannot see evidence "
     "for are still load-bearing. Return the COMPLETE new guidance body, not a diff or a fragment. "
     "Name the eval case ids your change is meant to fix in targeted_cases, and explain the change "
-    "in rationale."
+    "in rationale.\n\n"
+    # Said outright because models do it: the reply comes back as the whole prompt, rules followed
+    # by the section explaining how to rewrite them. `strip_prompt_echo` removes what lands anyway,
+    # but a body that never contains it is better than one repaired afterwards.
+    "`body` is the guidance itself, as the reviewer will be given it — nothing else. Do not "
+    "include these instructions, the section headings around them, the failure list, or any "
+    "commentary about the rewrite: that belongs in `rationale`.\n\n"
+    # A skill is a folder. For many of them `SKILL.md` is a table of contents and every rule lives
+    # in a companion page, so a step that could only write `body` was structurally unable to fix the
+    # rule that caused the failure — its only move was to restate it in the wrong file.
+    "A skill is a folder: `body` is its `SKILL.md`, and the companion pages shown to you are part "
+    "of the same guidance. Fix a rule where that rule lives. To change a page, return its complete "
+    "new text in `pages` under the exact path it was shown under; leave out any page you are not "
+    "changing. If the rules live in the pages, `body` should stay as it is."
 )
 
 

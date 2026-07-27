@@ -4,7 +4,7 @@ import ipaddress
 import os
 import shutil
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -14,15 +14,22 @@ from pydantic import BaseModel
 
 from whetstone import staging
 from whetstone.authoring import SkillEdit, prepare_guidance
+from whetstone.candidates import store_candidates
 from whetstone.config import Config, load_config
 from whetstone.core.gate import GateConfig
 from whetstone.core.loader import SkillLoadError, load_skill, load_skills
-from whetstone.corpus.builder import DEFAULT_MAX_CLEAN_FILES, DEFAULT_MAX_DEFECT_FILES
+from whetstone.corpus.builder import (
+    DEFAULT_MAX_CLEAN_FILES,
+    DEFAULT_MAX_DEFECT_FILES,
+    ProgressHandler,
+    WalkProgress,
+)
+from whetstone.corpus.model import CandidateCase
 from whetstone.domain.change import CodeChange, parse_unified_diff
 from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import MergeRequestRef
-from whetstone.domain.run import RunEvent, RunRecord, skill_hash
+from whetstone.domain.run import RunEvent, RunRecord, guidance_hash
 from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
@@ -44,11 +51,11 @@ from whetstone.service import (
     format_gate,
     format_score,
     precision_evidence,
-    pull_corpus,
-    pull_defects,
     record_eval,
     record_gate,
     record_review,
+    stream_corpus,
+    stream_defects,
 )
 from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step, load_steps
 from whetstone.update import refresh_wiki
@@ -781,7 +788,6 @@ def corpus_pull(
     fixed them and each fix is reversed into the change that introduced it — the strongest recall
     signal available, since it is a case review demonstrably missed.
     """
-    from whetstone.corpus.builder import write_candidate
 
     # Before the walk, not after it: this pairing is checkable in nanoseconds, and reporting it at
     # the end means the operator waits out a full history crawl to be told they mistyped a flag.
@@ -798,50 +804,100 @@ def corpus_pull(
         skipped.append(f"{mr.repo.path}!{mr.iid}")
         typer.echo(f"⚠ skipped {exc}", err=True)
 
-    candidates = pull_corpus(
-        connector, project, since, skills, max_clean_files=max_clean_files, on_skip=note_skip
-    )
-
-    if jira_url and jira_project:
-        tracker = JiraConnector.from_config(
-            {"base_url": jira_url, "token_env": jira_token_env, "email": jira_email or ""}
-        )
-        defects = pull_defects(
-            connector, tracker, project, jira_project, since, skills,
-            max_files=max_defect_files, on_skip=note_skip,
-        )
-        typer.echo(f"{len(defects)} candidate(s) from resolved {jira_project} defects")
-        candidates.extend(defects)
-
     written = decided = existing = 0
-    for c in candidates:
-        case_dir = out / c.id
-        if (case_dir / "decision.json").is_file():
-            # Someone already ruled on this one. Rewriting it would revive a rejected candidate as
-            # a fresh-looking case, or replace text a promoter is part-way through editing.
-            decided += 1
-            continue
-        if case_dir.is_dir() and not refresh:
-            existing += 1
-            continue
-        write_candidate(c, case_dir)
-        (case_dir / "candidate.json").write_text(c.model_dump_json(indent=2), encoding="utf-8")
-        written += 1
-        skill = c.suggested_skill or "(unrouted)"
-        typer.echo(f"{c.id}  [{c.kind}]  conf={c.confidence:.2f}  -> {skill}")
 
-    typer.echo(f"{written} candidate(s) written to {out}")
-    if existing:
-        typer.echo(f"{existing} already in the queue (use --refresh to rewrite)")
-    if decided:
-        typer.echo(f"{decided} already decided, left untouched")
-    if skipped:
-        # Said again at the end, where the counts are. A warning printed 40 minutes ago has scrolled
-        # away, and a total that silently omits them reads like a quieter quarter than it was.
-        shown = ", ".join(skipped[:5])
-        if len(skipped) > 5:
-            shown += f" (+{len(skipped) - 5} more)"
-        typer.echo(f"⚠ {len(skipped)} merge request(s) unreachable, not looked at: {shown}")
+    def announce(candidate: CandidateCase) -> None:
+        """Name each candidate as it lands, so a long crawl shows its work."""
+        nonlocal written
+        written += 1
+        skill = candidate.suggested_skill or "(unrouted)"
+        typer.echo(
+            f"{candidate.id}  [{candidate.kind}]  conf={candidate.confidence:.2f}  -> {skill}"
+        )
+
+    def show(label: str) -> ProgressHandler:
+        """Progress on stderr, so stdout stays a clean list of what was written."""
+
+        def report(p: WalkProgress) -> None:
+            found = f"{p.found} candidate(s)" if p.found else "nothing"
+            typer.echo(
+                f"  [{p.done}/{p.total}] {label} {p.ref} — {found}, {written} written so far",
+                err=True,
+            )
+
+        return report
+
+    def keep(stream: Iterator[CandidateCase]) -> int:
+        """Drain a walk into the queue, writing each candidate as it arrives.
+
+        Through `store_candidates` rather than a local copy of the same rules: what may be
+        overwritten is the one decision that must not differ between this command and the watcher,
+        and it had been written out twice.
+        """
+        nonlocal decided, existing
+        stored = store_candidates(stream, out, refresh=refresh, on_write=announce)
+        decided += stored.decided
+        existing += stored.existing
+        return stored.written
+
+    def summarise(interrupted: str = "") -> None:
+        """What ended up in the queue — printed whether or not the walk finished.
+
+        Streaming made this necessary. A crawl that dies at merge request 400 now leaves 400 merge
+        requests' worth of candidates on disk, and reporting only on the happy path meant the
+        operator saw a traceback, no counts, and no reason to believe anything had been saved — so
+        the natural next move was to re-run the whole thing from the beginning.
+        """
+        if interrupted:
+            typer.echo(
+                f"\n⚠ {interrupted} — stopping, but keeping what was already found.", err=True
+            )
+        typer.echo(f"{written} candidate(s) written to {out}")
+        if existing:
+            typer.echo(f"{existing} already in the queue (use --refresh to rewrite)")
+        if decided:
+            typer.echo(f"{decided} already decided, left untouched")
+        if skipped:
+            # Said again at the end, where the counts are. A warning printed 40 minutes ago has
+            # scrolled away, and a total that silently omits them reads like a quieter quarter.
+            shown = ", ".join(skipped[:5])
+            if len(skipped) > 5:
+                shown += f" (+{len(skipped) - 5} more)"
+            typer.echo(f"⚠ {len(skipped)} merge request(s) unreachable, not looked at: {shown}")
+        if interrupted:
+            typer.echo(
+                "Re-run with the same --since to carry on; nothing already here is rewritten."
+            )
+
+    try:
+        keep(
+            stream_corpus(
+                connector, project, since, skills,
+                max_clean_files=max_clean_files, on_skip=note_skip, on_progress=show("mr"),
+            )
+        )
+
+        if jira_url and jira_project:
+            tracker = JiraConnector.from_config(
+                {"base_url": jira_url, "token_env": jira_token_env, "email": jira_email or ""}
+            )
+            from_defects = keep(
+                stream_defects(
+                    connector, tracker, project, jira_project, since, skills,
+                    max_files=max_defect_files, on_skip=note_skip, on_progress=show("issue"),
+                )
+            )
+            typer.echo(f"{from_defects} candidate(s) from resolved {jira_project} defects")
+    except KeyboardInterrupt:
+        # The likeliest way a long backfill ends. Not an error — the queue is exactly as valid as
+        # it would have been had the window been narrower.
+        summarise("interrupted")
+        raise typer.Exit(130) from None
+    except (ConnectorError, OSError) as exc:
+        summarise(f"{type(exc).__name__}: {exc}")
+        raise typer.Exit(1) from exc
+
+    summarise()
 
 
 @corpus_app.command("promote")
@@ -1057,16 +1113,27 @@ def skills_improve(
     if result.proposal.rationale:
         typer.echo(f"# rationale: {result.proposal.rationale}", err=True)
 
+    # Named on every path. A skill is a folder, so a proposal may rewrite `patterns/errors.md` and
+    # leave `SKILL.md` alone — and then the body printed below is *unchanged*, which reads as "the
+    # step proposed nothing" while the real change sits in a field the output never mentioned.
+    if result.proposal.pages:
+        typer.echo(
+            f"# rewrites {len(result.proposal.pages)} companion page(s): "
+            f"{', '.join(sorted(result.proposal.pages))}"
+            + ("" if apply else " — only --apply writes these"),
+            err=True,
+        )
+
     if out is not None:
         out.write_text(result.proposal.body.rstrip() + "\n", encoding="utf-8")
-        typer.echo(f"wrote {out} (guidance body only — splice it under the existing "
+        typer.echo(f"wrote {out} (SKILL.md body only — splice it under the existing "
                    f"frontmatter, or use --apply)", err=True)
     elif not apply:
         typer.echo(result.proposal.body)
 
     targeted = "".join(f" --targeted {c}" for c in result.proposal.targeted_cases)
     if apply:
-        _apply_proposal(skill, sk, result.proposal.body, targeted)
+        _apply_proposal(skill, sk, result.proposal.body, result.proposal.pages, targeted)
         return
 
     typer.echo(
@@ -1098,14 +1165,20 @@ def _staging_id(config: Config, skill_dir: Path, sk: Skill) -> str:
     return sk.id
 
 
-def _apply_proposal(skill_dir: Path, sk: Skill, body: str, targeted: str) -> None:
-    """Stage a proposed body on the skill's branch, the same way the console's editor does.
+def _apply_proposal(
+    skill_dir: Path, sk: Skill, body: str, pages: dict[str, str], targeted: str
+) -> None:
+    """Stage a proposed guidance change on the skill's branch, as the console's editor does.
 
     Routed through `prepare_guidance` rather than written to a file: it preserves the frontmatter
     the body does not carry, bumps the version once per proposal, and validates by loading the
     result back. Writing the body over `SKILL.md` instead silently drops `id`, `version` and
     `triggers` — and a gate on a skill whose id came from a temp folder name records evidence C6
     can never match.
+
+    `pages` for the same reason the console stages them: the rule the step rewrote may not live in
+    `SKILL.md` at all, and dropping that half here would stage a version bump that changes nothing
+    while reporting success.
     """
     config = load_config()
     skill_id = _staging_id(config, skill_dir, sk)
@@ -1114,7 +1187,7 @@ def _apply_proposal(skill_dir: Path, sk: Skill, body: str, targeted: str) -> Non
         prepared = prepare_guidance(
             base,
             current,
-            SkillEdit(body=body),
+            SkillEdit(body=body, pages=pages),
             skills_root=staging.relative_skills_root(config),
             base_version=staging.base_version(config, skill_id),
         )
@@ -1256,8 +1329,8 @@ def _run_to_improve_from(
 
     A *stale* run is fatal. If the skill has been edited since it was scored, its failures describe
     a reviewer that no longer exists, and improving from them produces a confident proposal aimed at
-    a problem that may already be fixed. The record carries `skill_hash` for exactly this check, and
-    the console already badges the same condition on runs and on uploaded reviews.
+    a problem that may already be fixed. The record carries `guidance_hash` for exactly this check,
+    and the console already badges the same condition on runs and on uploaded reviews.
     """
     store = _store(runs_dir)
     if run_id is not None:
@@ -1273,14 +1346,18 @@ def _run_to_improve_from(
             return None
         record = store.load(recent[0].id)
 
-    current = skill_hash(skill)
-    if record.skill_hash != current and not stale_ok:
+    # Guidance rather than whole-skill identity, and for the same reason the console uses it: what
+    # this step reads is failures and what it writes is rules, so a run that scored these rules
+    # against a *larger* case set is better evidence, not stale evidence. An empty hash is a record
+    # written before the field existed — unknown, so not grounds for refusing it.
+    current = guidance_hash(skill)
+    if record.guidance_hash and record.guidance_hash != current and not stale_ok:
         raise typer.BadParameter(
-            f"run {record.id} scored a different version of this skill "
-            f"({record.skill_hash[:10]}, now {current[:10]}). Its failures describe a reviewer "
-            f"that no longer exists — the guidance, the eval cases or the wiki changed since. "
-            f"Re-run `whetstone eval run --skill <folder>` first, or pass --stale-ok to use it "
-            f"anyway."
+            f"run {record.id} scored different guidance than this skill carries "
+            f"({record.guidance_hash[:10]}, now {current[:10]}). Its failures describe a reviewer "
+            f"that no longer exists — the guidance body, a guidance page or the wiki changed "
+            f"since. Re-run `whetstone eval run --skill <folder>` first, or pass --stale-ok to "
+            f"use it anyway."
         )
     typer.echo(f"improving from run {record.id}", err=True)
     return record

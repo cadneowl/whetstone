@@ -63,6 +63,7 @@ class OpenAICompatibleClient:
         max_retries: int = 3,
         timeout: float = 120.0,
         temperature: float = 0.0,
+        on_retry: Callable[[str], None] | None = None,
     ) -> None:
         self._model = model
         self._base = base_url.rstrip("/")
@@ -75,6 +76,17 @@ class OpenAICompatibleClient:
         self._max_retries = max_retries
         self._temperature = temperature
         self._use_response_format = True
+        # Retries are the difference between a slow call and a stuck one, and they used to be
+        # invisible: two nested loops (schema-invalid JSON, then HTTP 429/5xx) each up to
+        # `max_retries`, every attempt allowed its own `timeout`. A local model that answers with
+        # not-quite-JSON can therefore burn many minutes on one call while the console shows
+        # nothing at all. Reported so the wait has a reason attached.
+        self._on_retry = on_retry
+        # One line per *kind* of trouble per call, not one per attempt. The job log holds 200 lines
+        # and re-sends all of them on every poll, so sixteen near-identical retry lines per call
+        # would evict the case transcripts within a handful of cases — burying the thing the log
+        # exists for, and doing it worst on exactly the slow local models that provoke retries.
+        self._noted: set[str] = set()
 
     def structured(self, system: str, user: str, schema: type[T], *, effort: Effort = "high") -> T:
         # Local endpoints have no server-side "effort" knob; determinism comes from temperature=0.
@@ -91,12 +103,22 @@ class OpenAICompatibleClient:
         ]
         messages = list(base_messages)
         last_error: Exception | None = None
+        self._noted = set()
         for _attempt in range(self._max_retries + 1):
             content = self._complete(messages)
             try:
                 return schema.model_validate(_extract_json_object(content))
             except (ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
+                # Only while another attempt will actually follow. Saying "asking again" on the
+                # last one and then raising describes something that does not happen; the error
+                # itself already reports the total attempts.
+                if _attempt < self._max_retries:
+                    self._note(
+                        "schema",
+                        f"{self._model} returned JSON that did not match {schema.__name__} "
+                        f"({exc}); retrying up to {self._max_retries} more time(s)",
+                    )
                 messages = [
                     *base_messages,
                     {"role": "assistant", "content": content},
@@ -130,6 +152,12 @@ class OpenAICompatibleClient:
         resp.raise_for_status()
         return _content_of(resp.json())
 
+    def _note(self, kind: str, message: str) -> None:
+        if self._on_retry is None or kind in self._noted:
+            return
+        self._noted.add(kind)
+        self._on_retry(message)
+
     def _post(self, body: dict[str, Any]) -> httpx.Response:
         url = f"{self._base}/chat/completions"
         attempt = 0
@@ -137,6 +165,11 @@ class OpenAICompatibleClient:
             resp = self._client.post(url, json=body)
             if resp.status_code in _RETRY_STATUS and attempt < self._max_retries:
                 attempt += 1
+                self._note(
+                    "http",
+                    f"{self._base} answered {resp.status_code}; retrying up to "
+                    f"{self._max_retries} time(s)",
+                )
                 self._sleep(0.2 * attempt)
                 continue
             return resp

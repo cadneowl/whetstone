@@ -20,8 +20,9 @@ money is a write, whatever it leaves on disk.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -36,7 +37,7 @@ from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
-from whetstone.gitio import GitError
+from whetstone.gitio import GitError, pending_batch
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.llm.factory import Backend, build_llm_client, resolve_backend
@@ -61,14 +62,26 @@ from whetstone.update import refresh_wiki
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+EvalScope = Literal["working", "draft", "batch"]
+
+
 class EvalRequest(BaseModel):
     skill_id: str
     trials: int | None = None
     sample: int | None = None
-    # Score what `whetstone/skill/<id>` holds instead of the working tree. A boolean rather than a
-    # ref, deliberately: the console never scores an arbitrary tree, so no caller-supplied revision
-    # is ever handed to git — the same rule `GateRequest` follows.
-    staged: bool = False
+    # What to score. A closed set of names the server resolves to branches itself, never a
+    # caller-supplied ref: the console scores its own branches or the working tree, nothing else.
+    #
+    #   working — the files on disk, which is what `eval run` has always meant.
+    #   draft   — `whetstone/skill/<id>`: guidance edited but not merged.
+    #   batch   — `whetstone/cases/batch-N`: eval cases promoted from triage but not merged.
+    #
+    # `batch` is the one that was missing, and its absence made triage a dead end. Promoting writes
+    # cases to a branch and never to the working tree, so the cases an operator had just spent an
+    # afternoon curating were invisible to every way of running the skill — the only route to
+    # "does the reviewer actually catch these?" was to merge the merge request first and find out
+    # afterwards. That is precisely backwards: the point of promoting a case is to test against it.
+    scope: EvalScope = "working"
 
 
 class GateRequest(BaseModel):
@@ -160,14 +173,39 @@ def launch_eval(
         handle.progress(0, total, "starting")
 
         def on_event(event: RunEvent) -> None:
-            if event.kind == "case_done":
+            """Every event moves the label, not only the ones that move the bar.
+
+            Listening for `case_done` alone made a run look stalled. The bar can only advance when a
+            case finishes, so between two completions — one review call plus a judge call per
+            candidate finding, each with its own timeout and retries — nothing on screen changed for
+            minutes at a time, and the case named beside the count was the one that had just
+            *ended* rather than the one being worked on. On a slow local model that is
+            indistinguishable from a hang.
+            """
+            if event.kind == "case_started":
+                handle.progress(event.completed_cases, event.total_cases, f"{event.case_id}…")
+            elif event.kind == "trial_done":
+                handle.progress(
+                    event.completed_cases,
+                    event.total_cases,
+                    f"{event.case_id} · trial {event.trial}",
+                )
+            elif event.kind == "case_done":
                 handle.progress(event.completed_cases, event.total_cases, event.case_id)
                 handle.log(*transcript(event))
 
         try:
             record = record_eval(
                 skill,
-                _client(config, spec, label=f"eval-{skill.id}"),
+                # A retry is the usual reason a run looks stuck: each attempt gets its own timeout,
+                # and there are two nested loops of them. Put in the log the operator is already
+                # watching, rather than left to be inferred from the clock.
+                _client(
+                    config,
+                    spec,
+                    label=f"eval-{skill.id}",
+                    on_retry=lambda note: handle.log(LogLine(text=f"retry: {note}")),
+                ),
                 trials=trials,
                 backend=backend.name,
                 model=backend.model,
@@ -374,6 +412,9 @@ def launch_improve(
         handle.progress(1, 1, "done")
         return {
             "body": result.proposal.body,
+            # Only the pages it actually rewrote — see `GuidanceProposal.changed_pages`. The editor
+            # opens each one, so a page returned unchanged would show as an edit to review.
+            "pages": result.proposal.pages,
             "rationale": result.proposal.rationale,
             "targeted_cases": result.proposal.targeted_cases,
             "unknown_cases": result.unknown_cases,
@@ -385,25 +426,32 @@ def launch_improve(
     return _launch(jobs, "improve", skill.id, work, plan)
 
 
+class StageProposalRequest(BaseModel):
+    skill_id: str
+    body: str
+    # A proposal may rewrite a companion page and leave `SKILL.md` alone, so accepting only the body
+    # would stage a version bump that changes nothing while answering with a commit sha.
+    pages: dict[str, str] = {}
+
+
 @router.post("/improve/stage", response_model=dict, dependencies=[Writable])
 def stage_proposal(
-    request: dict[str, str], config: ConfigDep, root: SkillsRootDep
+    request: StageProposalRequest, config: ConfigDep, root: SkillsRootDep
 ) -> dict[str, str]:
-    """Put a drafted body onto the skill's branch, through the path the editor uses.
+    """Put a drafted guidance change onto the skill's branch, through the path the editor uses.
 
     Separate from the job so the operator reads the proposal before any of it is committed — the
     whole value of the draft is that a person decides whether it is an improvement.
     """
-    skill_id, body = request.get("skill_id", ""), request.get("body", "")
-    if not skill_id or not body.strip():
-        raise Unprocessable("both skill_id and a non-empty body are required")
-    skill = _skill(root, skill_id)
+    if not request.skill_id or not (request.body.strip() or request.pages):
+        raise Unprocessable("skill_id and a non-empty body (or at least one page) are required")
+    skill = _skill(root, request.skill_id)
     try:
         base, current = staging.source(config, skill.id)
         prepared = prepare_guidance(
             base,
             current,
-            SkillEdit(body=body),
+            SkillEdit(body=request.body or base.body, pages=request.pages),
             skills_root=staging.relative_skills_root(config),
             base_version=staging.base_version(config, skill.id),
         )
@@ -702,20 +750,46 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
     operator with a failing gate therefore had a verdict, no per-case outcomes, and nothing the
     improve step could learn from, because improve reads runs.
 
-    The whole folder is loaded, not just `SKILL.md`: a draft may add or change eval cases too, and
-    "run the full suite on my draft" means the suite the draft carries.
+    The whole folder is loaded, not just `SKILL.md`: a branch may add or change eval cases too, and
+    "run the full suite on my draft" means the suite that branch carries.
+
+    `batch` is the composition the loop turns on. Promoted cases and a staged draft live on two
+    different branches, and scoring either one alone answers the wrong question: the batch branch
+    carries the new cases but the *merged* guidance, so it re-measures a version nobody is working
+    on, while the skill branch carries the draft and none of the new cases — literally zero, which
+    is what the console offered to spend a model call on. So the guidance comes from wherever the
+    operator is editing and the cases come from the batch, which is the only pairing that answers
+    "does my rewrite handle the cases I just curated?".
     """
-    if not request.staged:
+    if request.scope == "working":
         return _skill(root, request.skill_id), None
 
-    branch = staging.skill_branch(config, request.skill_id)
-    found = staging.skill_at(config, branch, request.skill_id)
-    if found is None:
+    if request.scope == "draft":
+        branch = staging.skill_branch(config, request.skill_id)
+        found = staging.skill_at(config, branch, request.skill_id)
+        if found is None:
+            raise Unprocessable(
+                f"nothing is staged on {branch} for {request.skill_id!r} — edit the guidance and "
+                f"press Stage on branch first, or score the working tree instead."
+            )
+        return found[0], branch
+
+    batch = pending_batch(
+        config.skills_repo,
+        base=config.git.default_base,
+        prefix=config.git.branch_prefix,
+        remote=config.git.push_remote,
+    )
+    promoted = staging.skill_at(config, batch.branch, request.skill_id)
+    if promoted is None:
         raise Unprocessable(
-            f"nothing is staged on {branch} for {request.skill_id!r} — edit the guidance and "
-            f"press Stage on branch first, or score the working tree instead."
+            f"no promoted cases for {request.skill_id!r} on {batch.branch} — promote something "
+            f"from triage first, or score the working tree instead."
         )
-    return found[0], branch
+    # The same merge the gate uses, so a run reporting recall 1.00 and the gate that has to confirm
+    # it are talking about the same content.
+    editing = _skill_being_edited(config, root, request.skill_id)
+    return staging.merge_cases(editing, promoted[0]), batch.branch
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:
@@ -738,7 +812,13 @@ def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:
 
 
 def _gate_sides(config: Config, skill_id: str) -> tuple[Skill, Skill]:
-    """The base and candidate a console gate compares: the default branch and the skill's branch."""
+    """The base and candidate a console gate compares: the default branch and the skill's branch.
+
+    Both sides get the promoted cases, and both sides get the same ones — a gate is a controlled
+    comparison, so the case set is exactly what must not differ between them. Without this the gate
+    ran over whatever the two branches happened to carry, which for a skill mid-loop is none of the
+    cases the guidance was just rewritten to handle.
+    """
     branch = staging.skill_branch(config, skill_id)
     candidate = staging.skill_at(config, branch, skill_id)
     if candidate is None:
@@ -752,7 +832,30 @@ def _gate_sides(config: Config, skill_id: str) -> tuple[Skill, Skill]:
             f"{skill_id!r} does not exist on {config.git.default_base}, so there is no baseline to "
             f"gate against. A new skill has nothing to regress from and may be published as is."
         )
-    return base[0], candidate[0]
+    # Looked up once and merged into both sides. `with_promoted_cases` would re-read the batch per
+    # call, and the two sides must carry the *same* cases anyway — reading it twice is both slower
+    # and, if a promotion lands between the two calls, wrong.
+    promoted = _promoted_skill(config, skill_id)
+    if promoted is None:
+        return base[0], candidate[0]
+    return staging.merge_cases(base[0], promoted), staging.merge_cases(candidate[0], promoted)
+
+
+def _promoted_skill(config: Config, skill_id: str) -> Skill | None:
+    """This skill as it stands on the triage batch, or None when there is no batch to read."""
+    try:
+        batch = pending_batch(
+            config.skills_repo,
+            base=config.git.default_base,
+            prefix=config.git.branch_prefix,
+            remote=config.git.push_remote,
+        )
+        if not batch.exists or batch.commits == 0:
+            return None
+        found = staging.skill_at(config, batch.branch, skill_id)
+    except (staging.StagingError, staging.NoSuchSkill, GitError, OSError):
+        return None
+    return found[0] if found else None
 
 
 def _step(root: Path, skill: Skill, kind: Any) -> StepSpec | None:
@@ -797,12 +900,19 @@ def _backend(config: Config, spec: StepSpec | None) -> Backend:
         raise Unprocessable(str(exc)) from exc
 
 
-def _client(config: Config, spec: StepSpec | None, *, label: str = "job") -> Any:
+def _client(
+    config: Config,
+    spec: StepSpec | None,
+    *,
+    label: str = "job",
+    on_retry: Callable[[str], None] | None = None,
+) -> Any:
     try:
         client = build_llm_client(
             spec.model.llm if spec else None,
             model=spec.model.model if spec else None,
             base_url=spec.model.base_url if spec else None,
+            on_retry=on_retry,
         )
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
@@ -828,7 +938,7 @@ def _eval_plan(config: Config, skill: Skill, request: EvalRequest) -> Plan:
         wiki_limits=spec.inputs.wiki if spec else None,
     )
     check_budget(plan, config.runs.max_llm_calls_per_run)
-    if not request.staged:
+    if request.scope == "working":
         _warn_if_a_change_is_staged(plan, config, skill)
     return plan
 
@@ -849,14 +959,17 @@ def _warn_if_a_change_is_staged(plan: Plan, config: Config, skill: Skill) -> Non
     names both, and scoring the draft is a request this route accepts rather than advice to go and
     do something by hand.
     """
-    from whetstone.domain.run import skill_hash
+    from whetstone.domain.run import guidance_hash
 
     try:
         branch = staging.skill_branch(config, skill.id)
         staged = staging.skill_at(config, branch, skill.id)
     except (staging.StagingError, GitError, OSError):
         return  # no git, no branch, nothing to warn about
-    if staged is None or skill_hash(staged[0]) == skill_hash(skill):
+    # The warning is about a staged *rule change* this run will not measure. A skill branch that
+    # differs only in which cases it carries is not that, and saying so sends the reader looking for
+    # an edit they never made.
+    if staged is None or guidance_hash(staged[0]) == guidance_hash(skill):
         return
     plan.warnings.append(
         f"{branch} holds a staged change that this run will NOT measure — this scores the working "
@@ -866,8 +979,14 @@ def _warn_if_a_change_is_staged(plan: Plan, config: Config, skill: Skill) -> Non
 
 
 def _run_for(store: Any, skill: Skill, request: ImproveRequest) -> Any:
-    """The run an improve job learns from, refusing one that scored different content."""
-    from whetstone.domain.run import skill_hash
+    """The run an improve job learns from, refusing one that scored different guidance.
+
+    Guidance, not whole-skill content. What this step reads out of a run is its failures, and what
+    it rewrites is the rules — so the question is whether those failures describe the rules being
+    edited. A run that scored the same rules against *more* cases answers that better, not worse,
+    and it is exactly what scoring a triage batch produces.
+    """
+    from whetstone.domain.run import guidance_hash
 
     if request.run_id:
         record = store.load(request.run_id)
@@ -876,9 +995,13 @@ def _run_for(store: Any, skill: Skill, request: ImproveRequest) -> Any:
         if not recent:
             return None
         record = store.load(recent[0].id)
-    if record.skill_hash != skill_hash(skill) and not request.stale_ok:
+    # An empty hash is a run recorded before the field existed: unknown, not mismatched. Refusing
+    # those would retire every run in an existing store the moment this shipped.
+    mismatched = bool(record.guidance_hash) and record.guidance_hash != guidance_hash(skill)
+    if mismatched and not request.stale_ok:
         raise Unprocessable(
-            f"run {record.id} scored a different version of this skill. Its failures describe a "
-            f"reviewer that no longer exists — score it again first, or retry with stale_ok."
+            f"run {record.id} scored different guidance than the version being edited. Its "
+            f"failures describe a reviewer that no longer exists — score it again first, or "
+            f"retry with stale_ok."
         )
     return record

@@ -327,7 +327,7 @@ def test_improve_scores_the_draft_and_says_so_before_the_click(
     launch = client.post("/api/jobs/improve", json={"skill_id": "rust-errors"})
 
     assert launch.status_code == 422, "a run of different content must still be refused"
-    assert any("different version" in w for w in plan["warnings"]), plan["warnings"]
+    assert any("different guidance" in w for w in plan["warnings"]), plan["warnings"]
 
 
 def test_improve_accepts_a_run_of_the_staged_draft(
@@ -341,7 +341,7 @@ def test_improve_accepts_a_run_of_the_staged_draft(
     """
     _stage_guidance(client, "# Rewritten\n\n- **R9 — something only the branch has.**\n")
     launched = client.post(
-        "/api/jobs/eval", json={"skill_id": "rust-errors", "staged": True}
+        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "draft"}
     ).json()
     job = _await(client, launched["id"])
     assert job["state"] == "done", job
@@ -409,3 +409,39 @@ def test_improve_still_works_when_the_folder_name_is_not_the_skill_id(
 
     response = client.post("/api/jobs/improve/plan", json={"skill_id": "rust-errors"})
     assert response.status_code != 500, response.text
+
+
+def test_progress_names_the_case_being_worked_on(
+    client: TestClient, steps: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Listening only for `case_done` made a run look stalled.
+
+    The bar can only advance when a case finishes, so between completions nothing changed and the
+    case named beside the count was the one that had just *ended*. On a slow local model, where one
+    case is minutes of review and judge calls, that is indistinguishable from a hang. Slowed here
+    on purpose: with an instant model the run is over before anyone could look.
+    """
+    slow = FakeLLMClient(_handler)
+    original = slow.structured
+
+    def dawdle(*args: object, **kwargs: object) -> BaseModel:
+        time.sleep(0.3)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(slow, "structured", dawdle)
+    monkeypatch.setattr("whetstone.ui.routers.jobs.build_llm_client", lambda *a, **k: slow)
+
+    labels: list[str] = []
+    launched = client.post("/api/jobs/eval", json={"skill_id": "rust-errors"}).json()
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        job = client.get(f"/api/jobs/{launched['id']}").json()
+        label = (job.get("progress") or {}).get("label", "")
+        if label and (not labels or labels[-1] != label):
+            labels.append(label)
+        if job["state"] != "running":
+            break
+        time.sleep(0.02)
+
+    # A label ending in the ellipsis announces work in flight rather than work completed.
+    assert any(label.endswith("…") for label in labels), labels

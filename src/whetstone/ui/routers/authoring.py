@@ -25,7 +25,7 @@ from whetstone.authoring import (
     prepare_meta,
 )
 from whetstone.config import Config
-from whetstone.domain.run import skill_hash
+from whetstone.domain.run import guidance_hash, skill_hash
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateStore, Verdict
 from whetstone.gitio import (
@@ -72,6 +72,14 @@ class Proposal(BaseModel):
     diff: str = ""
     version: int
     skill_hash: str
+    # The staged rules alone. What the editor compares a run against, because the question there is
+    # "do these case outcomes describe the guidance in the textarea?" — and a run that scored these
+    # same rules against cases the working tree has not merged yet still answers it.
+    guidance_hash: str = ""
+    # The companion pages as staged, keyed by path. Here for the same reason as `body`: they are
+    # guidance, the editor has to be able to open them, and reading them off disk would show the
+    # merged text for a page the branch has already rewritten.
+    pages: dict[str, str] = {}
     # The guidance as *staged*, which is what the editor must open with. Seeding it from the
     # working tree instead would show a saved edit as unsaved — the commit went to the branch, so
     # the file on disk never changes — and "discard" would silently revert to the merged version.
@@ -172,7 +180,9 @@ def get_proposal(skill_id: str, config: ConfigDep, gates: GatesDep) -> Proposal:
     branch = _branch(config, skill_id)
     base_branch = config.git.default_base
     staged, _ = _source(config, skill_id)
-    staged_hash = skill_hash(staged)
+    # Hashed as the gate scores it — with the promoted cases folded in — or the verdict below could
+    # never be found. See `staging.with_promoted_cases`.
+    staged_hash = skill_hash(staging.with_promoted_cases(config, staged))
 
     exists = ref_exists(config.skills_repo, branch)
     commits = commits_ahead(config.skills_repo, base_branch, branch) if exists else 0
@@ -206,7 +216,9 @@ def get_proposal(skill_id: str, config: ConfigDep, gates: GatesDep) -> Proposal:
         diff=diff,
         version=staged.version,
         skill_hash=staged_hash,
+        guidance_hash=guidance_hash(staged),
         body=staged.body,
+        pages={page.path: page.text for page in staged.pages},
         verdict=verdict,
     )
 
@@ -257,7 +269,8 @@ def _refusal(config: Config, gates: GateStore, branch: str, skill_id: str) -> st
     changed = _what_changed(base[0], staged[0])
     if not changed:
         return ""
-    verdict = gates.verdict_for(skill_id, skill_hash(staged[0]))
+    under_test = staging.with_promoted_cases(config, staged[0])
+    verdict = gates.verdict_for(skill_id, skill_hash(under_test))
     return "" if verdict.can_propose else f"this branch {changed}, and {verdict.reason}"
 
 

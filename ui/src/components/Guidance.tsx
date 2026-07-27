@@ -3,31 +3,44 @@ import type { SkillDetail } from '@/api/client'
 import { Badge } from './primitives'
 
 /**
- * Renders SKILL.md guidance and anchors each rule to its provenance.
+ * Renders a skill's guidance — the whole folder — and anchors each rule to its provenance.
  *
  * Purpose-built rather than a markdown library: the requirement isn't "render markdown", it's
  * "show each rule with the review signals that justified it, and mark the ones nothing tests".
  * Building only what SKILL.md actually uses also avoids `dangerouslySetInnerHTML` entirely — no
  * sanitiser to keep correct.
+ *
+ * The companion pages are rendered after the body because a skill is a folder: `SKILL.md` is often
+ * a table of contents, and this panel's own caption promises "the exact prose the reviewer is
+ * given". Showing the body alone made that caption false in the worst way — a page listing no
+ * rules at all, above a promise that these were all of them.
  */
 export function Guidance({ detail }: { detail: SkillDetail }) {
   const { skill, untested_rules, has_runs } = detail
   const untested = new Set(untested_rules)
+  const render = (text: string, keyPrefix: string) =>
+    text
+      .split('\n\n')
+      .filter((block) => block.trim())
+      .map((block, i) => (
+        <Block
+          key={`${keyPrefix}-${i}`}
+          text={block}
+          provenance={skill.provenance}
+          untested={untested}
+          hasRuns={has_runs}
+        />
+      ))
 
   return (
     <div className="space-y-3">
-      {skill.body
-        .split('\n\n')
-        .filter((block) => block.trim())
-        .map((block, i) => (
-          <Block
-            key={i}
-            text={block}
-            provenance={skill.provenance}
-            untested={untested}
-            hasRuns={has_runs}
-          />
-        ))}
+      {render(skill.body, 'body')}
+      {skill.pages.map((page) => (
+        <section key={page.path} className="space-y-3 border-t border-line pt-3">
+          <p className="font-mono text-xs text-muted">{page.path}</p>
+          {render(page.text, page.path)}
+        </section>
+      ))}
       {!has_runs && (
         <p className="pt-2 text-xs text-muted italic">
           No runs recorded yet — which rules are actually exercised can't be determined until this

@@ -7,6 +7,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from whetstone import staging
+from whetstone.authoring import SkillEdit, prepare_guidance
 from whetstone.config import Config
 from whetstone.corpus.builder import write_candidate
 from whetstone.corpus.model import CandidateCase
@@ -458,3 +460,203 @@ def test_skills_outside_the_repo_are_a_server_error_not_a_404(
             "case_id": "x", "skill_id": "y", "kind": "should_catch", "path": "a.rs"}})
     assert response.status_code == 500
     assert "not inside the git repo" in response.json()["message"]
+
+
+def _pushable(monkeypatch: pytest.MonkeyPatch, offered: str) -> None:
+    """A repo with a remote, and a forge that answers the push with `offered`."""
+    from whetstone.gitio import RepoStatus
+
+    monkeypatch.setattr(
+        "whetstone.ui.routers.meta.git_status",
+        lambda *a, **k: RepoStatus(branch="main", head="a" * 40, clean=True, remote="origin"),
+    )
+    monkeypatch.setattr("whetstone.ui.routers.meta.push", lambda *a, **k: offered)
+
+
+def test_propose_hands_back_the_link_the_forge_offered(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GitLab and GitHub both answer a push of a new branch with the address of their own
+    open-a-merge-request page, and git prints it on stderr — which was captured and discarded.
+
+    So the console said "open the merge request in your git host" while holding the URL of the page
+    that opens it.
+    """
+    url = "https://gitlab.example/acme/payments/-/merge_requests/new?source=batch-1"
+    _pushable(monkeypatch, url)
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+
+    body = client.post("/api/git/propose", json={"branch": "whetstone/cases/batch-1"}).json()
+    assert body["merge_request_url"] == url
+    assert "WriteConnector" not in body["message"], "no need to explain a gap that is not showing"
+
+
+def test_propose_says_what_to_do_when_the_remote_offers_no_link(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plain git server, or a branch that already has an open request."""
+    _pushable(monkeypatch, "")
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+
+    body = client.post("/api/git/propose", json={"branch": "whetstone/cases/batch-1"}).json()
+    assert body["merge_request_url"] is None
+    assert "open one from the branch" in body["message"]
+    assert "WriteConnector" in body["message"], "say why it was not created for you"
+
+
+# --- scoring what triage produced ---------------------------------------------
+
+
+def test_the_promoted_case_batch_can_be_scored(client: TestClient) -> None:
+    """The hole that made triage a dead end.
+
+    Promoting writes cases to `whetstone/cases/batch-N` and never to the working tree, so the cases
+    an operator had just curated were invisible to every way of running the skill: the only route
+    to "does the reviewer actually catch these?" was to merge the merge request and find out
+    afterwards. Which is backwards — testing against a case is the reason to promote it.
+    """
+    from whetstone import staging
+    from whetstone.core.loader import load_skill
+
+    promoted = client.post(
+        "/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")}
+    )
+    assert promoted.status_code == 200, promoted.text
+    branch = promoted.json()["branch"]
+
+    config = client.app.state.config
+    on_disk = {c.id for c in load_skill(config.skills_root / "rust-errors").eval_cases}
+    on_branch = staging.skill_at(config, branch, "rust-errors")
+    assert on_branch is not None
+    assert {c.id for c in on_branch[0].eval_cases} - on_disk, "the promotion added a case"
+
+    batch_plan = client.post(
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "batch"}
+    )
+    working = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"})
+    assert batch_plan.status_code == 200, batch_plan.text
+    assert batch_plan.json()["estimate"]["calls"] > working.json()["estimate"]["calls"], (
+        "scoring the batch must cover the promoted case as well as the ones already on disk"
+    )
+
+
+def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
+    client: TestClient,
+) -> None:
+    """The step the loop turns on, and the one that was missing.
+
+    The draft and the promoted cases live on two different branches. Scoring the batch branch alone
+    re-measures the *merged* rules — a version nobody is working on — while scoring the skill branch
+    alone covers none of the new cases. Only the pairing answers "does my rewrite handle the cases I
+    just curated?".
+    """
+    from whetstone.ui.routers.jobs import EvalRequest, _skill_to_score
+
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    _stage_a_draft(client, "# Rust errors\n\n- **R9 — a rule only the draft carries.**\n")
+
+    config = client.app.state.config
+    scored, _ = _skill_to_score(
+        config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="batch")
+    )
+
+    assert "R9" in scored.body, "the guidance must come from the draft"
+    assert "812-t0" in {c.id for c in scored.eval_cases}, "the cases must come from the batch"
+
+
+def test_the_gate_covers_the_promoted_cases_on_both_sides(client: TestClient) -> None:
+    """A gate is a controlled comparison, so the case set is what must not differ between sides.
+
+    Gating the skill branch alone compared two guidance versions over none of the cases just
+    curated — zero cases, two model calls each, proving nothing.
+    """
+    from whetstone.ui.routers.jobs import _gate_sides
+
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    _stage_a_draft(client)
+
+    base, candidate = _gate_sides(client.app.state.config, "rust-errors")
+
+    assert {c.id for c in base.eval_cases} == {c.id for c in candidate.eval_cases}
+    assert "812-t0" in {c.id for c in candidate.eval_cases}
+
+
+def test_a_passing_gate_unlocks_propose_once_cases_are_pending(client: TestClient) -> None:
+    """The gate and the C6 check key on `skill_hash`, so they must hash the same content.
+
+    Hashing the staged skill without the promoted cases while gating it with them put a passing
+    gate on screen next to a permanently disabled *Propose* — the verdict was recorded under a hash
+    nothing would ever look up.
+    """
+    from whetstone.domain.run import skill_hash
+    from whetstone.staging import with_promoted_cases
+    from whetstone.ui.routers.jobs import _gate_sides
+
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    _stage_a_draft(client)
+
+    config = client.app.state.config
+    _, candidate = _gate_sides(config, "rust-errors")
+    staged, _ = staging.source(config, "rust-errors")
+
+    assert skill_hash(candidate) == skill_hash(with_promoted_cases(config, staged))
+
+
+DRAFT_BODY = "# Rust errors\n\n- **R9 — a draft.**\n"
+
+
+def _stage_a_draft(client: TestClient, body: str = DRAFT_BODY) -> None:
+    config = client.app.state.config
+    base, current = staging.source(config, "rust-errors")
+    prepared = prepare_guidance(
+        base,
+        current,
+        SkillEdit(body=body),
+        skills_root=staging.relative_skills_root(config),
+        base_version=staging.base_version(config, "rust-errors"),
+    )
+    staging.stage(config, "rust-errors", prepared.files, "guidance: a draft to gate")
+
+
+def test_scoring_a_batch_with_nothing_promoted_says_so(client: TestClient) -> None:
+    response = client.post(
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "batch"}
+    )
+    assert response.status_code == 422
+    assert "promote something from triage first" in response.json()["message"]
+
+
+def test_the_batch_names_the_skills_its_cases_belong_to(client: TestClient) -> None:
+    """Without this the console cannot offer to score a batch — nothing on disk says whose it is."""
+    assert client.get("/api/candidates/batch").json()["skills"] == []
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    assert client.get("/api/candidates/batch").json()["skills"] == ["rust-errors"]
+
+
+def test_a_promoted_case_shows_on_the_skill_it_constrains(client: TestClient) -> None:
+    """Promoting writes to the batch branch and never to disk.
+
+    So the skill an operator had just spent an afternoon adding cases to showed none of them: a
+    panel headed "what constrains this guidance" naming strictly less than what constrains it, with
+    nothing on the screen admitting the others existed.
+    """
+    before = client.get("/api/skills/rust-errors").json()
+    assert before["pending_cases"] == []
+
+    edits = _edits(client, "812-t0")
+    client.post("/api/candidates/812-t0/promote", json={"edits": edits})
+
+    detail = client.get("/api/skills/rust-errors").json()
+    pending = detail["pending_cases"]
+    assert len(pending) == 1, pending
+    assert pending[0]["id"] == edits["case_id"]
+    assert pending[0]["branch"] == "whetstone/cases/batch-1"
+    # Listed apart from the scored ones: nothing on disk has ever been run against it.
+    assert pending[0]["id"] not in {c["id"] for c in detail["cases"]}
+
+
+def test_a_skill_page_survives_a_repo_with_no_batch(client: TestClient) -> None:
+    """Read-only and best-effort — a skill page must not fail because a batch is odd or absent."""
+    body = client.get("/api/skills/rust-errors")
+    assert body.status_code == 200
+    assert body.json()["pending_cases"] == []

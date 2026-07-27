@@ -214,6 +214,11 @@ class RunRecord(BaseModel):
     # sha256 over the guidance body and every eval case. `version` is hand-maintained frontmatter
     # (core/loader.py) and goes stale silently, so comparison and caching key on this instead.
     skill_hash: str
+    # The rules alone, without the cases. Answers "did this run measure the guidance I am looking
+    # at?", which `skill_hash` cannot: scoring the same rules against a larger case set changes it.
+    # Defaulted, so runs recorded before this field existed still load — they compare as unknown
+    # rather than as mismatched.
+    guidance_hash: str = ""
 
     backend: str = ""
     model: str = ""
@@ -253,6 +258,42 @@ def skill_hash(skill: Skill) -> str:
     no pages hashes as it did before they existed, so landing this invalidates nothing.
     """
     h = hashlib.sha256()
+    _feed_rules(h, skill)
+    for case in sorted(skill.eval_cases, key=lambda c: c.id):
+        h.update(b"\0case\0")
+        h.update(case.model_dump_json().encode("utf-8"))
+    _feed_wiki(h, skill)
+    return h.hexdigest()
+
+
+def guidance_hash(skill: Skill) -> str:
+    """Identity of the rules alone — everything that reaches the review prompt as guidance.
+
+    The same inputs as `skill_hash` minus the eval cases, and it exists because those two questions
+    are different. Publishing asks *"has this exact content passed a gate?"*, where a changed case
+    set genuinely is a different thing to have proved. Drafting an improvement asks *"do these
+    failures describe the rules in my editor?"* — and there, adding cases does not invalidate the
+    answer, it improves it.
+
+    Conflating them dead-ended the triage loop. Scoring a skill against cases promoted onto a batch
+    branch produces a run whose `skill_hash` cannot match the working tree, because the working tree
+    has none of those cases yet. So the one run that measured what the operator had just built was
+    the one run the console called stale, and the *Draft a change* button it justified was refused —
+    permanently, until the batch merged.
+    """
+    h = hashlib.sha256()
+    # Domain separator, so the two digests can never collide. Without it a skill with no eval cases
+    # and no wiki hashes identically both ways, and any comparison that reached for the wrong field
+    # would agree — passing loudest exactly where there is least evidence. Only this side is
+    # prefixed: `skill_hash` has to stay byte-for-byte what it was, or every stored gate record
+    # stops covering the content it was earned against.
+    h.update(b"guidance\0")
+    _feed_rules(h, skill)
+    _feed_wiki(h, skill)
+    return h.hexdigest()
+
+
+def _feed_rules(h: hashlib._Hash, skill: Skill) -> None:
     h.update(skill.id.encode("utf-8"))
     h.update(b"\0")
     h.update(skill.body.encode("utf-8"))
@@ -263,13 +304,12 @@ def skill_hash(skill: Skill) -> str:
         h.update(page.path.encode("utf-8"))
         h.update(b"\0")
         h.update(page.text.encode("utf-8"))
-    for case in sorted(skill.eval_cases, key=lambda c: c.id):
-        h.update(b"\0case\0")
-        h.update(case.model_dump_json().encode("utf-8"))
+
+
+def _feed_wiki(h: hashlib._Hash, skill: Skill) -> None:
     if not skill.wiki.is_empty():
         h.update(b"\0wiki\0")
         h.update(wiki_digest(skill.wiki).encode("utf-8"))
-    return h.hexdigest()
 
 
 # `RunEvent.case` is annotated with a class defined further down the module, so the reference has to

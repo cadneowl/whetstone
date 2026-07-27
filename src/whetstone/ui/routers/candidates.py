@@ -96,15 +96,38 @@ def list_candidates(
     )
 
 
-@router.get("/batch", response_model=Batch)
-def get_batch(config: ConfigDep) -> Batch:
-    """Which branch the next promotion lands on, and how much is already queued there."""
-    return pending_batch(
+class BatchView(Batch):
+    """The batch, plus the skills whose cases are on it.
+
+    Needed so the console can offer to *score* a batch. Promoted cases go to the branch and never
+    to the working tree, so nothing on disk says which skills they belong to — and without that
+    the only honest thing the triage screen could do with a batch was push it somewhere else.
+    """
+
+    skills: list[str] = []
+
+
+@router.get("/batch", response_model=BatchView)
+def get_batch(config: ConfigDep) -> BatchView:
+    """Which branch the next promotion lands on, what is queued there, and for which skills."""
+    batch = pending_batch(
         config.skills_repo,
         base=config.git.default_base,
         prefix=config.git.branch_prefix,
         remote=config.git.push_remote,
     )
+    store = _store(config)
+    on_branch = sorted(
+        {
+            entry.decision.skill_id
+            for entry in store.list(include_decided=True)
+            if entry.decision is not None
+            and entry.decision.status == "promoted"
+            and entry.decision.branch == batch.branch
+            and entry.decision.skill_id
+        }
+    )
+    return BatchView(**batch.model_dump(), skills=on_branch)
 
 
 @router.get("/{candidate_id}", response_model=QueueItem)

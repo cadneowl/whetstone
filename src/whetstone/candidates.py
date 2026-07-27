@@ -11,7 +11,7 @@ usually aren't" is only learnable if the noes are written down alongside the yes
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -156,14 +156,27 @@ class StoreResult(BaseModel):
 
 
 def store_candidates(
-    candidates: list[CandidateCase], out: str | Path, *, refresh: bool = False
+    candidates: Iterable[CandidateCase],
+    out: str | Path,
+    *,
+    refresh: bool = False,
+    on_write: Callable[[CandidateCase], None] | None = None,
 ) -> StoreResult:
     """Write candidates into the queue, never disturbing one a human has touched.
 
     Shared by `corpus pull` and the background watcher rather than reimplemented in each: the rule
     about what may be overwritten is the one thing here that must not differ between the two, since
     getting it wrong revives a rejected candidate as a fresh-looking case or clobbers a promotion
-    someone is part-way through editing.
+    someone is part-way through editing. `corpus pull` kept its own copy of that rule until the two
+    walks started streaming; it now goes through here, which is what the paragraph above always
+    claimed.
+
+    Takes any iterable, deliberately. Handed a generator it writes each candidate as the walk
+    produces it, so the triage queue fills during a long crawl instead of at the end of one — and a
+    run that is interrupted keeps everything it had already found.
+
+    `on_write` fires per candidate actually written, for a caller that wants to name them as they
+    land rather than count them afterwards.
     """
     from whetstone.corpus.builder import write_candidate
 
@@ -182,4 +195,6 @@ def store_candidates(
             candidate.model_dump_json(indent=2), encoding="utf-8"
         )
         result.written += 1
+        if on_write is not None:
+            on_write(candidate)
     return result

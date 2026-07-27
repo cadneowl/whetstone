@@ -12,7 +12,12 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.skill import Skill
 from whetstone.judge import DeterministicJudge
 from whetstone.llm import FakeLLMClient
-from whetstone.reviewer.llm_reviewer import LLMFinding, LLMFindingList, LLMReviewer
+from whetstone.reviewer.llm_reviewer import (
+    LLMFinding,
+    LLMFindingList,
+    LLMReviewer,
+    number_diff,
+)
 from whetstone.wiki import SkillWiki, WikiEntry, WikiPage
 
 SKILL_DIR = Path(__file__).resolve().parents[2] / "skills" / "code-review-rust-error-handling"
@@ -149,6 +154,46 @@ def test_skill_without_a_wiki_produces_the_prompt_it_always_did() -> None:
     captured, handler = _capture()
     LLMReviewer(FakeLLMClient(handler)).review(_skill(), _change())
     assert "Background on this codebase" not in captured["system"]
+
+
+def test_the_diff_reaches_the_model_with_new_file_line_numbers() -> None:
+    """The number a finding is scored against is stated, not left to the model's arithmetic."""
+    captured, handler = _capture()
+    LLMReviewer(FakeLLMClient(handler)).review(_skill(), _change())
+
+    assert "41 | +        let row = self.db.get(id).unwrap();" in captured["user"]
+    assert "do not count lines yourself" in captured["user"]
+
+
+def test_numbering_skips_deleted_lines_and_diff_headers() -> None:
+    numbered = number_diff(
+        "diff --git a/a.rs b/a.rs\n"
+        "--- a/a.rs\n"
+        "+++ b/a.rs\n"
+        "@@ -18,4 +18,4 @@\n"
+        " fn settle() {\n"
+        "-    old();\n"
+        "+    new();\n"
+        " }\n"
+    )
+    gutters = [line.split(" | ", 1)[0].strip() for line in numbered.splitlines()]
+
+    # Headers and the removal carry no new-file line; the removal does not advance the count.
+    assert gutters == ["", "", "", "", "18", "", "19", "20"]
+
+
+def test_numbering_is_width_aligned_across_hunks() -> None:
+    numbered = number_diff("@@ -1,2 +1,2 @@\n x\n+y\n@@ -98,2 +98,3 @@\n a\n+b\n c\n")
+    gutters = [line.split(" | ", 1)[0] for line in numbered.splitlines()]
+
+    assert gutters == ["   ", "  1", "  2", "   ", " 98", " 99", "100"]
+
+
+def test_a_diff_with_no_hunk_header_is_left_alone() -> None:
+    """Nothing is numbered on a guess: without a hunk header there is no new-file origin."""
+    numbered = number_diff("diff --git a/a.rs b/a.rs\n+ orphan line\n")
+
+    assert numbered.splitlines() == ["  | diff --git a/a.rs b/a.rs", "  | + orphan line"]
 
 
 def test_reviewer_plugs_into_run_skill() -> None:

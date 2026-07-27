@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -80,6 +81,28 @@ def test_index_rebuilds_when_deleted(tmp_path: Path) -> None:
     store.save(_record())
     (tmp_path / "runs.db").unlink()
     assert [s.id for s in store.list()] == ["r1"]
+
+
+def test_an_index_from_an_older_schema_is_rebuilt_not_emptied(tmp_path: Path) -> None:
+    """A schema bump discards the index; the next read must refill it from the record files.
+
+    Emptying the tables and leaving `indexed_files` behind claims the empty index is current, so
+    nothing ever repopulates it — every stored run disappears from the console while its file sits
+    on disk untouched.
+    """
+    store = RunStore(tmp_path / "runs")
+    store.save(_record(run_id="before-the-bump"))
+
+    with sqlite3.connect(tmp_path / "runs.db") as conn:
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+
+    assert [s.id for s in store.list()] == ["before-the-bump"]
+
+
+def test_guidance_hash_survives_the_index(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    store.save(_record().model_copy(update={"guidance_hash": "g1"}))
+    assert [s.guidance_hash for s in store.list()] == ["g1"]
 
 
 def test_index_self_heals_for_out_of_band_records(tmp_path: Path) -> None:

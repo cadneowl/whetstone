@@ -30,7 +30,7 @@ export interface paths {
         };
         /**
          * Get Batch
-         * @description Which branch the next promotion lands on, and how much is already queued there.
+         * @description Which branch the next promotion lands on, what is queued there, and for which skills.
          */
         get: operations["get_batch_api_candidates_batch_get"];
         put?: never;
@@ -419,7 +419,7 @@ export interface paths {
         put?: never;
         /**
          * Stage Proposal
-         * @description Put a drafted body onto the skill's branch, through the path the editor uses.
+         * @description Put a drafted guidance change onto the skill's branch, through the path the editor uses.
          *
          *     Separate from the job so the operator reads the proposal before any of it is committed — the
          *     whole value of the draft is that a person decides whether it is an improvement.
@@ -885,10 +885,14 @@ export interface components {
             name: string;
         };
         /**
-         * Batch
-         * @description An accumulating branch of promoted cases, and whether it is still open.
+         * BatchView
+         * @description The batch, plus the skills whose cases are on it.
+         *
+         *     Needed so the console can offer to *score* a batch. Promoted cases go to the branch and never
+         *     to the working tree, so nothing on disk says which skills they belong to — and without that
+         *     the only honest thing the triage screen could do with a batch was push it somewhere else.
          */
-        Batch: {
+        BatchView: {
             /** Branch */
             branch: string;
             /** Commits */
@@ -897,6 +901,11 @@ export interface components {
             exists: boolean;
             /** Proposed */
             proposed: boolean;
+            /**
+             * Skills
+             * @default []
+             */
+            skills: string[];
         };
         /**
          * CandidateCase
@@ -1324,13 +1333,14 @@ export interface components {
         EvalRequest: {
             /** Sample */
             sample?: number | null;
+            /**
+             * Scope
+             * @default working
+             * @enum {string}
+             */
+            scope: "working" | "draft" | "batch";
             /** Skill Id */
             skill_id: string;
-            /**
-             * Staged
-             * @default false
-             */
-            staged: boolean;
             /** Trials */
             trials?: number | null;
         };
@@ -1885,6 +1895,41 @@ export interface components {
             why: string;
         };
         /**
+         * PendingCase
+         * @description An eval case promoted from triage, still on its batch branch.
+         *
+         *     Carries outcomes like `CaseSummary` does. It did not at first, on the reasoning that nothing had
+         *     ever been scored against a case that is not on disk — true until the console grew a button to
+         *     score the batch, which is the whole point of promoting cases before merging them. Leaving the
+         *     fields off then meant the one screen showing these cases could not show what the run had just
+         *     said about them, which is the only reason to look.
+         *
+         *     `None` still means genuinely unscored, and is the state a freshly promoted case starts in.
+         */
+        PendingCase: {
+            /**
+             * Branch
+             * @default
+             */
+            branch: string;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "should_catch" | "should_not_flag";
+            /** Last Fp Rate */
+            last_fp_rate?: number | null;
+            /** Last Recall */
+            last_recall?: number | null;
+            /**
+             * Path
+             * @default
+             */
+            path: string;
+        };
+        /**
          * Plan
          * @description What is about to run, against what, at what cost.
          *
@@ -2011,8 +2056,20 @@ export interface components {
              * @default
              */
             diff: string;
+            /**
+             * Guidance Hash
+             * @default
+             */
+            guidance_hash: string;
             /** Head */
             head?: string | null;
+            /**
+             * Pages
+             * @default {}
+             */
+            pages: {
+                [key: string]: string;
+            };
             /** Path */
             path: string;
             /** Skill Hash */
@@ -2511,6 +2568,11 @@ export interface components {
             duration_s: number;
             /** Git Ref */
             git_ref?: string | null;
+            /**
+             * Guidance Hash
+             * @default
+             */
+            guidance_hash: string;
             /** Id */
             id: string;
             /**
@@ -2586,6 +2648,11 @@ export interface components {
              * @default 0
              */
             fp_rate: number;
+            /**
+             * Guidance Hash
+             * @default
+             */
+            guidance_hash: string;
             /** Id */
             id: string;
             /**
@@ -2768,6 +2835,11 @@ export interface components {
              */
             has_runs: boolean;
             /**
+             * Pending Cases
+             * @default []
+             */
+            pending_cases: components["schemas"]["PendingCase"][];
+            /**
              * Precision Evidence
              * @default {}
              */
@@ -2807,6 +2879,10 @@ export interface components {
             description?: string | null;
             /** Name */
             name?: string | null;
+            /** Pages */
+            pages?: {
+                [key: string]: string;
+            };
         };
         /** SkillScore */
         SkillScore: {
@@ -2908,6 +2984,20 @@ export interface components {
              *     }
              */
             source: components["schemas"]["WikiSource"];
+        };
+        /** StageProposalRequest */
+        StageProposalRequest: {
+            /** Body */
+            body: string;
+            /**
+             * Pages
+             * @default {}
+             */
+            pages: {
+                [key: string]: string;
+            };
+            /** Skill Id */
+            skill_id: string;
         };
         /**
          * StagedSkill
@@ -3187,7 +3277,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Batch"];
+                    "application/json": components["schemas"]["BatchView"];
                 };
             };
         };
@@ -3769,9 +3859,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    [key: string]: string;
-                };
+                "application/json": components["schemas"]["StageProposalRequest"];
             };
         };
         responses: {

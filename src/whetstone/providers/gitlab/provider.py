@@ -53,7 +53,16 @@ class GitLabConnector:
     # --- ReviewConnector -----------------------------------------------------
     def list_reviewed_changes(self, repo: RepoRef, since: datetime) -> list[MergeRequestRef]:
         endpoint = f"/api/v4/projects/{self._pid(repo)}/merge_requests"
-        params = {"state": "merged", "updated_after": since.isoformat(), "order_by": "updated_at"}
+        # `sort` is stated rather than left to GitLab's default. A corpus walk writes as it goes and
+        # may be stopped at any point — by an operator, a timeout, a token expiring — so the order
+        # decides which history survives a partial run. Newest first means what you keep is the
+        # review activity most likely to still describe how the team works.
+        params = {
+            "state": "merged",
+            "updated_after": since.isoformat(),
+            "order_by": "updated_at",
+            "sort": "desc",
+        }
         return [mr_ref(repo, m) for m in self._http.paginate(endpoint, params)]
 
     def get_merge_request(self, repo: RepoRef, iid: int) -> MergeRequestRef:

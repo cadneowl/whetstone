@@ -26,6 +26,7 @@ recorded on the sweep and shown; the schedule carries on.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -34,9 +35,10 @@ from pydantic import BaseModel, Field
 from whetstone.candidates import store_candidates
 from whetstone.config import Config
 from whetstone.core.loader import load_skills
+from whetstone.corpus.model import CandidateCase
 from whetstone.domain.review import MergeRequestRef
 from whetstone.providers.base import ConnectorError, IssueConnector, ReviewConnector
-from whetstone.service import pull_corpus, pull_defects
+from whetstone.service import stream_corpus, stream_defects
 
 # Sweeps kept for the console's "recent activity" list. Small on purpose: this is a heartbeat, not
 # an audit log, and what a sweep *found* lives in the candidate queue rather than here.
@@ -146,17 +148,23 @@ class Watcher:
             issues = self._issues()
             for project in watch.projects:
                 since = self._since(project, started)
-                found = pull_corpus(
-                    connector,
-                    project,
-                    since,
-                    skills,
-                    max_clean_files=watch.max_clean_files,
-                    on_skip=note_skip,
-                )
+                # Streamed into the queue rather than collected first. A routine sweep covers a
+                # short window and it makes little difference; the *first* sweep after configuring
+                # `[watch]` covers the whole lookback, and that one used to write nothing until it
+                # had walked all of it — the same silence the operator sees on a backfill.
+                walks: list[Iterator[CandidateCase]] = [
+                    stream_corpus(
+                        connector,
+                        project,
+                        since,
+                        skills,
+                        max_clean_files=watch.max_clean_files,
+                        on_skip=note_skip,
+                    )
+                ]
                 if issues is not None and watch.tracker_project:
-                    found.extend(
-                        pull_defects(
+                    walks.append(
+                        stream_defects(
                             connector,
                             issues,
                             project,
@@ -166,10 +174,11 @@ class Watcher:
                             on_skip=note_skip,
                         )
                     )
-                stored = store_candidates(found, self._config.candidates_dir)
-                sweep.found += stored.written
-                sweep.already_queued += stored.existing
-                sweep.already_decided += stored.decided
+                for walk in walks:
+                    stored = store_candidates(walk, self._config.candidates_dir)
+                    sweep.found += stored.written
+                    sweep.already_queued += stored.existing
+                    sweep.already_decided += stored.decided
                 # Advanced only now, after this project's candidates are safely on disk. Moving it
                 # earlier would skip a window whose findings were never written.
                 with self._lock:

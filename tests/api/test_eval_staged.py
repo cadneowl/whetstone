@@ -43,20 +43,22 @@ def test_scoring_the_draft_drops_the_warning_about_not_measuring_it(client: Test
     _stage(client)
 
     assert any("will NOT measure" in w for w in _plan(client)["warnings"])
-    assert _plan(client, staged=True)["warnings"] == []
+    assert _plan(client, scope="draft")["warnings"] == []
 
 
 def test_the_warning_offers_scoring_the_draft_as_well_as_the_gate(client: TestClient) -> None:
     """Naming only the gate was the old advice, and the gate answers a different question."""
     _stage(client)
-    warnings = _plan(client, staged=False)["warnings"]
+    warnings = _plan(client, scope="working")["warnings"]
     assert any("draft" in w for w in warnings), warnings
     assert any("gate" in w for w in warnings), warnings
 
 
 def test_scoring_the_draft_with_nothing_staged_is_refused_by_name(client: TestClient) -> None:
     """Rather than silently scoring the working tree and reporting it as the draft."""
-    response = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors", "staged": True})
+    response = client.post(
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "draft"}
+    )
     assert response.status_code == 422, response.text
     body = response.json()["message"]
     assert "nothing is staged" in body
@@ -67,15 +69,16 @@ def test_the_plan_counts_the_drafts_own_cases(client: TestClient) -> None:
     """A draft may add eval cases. "Run the full suite on my draft" means the suite it carries, so
     the estimate has to come from the staged folder rather than the working tree's."""
     _stage(client)
-    working = _plan(client, staged=False)
-    draft = _plan(client, staged=True)
+    working = _plan(client, scope="working")
+    draft = _plan(client, scope="draft")
     # Same corpus here, but both numbers must be derived rather than one reused for the other.
     assert working["estimate"]["calls"] == draft["estimate"]["calls"]
     assert draft["action"] == "eval run"
 
 
-@pytest.mark.parametrize("staged", [True, False])
-def test_both_targets_are_plannable_without_a_model(client: TestClient, staged: bool) -> None:
+@pytest.mark.parametrize("scope", ["draft", "working"])
+def test_both_targets_are_plannable_without_a_model(client: TestClient, scope: str) -> None:
     _stage(client)
-    assert _plan(client, staged=staged)["estimate"]["calls"] > 0
+    assert _plan(client, scope=scope)["estimate"]["calls"] > 0
+
 

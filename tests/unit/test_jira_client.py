@@ -158,7 +158,9 @@ def test_jql_asks_for_resolved_issues_in_the_window() -> None:
 def test_an_extra_filter_is_conjoined_not_concatenated() -> None:
     jql = _connector(jql_filter='labels = "prod"').jql("PAY", datetime(2026, 1, 1))
     assert '(labels = "prod")' in jql
-    assert jql.endswith("ORDER BY resolutiondate ASC")
+    # Newest first, matching the forge walk: with candidates written as they are built,
+    # the order decides which history survives a crawl that is stopped early.
+    assert jql.endswith("ORDER BY resolutiondate DESC")
 
 
 @pytest.mark.parametrize(

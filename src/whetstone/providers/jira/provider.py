@@ -64,10 +64,15 @@ class JiraConnector:
         return {Capability.tracker}
 
     def jql(self, project: str, since: datetime) -> str:
-        """Resolved issues in a project since a date, newest last.
+        """Resolved issues in a project since a date, newest first.
 
         `resolution IS NOT EMPTY` rather than `resolution = Done`: every workflow names its
         done-state differently, and the question here is only whether the issue was closed out.
+
+        Newest first, matching `list_reviewed_changes`. The order was arbitrary while a walk
+        collected everything before returning; now that candidates are written as they are built,
+        it decides which history survives a crawl that is stopped — and the two walks in one
+        `corpus pull` disagreeing about that would be indefensible.
         """
         if not _PROJECT_KEY_RE.match(project):
             raise ValueError(
@@ -80,7 +85,7 @@ class JiraConnector:
         ]
         if self._jql_filter:
             clauses.append(f"({self._jql_filter})")
-        return " AND ".join(clauses) + " ORDER BY resolutiondate ASC"
+        return " AND ".join(clauses) + " ORDER BY resolutiondate DESC"
 
     # --- IssueConnector ------------------------------------------------------
     def list_resolved_issues(self, project: str, since: datetime) -> list[IssueRef]:

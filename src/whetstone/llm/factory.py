@@ -17,6 +17,7 @@ deployment can switch to a local box with no code and no flags, purely via env:
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from whetstone.llm.base import LLMClient
@@ -92,6 +93,7 @@ def build_llm_client(
     api_key: str | None = None,
     api_key_env: str | None = None,
     timeout: float | None = None,
+    on_retry: Callable[[str], None] | None = None,
 ) -> LLMClient:
     """Construct an `LLMClient` for a provider preset, resolving each field from arg → env → preset.
 
@@ -108,6 +110,10 @@ def build_llm_client(
     ``api_key_env`` names the env var holding the key; custom/local endpoints assume none, so no
     ``Authorization`` header is sent unless you ask for one. ``timeout`` (or
     ``WHETSTONE_LLM_TIMEOUT``, seconds) raises the per-request budget for slow local hardware.
+
+    ``on_retry`` is told when a call is being repeated — malformed JSON, or a 429/5xx — so a caller
+    with somewhere to show it can explain a long wait instead of leaving it silent. Ignored by the
+    Anthropic client, whose SDK does its own retrying.
     """
     backend = resolve_backend(provider, model=model, base_url=base_url)
 
@@ -122,9 +128,12 @@ def build_llm_client(
     key = api_key or _resolve_key(api_key_env, backend.preset)
     resolved_timeout = timeout if timeout is not None else _env_timeout()
     if resolved_timeout is None:
-        return OpenAICompatibleClient(model=backend.model, base_url=endpoint, api_key=key)
+        return OpenAICompatibleClient(
+            model=backend.model, base_url=endpoint, api_key=key, on_retry=on_retry
+        )
     return OpenAICompatibleClient(
-        model=backend.model, base_url=endpoint, api_key=key, timeout=resolved_timeout
+        model=backend.model, base_url=endpoint, api_key=key,
+        timeout=resolved_timeout, on_retry=on_retry,
     )
 
 

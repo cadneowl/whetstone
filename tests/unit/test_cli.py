@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -100,7 +100,7 @@ def _pull(out: Path, *extra: str) -> Result:
 
 @pytest.fixture
 def stub_pull(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("whetstone.cli.pull_corpus", lambda *a, **k: [_pull_candidate()])
+    monkeypatch.setattr("whetstone.cli.stream_corpus", lambda *a, **k: iter([_pull_candidate()]))
 
 
 def test_corpus_pull_writes_candidates(tmp_path: Path, stub_pull: None) -> None:
@@ -139,11 +139,13 @@ def test_unreachable_merge_requests_are_counted_in_the_summary(
     """
     mr = MergeRequestRef(repo=RepoRef.parse("gitlab:acme/payments"), iid=813)
 
-    def pull(*args: object, on_skip: Callable[..., None], **kw: object) -> list[CandidateCase]:
+    def pull(
+        *args: object, on_skip: Callable[..., None], **kw: object
+    ) -> Iterator[CandidateCase]:
         on_skip(mr, ConnectorError("acme/payments!813: Server disconnected"))
-        return [_pull_candidate()]
+        yield _pull_candidate()
 
-    monkeypatch.setattr("whetstone.cli.pull_corpus", pull)
+    monkeypatch.setattr("whetstone.cli.stream_corpus", pull)
     result = _pull(tmp_path / "candidates")
     assert result.exit_code == 0
     assert "1 merge request(s) unreachable" in result.stdout
@@ -155,10 +157,10 @@ def test_mismatched_jira_flags_are_caught_before_the_walk(
 ) -> None:
     """Checking this afterwards costs a full history crawl to learn you mistyped a flag."""
 
-    def never(*args: object, **kw: object) -> list[CandidateCase]:
+    def never(*args: object, **kw: object) -> Iterator[CandidateCase]:
         raise AssertionError("the walk must not start")
 
-    monkeypatch.setattr("whetstone.cli.pull_corpus", never)
+    monkeypatch.setattr("whetstone.cli.stream_corpus", never)
     result = _pull(tmp_path / "candidates", "--jira-url", "https://acme.atlassian.net")
     assert result.exit_code != 0
     assert "must be given together" in result.output
@@ -310,7 +312,7 @@ def test_defect_candidates_join_the_queue(
     defect = _pull_candidate()
     defect.id = "pay-812-fix0"
     monkeypatch.setattr("whetstone.cli.JiraConnector.from_config", lambda config: object())
-    monkeypatch.setattr("whetstone.cli.pull_defects", lambda *a, **k: [defect])
+    monkeypatch.setattr("whetstone.cli.stream_defects", lambda *a, **k: iter([defect]))
 
     out = tmp_path / "candidates"
     result = _pull(
@@ -445,3 +447,44 @@ def test_preflight_names_the_backend_and_estimates_the_calls(
     assert "LLM call(s)" in result.output
     # A gate scores both sides, so its estimate must not read like a single run's.
     assert "doubled" in result.output
+
+
+def test_a_walk_that_dies_still_reports_what_it_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Streaming made this necessary.
+
+    A crawl that dies at merge request 400 leaves 400 merge requests' worth of candidates on disk.
+    Reporting only on the happy path meant a traceback, no counts, and no reason to believe
+    anything had been kept — so the natural next move was to re-run the whole thing.
+    """
+
+    def half_a_walk(*args: object, **kw: object) -> Iterator[CandidateCase]:
+        yield _pull_candidate()
+        raise ConnectorError("gitlab token expired mid-walk")
+
+    monkeypatch.setattr("whetstone.cli.stream_corpus", half_a_walk)
+    out = tmp_path / "candidates"
+    result = _pull(out)
+
+    assert result.exit_code != 0, "a failed walk is still a failure"
+    assert (out / "acme-payments-812-t0" / "candidate.json").is_file()
+    assert "1 candidate(s) written" in result.stdout
+    assert "carry on" in result.stdout, "an operator must know not to start over"
+
+
+def test_an_interrupted_walk_keeps_and_reports_its_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C is the likeliest way a long backfill ends, and it is not an error."""
+
+    def stopped(*args: object, **kw: object) -> Iterator[CandidateCase]:
+        yield _pull_candidate()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("whetstone.cli.stream_corpus", stopped)
+    out = tmp_path / "candidates"
+    result = _pull(out)
+
+    assert "1 candidate(s) written" in result.stdout
+    assert (out / "acme-payments-812-t0" / "candidate.json").is_file()
