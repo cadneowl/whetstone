@@ -53,6 +53,7 @@ from whetstone.judge.spec import JudgeSpec
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.counting import CountingClient
 from whetstone.llm.embedding import Embedder, build_embedder
+from whetstone.llm.factory import build_llm_client, resolve_backend
 from whetstone.providers.base import IssueConnector, ReviewConnector
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
@@ -148,7 +149,24 @@ def record_eval(
         embedder=_embedder_for(skill),
         precedent_limits=precedent_limits,
     )
-    tier1 = LLMJudge(counted, effort=judge_effort, system=judge_system)
+    # Tier-1 verdicts may run on their own backend — the deployment seam for a distilled judge
+    # (`judge: {tier1: …}` in evaluate/step.yaml). The reviewer and the grounded tier 2 stay on
+    # the run's client: the student takes the bulk calls, the teacher keeps the contested ones.
+    # The separate client gets its own counter so `llm_calls` still reports every call made, and
+    # its resolved model folds into `judge_hash` below — a different tier-1 model is a different
+    # instrument. (A per-run transcript wraps only the run's own client; tier-1 calls from a
+    # distilled local model are not recorded, which is the cache's whole point.)
+    tier1_client: CountingClient = counted
+    tier1_model = ""
+    if judge_policy is not None and judge_policy.tier1.configured:
+        t1 = judge_policy.tier1
+        # Resolved exactly as `build_llm_client` below resolves it, so the identity names the
+        # model that actually answers.
+        tier1_model = resolve_backend(t1.llm, model=t1.model, base_url=t1.base_url).model
+        tier1_client = CountingClient(
+            build_llm_client(t1.llm, model=t1.model, base_url=t1.base_url)
+        )
+    tier1 = LLMJudge(tier1_client, effort=judge_effort, system=judge_system)
     llm_judge: LLMJudge | CascadingJudgeFactory = (
         CascadingJudgeFactory(
             tier1,
@@ -194,13 +212,17 @@ def record_eval(
         # judge above was constructed with, so nothing between construction and recording can
         # drift.
         judge_hash=judge_identity(
-            judge_system, escalate_below=cascade.escalate_below if cascade else 0.0
+            judge_system,
+            escalate_below=cascade.escalate_below if cascade else 0.0,
+            tier1_model=tier1_model,
         ),
         k=trials,
         practice_mode=practice_mode,
         baseline=baseline,
         duration_s=duration,
-        llm_calls=counted.calls,
+        # Both counters: a distilled tier 1 makes its calls on its own client, and a total that
+        # ignored them would report the run as cheaper than it was.
+        llm_calls=counted.calls + (tier1_client.calls if tier1_client is not counted else 0),
         git_ref=git_ref,
         cases=cases,
         score=score,

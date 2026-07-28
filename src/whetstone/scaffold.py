@@ -75,6 +75,12 @@ judge:
   escalate_below: 0.0
   # Diff shown to the grounded judge, capped like every other per-call input.
   max_diff_bytes: 2000
+  # A distilled judge takes the tier-1 calls while tier 2 and the reviewer stay on the run's
+  # backend — see judges/default/distill.md. The resolved model folds into the run's judge
+  # identity, so a swap re-baselines trends instead of drawing through them.
+  # tier1:
+  #   llm: ollama
+  #   model: judge-distilled
 
 model:
   # Pin this skill to a particular backend. Anything set here is the default; a flag on the command

@@ -72,3 +72,27 @@ def test_ruling_counts_reach_the_judge_page(client: TestClient, store: RunStore)
     body = client.get("/api/judge").json()
     assert body["rulings_total"] == 1
     assert body["rulings_overruled"] == 1
+
+
+def test_escalation_rate_counts_tier_two_verdicts(client: TestClient, store: RunStore) -> None:
+    """The number a distilled tier 1 has to keep honest: how often the teacher had to step in."""
+    from whetstone.domain.run import PriorVerdictRecord
+
+    plain = make_record("run-1")
+    escalated = make_record("run-2")
+    verdict = escalated.cases[0].trials[0].outcomes[0].verdicts[0]
+    verdict.tier = 2
+    verdict.prior = PriorVerdictRecord(matched=False, confidence=0.4, reason="unsure")
+    store.save(plain)
+    store.save(escalated)
+
+    stats = client.get("/api/judge").json()["escalation"]
+    assert stats is not None
+    assert stats["runs"] == 2
+    assert stats["verdicts"] == 2
+    assert stats["escalated"] == 1
+    assert stats["rate"] == 0.5
+
+
+def test_no_verdicts_means_no_escalation_stats(client: TestClient) -> None:
+    assert client.get("/api/judge").json()["escalation"] is None

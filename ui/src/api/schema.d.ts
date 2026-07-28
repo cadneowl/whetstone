@@ -1952,6 +1952,25 @@ export interface components {
             report: components["schemas"]["DriftReport"];
         };
         /**
+         * EscalationStats
+         * @description How often tier 1 was unsure enough to pay for grounding, over the recent runs.
+         *
+         *     The number that makes a distilled tier 1 auditable: a cheap judge that escalates everything
+         *     saved nothing, and one that never escalates is either excellent or over-confident — the
+         *     meta-eval bar says which. Zero escalations over runs with verdicts usually just means the
+         *     cascade is off (`escalate_below: 0`).
+         */
+        EscalationStats: {
+            /** Escalated */
+            escalated: number;
+            /** Rate */
+            readonly rate: number;
+            /** Runs */
+            runs: number;
+            /** Verdicts */
+            verdicts: number;
+        };
+        /**
          * Estimate
          * @description An upper bound on model calls, with the arithmetic that produced it.
          */
@@ -2682,6 +2701,7 @@ export interface components {
             best?: number | null;
             /** Builtin */
             builtin: boolean;
+            escalation?: components["schemas"]["EscalationStats"] | null;
             /** Hash */
             hash: string;
             /** Id */

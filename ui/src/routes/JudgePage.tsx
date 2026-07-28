@@ -80,6 +80,19 @@ export function JudgePage() {
         </p>
       )}
 
+      {data.escalation && (
+        <p className="mt-2 text-xs text-muted">
+          <span className="font-medium text-ink">
+            escalation rate {(data.escalation.rate * 100).toFixed(0)}%
+          </span>{' '}
+          — {data.escalation.escalated} of {data.escalation.verdicts} verdict(s) over the last{' '}
+          {data.escalation.runs} run(s) were re-judged grounded in the case diff.{' '}
+          {data.escalation.escalated === 0
+            ? 'Zero usually means the cascade is off (escalate_below: 0 in evaluate/step.yaml).'
+            : 'This is the number a distilled tier-1 judge has to keep honest: cheap verdicts take the bulk, the grounded teacher keeps the contested calls. `whetstone judge export` writes the training triples.'}
+        </p>
+      )}
+
       <div className="mt-3">
         <LaunchButton
           kind="judge-eval"

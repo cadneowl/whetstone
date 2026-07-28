@@ -82,8 +82,10 @@ GROUNDED_TEMPLATE = (
 )
 
 
-def judge_identity(system: str | None = None, *, escalate_below: float = 0.0) -> str:
-    """sha256 over everything that shapes a verdict besides the model itself.
+def judge_identity(
+    system: str | None = None, *, escalate_below: float = 0.0, tier1_model: str = ""
+) -> str:
+    """sha256 over everything that shapes a verdict besides the run's own model.
 
     Recorded on every run (`RunRecord.judge_hash`) for the same reason `Backend` is: two runs judged
     by different judges are different measurements that look identical, and every trend line and
@@ -100,6 +102,11 @@ def judge_identity(system: str | None = None, *, escalate_below: float = 0.0) ->
     in the case diff. That is a different instrument — different prompts can run, and the
     threshold decides when — so both fold into the hash. A deployment that never enables the
     cascade hashes exactly as it always has.
+
+    `tier1_model` is set when tier-1 verdicts run on their own backend (a distilled judge). The
+    run's `model` field records the *reviewer's* backend, so without this fold a tier-1 swap
+    would be invisible: two runs judged by different models would compare as the same instrument.
+    Empty — the default, tier 1 on the run's client — hashes exactly as before the seam existed.
     """
     h = hashlib.sha256()
     h.update((system or DEFAULT_SYSTEM).encode("utf-8"))
@@ -110,6 +117,9 @@ def judge_identity(system: str | None = None, *, escalate_below: float = 0.0) ->
         h.update(f"{escalate_below}".encode())
         h.update(b"\0")
         h.update(GROUNDED_TEMPLATE.encode("utf-8"))
+    if tier1_model:
+        h.update(b"\0tier1\0")
+        h.update(tier1_model.encode("utf-8"))
     return h.hexdigest()
 
 

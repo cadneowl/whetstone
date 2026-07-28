@@ -2080,5 +2080,82 @@ def judge_eval(
     raise typer.Exit(code=0 if bar.passes(report.accuracy) else 1)
 
 
+@judge_app.command("export")
+def judge_export(
+    out: Annotated[
+        Path, typer.Option("--out", help="JSONL file to write the training triples to")
+    ] = Path("judge-triples.jsonl"),
+    judge_hash: Annotated[
+        str | None,
+        typer.Option(
+            "--judge-hash",
+            help="Export only this judge identity, given whole or as a unique prefix "
+            "(default: the identity of the newest run)",
+        ),
+    ] = None,
+    skills_root: Annotated[
+        Path | None, typer.Option(help="Skills root, for joining case diffs onto the triples")
+    ] = None,
+    runs_dir: RunsDirOpt = None,
+) -> None:
+    """Export every recorded judge verdict as training triples for distillation.
+
+    Walks the run store and emits (finding, expectation, diff -> verdict) lines, filtered to one
+    judge identity — mixing judges would distill an instrument nobody ever ran. Tier-2 verdicts
+    are the grounded teacher speaking with the code in front of it; escalations carry the tier-1
+    verdict they replaced, which are the hard negatives worth oversampling.
+
+    The fine-tune happens outside Whetstone — `judges/default/distill.md` documents the recipe.
+    Validation and deployment come back through existing machinery: `whetstone judge eval --llm
+    ollama --model <distilled>` against the ratcheted bar, then `judge: {tier1: {llm: ollama,
+    model: …}}` in the skill's evaluate step. Rollback is deleting the config.
+    """
+    from whetstone.meta_eval.distill import export_triples, newest_judge_hash
+    from whetstone.runs import CorruptRecord
+
+    store = _store(runs_dir)
+    records: list[RunRecord] = []
+    for summary in store.list(baseline=None):
+        try:
+            records.append(store.load(summary.id))
+        except (FileNotFoundError, CorruptRecord):
+            continue  # one lost record must not sink the export
+    if not records:
+        typer.echo("no run records — score something before exporting its verdicts", err=True)
+        raise typer.Exit(1)
+
+    wanted = judge_hash or newest_judge_hash(records)
+    known = sorted({r.judge_hash for r in records if r.judge_hash})
+    matches = [h for h in known if h.startswith(wanted)] if wanted else []
+    if len(matches) != 1:
+        listing = "\n".join(f"  {h}" for h in known) or "  (none recorded)"
+        problem = "matches no recorded judge" if not matches else "is ambiguous"
+        typer.echo(f"judge hash {wanted!r} {problem}. Recorded identities:\n{listing}", err=True)
+        raise typer.Exit(1)
+
+    root = skills_root if skills_root is not None else load_config().skills_root
+    try:
+        skills = {s.id: s for s in load_skills(root)}
+    except (SkillLoadError, OSError):
+        skills = {}  # triples still export; they just carry no grounding diff
+
+    result = export_triples(records, skills, judge_hash=matches[0])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as fh:
+        for triple in result.triples:
+            fh.write(triple.model_dump_json() + "\n")
+
+    typer.echo(
+        f"{len(result.triples)} triple(s) from {result.runs} run(s) -> {out}\n"
+        f"  judge {matches[0][:16]}…  escalations: {result.escalations}"
+    )
+    if result.other_judges or result.practice:
+        typer.echo(
+            f"  excluded: {result.other_judges} run(s) under other judges, "
+            f"{result.practice} practice run(s)"
+        )
+    typer.echo("\nnext: judges/default/distill.md documents the fine-tune and validation recipe")
+
+
 if __name__ == "__main__":
     app()

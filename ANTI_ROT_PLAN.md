@@ -225,11 +225,37 @@
 >   self-exclusion, caps, digest properties, round-trip, characterization),
 >   `test_index_routes.py` (staged rebuild + C6 retraction, staleness, eval-plan detail, review
 >   precedents recorded end-to-end).
-> - **Next up: 4.2 judge distillation** (export (finding, expectation, hunk → verdict) triples
->   for the current judge version; fine-tune small local model outside Whetstone, recipe in
->   `judges/default/distill.md`; validate via `judge eval` + ratchet; deploy as cascade tier 1
->   by config, grounded judge stays tier 2; record before/after full-corpus run cost). Then
->   Phase 5 cadence + dead-rule report (fills `cadence`).
+> - **4.2 — DONE** (this commit): the judge-distillation machinery. `meta_eval/distill.py`:
+>   `export_triples(records, skills, judge_hash=…)` walks the run store and emits one
+>   `DistillTriple` per recorded verdict — finding message/location, expectation
+>   semantic/must/region, the case's grounding hunk joined from the skill on disk (capped at the
+>   cascade's own 2000 bytes; "" when the case is gone — the pairwise fields stand alone),
+>   verdict matched/confidence/reason/tier, and `prior` on escalations (the tier-1 call the
+>   grounded teacher corrected — the hard negatives worth oversampling). **Filtered to one judge
+>   identity** (mixing judges distills an instrument nobody ran); default = the newest real
+>   run's hash (`newest_judge_hash` — "current" is not computable from the doctrine file because
+>   judge_hash folds per-skill cascade policy). Practice runs excluded (regex verdicts), baseline
+>   probes included (same instrument, naked reviewer). CLI `whetstone judge export` (JSONL,
+>   `--judge-hash` accepts a unique prefix, excluded runs reported by reason). Deployment seam:
+>   `JudgePolicy.tier1 {llm, model, base_url}` — record_eval builds a *separate* counted client
+>   for tier-1 verdicts (reviewer + grounded tier 2 stay on the run's client; `llm_calls` sums
+>   both counters), and the resolved tier-1 model folds into `judge_identity(tier1_model=…)` —
+>   a swapped tier-1 is a different instrument, trends break at the seam; empty hashes exactly
+>   as before. Validation/deployment reuse existing machinery: `judge eval --llm ollama --model
+>   <distilled>` vs the ratcheted bar, config-only rollback. Recipe: `judges/default/distill.md`
+>   (chat-example shaping, train-to-teacher-final-verdicts, hold out by case id not row,
+>   escalation-rate operating band). Surfaces: Judge page `escalation` stats (tier-2 share over
+>   the last 20 runs, computed on read from run records — probes in, practice out), eval-plan
+>   detail when tier1 is configured, scaffold template documents the block.
+> - **4.2 deferral** (operational, needs real hardware): the done-when's measured before/after
+>   full-corpus run cost — record it here after the first real distilled model deploys. The
+>   export/validate/deploy path is fully built and tested; the fine-tune itself is by design
+>   outside Whetstone.
+> - **Next up: Phase 5 — operating cadence** (near-zero code): time-based inbox actions
+>   ("distill pass due — last run 47 days ago", "quarterly re-anchor overdue") from stored
+>   last-done timestamps — fills the health payload's final `cadence` placeholder; monthly
+>   dead-rule report from `meta.yaml` rule→signal provenance (rules whose supporting cases are
+>   all archived or whose refs touch deleted paths).
 > - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
 >   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
 >   scheduled job — cadence lands with Phase 5.
