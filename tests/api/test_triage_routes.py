@@ -702,3 +702,39 @@ def test_a_skill_page_survives_a_repo_with_no_batch(client: TestClient) -> None:
     body = client.get("/api/skills/rust-errors")
     assert body.status_code == 200
     assert body.json()["pending_cases"] == []
+
+
+def test_a_missing_triage_step_is_a_clean_422_not_a_crash(client: TestClient) -> None:
+    """The skill has no triage/ step, so the drafter has nothing to run — say so, actionably."""
+    resp = client.post("/api/candidates/812-t0/draft", json={"skill_id": "rust-errors"})
+    assert resp.status_code == 422
+    assert "no triage" in resp.json()["message"]
+
+
+def test_a_draft_backend_failure_is_a_clean_message_not_a_500(
+    client: TestClient, skills_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one model call the console makes synchronously: a missing key or an unreachable backend
+    must come back as an actionable message, not the bare 500 a raw client exception would raise."""
+    import whetstone.drafting as drafting
+
+    triage = skills_root / "rust-errors" / "triage"
+    triage.mkdir(parents=True)
+    (triage / "step.yaml").write_text(
+        "description: Draft an expectation.\n"
+        "inputs:\n  draft:\n    max_comments: 6\n    max_comment_chars: 1200\n"
+        "    max_diff_bytes: 2000\nprompt: prompt.md\n",
+        encoding="utf-8",
+    )
+    (triage / "prompt.md").write_text("Write one sentence about {{seeded}}\n", encoding="utf-8")
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("Could not resolve authentication method")
+
+    monkeypatch.setattr(drafting, "draft_semantic", boom)
+
+    resp = client.post("/api/candidates/812-t0/draft", json={"skill_id": "rust-errors"})
+    assert resp.status_code == 422, resp.text
+    message = resp.json()["message"]
+    assert "switch the model" in message  # the fix the operator can act on
+    assert "Could not resolve authentication" in message  # the reason, surfaced not swallowed

@@ -22,6 +22,6 @@ def test_export_tree_reproduces_committed_skill() -> None:
     try:
         skill = load_skill(root / SKILL_PATH)
         assert skill.id == "code-review-rust-error-handling"
-        assert len(skill.eval_cases) == 3
+        assert len(skill.eval_cases) == 4
     finally:
         shutil.rmtree(root, ignore_errors=True)
