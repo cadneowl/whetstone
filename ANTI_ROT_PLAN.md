@@ -251,14 +251,43 @@
 >   full-corpus run cost — record it here after the first real distilled model deploys. The
 >   export/validate/deploy path is fully built and tested; the fine-tune itself is by design
 >   outside Whetstone.
-> - **Next up: Phase 5 — operating cadence** (near-zero code): time-based inbox actions
->   ("distill pass due — last run 47 days ago", "quarterly re-anchor overdue") from stored
->   last-done timestamps — fills the health payload's final `cadence` placeholder; monthly
->   dead-rule report from `meta.yaml` rule→signal provenance (rules whose supporting cases are
->   all archived or whose refs touch deleted paths).
+> - **5 — DONE** (this commit): the operating cadence, visible. `cadence.py` — four per-skill
+>   clocks (`PERIOD_DAYS`: distill 30d, saturation 30d, anchor 90d, drift 90d). Three are
+>   *derived* on read from stores that already record their events (saturation from
+>   `latest_baseline`, drift from the drift store, anchor from the newest real run whose draw
+>   covered every currently-active case — judged against the corpus as it is *now*, so a
+>   promotion restarts the clock; `last_anchor_at` scans the last `ANCHOR_SCAN=10` records).
+>   Only the distill pass is stored (`CadenceStore`, `[cadence] dir` config, default
+>   `.whetstone/cadence`): a distill is an ordinary improve run with a consolidating
+>   instruction and nothing in its record distinguishes it, so the operator marks it —
+>   `whetstone cadence done`, or the Health tab button (`POST
+>   /api/skills/{id}/cadence/distill`, Writable-gated; the derived clocks have no endpoint on
+>   purpose). Never-done clocks count from the skill's first real run
+>   (`RunStore.earliest_at`, baseline/practice excluded) — a day-one skill owes nothing, and a
+>   skill with no runs owes nothing (score already outranks). Health payload's last
+>   placeholder filled: `cadence: CadenceSection` (always present, `due` sentences computed).
+>   Inbox: `cadence` ActionKind at rank 7 — below curate (evidence outranks a calendar),
+>   above nothing; `Attention.cadence_due` carried even when outranked. **Dead-rule report**:
+>   `deadrules.py` crosses `meta.yaml` rule→signal provenance with the corpus — verdicts
+>   `unreferenced` (guidance no longer mentions the rule id; custom word-boundary so R1 ≠
+>   R12), `evidence-archived` (all supporting cases archived; case ids carried),
+>   `no-evidence` (refs match no case — matched on MR identity, `#note_…` stripped). Pure
+>   function of the skill; health computes it from the *staged* skill so a distill on the
+>   branch stops the nagging immediately. CLI `whetstone skills rules`, `whetstone cadence
+>   status`. UI: Health tab Cadence section (clocks, due badges, mark-done) + Dead rules
+>   section; the "Not yet measured" placeholder list is gone — every planned section now
+>   renders.
+> - **5 deferral** (needs the target repo, which Whetstone deliberately never has): the
+>   dead-rule verdict for "provenance refs touch since-deleted paths" — recorded here rather
+>   than approximated. Also still open from §5: the weekly/monthly/quarterly *practice* itself
+>   is a human routine; the clocks only make skipping it visible.
 > - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
 >   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
->   scheduled job — cadence lands with Phase 5.
+>   scheduled job — its clock now ticks on the Health tab.
+> - **All phases 0–5 are now implemented.** Remaining open items are the recorded deferrals
+>   above (2.3 `barely` flag, RETIREMENT_GATES config, dispute diff capture, console JUDGE.md
+>   editing, hard adopt-gate, 4.2 measured cost after a real distilled model deploys, the
+>   deleted-paths dead-rule leg) and Phase H's degraded-fixture "done when" walkthrough.
 
 This is a handoff document. It assumes the implementer (you) has not read the conversation that
 produced it, so it carries its own reasoning: every step says *what* to build, *why it exists at
@@ -861,9 +890,11 @@ measurably (record before/after in this file); escalation rate visible on Judge 
   eval says 98% and shipped misses keep arriving, the verdict is "corpus rotten," not "skill
   sharp" — and Phases 2–3 name *which kind* of rotten.
 
-**Cadence must be visible, or it will not happen.** The inbox gains time-based `curate` actions
-("distill pass due — last run 47 days ago", "quarterly re-anchor overdue"), driven by stored
-last-done timestamps. A cadence that lives in a document is a cadence that dies in the document.
+**Cadence must be visible, or it will not happen.** The inbox gains time-based actions (its own
+`cadence` kind, ranked below evidence-backed work: "guidance distill pass due — last done 47 days
+ago", "full-corpus anchor run due — never done"), driven by last-done timestamps — stored for the
+distill pass, derived from the run and drift stores for the rest. A cadence that lives in a
+document is a cadence that dies in the document.
 
 ---
 

@@ -5,9 +5,9 @@ skill, retirement evidence in the inbox, the judge on its own page, production r
 Each is honest alone and a scavenger hunt together. This endpoint is the aggregation — "how is
 this skill actually doing?" answered in one payload.
 
-The shape is the plan's, not the current feature set's: sections whose phases have not landed yet
-(`index`, `cadence`) are present and null rather than absent, so the payload admits what it does
-not know and the UI never restructures when a phase fills a section in.
+The shape is the plan's, not the current feature set's: sections that need a measurement nobody
+has run yet (`discrimination`, `drift`, `index`) are present and null rather than absent, so the
+payload admits what it does not know and the UI never restructures when one fills in.
 """
 
 from __future__ import annotations
@@ -18,9 +18,12 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from whetstone import staging
+from whetstone.cadence import CadenceSection, CadenceStore, clocks, last_anchor_at
 from whetstone.caseindex import stale_cases
 from whetstone.config import Config
 from whetstone.curation import Discrimination, discrimination, retirement_proposals, tier_counts
+from whetstone.deadrules import DeadRule, dead_rules
+from whetstone.domain.run import RunRecord
 from whetstone.domain.score import HoldoutReport
 from whetstone.domain.skill import Skill
 from whetstone.drift import DRIFT_ALARM, DriftPoint, DriftReport, DriftStore, trend_point
@@ -29,7 +32,16 @@ from whetstone.inbox import Retirement
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.service import precision_evidence
-from whetstone.ui.deps import ConfigDep, DriftDep, GatesDep, ReviewsDep, SkillsRootDep, StoreDep
+from whetstone.ui.deps import (
+    CadenceDep,
+    ConfigDep,
+    DriftDep,
+    GatesDep,
+    ReviewsDep,
+    SkillsRootDep,
+    StoreDep,
+    Writable,
+)
 from whetstone.ui.errors import Unprocessable
 from whetstone.ui.routers.inbox import GATE_HISTORY
 from whetstone.ui.routers.judge import JudgeView, get_judge
@@ -133,8 +145,13 @@ class SkillHealth(BaseModel):
     drift: DriftSection | None = None
     # The retrieval index precedent injection reads. None until one has been built.
     index: IndexSection | None = None
-    # The one section whose phase has not landed (ANTI_ROT_PLAN.md 5). Null, not absent.
-    cadence: None = None
+    # The routine clocks (ANTI_ROT_PLAN.md 5): distill, saturation, anchor, drift — when each
+    # last happened and which are due. Always present; a skill with no history simply owes nothing.
+    cadence: CadenceSection
+    # Rules whose evidence has gone stale — the removal list the monthly distill pass reads.
+    # Computed from the staged skill like every curation view: a distill on the branch that
+    # already dropped a rule must stop the nagging immediately.
+    dead_rules: list[DeadRule] = []
 
 
 @router.get("/{skill_id}/health", response_model=SkillHealth)
@@ -145,6 +162,7 @@ def get_health(
     gates: GatesDep,
     reviews: ReviewsDep,
     drift: DriftDep,
+    cadence: CadenceDep,
     config: ConfigDep,
 ) -> SkillHealth:
     skill = _load_one(root, skill_id)
@@ -186,6 +204,63 @@ def get_health(
         # From the staged skill, like every curation view: a rebuild staged a minute ago must
         # show here immediately, not after its branch merges.
         index=_index_section(curated),
+        cadence=_cadence_section(store, drift, cadence, skill, probe),
+        dead_rules=dead_rules(curated),
+    )
+
+
+def _cadence_section(
+    store: RunStore,
+    drift: DriftStore,
+    cadence: CadenceStore,
+    skill: Skill,
+    probe: RunRecord | None = None,
+) -> CadenceSection:
+    """The four clocks from their stores — the same facts the inbox's cadence action reads.
+
+    The anchor is judged against the working-tree corpus, not the staged one: cases promoted to a
+    batch branch are not published yet, and a clock that starts ticking on unmerged work would
+    call for re-anchoring a corpus that does not exist.
+    """
+    probe = probe or store.latest_baseline(skill.id)
+    report = drift.latest(skill.id)
+    return CadenceSection(
+        clocks=clocks(
+            distill_at=cadence.marks(skill.id).marks.get("distill"),
+            saturation_at=probe.created_at if probe else None,
+            anchor_at=last_anchor_at(store, skill),
+            drift_at=report.measured_at if report else None,
+            first_run_at=store.earliest_at(skill.id),
+        )
+    )
+
+
+class CadenceMarked(BaseModel):
+    """What a mark wrote, and the clocks as they now read."""
+
+    kind: str
+    at: datetime
+    cadence: CadenceSection
+
+
+@router.post(
+    "/{skill_id}/cadence/distill", response_model=CadenceMarked, dependencies=[Writable]
+)
+def mark_distill(
+    skill_id: str,
+    root: SkillsRootDep,
+    store: StoreDep,
+    drift: DriftDep,
+    cadence: CadenceDep,
+) -> CadenceMarked:
+    """Record that the guidance distill pass ran. The one hand-marked clock: a distill is an
+    ordinary improve run with a consolidating instruction, so nothing in its record distinguishes
+    it — the operator says when one happened. The derived clocks have no endpoint on purpose;
+    marking them by hand could only disagree with the stores they are read from."""
+    skill = _load_one(root, skill_id)
+    at = cadence.mark(skill.id, "distill")
+    return CadenceMarked(
+        kind="distill", at=at, cadence=_cadence_section(store, drift, cadence, skill)
     )
 
 

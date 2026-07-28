@@ -28,6 +28,10 @@ export type DriftReport = Schemas['DriftReport']
 export type UncoveredMr = Schemas['UncoveredMr']
 export type IndexSection = Schemas['IndexSection']
 export type PrecedentRef = Schemas['PrecedentRef']
+export type CadenceSection = Schemas['CadenceSection']
+export type CadenceClock = Schemas['CadenceClock']
+export type CadenceMarked = Schemas['CadenceMarked']
+export type DeadRule = Schemas['DeadRule']
 export type CaseTier = CaseSummary['tier']
 export type HoldoutReport = Schemas['HoldoutReport']
 export type CaseRun = Schemas['CaseRun']
@@ -247,6 +251,26 @@ export function useHealth(skillId: string) {
   return useQuery({
     queryKey: keys.health(skillId),
     queryFn: () => get<SkillHealth>(`/api/skills/${encodeURIComponent(skillId)}/health`),
+  })
+}
+
+/**
+ * Record that the guidance distill pass ran — the one hand-marked cadence clock. A distill is an
+ * ordinary improve run with a consolidating instruction, so nothing in its record distinguishes
+ * it; the operator says when one happened. The derived clocks reset from their own stores.
+ */
+export function useMarkDistill(skillId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      send<CadenceMarked>(
+        'POST',
+        `/api/skills/${encodeURIComponent(skillId)}/cadence/distill`,
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.health(skillId) })
+      void client.invalidateQueries({ queryKey: keys.inbox })
+    },
   })
 }
 

@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from whetstone.cadence import CadenceStore
 from whetstone.config import Config, load_config
 from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
@@ -74,6 +75,7 @@ def create_app(
     app.state.gates = gates or GateStore(resolved.gates_dir)
     app.state.reviews = reviews or ReviewStore(resolved.reviews_dir)
     app.state.drift = DriftStore(resolved.drift_dir)
+    app.state.cadence = CadenceStore(resolved.cadence_dir)
     # One runner per server. In memory by design: see `jobs.py`.
     app.state.jobs = JobStore()
     # The model everything the console launches resolves to. Seeded from `[llm]`, changeable at

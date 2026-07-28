@@ -150,6 +150,7 @@ def config(repo: Path, skills_root: Path, tmp_path: Path) -> Config:
     config.reviews.dir = tmp_path / ".whetstone" / "reviews"
     config.meta_eval.dir = tmp_path / ".whetstone" / "meta_eval"
     config.drift.dir = tmp_path / ".whetstone" / "drift"
+    config.cadence.dir = tmp_path / ".whetstone" / "cadence"
     config.judge.dir = tmp_path / "judges" / "default"
     return config
 

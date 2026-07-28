@@ -12,6 +12,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from whetstone import staging
+from whetstone.cadence import CadenceStore, clocks, last_anchor_at
 from whetstone.candidates import CandidateEntry, CandidateStore
 from whetstone.config import Config
 from whetstone.curation import discrimination, retirement_proposals
@@ -22,6 +23,7 @@ from whetstone.gates import GateStore
 from whetstone.inbox import Attention, Inbox, Retirement, Signal, decide
 from whetstone.runs import CorruptRecord, RunStore
 from whetstone.ui.deps import (
+    CadenceDep,
     ConfigDep,
     DriftDep,
     GatesDep,
@@ -56,6 +58,7 @@ def get_inbox(
     store: StoreDep,
     gates: GatesDep,
     drift: DriftDep,
+    cadence: CadenceDep,
     watcher: WatcherDep,
 ) -> InboxView:
     from whetstone.ui.routers.skills import _load_all
@@ -63,7 +66,7 @@ def get_inbox(
     skills = _load_all(root)
     pending = _pending_by_skill(config)
     rows = [
-        _attention(config, store, gates, drift, skill, pending.get(skill.id, []))
+        _attention(config, store, gates, drift, cadence, skill, pending.get(skill.id, []))
         for skill in skills
     ]
     rows.sort(key=lambda a: (a.action.rank, -a.new_signals, a.skill_id))
@@ -105,6 +108,7 @@ def _attention(
     store: RunStore,
     gates: GateStore,
     drift: DriftStore,
+    cadence: CadenceStore,
     skill: Skill,
     pending: list[CandidateEntry],
 ) -> Attention:
@@ -132,6 +136,20 @@ def _attention(
     saturated = discrimination(curated, probe).flagged if probe else []
     drift_report = drift.latest(skill.id)
     drift_uncovered = None if drift_report is None else drift_report.uncovered_fraction
+    # Anchor and clocks read the working-tree corpus — cases promoted to a batch branch are not
+    # published yet, and a clock that starts ticking on unmerged work would nag about a corpus
+    # that does not exist. Same facts the health panel's cadence section reads.
+    cadence_due = [
+        c.label
+        for c in clocks(
+            distill_at=cadence.marks(skill.id).marks.get("distill"),
+            saturation_at=probe.created_at if probe else None,
+            anchor_at=last_anchor_at(store, skill),
+            drift_at=drift_report.measured_at if drift_report else None,
+            first_run_at=store.earliest_at(skill.id),
+        )
+        if c.due
+    ]
     action = decide(
         new_signals=len(pending),
         staged=staged,
@@ -144,6 +162,7 @@ def _attention(
         retire_ready=len(retirements),
         saturated=len(saturated),
         drift_uncovered=drift_uncovered,
+        cadence_due=cadence_due,
     )
     return Attention(
         skill_id=skill.id,
@@ -164,6 +183,7 @@ def _attention(
         retirements=[Retirement(case_id=p.case_id, evidence=p.evidence) for p in retirements],
         saturated=[Retirement(case_id=c.case_id, evidence=c.evidence) for c in saturated],
         drift_uncovered=drift_uncovered,
+        cadence_due=cadence_due,
         action=action,
     )
 

@@ -83,6 +83,10 @@ app.add_typer(providers_app, name="providers")
 app.add_typer(llm_app, name="llm")
 app.add_typer(runs_app, name="runs")
 app.add_typer(judge_app, name="judge")
+cadence_app = typer.Typer(
+    help="The routine clocks: which upkeep passes are due, and marking the distill pass done."
+)
+app.add_typer(cadence_app, name="cadence")
 
 @app.callback()
 def main(
@@ -1285,6 +1289,44 @@ def skills_steps(skill: SkillDirOpt) -> None:
             )
 
 
+@skills_app.command("rules")
+def skills_rules(
+    skill: SkillDirOpt,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """The dead-rule report: which rules the evidence no longer stands behind.
+
+    Crosses `meta.yaml` rule provenance with the eval corpus and reports rules the guidance no
+    longer mentions, rules whose supporting cases are all archived, and rules no case carries
+    evidence for. Read it before a distill pass: it is the evidenced removal list — the
+    difference between compression and vandalism.
+    """
+    from whetstone.deadrules import dead_rules
+
+    sk = load_skill(skill)
+    report = dead_rules(sk)
+    if json_out:
+        typer.echo(json.dumps([r.model_dump() for r in report], indent=2))
+        return
+    if not sk.provenance:
+        typer.echo(
+            f"{sk.id} records no rule provenance in meta.yaml — nothing to cross-check"
+        )
+        return
+    if not report:
+        typer.echo(
+            f"every rule in {sk.id}'s provenance is referenced by the guidance and backed by "
+            "at least one unarchived case"
+        )
+        return
+    for rule in report:
+        typer.echo(f"{rule.rule_id}  [{rule.verdict}]  {rule.evidence}")
+        for ref in rule.refs:
+            typer.echo(f"    signal: {ref}")
+        for case_id in rule.case_ids:
+            typer.echo(f"    case:   {case_id}")
+
+
 @skills_app.command("improve")
 def skills_improve(
     skill: SkillDirOpt,
@@ -2155,6 +2197,77 @@ def judge_export(
             f"{result.practice} practice run(s)"
         )
     typer.echo("\nnext: judges/default/distill.md documents the fine-tune and validation recipe")
+
+
+@cadence_app.command("status")
+def cadence_status(
+    skill: SkillDirOpt,
+    runs_dir: RunsDirOpt = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """The four routine clocks for one skill: when each pass last ran, and which are due.
+
+    Three clocks are derived from stores that already record their events — the saturation probe
+    from baseline runs, the drift probe from the drift store, the anchor from the newest run that
+    covered the whole active corpus. Only the distill pass is hand-marked (`cadence done`),
+    because a distill is an ordinary improve run and nothing in its record distinguishes it.
+    """
+    from whetstone.cadence import CadenceSection, CadenceStore, clocks, last_anchor_at
+    from whetstone.drift import DriftStore
+
+    config = load_config()
+    sk = load_skill(skill)
+    store = _store(runs_dir)
+    probe = store.latest_baseline(sk.id)
+    report = DriftStore(config.drift_dir).latest(sk.id)
+    section = CadenceSection(
+        clocks=clocks(
+            distill_at=CadenceStore(config.cadence_dir).marks(sk.id).marks.get("distill"),
+            saturation_at=probe.created_at if probe else None,
+            anchor_at=last_anchor_at(store, sk),
+            drift_at=report.measured_at if report else None,
+            first_run_at=store.earliest_at(sk.id),
+        )
+    )
+    if json_out:
+        typer.echo(section.model_dump_json(indent=2))
+        return
+    for clock in section.clocks:
+        when = (
+            f"last done {clock.last_done:%Y-%m-%d}"
+            if clock.last_done is not None
+            else "never done"
+        )
+        state = "DUE" if clock.due else "ok"
+        typer.echo(f"{clock.kind:11} every {clock.period_days:>2}d  {when:22} {state}")
+    if not section.due:
+        typer.echo("\nnothing due")
+
+
+@cadence_app.command("done")
+def cadence_done(
+    skill: SkillDirOpt,
+    kind: Annotated[
+        str, typer.Option("--kind", help="Which pass ran (only 'distill' is hand-marked)")
+    ] = "distill",
+) -> None:
+    """Record that a routine pass happened — resets its clock.
+
+    Only the distill pass takes a mark: the other clocks are read from stores that already record
+    their events, and a hand-written mark could only ever disagree with them.
+    """
+    from whetstone.cadence import MARKABLE, CadenceStore
+
+    if kind not in MARKABLE:
+        typer.echo(
+            f"'{kind}' is derived from its own records, not marked by hand — run the pass and "
+            "its clock resets itself. Only these are markable: " + ", ".join(MARKABLE),
+            err=True,
+        )
+        raise typer.Exit(1)
+    sk = load_skill(skill)
+    at = CadenceStore(load_config().cadence_dir).mark(sk.id, kind)  # type: ignore[arg-type]
+    typer.echo(f"{sk.id}: {kind} marked done at {at:%Y-%m-%d %H:%M} UTC")
 
 
 if __name__ == "__main__":
