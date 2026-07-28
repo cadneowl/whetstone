@@ -490,6 +490,25 @@ function JobResult({ job }: { job: Job }) {
       </p>
     )
   }
+  if (job.kind === 'drift') {
+    const uncovered = (r.uncovered as string[]) ?? []
+    return (
+      <p className="mt-2 text-xs">
+        {uncovered.length === 0 ? (
+          <span className="text-good">
+            coverage {fmt(r.coverage)} — every one of {String(r.recent_mrs)} recent MR(s) has a
+            case within the similarity radius
+          </span>
+        ) : (
+          <span className="text-warn">
+            coverage {fmt(r.coverage)} over {String(r.recent_mrs)} recent MR(s) —{' '}
+            {String(r.uncovered_total)} look like nothing in the corpus: {uncovered.join(', ')} —
+            see the Health tab
+          </span>
+        )}
+      </p>
+    )
+  }
   if (job.kind === 'review') {
     const found = Number(r.findings ?? 0)
     return (

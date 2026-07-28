@@ -287,8 +287,9 @@ function Action({ row }: { row: Attention }) {
       </Link>
     )
   }
-  if (kind === 'curate') {
-    // The confirm buttons are on the row above; this leads to the fuller picture.
+  if (kind === 'curate' || kind === 'drift') {
+    // The confirm buttons (curate) and the uncovered list (drift) live on the health tab; the
+    // row leads to the fuller picture rather than duplicating it.
     return (
       <Link
         to={`/skills/${encodeURIComponent(row.skill_id)}?tab=health`}
@@ -308,6 +309,7 @@ function ActionBadge({ kind }: { kind: ActionKind }) {
     triage: 'accent',
     score: 'neutral',
     improve: 'warn',
+    drift: 'warn',
     curate: 'neutral',
     nothing: 'neutral',
   } as const

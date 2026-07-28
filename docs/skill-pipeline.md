@@ -207,6 +207,35 @@ row, or an improve digest. The health panel's Discrimination section reads the n
 flagged cases appear in the inbox as curation proposals. A diagnostic sweep, not a gate — run it
 monthly, on a local model if you have one.
 
+### The drift probe
+
+The one rot vector nothing above can see: the holdout catches overfitting *to the corpus*, the
+saturation probe catches dead cases *in the corpus* — neither notices when the codebase moves on
+and the entire corpus tests last year's idioms. `whetstone corpus drift` measures it directly: it
+embeds the diffs of the skill's active cases and the diffs of the recent merge-request stream
+(read from the candidate queue that `corpus pull` and the watcher already maintain — no forge
+round-trips), and reports two numbers. **Coverage** is the actionable one: the fraction of recent
+MRs with an active case within a similarity radius, and the uncovered list names exactly which
+MRs look like nothing the skill is tested on — each links into triage, because promoting a
+candidate from one is what moves the number. Centroid distance is the trend companion: the middle
+of the stream moving away from the middle of the corpus.
+
+Embeddings are banned from scoring (the review path must be a pure function of the diff) and
+allowed here, deliberately: drift runs after the fact, feeds no reviewer, and produces evidence
+for a human. It needs an embedding model — a local one is the intended backend:
+
+```toml
+[drift]
+embed_provider = "ollama"          # any OpenAI-compatible preset
+embed_model = "nomic-embed-text"   # `ollama pull nomic-embed-text` first
+```
+
+Vectors are cached by content hash under the drift directory, so a re-probe embeds only what
+changed. Reports are stored; the health panel's Drift section shows the latest with its trend,
+and when the uncovered fraction crosses the threshold the inbox says so — "corpus drift: 40% of
+recent MRs look like nothing in the corpus" — ranked below failing cases, above housekeeping.
+Quarterly is plenty; it is also a button on the Health tab.
+
 ---
 
 ## `improve/step.yaml` — drafting a guidance change

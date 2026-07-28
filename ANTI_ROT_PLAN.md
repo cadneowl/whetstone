@@ -134,12 +134,39 @@
 >   reason (already existed). UI: warn-toned expandable chip on the triage form ("similar to N
 >   existing cases") with side-by-side expectations and case links; "Promote to archive" button
 >   appears only when similars exist.
-> - **Next up: Phase 3 — representativeness.** 3.1 corpus drift metric (embeddings allowed —
->   offline, never in the gate path): centroid distance between recent-MR-stream vectors and
->   corpus vectors, plus uncovered-MR list linking into triage; fills the health payload's
->   `drift` section. 3.2 synthetic counterfactuals/mutations (clearly provenance-tagged
->   `synthetic`, shown in composition). Then Phase 4.1 case-RAG / 4.2 judge distillation,
->   Phase 5 cadence + dead-rule report.
+> - **3.1 — DONE** (this commit): the corpus drift metric. `llm/embedding.py`:
+>   `OpenAIEmbeddingClient` (`/v1/embeddings` over the existing httpx, retries, order restored by
+>   index) + `CachedEmbedder` (one JSON file per sha256(text) per model slug, torn file = miss)
+>   + `build_embedder(provider, model=…)` through `resolve_backend` with `inherit_env=False` —
+>   the chat env's `WHETSTONE_LLM_MODEL` must never leak into an embeddings call; anthropic kind
+>   refused with the fix in the message. `drift.py`: the recent MR stream is the **candidate
+>   queue** (decided + pending — `corpus pull`/watcher already materialize the trailing window,
+>   so a probe is fully offline), grouped one-unit-per-MR by provenance ref so a chatty MR cannot
+>   outvote ten quiet ones; corpus side = active cases with diffs (archive is regression
+>   insurance, not representativeness). Coverage = fraction of MRs with an active case at cosine
+>   ≥ `COVERAGE_RADIUS` (0.6); uncovered sorted farthest-first, capped at `MAX_UNCOVERED` (50)
+>   with `uncovered_total` kept honest; centroid distance = 1 − cos(centroids); `DRIFT_ALARM` =
+>   0.4 uncovered. `DriftStore` (JSON per report, like reviews), `[drift]` config block
+>   (`dir`, `embed_provider`/`embed_model` — deliberately separate from `[llm]`: chat models do
+>   not embed), cache under `<dir>/cache`. Surfaces: `whetstone corpus drift` (preflight,
+>   uncovered lines, `--json`), `POST /api/jobs/drift[/plan]` (JobKind "drift"; plan 422s on a
+>   missing model, an empty side, or a chat-only provider — before the click), health `drift`
+>   section (report + trend history + `alarm` computed server-side so panel and inbox cross the
+>   same threshold), inbox: `Attention.drift_uncovered` + new `drift` action ("Review uncovered
+>   MRs", rank 5 — below improve, above curate; below triage/score, so fresh signal and a first
+>   run still win). UI: HealthPanel Drift section (coverage, centroid distance, trend arrow-line,
+>   uncovered rows linking `/triage?focus=<candidate>` — Triage now seeds its index from `?focus`
+>   and consumes it), LaunchButton drift result, inbox drift badge + Health link. Tests:
+>   `test_drift.py`/`test_embedding.py` (keyword-axis fake embedder — similarity arranged by
+>   choosing words; MockTransport for the client; no Ollama anywhere), `test_drift_routes.py`.
+> - **3.1 note:** the drift *action* only surfaces when nothing more urgent exists — with
+>   unruled signals the inbox says triage (reviewing them is how uncovered MRs get promoted).
+>   The reading itself (`drift_uncovered`) is always on the row.
+> - **Next up: 3.2 synthetic counterfactuals/mutations** (clearly provenance-tagged
+>   `synthetic-counterfactual` / `synthetic-mutation` with `ref` → parent case, feeding triage
+>   never auto-promotion; shown in composition; counterfactual = stored fix applied where clean,
+>   mutation = LLM-drafted + validated against the parent's expectation). Then Phase 4.1
+>   case-RAG / 4.2 judge distillation, Phase 5 cadence + dead-rule report (fills `cadence`).
 > - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
 >   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
 >   scheduled job — cadence lands with Phase 5.

@@ -367,6 +367,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/drift": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Drift
+         * @description Run the drift probe and store the report.
+         *
+         *     Entirely offline: the recent MR stream is read from the candidate queue the pulls and the
+         *     watcher already maintain, so the only network this touches is the embedding endpoint.
+         */
+        post: operations["launch_drift_api_jobs_drift_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/drift/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Drift Job */
+        post: operations["plan_drift_job_api_jobs_drift_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/eval": {
         parameters: {
             query?: never;
@@ -1066,6 +1106,8 @@ export interface components {
              * @default false
              */
             can_propose: boolean;
+            /** Drift Uncovered */
+            drift_uncovered?: number | null;
             /**
              * Failing Cases
              * @default 0
@@ -1727,6 +1769,110 @@ export interface components {
             drafted_by: string;
         };
         /**
+         * DriftPoint
+         * @description A report reduced to its trend coordinates.
+         */
+        DriftPoint: {
+            /** Centroid Distance */
+            centroid_distance: number;
+            /** Coverage */
+            coverage: number;
+            /** Id */
+            id: string;
+            /**
+             * Measured At
+             * Format: date-time
+             */
+            measured_at: string;
+        };
+        /**
+         * DriftReport
+         * @description One probe's answer, stored whole so the trend is a directory listing away.
+         */
+        DriftReport: {
+            /** Active Cases */
+            active_cases: number;
+            /** Centroid Distance */
+            centroid_distance: number;
+            /** Coverage */
+            coverage: number;
+            /** Id */
+            id: string;
+            /**
+             * Measured At
+             * Format: date-time
+             */
+            measured_at: string;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Recent Mrs */
+            recent_mrs: number;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Uncovered
+             * @default []
+             */
+            uncovered: components["schemas"]["UncoveredMr"][];
+            /**
+             * Uncovered Fraction
+             * @description What the alarm reads: the share of the recent stream the corpus does not resemble.
+             */
+            readonly uncovered_fraction: number;
+            /** Uncovered Total */
+            uncovered_total: number;
+        };
+        /**
+         * DriftRequest
+         * @description Measure a skill's corpus against the recent MR stream — the representativeness probe.
+         *
+         *     `provider`/`model` name an *embedding* backend, not a chat one, so they default to
+         *     `[drift] embed_provider`/`embed_model` rather than the console's model picker — the picker's
+         *     default is a reviewer model, and a reviewer model sent to an embeddings endpoint only fails.
+         */
+        DriftRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Skill Id */
+            skill_id: string;
+        };
+        /**
+         * DriftSection
+         * @description What the latest drift probe says, with the trend behind it.
+         *
+         *     `alarm` is computed here rather than left to the UI so the console and the inbox cross the
+         *     same threshold — the inbox action and a calm-looking health panel must not disagree.
+         */
+        DriftSection: {
+            /**
+             * Alarm
+             * @default false
+             */
+            alarm: boolean;
+            /**
+             * History
+             * @default []
+             */
+            history: components["schemas"]["DriftPoint"][];
+            report: components["schemas"]["DriftReport"];
+        };
+        /**
          * Estimate
          * @description An upper bound on model calls, with the arithmetic that produced it.
          */
@@ -2285,7 +2431,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -2542,7 +2688,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "propose" | "gate" | "triage" | "score" | "improve" | "curate" | "nothing";
+            kind: "propose" | "gate" | "triage" | "score" | "improve" | "drift" | "curate" | "nothing";
             /** Label */
             label: string;
             /** Rank */
@@ -3731,8 +3877,7 @@ export interface components {
             cadence?: null;
             composition: components["schemas"]["Composition"];
             discrimination?: components["schemas"]["Discrimination"] | null;
-            /** Drift */
-            drift?: null;
+            drift?: components["schemas"]["DriftSection"] | null;
             /** Index */
             index?: null;
             judge?: components["schemas"]["JudgeView"] | null;
@@ -3989,6 +4134,36 @@ export interface components {
              * @default []
              */
             paths: string[];
+        };
+        /**
+         * UncoveredMr
+         * @description One recent merge request with no active case within the similarity radius.
+         */
+        UncoveredMr: {
+            /** Candidate Id */
+            candidate_id: string;
+            /**
+             * Nearest Case
+             * @default
+             */
+            nearest_case: string;
+            /**
+             * Pending
+             * @default false
+             */
+            pending: boolean;
+            /** Ref */
+            ref: string;
+            /**
+             * Similarity
+             * @default 0
+             */
+            similarity: number;
+            /**
+             * Title
+             * @default
+             */
+            title: string;
         };
         /** UpdateRequest */
         UpdateRequest: {
@@ -4653,6 +4828,72 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["BaselineRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_drift_api_jobs_drift_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DriftRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_drift_job_api_jobs_drift_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DriftRequest"];
             };
         };
         responses: {

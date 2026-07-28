@@ -35,7 +35,9 @@ from pydantic import BaseModel, Field
 
 from whetstone.preflight import Plan
 
-JobKind = Literal["eval", "gate", "improve", "update", "review", "judge-eval", "baseline"]
+JobKind = Literal[
+    "eval", "gate", "improve", "update", "review", "judge-eval", "baseline", "drift"
+]
 JobState = Literal["running", "done", "failed", "cancelled"]
 
 # How many jobs may run at once. Two so a gate can be watched while something else finishes, and no

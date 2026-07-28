@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from whetstone import staging
 from whetstone.config import Config
+from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
 from whetstone.gitio import author_from_config
 from whetstone.jobs import JobStore
@@ -72,6 +73,11 @@ def get_watcher(request: Request) -> Watcher:
 def get_reviews(request: Request) -> ReviewStore:
     reviews: ReviewStore = request.app.state.reviews
     return reviews
+
+
+def get_drift(request: Request) -> DriftStore:
+    drift: DriftStore = request.app.state.drift
+    return drift
 
 
 def get_selection(request: Request) -> ModelSelection:
@@ -130,6 +136,7 @@ GatesDep = Annotated[GateStore, Depends(get_gates)]
 JobsDep = Annotated[JobStore, Depends(get_jobs)]
 WatcherDep = Annotated[Watcher, Depends(get_watcher)]
 ReviewsDep = Annotated[ReviewStore, Depends(get_reviews)]
+DriftDep = Annotated[DriftStore, Depends(get_drift)]
 SelectionDep = Annotated[ModelSelection, Depends(get_selection)]
 SkillsRootDep = Annotated[Path, Depends(get_skills_root)]
 PrincipalDep = Annotated[Principal, Depends(get_principal)]

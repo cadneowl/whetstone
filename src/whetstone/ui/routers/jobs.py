@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from whetstone import staging
 from whetstone.authoring import SkillEdit, prepare_guidance
+from whetstone.candidates import CandidateStore
 from whetstone.config import Config
 from whetstone.core.gate import GateConfig
 from whetstone.core.harness import RunCancelled
@@ -38,10 +39,12 @@ from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
+from whetstone.drift import DriftError, compute_drift, drift_inputs
 from whetstone.gitio import GitError, pending_batch
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.judge.spec import load_judge
+from whetstone.llm.embedding import build_embedder
 from whetstone.llm.factory import (
     PRESETS,
     Backend,
@@ -58,6 +61,7 @@ from whetstone.service import record_eval, record_gate, record_review
 from whetstone.steps import StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
+    DriftDep,
     GatesDep,
     JobsDep,
     ReviewsDep,
@@ -821,6 +825,127 @@ def launch_baseline(
         }
 
     return _launch(jobs, "baseline", skill.id, work, plan)
+
+
+class DriftRequest(BaseModel):
+    """Measure a skill's corpus against the recent MR stream — the representativeness probe.
+
+    `provider`/`model` name an *embedding* backend, not a chat one, so they default to
+    `[drift] embed_provider`/`embed_model` rather than the console's model picker — the picker's
+    default is a reviewer model, and a reviewer model sent to an embeddings endpoint only fails.
+    """
+
+    skill_id: str
+    provider: str = ""
+    model: str = ""
+
+
+@router.post("/drift/plan", response_model=Plan)
+def plan_drift_job(request: DriftRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
+    skill = _skill(root, request.skill_id)
+    provider, backend = _drift_backend(config, request)
+    case_texts, units = _drift_inputs(config, skill)
+    plan = plan_calls(
+        "drift",
+        backend,
+        calls=len(case_texts) + len(units),
+        basis=(
+            f"{len(case_texts)} active case diff(s) + {len(units)} recent merge request(s), "
+            "one embedding each"
+        ),
+        details=[
+            "embeddings only — no reviewer runs, no judge, and nothing in the gate path",
+            "vectors are cached by content, so a re-probe embeds only what changed",
+        ],
+    )
+    return plan
+
+
+@router.post("/drift", response_model=Job, dependencies=[Writable])
+def launch_drift(
+    request: DriftRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    drift: DriftDep,
+    jobs: JobsDep,
+) -> Job:
+    """Run the drift probe and store the report.
+
+    Entirely offline: the recent MR stream is read from the candidate queue the pulls and the
+    watcher already maintain, so the only network this touches is the embedding endpoint.
+    """
+    skill = _skill(root, request.skill_id)
+    provider, backend = _drift_backend(config, request)
+    plan = plan_drift_job(request, config, root)
+    entries = CandidateStore(config.candidates_dir).list(include_decided=True)
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, 1, "embedding the corpus and the stream")
+        try:
+            embedder = build_embedder(
+                provider, model=backend.model, cache_dir=config.drift_cache_dir
+            )
+            report = compute_drift(skill, entries, embedder, provider=provider)
+        except (ValueError, DriftError) as exc:
+            raise Unprocessable(str(exc)) from exc
+        drift.save(report)
+        for mr in report.uncovered:
+            handle.log(
+                LogLine(
+                    text=(
+                        f"  uncovered: {mr.ref} — nearest case {mr.nearest_case or '(none)'} "
+                        f"at {mr.similarity:.2f}"
+                    ),
+                    tone="bad",
+                )
+            )
+        handle.progress(1, 1, "done")
+        return {
+            "report_id": report.id,
+            "coverage": report.coverage,
+            "centroid_distance": report.centroid_distance,
+            "recent_mrs": report.recent_mrs,
+            "active_cases": report.active_cases,
+            "uncovered_total": report.uncovered_total,
+            "uncovered": [mr.ref for mr in report.uncovered],
+        }
+
+    return _launch(jobs, "drift", skill.id, work, plan)
+
+
+def _drift_backend(config: Config, request: DriftRequest) -> tuple[str, Backend]:
+    """The embedding backend a drift launch resolves to, refused early when it cannot work."""
+    provider = request.provider or config.drift.embed_provider
+    model = request.model or config.drift.embed_model
+    if not model:
+        raise Unprocessable(
+            "drift needs an embedding model — set [drift] embed_model in whetstone.toml "
+            "(e.g. nomic-embed-text after `ollama pull nomic-embed-text`), or name one for "
+            "this launch"
+        )
+    if request.provider and request.provider not in PRESETS:
+        raise Unprocessable(
+            f"unknown provider {request.provider!r}; choose one of: {', '.join(sorted(PRESETS))}"
+        )
+    try:
+        backend = resolve_backend(provider, model=model, inherit_env=False)
+    except ValueError as exc:
+        raise Unprocessable(str(exc)) from exc
+    if backend.kind != "openai":
+        raise Unprocessable(
+            f"provider {backend.name!r} has no embeddings endpoint — use a local model instead, "
+            "e.g. ollama with nomic-embed-text"
+        )
+    return provider, backend
+
+
+def _drift_inputs(config: Config, skill: Skill) -> tuple[list[tuple[str, str]], list[Any]]:
+    """The probe's two populations, with an empty side refused at the plan — not mid-job."""
+    entries = CandidateStore(config.candidates_dir).list(include_decided=True)
+    try:
+        return drift_inputs(skill, entries)
+    except DriftError as exc:
+        raise Unprocessable(str(exc)) from exc
 
 
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:

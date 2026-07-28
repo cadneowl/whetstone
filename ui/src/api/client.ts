@@ -23,6 +23,9 @@ export type SkillHealth = Schemas['SkillHealth']
 export type Retirement = Schemas['Retirement']
 export type SimilarCase = Schemas['SimilarCase']
 export type TierResult = Schemas['TierResult']
+export type DriftSection = Schemas['DriftSection']
+export type DriftReport = Schemas['DriftReport']
+export type UncoveredMr = Schemas['UncoveredMr']
 export type CaseTier = CaseSummary['tier']
 export type HoldoutReport = Schemas['HoldoutReport']
 export type CaseRun = Schemas['CaseRun']
@@ -636,6 +639,8 @@ function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
     void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })
     void client.invalidateQueries({ queryKey: ['case', job.skill_id] })
   }
+  // A drift probe fills the health payload's drift section; the inbox is already invalidated above.
+  if (job.kind === 'drift') void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })
 }
 
 export function usePlanJob(kind: JobKind) {

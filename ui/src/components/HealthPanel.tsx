@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { useHealth, useSetTier, type Retirement, type SkillHealth } from '@/api/client'
+import { useHealth, useSetTier, type Retirement, type SkillHealth, type UncoveredMr } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
@@ -24,6 +24,7 @@ export function HealthPanel({ skillId }: { skillId: string }) {
       <CompositionSection health={data} />
       <RetirementSection skillId={skillId} retirements={data.retirements ?? []} />
       <DiscriminationSection skillId={skillId} health={data} />
+      <DriftSection skillId={skillId} health={data} />
       <JudgeSection health={data} />
       <ProductionSection health={data} />
       <PendingSections />
@@ -240,6 +241,105 @@ function DiscriminationSection({ skillId, health }: { skillId: string; health: S
   )
 }
 
+/**
+ * Whether the corpus still looks like what the team actually ships.
+ *
+ * Coverage is the number that matters: the fraction of recent merge requests with an active case
+ * nearby. The uncovered list is the remedy — each row is an MR that looks like nothing the skill
+ * is tested on, linked into triage where promoting a candidate from it is one click away.
+ */
+function DriftSection({ skillId, health }: { skillId: string; health: SkillHealth }) {
+  const d = health.drift
+  return (
+    <Section
+      title="Drift"
+      intro="Recent merge requests, embedded and compared against the active cases. An MR with no case within the similarity radius is one the scores above say nothing about."
+    >
+      {d ? (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1">
+            <span className="tabular">
+              coverage {score(d.report.coverage, 2)}
+              <span className="ml-1 text-xs text-muted">
+                of {d.report.recent_mrs} recent MR{d.report.recent_mrs === 1 ? '' : 's'}
+              </span>
+            </span>
+            <span className="tabular text-muted" title="1 − cosine similarity of the two centroids — growth means the middle of the stream is moving away from the middle of the corpus">
+              centroid distance {score(d.report.centroid_distance, 3)}
+            </span>
+            {d.alarm && (
+              <Badge tone="warn" title="Past the drift threshold — the eval may be scoring last year's idioms">
+                {Math.round((d.report.uncovered_fraction ?? 0) * 100)}% uncovered
+              </Badge>
+            )}
+            <span className="ml-auto text-xs text-muted">probed {when(d.report.measured_at)}</span>
+          </div>
+          {(d.history ?? []).length > 0 && (
+            <p className="text-xs text-muted">
+              trend:{' '}
+              {[...(d.history ?? [])]
+                .reverse()
+                .map((p) => score(p.coverage, 2))
+                .concat([`${score(d.report.coverage, 2)} now`])
+                .join(' → ')}
+            </p>
+          )}
+          {(d.report.uncovered ?? []).length > 0 && (
+            <ul className="space-y-1.5 border-t border-line pt-2">
+              {(d.report.uncovered ?? []).map((mr) => (
+                <UncoveredRow key={mr.ref} mr={mr} />
+              ))}
+            </ul>
+          )}
+          {(d.report.uncovered_total ?? 0) > (d.report.uncovered ?? []).length && (
+            <p className="text-xs text-muted italic">
+              … and {(d.report.uncovered_total ?? 0) - (d.report.uncovered ?? []).length} more
+              uncovered — the report keeps the farthest {(d.report.uncovered ?? []).length}.
+            </p>
+          )}
+        </div>
+      ) : (
+        <p className="text-muted italic">
+          Never probed — the drift probe embeds the corpus and the candidate queue through a local
+          model (set <code className="font-mono">[drift] embed_model</code> in whetstone.toml).
+        </p>
+      )}
+      <div className="mt-3">
+        <LaunchButton
+          kind="drift"
+          request={{ skill_id: skillId }}
+          label={d ? 'Re-run drift probe' : 'Run drift probe'}
+        />
+      </div>
+    </Section>
+  )
+}
+
+function UncoveredRow({ mr }: { mr: UncoveredMr }) {
+  return (
+    <li className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      {mr.pending ? (
+        <Link
+          to={`/triage?focus=${encodeURIComponent(mr.candidate_id)}`}
+          className="font-mono text-xs hover:text-accent"
+        >
+          {mr.ref}
+        </Link>
+      ) : (
+        <span className="font-mono text-xs" title="its candidates have already been ruled on">
+          {mr.ref}
+        </span>
+      )}
+      {mr.title && <span className="text-xs text-muted">{mr.title}</span>}
+      <span className="ml-auto text-xs text-muted tabular">
+        {mr.nearest_case
+          ? `nearest ${mr.nearest_case} at ${(mr.similarity ?? 0).toFixed(2)}`
+          : 'no case comes close'}
+      </span>
+    </li>
+  )
+}
+
 function JudgeSection({ health }: { health: SkillHealth }) {
   const j = health.judge
   if (health.judge_error) {
@@ -309,7 +409,6 @@ function ProductionSection({ health }: { health: SkillHealth }) {
  */
 function PendingSections() {
   const pending = [
-    ['Drift', 'whether the corpus still looks like the MR stream — lands with the drift metric'],
     ['Cadence', 'when the maintenance passes last ran and what is due — lands with the cadence clocks'],
   ] as const
   return (
