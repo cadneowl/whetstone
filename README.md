@@ -501,7 +501,7 @@ candidate. It **PASSes only if all guards hold**:
 
 `GateResult` reports `passed`, `reasons` (human-readable failure list), `regressed_cases`,
 `fixed_cases` / `unfixed_cases`, and the before/after recall and fp_rate. This is the seam the CI job
-and every future proposal engine call.
+and the improve step's drafts both pass through.
 
 ### Both sides answer the same questions
 
@@ -536,8 +536,9 @@ change must fix is a property of that change, not a repo-wide default.
 ### A gate result is evidence, not just output
 
 Every gate is stored under `.whetstone/gates/` as a `GateRecord` carrying the **content hash of the
-candidate skill as committed** (`domain/run.skill_hash` — the guidance body plus every eval case).
-That record is what makes "never ship a skill change you can't prove is an improvement" a property
+candidate skill as committed** (`domain/run.skill_hash` — the guidance body *and its companion
+pages*, the wiki, the case index, and every eval case: everything that can change what the skill
+scores). That record is what makes "never ship a skill change you can't prove is an improvement" a property
 of the system rather than a habit: the console will not publish a guidance branch unless a passing
 record exists for the exact content it would push (see [ADR-008](docs/decisions.md)).
 
@@ -553,8 +554,10 @@ Four consequences worth knowing:
   a reviewer keeps failing raises recall without improving anything, and `skill_hash` covers the
   cases so it counts. **Adding** cases is the one exemption, which is why triage batches push
   without a gate: a case the skill never had cannot make it worse at the ones it did.
-- **A practice-mode gate does not count.** Practice mode swaps in the pattern reviewer and the
-  deterministic judge, so its verdict is about a regex, not about the model that will review code.
+- **A practice-mode gate does not count.** `gates.py` refuses to treat a run flagged `practice_mode`
+  as publish evidence — a practice run's verdict is meant to be about deterministic doubles, not the
+  model that reviews real code. The guard is in place; the flag itself is reserved (see the note
+  under [Console configuration](#console-configuration)) and no current command sets it.
 - **`.whetstone/gates/` is load-bearing.** Unlike `.whetstone/runs/`, which is telemetry and safe to
   delete, removing gate records costs the right to propose until they are re-run.
 
@@ -1273,9 +1276,10 @@ dir = ".whetstone/runs"          # where run records are read from
 Relative paths in `whetstone.toml` resolve against the file's own directory; paths from environment
 variables resolve against the current working directory, as environment variables conventionally do.
 
-> **`practice_mode`** tags a run or gate as a throwaway — a demo or a dry run of the workflow. It is
-> reported to the UI and shown as a badge, and such records are held out of the trend listings and
-> the cadence clocks and never anchor a corpus, so practising never disturbs a skill's real history.
+> **`practice_mode` is declared but inert.** It is reported to the UI and shown as a badge, but no
+> CLI or console command sets it on a run yet, so today it changes only what the header displays. The
+> guards that *would* discount a practice run — the gate refusing it as evidence, the cadence clocks
+> and the distill digest holding it out — are already in place for when a command does set it.
 
 **Pointing at a separate skills repo:**
 
@@ -1299,7 +1303,8 @@ From a fresh checkout, with no model credentials:
 # 1. Build the frontend once.
 cd ui && npm install && npm run build && cd ..
 
-# 2. Start the console. The skills index will show one skill, "never evaluated".
+# 2. Start the console. It opens on the inbox (empty at first); the Skills tab
+#    shows one skill, "never evaluated".
 whetstone ui
 ```
 
@@ -1329,24 +1334,28 @@ whetstone corpus pull --base-url https://gitlab.acme.com --project acme/payments
 
 ### The screens
 
+The nav runs in loop order — what needs doing, the signal behind it, the skills it changes, the
+evidence it produced:
+
 | Route | Screen |
 |---|---|
-| `/` | Skills index — **worst first**, with a rot strip per skill |
+| `/` | **Inbox** — what wants attention across every skill, ranked (the landing screen) |
+| `/triage` | Candidate queue |
+| `/reviews` · `/reviews/<id>` | Live reviews, and the drill-down where findings are ruled on |
+| `/skills` | Skills index — **worst first**, with a rot strip per skill |
 | `/skills/<id>` | Skill detail — guidance, **edit**, cases, runs, **health**, metadata |
 | `/skills/<id>/cases/<case-id>` | Eval case — diff, expectations, history, baseline verdict |
-| `/triage` | Candidate queue |
-| `/runs` | Run history |
-| `/runs/<run-id>` | Run drill-down — findings, judge verdicts, train/holdout, rulings |
-| `/inbox` | What wants attention across every skill, ranked |
+| `/runs` · `/runs/<run-id>` | Run history, and the drill-down: findings, judge verdicts, train/holdout, rulings |
 | `/judge` | The deployment judge — doctrine, identity, accuracy vs the bar |
 
 Every URL is deep-linkable. Paste a run link into a merge request and it opens where you left it.
 
 #### Skills index
 
-One row per skill, **worst first** — the landing order answers "which of our skills needs me?",
-which otherwise takes a CLI run per skill and eyeballing. A skill with a lit **rot signal** sorts
-ahead of a merely low score, because the rest of the product detects rot the score alone would hide.
+One row per skill on the **Skills** tab, **worst first** — the order answers "which of our skills
+needs me?", which otherwise takes a CLI run per skill and eyeballing. A skill with a lit **rot
+signal** sorts ahead of a merely low score, because the rest of the product detects rot the score
+alone would hide.
 
 - **`8 catch / 5 noflag`** — the case split. A skill with no `should_not_flag` cases has nothing
   keeping its precision honest. `· N archived` counts retired cases sampled at low weight.
@@ -2622,17 +2631,22 @@ whetstone/
 
 ## Where this is going
 
-Milestone 1 delivers **measurement before automation**: the `gate` function, callable from code,
-CLI, and HTTP — and now a stored verdict that publishing is checked against, so the thesis is
-enforced rather than merely intended. What is still a human's job is *writing the rule*. The next
-milestones close that:
+**Measurement came first** — the `gate` function, callable from code, CLI, and HTTP, plus a stored
+verdict publishing is checked against, so the thesis is enforced rather than intended. Built on top
+of it now is the whole [anti-rot loop](#keeping-skills-sharp-the-anti-rot-loop): corpus mining and
+triage, the improve step that drafts a guidance change from clustered failures, console orchestration
+of every run and gate, and the holdout / tier / saturation / drift / case-index / self-measuring-judge
+machinery. Writing the rule is still deliberately a human's call — the drafter proposes, a person
+reads and accepts, and the gate rules.
 
-- **Distillation + proposal engine** — cluster review signals into candidate learnings and generate
-  skill diffs. Its output enters the loop exactly where a person's edit does today: staged on a
-  `whetstone/skill/<id>` branch, and unpublishable until a gate record covers that content hash.
-- **Run orchestration** — launching gates from the console, so C6 stops being a rule the console
-  states and a command you run elsewhere.
-- **Control-plane API + governance** — the `POST /sharpen` surface, approval workflow, and drift
-  detection.
+What is still ahead:
+
+- **Deeper automation of the drafter** — today it drafts from one run's failures and a person accepts;
+  the direction is proposing *and* self-gating a change end to end, still unpublishable until a gate
+  record covers its content hash.
+- **Judge distillation in production** — the tier-1 seam and the distillation exhaust exist; deploying
+  a cheap local student judge that clears the accuracy ratchet is the remaining step.
+- **Control-plane API + fleet governance** — a `POST /sharpen` surface, an approval workflow, and
+  cross-repository rollout, so a fleet of skills is governed rather than a single checkout.
 
 Nothing ships that the gate can't show is a net improvement.
