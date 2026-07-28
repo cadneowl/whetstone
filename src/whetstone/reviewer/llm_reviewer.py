@@ -14,6 +14,7 @@ from whetstone.caseindex import (
 )
 from whetstone.domain.change import CodeChange
 from whetstone.domain.enums import Severity
+from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.finding import Finding
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
@@ -55,6 +56,12 @@ class LLMReviewer:
     embedding of one diff is memoized per reviewer instance, so k trials of the same case cost one
     embedding call, not k. `last_precedents` records what the most recent `review` injected — how
     a live review's record can say which cases shaped it.
+
+    `corpus` is the full active case set precedents may be drawn from. It matters only on a sampled
+    run: the harness hands `review` the sampled skill, and resolving precedents from *its*
+    `eval_cases` would narrow the pool to the drawn subset. Passing the whole corpus here keeps
+    retrieval corpus-wide regardless of the draw. Left unset (live reviews, unsampled runs), it
+    falls back to the reviewed skill's own cases — which is the whole corpus in exactly those cases.
     """
 
     def __init__(
@@ -65,12 +72,14 @@ class LLMReviewer:
         wiki_limits: WikiLimits | None = None,
         embedder: Embedder | None = None,
         precedent_limits: PrecedentLimits | None = None,
+        corpus: list[EvalCase] | None = None,
     ) -> None:
         self._client = client
         self._effort = effort
         self._wiki_limits = wiki_limits or WikiLimits()
         self._embedder = embedder
         self._precedent_limits = precedent_limits or PrecedentLimits()
+        self._corpus = corpus
         self._vector_memo: dict[str, list[float]] = {}
         self.last_precedents: list[PrecedentRef] = []
 
@@ -107,7 +116,12 @@ class LLMReviewer:
             [vector] = self._embedder.embed([diff])
             self._vector_memo[key] = vector
         return retrieve_precedents(
-            skill, change, vector, query_hash=key, limits=self._precedent_limits
+            skill,
+            change,
+            vector,
+            query_hash=key,
+            limits=self._precedent_limits,
+            corpus=self._corpus,
         )
 
 

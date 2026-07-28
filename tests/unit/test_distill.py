@@ -23,7 +23,7 @@ from whetstone.domain.skill import Skill
 from whetstone.judge.llm_judge import judge_identity
 from whetstone.llm.fake_client import FakeLLMClient
 from whetstone.meta_eval.distill import export_triples, newest_judge_hash
-from whetstone.service import record_eval
+from whetstone.service import record_eval, record_gate
 from whetstone.steps import JudgePolicy, Tier1Backend
 
 REPO = RepoRef.parse("local:x")
@@ -200,3 +200,36 @@ def test_a_configured_tier1_takes_the_judge_calls(monkeypatch) -> None:
     assert record.llm_calls == 2
     assert record.judge_hash == judge_identity(None, tier1_model="judge-distilled")
     assert record.score.recall == 1.0
+
+
+def test_a_gate_folds_the_tier1_model_into_its_own_judge_identity(monkeypatch) -> None:
+    """The gate path must name the same instrument the eval path does: a gate judged by a distilled
+    tier 1 is not the teacher's gate, and recording the teacher's hash would let a later
+    gate-accuracy trend draw straight through the swap."""
+    from whetstone.judge.llm_judge import JudgeVerdict
+    from whetstone.reviewer.llm_reviewer import LLMFinding, LLMFindingList
+
+    def main_handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        # Handles both roles: reviews always, and judge calls too on the plain gate below where
+        # there is no tier-1 to take them. (Tier-1 routing itself is covered by the eval test.)
+        if schema is LLMFindingList:
+            return LLMFindingList(
+                findings=[LLMFinding(path="src/a.rs", line=39, message="unwrap panics")]
+            )
+        return JudgeVerdict(matched=True, confidence=1.0, reason="same issue")
+
+    def tier1_handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return JudgeVerdict(matched=True, confidence=1.0, reason="same issue")
+
+    monkeypatch.setattr(
+        "whetstone.service.build_llm_client", lambda *a, **k: FakeLLMClient(tier1_handler)
+    )
+    policy = JudgePolicy(tier1=Tier1Backend(llm="ollama", model="judge-distilled"))
+    base = _skill_with_case()
+    candidate = _skill_with_case()
+    record = record_gate(base, candidate, FakeLLMClient(main_handler), judge_policy=policy)
+
+    assert record.judge_hash == judge_identity(None, tier1_model="judge-distilled")
+    # And a gate under no tier-1 hashes as the plain judge — the seam changes nothing by default.
+    plain = record_gate(base, candidate, FakeLLMClient(main_handler))
+    assert plain.judge_hash == judge_identity(None)

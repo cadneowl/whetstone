@@ -83,6 +83,7 @@ def run_eval(
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
     precedent_limits: PrecedentLimits | None = None,
+    precedent_corpus: list[EvalCase] | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     on_event: EventSink | None = None,
@@ -98,6 +99,7 @@ def run_eval(
         sample=sample,
         wiki_limits=wiki_limits,
         precedent_limits=precedent_limits,
+        precedent_corpus=precedent_corpus,
         judge=judge,
         judge_policy=judge_policy,
         on_event=on_event,
@@ -124,6 +126,7 @@ def record_eval(
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
     precedent_limits: PrecedentLimits | None = None,
+    precedent_corpus: list[EvalCase] | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     baseline: bool = False,
@@ -152,6 +155,10 @@ def record_eval(
         wiki_limits=wiki_limits,
         embedder=_embedder_for(skill),
         precedent_limits=precedent_limits,
+        # The full corpus to draw precedents from, so a sampled run still retrieves corpus-wide.
+        # Defaults to this skill's whole case set — which is the full corpus for an unsampled run,
+        # and the *unsampled* union a gate passes explicitly so each side sees all of its own cases.
+        corpus=precedent_corpus if precedent_corpus is not None else skill.eval_cases,
     )
     # Tier-1 verdicts may run on their own backend — the deployment seam for a distilled judge
     # (`judge: {tier1: …}` in evaluate/step.yaml). The reviewer and the grounded tier 2 stay on
@@ -519,16 +526,21 @@ def gate_skills(
     # each side's partition stamping matches the skill's own configuration.
     no_draw = SamplePolicy(max_cases=None, holdout_fraction=fraction)
     # Each side keeps its own index (or lack of one): a gate for "does precedent injection help?"
-    # is precisely base-without against candidate-with, over the same cases.
+    # is precisely base-without against candidate-with, over the same cases. Each side also draws
+    # precedents from its *own* full corpus — not the sampled `cases`, and not the union: base's
+    # index was built from base's cases, so rendering a precedent from base's corpus keeps the
+    # injected diff and the vector that ranked it from the same commit.
     base_score = run_eval(
         base.model_copy(update={"eval_cases": cases}), client, trials=trials,
         wiki_limits=wiki_limits, precedent_limits=precedent_limits,
+        precedent_corpus=base.eval_cases,
         judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_base, cancel=cancel,
     )
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
         wiki_limits=wiki_limits, precedent_limits=precedent_limits,
+        precedent_corpus=candidate.eval_cases,
         judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_candidate, cancel=cancel,
     )
@@ -580,6 +592,13 @@ def record_gate(
 
     fraction = (sample or SamplePolicy()).holdout_fraction
     candidate_hash = skill_hash(candidate)
+    # The tier-1 model folds into the identity exactly as it does on a plain run: a gate judged by
+    # a distilled tier 1 is a different instrument than one judged by the teacher, and recording
+    # the same hash for both would let a later gate-accuracy trend draw straight through the swap.
+    tier1_model = ""
+    if judge_policy is not None and judge_policy.tier1.configured:
+        t1 = judge_policy.tier1
+        tier1_model = resolve_backend(t1.llm, model=t1.model, base_url=t1.base_url).model
     return GateRecord(
         id=new_gate_id(candidate.id, candidate_hash, started_at),
         created_at=started_at,
@@ -596,6 +615,7 @@ def record_gate(
             escalate_below=judge_policy.escalate_below
             if judge_policy is not None and judge_policy.enabled
             else 0.0,
+            tier1_model=tier1_model,
         ),
         k=trials,
         practice_mode=practice_mode,
