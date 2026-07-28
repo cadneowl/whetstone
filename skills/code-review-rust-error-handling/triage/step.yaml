@@ -1,0 +1,31 @@
+# How a mined signal becomes an expectation this skill can be judged against.
+#
+# Used by the console's "Draft it" button beside the Semantic field in Triage.
+#
+# The miner seeds `semantic` from whatever text sat nearest the signal — the first review comment,
+# a tracker summary, or the skill's own finding. Rewriting that into a standalone description of
+# the problem is the one irreducible human step in triage, and the one that does not scale. This
+# drafts it; a person still accepts, edits or discards every result.
+
+description: Draft an eval case's expectation from the review evidence.
+
+inputs:
+  draft:
+    # The review thread, capped. Enough to see what was actually objected to; not so much that one
+    # unusually chatty merge request costs more than the rest of the queue combined.
+    max_comments: 6
+    max_comment_chars: 1200
+    # The diff for the file the expectation is about, in bytes.
+    max_diff_bytes: 2000
+
+prompt: prompt.md
+
+# model:
+#   llm: ollama
+#   model: qwen2.5-coder:7b
+#   effort: medium
+
+# Instead of `prompt:`, set `run:` and Whetstone invokes your own program: the bounded evidence
+# arrives as JSON on stdin, and it must print {"semantic": ..., "rationale": ...} on stdout.
+#
+# run: ["python", "draft.py"]

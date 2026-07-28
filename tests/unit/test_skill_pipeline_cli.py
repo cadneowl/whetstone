@@ -224,6 +224,12 @@ def test_a_clean_run_does_not_spend_a_call(
         if schema is GuidanceProposal:
             prompts.append(user)
             return GuidanceProposal(body=NEW_BODY)
+        # Catch both real defects so the run is genuinely clean: the unwrap on charge.rs and the
+        # swallowed error (`let _ =`) on refund.rs. Stay silent on the noflag cases.
+        if "let _ =" in user:
+            return LLMFindingList(
+                findings=[LLMFinding(path="src/handlers/refund.rs", line=32, message="swallow")]
+            )
         if "charge" in user and "test" not in user:
             return LLMFindingList(
                 findings=[LLMFinding(path="src/handlers/charge.rs", line=41, message="unwrap")]
