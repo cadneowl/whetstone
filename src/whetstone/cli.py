@@ -1098,6 +1098,108 @@ def corpus_drift(
     typer.echo(f"\ndrift report {report.id}")
 
 
+@corpus_app.command("synthesize")
+def corpus_synthesize(
+    skill: Annotated[Path, typer.Option("--skill", help="Path to a skill folder")],
+    counterfactual: Annotated[
+        bool,
+        typer.Option(
+            "--counterfactual",
+            help="Reverse each case's diff into a should_not_flag negative (no model call)",
+        ),
+    ] = False,
+    mutate: Annotated[
+        bool,
+        typer.Option(
+            "--mutate",
+            help="Draft same-defect-different-names mutants with a model (one call per case)",
+        ),
+    ] = False,
+    case: Annotated[
+        list[str] | None,
+        typer.Option("--case", help="Limit to these parent case ids (repeatable)"),
+    ] = None,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Candidates directory (default: the configured queue)"),
+    ] = None,
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    yes: YesOpt = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Generate synthetic candidates into the triage queue — never into the corpus directly.
+
+    Two generators, both provenance-tagged `synthetic-*` with a ref to the parent case, so every
+    corpus statistic can exclude them. `--counterfactual` reverses each active should_catch
+    case's diff into the defect's removal — the highest-grade precision negative, mechanically,
+    with no model call. `--mutate` asks a model for the same defect wearing different names —
+    the probe for guidance that memorized an incident instead of a pattern; every draft is
+    validated against the parent's expectation before it may enter the queue.
+
+    A person still rules on every candidate in triage. Nothing here promotes anything.
+    """
+    from whetstone.corpus.synthesize import Skipped, counterfactuals, eligible_parents, mutations
+
+    if not counterfactual and not mutate:
+        raise typer.BadParameter("choose at least one of --counterfactual / --mutate")
+
+    sk = load_skill(skill)
+    destination = out or load_config().candidates_dir
+    found: list[CandidateCase] = []
+    skipped: list[Skipped] = []
+
+    if counterfactual:
+        cf, cf_skipped = counterfactuals(sk, case_ids=case)
+        found.extend(cf)
+        skipped.extend(cf_skipped)
+
+    if mutate:
+        targets, mut_skipped = eligible_parents(sk, case)
+        if targets:
+            pick = _backend_for(None, llm, model, base_url)
+            backend = _resolve(*pick)
+            plan = plan_calls(
+                "synthesize",
+                backend,
+                calls=len(targets),
+                basis=f"{len(targets)} parent case(s) x 1 mutation draft",
+                details=["invalid drafts are skipped and reported, never queued"],
+            )
+            _preflight(plan, yes)
+            client = _client(*pick, api_key_env, label=f"synthesize-{sk.id}")
+            mutants, more_skipped = mutations(sk, client, case_ids=case)
+            found.extend(mutants)
+            skipped.extend(more_skipped)
+        else:
+            skipped.extend(mut_skipped)
+
+    result = store_candidates(found, destination)
+    if json_out:
+        typer.echo(json.dumps({
+            "written": result.written,
+            "existing": result.existing,
+            "decided": result.decided,
+            "candidates": [c.id for c in found],
+            "skipped": [{"case_id": s.case_id, "reason": s.reason} for s in skipped],
+        }, indent=2))
+        return
+
+    for candidate in found:
+        typer.echo(f"  {candidate.id} <- {candidate.provenance.ref}")
+    for s in skipped:
+        typer.echo(f"  skipped {s.case_id}: {s.reason}")
+    typer.echo(
+        f"\n{result.written} candidate(s) written to {destination}"
+        + (f" ({result.existing} already queued)" if result.existing else "")
+        + (f" ({result.decided} already ruled on)" if result.decided else "")
+    )
+    if result.written:
+        typer.echo("review them in triage — nothing enters the corpus without a person")
+
+
 @skills_app.command("list")
 def skills_list(
     root: Annotated[Path, typer.Option(help="Skills root folder")] = Path("skills"),

@@ -88,6 +88,9 @@ export type JobRequest = {
   /** review only: a merge-request URL (pasted from the browser) or a bare number. */
   mr?: string
   project?: string
+  /** synthesize only: which generator, and optionally which parent cases. */
+  mode?: 'counterfactual' | 'mutation'
+  cases?: string[]
 }
 
 /** The shape the API returns for a handled failure — see `ui/errors.py`. */
@@ -641,6 +644,11 @@ function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
   }
   // A drift probe fills the health payload's drift section; the inbox is already invalidated above.
   if (job.kind === 'drift') void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })
+  // Synthesis writes candidates into the triage queue.
+  if (job.kind === 'synthesize') {
+    void client.invalidateQueries({ queryKey: keys.candidates })
+    void client.invalidateQueries({ queryKey: keys.batch })
+  }
 }
 
 export function usePlanJob(kind: JobKind) {

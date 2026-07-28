@@ -509,6 +509,33 @@ function JobResult({ job }: { job: Job }) {
       </p>
     )
   }
+  if (job.kind === 'synthesize') {
+    const written = Number(r.written ?? 0)
+    const skipped = (r.skipped as { case_id: string; reason: string }[]) ?? []
+    return (
+      <p className="mt-2 text-xs">
+        {written > 0 ? (
+          <>
+            <span className="text-good">
+              {written} candidate{written === 1 ? '' : 's'} written
+            </span>{' '}
+            <a className="text-accent hover:underline" href="/triage">
+              — review them in triage
+            </a>
+          </>
+        ) : (
+          <span className="text-muted">
+            nothing new{Number(r.existing ?? 0) > 0 && ' — the earlier output is still queued'}
+          </span>
+        )}
+        {skipped.length > 0 && (
+          <span className="mt-0.5 block text-muted">
+            skipped {skipped.map((s) => `${s.case_id} (${s.reason})`).join('; ')}
+          </span>
+        )}
+      </p>
+    )
+  }
   if (job.kind === 'review') {
     const found = Number(r.findings ?? 0)
     return (

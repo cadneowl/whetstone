@@ -61,6 +61,10 @@ class Composition(BaseModel):
     archive: int
     catch: int
     noflag: int
+    # Cases with `synthetic-*` provenance — generated, not mined. Counted separately because a
+    # corpus statistic that cannot tell derived cases from real review history overstates how
+    # much of reality it measures.
+    synthetic: int = 0
     # `should_not_flag` cases by evidence strength. Shown because a precision score computed
     # mostly from silence rewards a reviewer that says nothing — see `service.precision_evidence`.
     evidence_mix: dict[str, int]
@@ -152,6 +156,7 @@ def get_health(
             archive=tiers["archive"],
             catch=sum(1 for c in skill.eval_cases if c.kind == "should_catch"),
             noflag=sum(1 for c in skill.eval_cases if c.kind == "should_not_flag"),
+            synthetic=sum(1 for c in skill.eval_cases if c.provenance.synthetic),
             evidence_mix=precision_evidence(skill),
         ),
         retirements=[Retirement(case_id=p.case_id, evidence=p.evidence) for p in proposals],

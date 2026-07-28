@@ -256,18 +256,24 @@ def test_precision_evidence_separates_confirmed_from_silence() -> None:
             _noflag("quiet-3", "merged clean"),
         ],
     )
-    assert precision_evidence(skill) == {"confirmed": 2, "silence": 3, "unclassified": 0}
+    assert precision_evidence(skill) == {
+        "confirmed": 2, "silence": 3, "synthetic": 0, "unclassified": 0,
+    }
 
 
 def test_hand_written_cases_are_unclassified_not_guessed_at() -> None:
     # A case someone wrote deliberately may be the best evidence in the set or the weakest.
     skill = Skill(id="s", eval_cases=[_noflag("hand", None), _noflag("odd", "something else")])
-    assert precision_evidence(skill) == {"confirmed": 0, "silence": 0, "unclassified": 2}
+    assert precision_evidence(skill) == {
+        "confirmed": 0, "silence": 0, "synthetic": 0, "unclassified": 2,
+    }
 
 
 def test_a_skill_with_no_precision_cases_reports_zeroes() -> None:
     skill = Skill(id="s", eval_cases=[_catch_case("a", "src/a.rs")])
-    assert precision_evidence(skill) == {"confirmed": 0, "silence": 0, "unclassified": 0}
+    assert precision_evidence(skill) == {
+        "confirmed": 0, "silence": 0, "synthetic": 0, "unclassified": 0,
+    }
 
 
 def test_the_evidence_mix_reaches_the_index_row(tmp_path: Path) -> None:

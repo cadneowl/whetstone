@@ -223,11 +223,15 @@ def _stream_units(
     Only candidates routed to this skill: drift is a per-skill question, and a python skill's
     corpus is not stale because the frontend shipped a rewrite. Grouped by provenance ref; a
     candidate without one (hand-made uploads) stands alone. Decided candidates stay in — a
-    promotion or rejection settles the candidate's fate, not whether the MR happened.
+    promotion or rejection settles the candidate's fate, not whether the MR happened. Synthetic
+    candidates stay out: they derive from the corpus itself, and a stream padded with them would
+    measure the corpus against its own reflection.
     """
     groups: dict[str, list[CandidateEntry]] = {}
     for entry in entries:
         if entry.candidate.suggested_skill != skill_id:
+            continue
+        if entry.candidate.provenance.synthetic:
             continue
         key = entry.candidate.provenance.ref or entry.id
         groups.setdefault(key, []).append(entry)

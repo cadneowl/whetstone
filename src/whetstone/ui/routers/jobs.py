@@ -54,7 +54,7 @@ from whetstone.llm.factory import (
 )
 from whetstone.llm.transcript import RecordingClient, Transcript, transcript_path
 from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
-from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval
+from whetstone.preflight import Estimate, Plan, check_budget, plan_calls, plan_eval
 from whetstone.providers.base import ConnectorError
 from whetstone.sampling import sample_cases
 from whetstone.service import record_eval, record_gate, record_review
@@ -946,6 +946,127 @@ def _drift_inputs(config: Config, skill: Skill) -> tuple[list[tuple[str, str]], 
         return drift_inputs(skill, entries)
     except DriftError as exc:
         raise Unprocessable(str(exc)) from exc
+
+
+SynthesisMode = Literal["counterfactual", "mutation"]
+
+
+class SynthesizeRequest(BaseModel):
+    """Generate synthetic candidates into the triage queue — never into the corpus directly.
+
+    `cases` narrows the parents; empty means every active `should_catch` case. Counterfactuals
+    are mechanical (no model); mutation drafts go through the normal per-launch backend picker.
+    """
+
+    skill_id: str
+    mode: SynthesisMode
+    cases: list[str] = Field(default_factory=list)
+    # Mutation only; see `EvalRequest.provider` and `_pick`.
+    provider: str = ""
+    model: str = ""
+
+
+@router.post("/synthesize/plan", response_model=Plan)
+def plan_synthesize_job(
+    request: SynthesizeRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
+    from whetstone.corpus.synthesize import eligible_parents
+
+    skill = _skill(root, request.skill_id)
+    targets, skipped = eligible_parents(skill, request.cases or None)
+    if not targets:
+        detail = "; ".join(f"{s.case_id}: {s.reason}" for s in skipped[:3])
+        raise Unprocessable(
+            f"{skill.id} has no eligible parent cases — a generator derives from active "
+            f"should_catch cases with a diff and an expectation"
+            + (f" ({detail})" if detail else "")
+        )
+    if request.mode == "counterfactual":
+        plan = Plan(
+            action="synthesize",
+            backend="(mechanical)",
+            model="(no model call)",
+            billing="local",
+            estimate=Estimate(
+                calls=0, basis=f"{len(targets)} diff(s) reversed mechanically — no model call"
+            ),
+            details=[
+                "each candidate is the parent's defect being removed — precision evidence that "
+                "does not rest on silence",
+                "candidates land in triage for a person to rule on; nothing enters the corpus here",
+            ],
+        )
+    else:
+        selection = _pick(request.provider, request.model, selection)
+        plan = plan_calls(
+            "synthesize",
+            _backend(selection, None),
+            calls=len(targets),
+            basis=f"{len(targets)} parent case(s) × 1 mutation draft",
+            details=[
+                "each draft is validated against the parent's expectation before it may enter "
+                "triage — an invalid mutant is skipped and reported, never queued",
+                "candidates land in triage for a person to rule on; nothing enters the corpus here",
+            ],
+        )
+        check_budget(plan, config.runs.max_llm_calls_per_run)
+    if skipped:
+        plan.warnings.extend(f"skipping {s.case_id}: {s.reason}" for s in skipped)
+    return plan
+
+
+@router.post("/synthesize", response_model=Job, dependencies=[Writable])
+def launch_synthesize(
+    request: SynthesizeRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    jobs: JobsDep,
+    selection: SelectionDep,
+) -> Job:
+    """Write synthetic candidates into the triage queue, provenance-tagged to their parents."""
+    from whetstone.candidates import store_candidates
+    from whetstone.corpus.synthesize import counterfactuals, mutations
+
+    skill = _skill(root, request.skill_id)
+    plan = plan_synthesize_job(request, config, root, selection)
+    picked = (
+        _pick(request.provider, request.model, selection)
+        if request.mode == "mutation"
+        else selection
+    )
+    case_ids = request.cases or None
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, 1, f"deriving {request.mode}s from {skill.id}")
+        if request.mode == "counterfactual":
+            found, skipped = counterfactuals(skill, case_ids=case_ids)
+        else:
+            found, skipped = mutations(
+                skill,
+                _client(config, None, picked, label=f"synthesize-{skill.id}"),
+                case_ids=case_ids,
+            )
+        result = store_candidates(found, config.candidates_dir)
+        for candidate in found:
+            handle.log(
+                LogLine(
+                    text=f"  {candidate.id} ← {candidate.provenance.ref}",
+                    tone="ok",
+                )
+            )
+        for skip in skipped:
+            handle.log(LogLine(text=f"  skipped {skip.case_id}: {skip.reason}", tone="said"))
+        handle.progress(1, 1, "done")
+        return {
+            "mode": request.mode,
+            "written": result.written,
+            "existing": result.existing,
+            "decided": result.decided,
+            "candidate_ids": [c.id for c in found],
+            "skipped": [{"case_id": s.case_id, "reason": s.reason} for s in skipped],
+        }
+
+    return _launch(jobs, "synthesize", skill.id, work, plan)
 
 
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:

@@ -162,11 +162,41 @@
 > - **3.1 note:** the drift *action* only surfaces when nothing more urgent exists — with
 >   unruled signals the inbox says triage (reviewing them is how uncovered MRs get promoted).
 >   The reading itself (`drift_uncovered`) is always on the row.
-> - **Next up: 3.2 synthetic counterfactuals/mutations** (clearly provenance-tagged
->   `synthetic-counterfactual` / `synthetic-mutation` with `ref` → parent case, feeding triage
->   never auto-promotion; shown in composition; counterfactual = stored fix applied where clean,
->   mutation = LLM-drafted + validated against the parent's expectation). Then Phase 4.1
->   case-RAG / 4.2 judge distillation, Phase 5 cadence + dead-rule report (fills `cadence`).
+> - **3.2 — DONE** (this commit): synthetic counterfactuals and mutation probes.
+>   `corpus/synthesize.py`, both generators feeding **triage, never auto-promotion**.
+>   Counterfactual = the parent `should_catch` case's diff reversed (`CodeChange.reversed()` —
+>   for an escaped-defect case this reconstructs the original fix exactly), as a
+>   `should_not_flag` asserting silence in the parent's own words; mechanical, no model.
+>   Mutation = LLM-drafted (`MutantDraft {diff, note}` through the normal `structured()` path),
+>   validated before it may enter the queue: must parse as a unified diff, must add lines for
+>   the parent's expectation to anchor to (region remapped to the mutant's added span, semantic
+>   carried verbatim — the probe's claim is that the same words still apply), and must differ
+>   from the parent's added content (an echo is a skip, not a candidate). Eligibility shared
+>   (`eligible_parents`): active `should_catch` with diff + expectation text; synthetic parents
+>   refused — the chain stays one step from real evidence; every refusal is a reported
+>   `Skipped(case_id, reason)`. Deterministic child ids (`syn-cf-*`/`syn-mut-*`) so re-runs hit
+>   `store_candidates`' existing-dir skip instead of duplicating. Confidences 0.7/0.6 — below
+>   every human-confirmed signal, so synthetics never outrank real evidence in the queue.
+>   Vocabulary: `SOURCE_COUNTERFACTUAL`/`SOURCE_MUTATION` + `SYNTHETIC_PREFIX` contract,
+>   `Provenance.synthetic` property, `SIGNAL_COUNTERFACTUAL`/`SIGNAL_MUTATION` in the closed
+>   human_signal set (so every badge/filter surface treats them as what they are), and
+>   `EVIDENCE_SYNTHETIC` — its own precision bucket, never `confirmed` (generated evidence must
+>   not launder into the strongest tier). Filtered out of "what really ships": drift's stream
+>   excludes synthetic candidates (a padded stream measures the corpus against its own
+>   reflection); health `Composition.synthetic` counts them; evidence mix shows the bucket.
+>   Surfaces: `whetstone corpus synthesize --skill … [--counterfactual] [--mutate] [--case …]`
+>   (preflight for the mutation calls only), `POST /api/jobs/synthesize[/plan]` (JobKind
+>   "synthesize"; counterfactual plan is billing=local calls=0). UI: signals.tsx entries,
+>   DiscussionPane synthetic explanation + parent-case link (both in the silence pane and as the
+>   header ref link), Corpus health section: synthetic count, evidence bucket, and both
+>   generators as LaunchButtons; LaunchButton synthesize result names written and skipped.
+>   Tests: `test_synthesize.py`, `test_synthesize_routes.py` — including the done-when
+>   round-trip: counterfactual → triage → promote, provenance intact on the batch branch.
+> - **Next up: Phase 4 — capability.** 4.1 case-corpus RAG at review time (pinned embedding
+>   model over a versioned index staged on the skill branch; manifest hash folded into
+>   `skill_hash` so an index rebuild retracts gates exactly as a wiki refresh does — fills the
+>   health payload's `index` section). 4.2 judge distillation. Then Phase 5 cadence + dead-rule
+>   report (fills `cadence`).
 > - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
 >   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
 >   scheduled job — cadence lands with Phase 5.

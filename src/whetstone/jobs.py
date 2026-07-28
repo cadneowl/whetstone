@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from whetstone.preflight import Plan
 
 JobKind = Literal[
-    "eval", "gate", "improve", "update", "review", "judge-eval", "baseline", "drift"
+    "eval", "gate", "improve", "update", "review", "judge-eval", "baseline", "drift", "synthesize"
 ]
 JobState = Literal["running", "done", "failed", "cancelled"]
 

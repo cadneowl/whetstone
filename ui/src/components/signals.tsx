@@ -57,11 +57,25 @@ export const SIGNALS: SignalMeta[] = [
       'The accepted replacement itself. Code endorsed twice over, so flagging it would be a false positive.',
   },
   {
+    id: 'synthetic counterfactual',
+    short: 'counterfactual',
+    tone: 'neutral',
+    meaning:
+      "Generated, not observed: a real case's diff reversed, so this is the defect being removed. Flagging the fix for the very defect the parent documents would be a false positive.",
+  },
+  {
     id: 'suggestion declined',
     short: 'declined',
     tone: 'warn',
     meaning:
       'A reviewer proposed a change and the thread closed without it. A confirmed false alarm.',
+  },
+  {
+    id: 'synthetic mutation',
+    short: 'mutation',
+    tone: 'neutral',
+    meaning:
+      "Generated, not observed: the parent case's defect wearing different names. If the reviewer catches the parent but misses this, the guidance memorized the incident, not the pattern.",
   },
   {
     id: 'reviewer comment resolved',
