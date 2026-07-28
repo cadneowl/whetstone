@@ -123,6 +123,48 @@ def test_candidate_id_cannot_escape_the_root(client: TestClient) -> None:
     assert client.get("/api/candidates/%2e%2e").status_code == 404
 
 
+# --- dedup at the door --------------------------------------------------------
+
+
+def test_the_queue_surfaces_similar_existing_cases(client: TestClient) -> None:
+    """The fixture skill already has a case mined from !812; the candidate carries the same ref."""
+    item = client.get("/api/candidates/812-t0").json()
+    similars = item["similar_cases"]
+    assert [s["case_id"] for s in similars] == ["unwrap-in-handler"]
+    assert "same merge request" in similars[0]["why"]
+    # The existing expectation rides along, so the triage screen can lay the two side by side.
+    assert "unwrap on the DB result" in similars[0]["semantic"]
+
+
+def test_a_promotion_on_the_batch_counts_as_existing_coverage(
+    client: TestClient, repo: Path
+) -> None:
+    """The commonest duplicate is the candidate you promoted an hour ago — it lives on the batch
+    branch, not the working tree, and the door must see it there."""
+    edits = _edits(client, "812-t0", semantic="unwrap on the handler row can panic")
+    client.post("/api/candidates/812-t0/promote", json={"edits": edits})
+
+    item = client.get("/api/candidates/813-t1").json()
+    assert "812-t0" in [s["case_id"] for s in item["similar_cases"]]
+
+
+def test_promoting_straight_to_archive_round_trips(client: TestClient, repo: Path) -> None:
+    """The disposition for 'duplicate, but worth counting': the case lands with tier: archive,
+    provenance intact, and draws at low weight from its first day."""
+    edits = _edits(
+        client,
+        "812-t0",
+        semantic="unwrap can panic on a normal error path",
+        tier="archive",
+    )
+    body = client.post("/api/candidates/812-t0/promote", json={"edits": edits}).json()
+
+    case_path = "skills/rust-errors/eval_cases/812-t0/case.yaml"
+    payload = yaml.safe_load(_git(repo, "show", f"{body['branch']}:{case_path}"))
+    assert payload["tier"] == "archive"
+    assert payload["provenance"]["ref"] == "acme/payments!812"  # the evidence chain survives
+
+
 # --- preview / validation -----------------------------------------------------
 
 

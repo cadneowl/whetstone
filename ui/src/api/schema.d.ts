@@ -1298,6 +1298,12 @@ export interface components {
             severity_min?: components["schemas"]["Severity"] | null;
             /** Skill Id */
             skill_id: string;
+            /**
+             * Tier
+             * @default active
+             * @enum {string}
+             */
+            tier: "active" | "archive";
         };
         /** CaseHistoryEntry */
         CaseHistoryEntry: {
@@ -2854,6 +2860,11 @@ export interface components {
         QueueItem: {
             edits: components["schemas"]["CaseEdits"];
             entry: components["schemas"]["CandidateEntry"];
+            /**
+             * Similar Cases
+             * @default []
+             */
+            similar_cases: components["schemas"]["SimilarCase"][];
         };
         /**
          * Reference
@@ -3560,6 +3571,25 @@ export interface components {
              * @default
              */
             ref: string;
+        };
+        /**
+         * SimilarCase
+         * @description An existing case a triage candidate resembles, and the evidence for saying so.
+         *
+         *     `semantic` is the existing case's expectation text, carried so the triage screen can lay the
+         *     two side by side — the decision being asked for is "is this the same lesson?", and that is
+         *     unanswerable from a case id.
+         */
+        SimilarCase: {
+            /** Case Id */
+            case_id: string;
+            /**
+             * Semantic
+             * @default
+             */
+            semantic: string;
+            /** Why */
+            why: string;
         };
         /** Skill */
         Skill: {

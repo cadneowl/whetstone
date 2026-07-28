@@ -7,6 +7,7 @@ import pytest
 
 from whetstone.core.gate import GateConfig, GateResult
 from whetstone.core.loader import load_skill
+from whetstone.corpus.model import CandidateCase
 from whetstone.curation import (
     CurationError,
     RetirementProposal,
@@ -198,6 +199,114 @@ def test_a_flipped_case_round_trips_through_the_loader(tmp_path: Path) -> None:
 def test_tier_counts() -> None:
     counts = tier_counts([_case("a"), _case("b", tier="archive"), _case("c")])
     assert counts == {"active": 2, "archive": 1}
+
+
+# --- dedup at the promotion door -------------------------------------------------
+
+
+def _existing(
+    case_id: str,
+    semantic: str,
+    *,
+    path: str = "src/handlers/charge.rs",
+    ref: str = "",
+    kind: str = "should_catch",
+    tier: str = "active",
+) -> EvalCase:
+    from whetstone.domain.eval_model import Expectation, Provenance
+    from whetstone.domain.refs import Region
+
+    return EvalCase(
+        id=case_id,
+        kind=kind,  # type: ignore[arg-type]
+        change=CodeChange(repo=REPO),
+        expect=[
+            Expectation(id="e1", must="appear", where=Region(path=path), semantic=semantic)
+        ],
+        provenance=Provenance(source="gitlab_mr", ref=ref or None),
+        tier=tier,  # type: ignore[arg-type]
+    )
+
+
+def _candidate(
+    semantic: str, *, path: str = "src/handlers/charge.rs", ref: str = "acme/payments!990"
+) -> CandidateCase:
+    from whetstone.domain.change import FileChange
+    from whetstone.domain.eval_model import Expectation, Provenance
+    from whetstone.domain.refs import Region
+
+    return CandidateCase(
+        id="cand-1",
+        kind="should_catch",
+        change=CodeChange(repo=REPO, files=[FileChange(path=path)]),
+        expect=[
+            Expectation(id="e1", must="appear", where=Region(path=path), semantic=semantic)
+        ],
+        provenance=Provenance(source="gitlab_mr", ref=ref),
+        confidence=0.9,
+        suggested_skill="s",
+    )
+
+
+def test_a_near_verbatim_duplicate_surfaces_its_similar() -> None:
+    from whetstone.curation import similar_cases
+
+    skill = _skill(
+        _existing("dup", "unwrap on the DB result can panic on a normal error path"),
+        _existing("other", "missing pagination on the customer list", path="src/api/list.rs"),
+    )
+    found = similar_cases(_candidate("unwrap on the DB result panics on the error path"), skill)
+    assert [s.case_id for s in found] == ["dup"]
+    assert "share" in found[0].why
+    assert found[0].semantic.startswith("unwrap on the DB result")
+
+
+def test_the_same_merge_request_mined_twice_is_named_as_such() -> None:
+    from whetstone.curation import similar_cases
+
+    skill = _skill(_existing("prior", "totally different words", ref="acme/payments!812"))
+    found = similar_cases(
+        _candidate("nothing in common with it", ref="acme/payments!812"), skill
+    )
+    assert [s.case_id for s in found] == ["prior"]
+    assert "same merge request" in found[0].why
+
+
+def test_same_file_lowers_the_word_bar_but_does_not_remove_it() -> None:
+    from whetstone.curation import similar_cases
+
+    skill = _skill(_existing("near", "unwrap can panic in the charge handler"))
+    same_file_some_words = _candidate("charge handler occasionally leaks resources")
+    assert [s.case_id for s in similar_cases(same_file_some_words, skill)] == ["near"]
+
+    different_file = _candidate(
+        "charge handler occasionally leaks resources", path="src/other.rs"
+    )
+    assert similar_cases(different_file, skill) == []
+
+
+def test_kind_and_unrelated_text_do_not_match() -> None:
+    from whetstone.curation import similar_cases
+
+    skill = _skill(
+        _existing("noflag", "unwrap is fine in tests", kind="should_not_flag"),
+        _existing("far", "missing index on the orders table", path="db/schema.sql"),
+    )
+    assert similar_cases(_candidate("unwrap is fine in tests"), skill) == []
+
+
+def test_similars_are_capped_and_best_first() -> None:
+    from whetstone.curation import similar_cases
+
+    dupes = [
+        _existing(f"dup-{i}", "unwrap on the DB result can panic on a normal error path")
+        for i in range(8)
+    ]
+    found = similar_cases(
+        _candidate("unwrap on the DB result can panic on a normal error path"), _skill(*dupes)
+    )
+    assert len(found) == 5  # capped
+    assert found[0].case_id == "dup-0"
 
 
 # --- the saturation probe's readout ----------------------------------------------

@@ -27,6 +27,7 @@ from datetime import datetime
 import yaml
 from pydantic import BaseModel, computed_field
 
+from whetstone.corpus.model import CandidateCase
 from whetstone.domain.eval_model import CaseTier, EvalCase
 from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
@@ -157,6 +158,109 @@ def discrimination(skill: Skill, probe: RunRecord) -> Discrimination:
         active_catch=len(scored),
         flagged=flagged,
     )
+
+
+# --- dedup at the promotion door -------------------------------------------------
+
+
+class SimilarCase(BaseModel):
+    """An existing case a triage candidate resembles, and the evidence for saying so.
+
+    `semantic` is the existing case's expectation text, carried so the triage screen can lay the
+    two side by side — the decision being asked for is "is this the same lesson?", and that is
+    unanswerable from a case id.
+    """
+
+    case_id: str
+    why: str
+    semantic: str = ""
+
+
+# A candidate must clear one of these to be called similar. High bar for words alone; lower when
+# the candidate also points at the same file, because "same file, same complaint" is how the ninth
+# unwrap case actually presents.
+_SIMILAR_OVERLAP = 0.5
+_SAME_PATH_OVERLAP = 0.25
+
+# Words that match any two expectations about anything. Tiny and closed on purpose — the point is
+# to stop "the", not to do NLP.
+_STOPWORDS = frozenset(
+    "a an and are be can for in is it its must not of on or should that the this to with".split()
+)
+
+
+def _tokens(text: str) -> frozenset[str]:
+    return frozenset(w for w in re.findall(r"[a-z0-9_]+", text.lower()) if w not in _STOPWORDS)
+
+
+def _overlap(a: frozenset[str], b: frozenset[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def similar_cases(
+    candidate: CandidateCase, skill: Skill, *, limit: int = 5
+) -> list[SimilarCase]:
+    """Existing cases this candidate may duplicate — evidence for the door, never a verdict.
+
+    A corpus mined from hundreds of MRs of real defects is heavily repetitive by nature: that is
+    what "defects that keep shipping" means. Promoted naively, the stratified sample skews toward
+    the over-represented class and the score measures "does the skill still catch its favourite
+    thing". This surfaces the resemblance at the door, where correcting it is cheapest — and only
+    surfaces it: the ninth unwrap case *in a new subsystem* may be exactly the promotion you want,
+    so nothing here rejects anything.
+
+    Deliberately lexical (token overlap plus same-source and same-file signals). Embeddings are a
+    possible upgrade, not a dependency — and this runs only at triage load, never anywhere near
+    the review path, so scoring stays deterministic.
+    """
+    seed = next((e.semantic for e in candidate.expect if e.semantic), candidate.seed_semantic)
+    candidate_tokens = _tokens(seed)
+    candidate_path = (
+        candidate.expect[0].where.path
+        if candidate.expect
+        else (candidate.change.files[0].path if candidate.change.files else "")
+    )
+
+    found: list[tuple[float, SimilarCase]] = []
+    for case in skill.eval_cases:
+        if case.kind != candidate.kind:
+            continue
+        semantic = next((e.semantic for e in case.expect if e.semantic), "")
+        why = _resemblance(
+            candidate, candidate_tokens, candidate_path, case, _tokens(semantic)
+        )
+        if why:
+            score = _overlap(candidate_tokens, _tokens(semantic))
+            found.append((score, SimilarCase(case_id=case.id, why=why, semantic=semantic)))
+    found.sort(key=lambda pair: (-pair[0], pair[1].case_id))
+    return [similar for _, similar in found[:limit]]
+
+
+def _resemblance(
+    candidate: CandidateCase,
+    candidate_tokens: frozenset[str],
+    candidate_path: str,
+    case: EvalCase,
+    case_tokens: frozenset[str],
+) -> str:
+    """Why this case counts as similar, or "" when it does not. The sentence is the evidence."""
+    ref = candidate.provenance.ref
+    if ref and ref == case.provenance.ref:
+        # The same merge request mined twice — overlapping pull windows do this routinely.
+        return f"mined from the same merge request ({ref})"
+
+    overlap = _overlap(candidate_tokens, case_tokens)
+    case_path = case.expect[0].where.path if case.expect else ""
+    same_path = bool(candidate_path) and candidate_path == case_path
+
+    if overlap >= _SIMILAR_OVERLAP:
+        where = " about the same file" if same_path else ""
+        return f"expectations share {overlap:.0%} of their words{where}"
+    if same_path and overlap >= _SAME_PATH_OVERLAP:
+        return f"same file, and the expectations share {overlap:.0%} of their words"
+    return ""
 
 
 class CurationError(ValueError):
