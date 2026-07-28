@@ -184,25 +184,30 @@ function RetirementSection({
       intro="Cases every recent gate passed on every version — they no longer tell a better rule from a worse one. Archiving stages a one-line commit on the skill branch; C6 asks for a fresh gate before it ships. Reversible the same way."
     >
       <ul className="space-y-1.5">
-        {retirements.map((r) => (
-          <li key={r.case_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <Link
-              to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(r.case_id)}`}
-              className="font-mono text-xs hover:text-accent"
-            >
-              {r.case_id}
-            </Link>
-            <span className="text-xs text-muted">{r.evidence}</span>
-            <button
-              type="button"
-              disabled={flip.isPending}
-              onClick={() => flip.mutate({ caseId: r.case_id, tier: 'archive' })}
-              className="ml-auto rounded border border-line px-2 py-0.5 text-xs transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
-            >
-              {flip.isPending ? 'Archiving…' : 'Archive'}
-            </button>
-          </li>
-        ))}
+        {retirements.map((r) => {
+          // Only the row being archived shows the pending state — one shared mutation drove every
+          // button to "Archiving…" and disabled the whole list on a single click.
+          const pending = flip.isPending && flip.variables?.caseId === r.case_id
+          return (
+            <li key={r.case_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <Link
+                to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(r.case_id)}`}
+                className="font-mono text-xs hover:text-accent"
+              >
+                {r.case_id}
+              </Link>
+              <span className="text-xs text-muted">{r.evidence}</span>
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => flip.mutate({ caseId: r.case_id, tier: 'archive' })}
+                className="ml-auto rounded border border-line px-2 py-0.5 text-xs transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
+              >
+                {pending ? 'Archiving…' : 'Archive'}
+              </button>
+            </li>
+          )
+        })}
       </ul>
       {flip.error && <ErrorNote error={flip.error} />}
     </Section>
@@ -233,27 +238,30 @@ function DiscriminationSection({ skillId, health }: { skillId: string; health: S
           </p>
           {(d.flagged ?? []).length > 0 && (
             <ul className="space-y-1.5 border-t border-line pt-2">
-              {(d.flagged ?? []).map((c) => (
-                <li key={c.case_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <Link
-                    to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(c.case_id)}`}
-                    className="font-mono text-xs hover:text-accent"
-                  >
-                    {c.case_id}
-                  </Link>
-                  <span className="text-xs text-muted">
-                    passes with no guidance — tighten its expectation or retire it
-                  </span>
-                  <button
-                    type="button"
-                    disabled={flip.isPending}
-                    onClick={() => flip.mutate({ caseId: c.case_id, tier: 'archive' })}
-                    className="ml-auto rounded border border-line px-2 py-0.5 text-xs transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
-                  >
-                    {flip.isPending ? 'Archiving…' : 'Archive'}
-                  </button>
-                </li>
-              ))}
+              {(d.flagged ?? []).map((c) => {
+                const pending = flip.isPending && flip.variables?.caseId === c.case_id
+                return (
+                  <li key={c.case_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                    <Link
+                      to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(c.case_id)}`}
+                      className="font-mono text-xs hover:text-accent"
+                    >
+                      {c.case_id}
+                    </Link>
+                    <span className="text-xs text-muted">
+                      passes with no guidance — tighten its expectation or retire it
+                    </span>
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() => flip.mutate({ caseId: c.case_id, tier: 'archive' })}
+                      className="ml-auto rounded border border-line px-2 py-0.5 text-xs transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
+                    >
+                      {pending ? 'Archiving…' : 'Archive'}
+                    </button>
+                  </li>
+                )
+              })}
             </ul>
           )}
           {flip.error && <ErrorNote error={flip.error} />}

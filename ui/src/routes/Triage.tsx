@@ -803,7 +803,11 @@ function FormPane({
                 </Badge>
               )
             )}
+            {/* Keyed on the candidate so its draft/plan mutation state is dropped when the queue
+                moves on. Without this the button kept the previous candidate's result — showing
+                "redraft" and the old rationale beside a fresh, unedited semantic. */}
             <DraftButton
+              key={candidate.id}
               candidateId={candidate.id}
               skillId={edits.skill_id}
               disabled={readOnly}
