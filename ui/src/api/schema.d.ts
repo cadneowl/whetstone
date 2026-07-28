@@ -554,6 +554,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/judge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Judge */
+        get: operations["get_judge_api_judge_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reviews": {
         parameters: {
             query?: never;
@@ -2068,6 +2085,25 @@ export interface components {
             matched: boolean;
             /** Reason */
             reason: string;
+        };
+        /** JudgeView */
+        JudgeView: {
+            /** Builtin */
+            builtin: boolean;
+            /** Hash */
+            hash: string;
+            /** Id */
+            id: string;
+            /** Path */
+            path: string;
+            /** Rulings Overruled */
+            rulings_overruled: number;
+            /** Rulings Total */
+            rulings_total: number;
+            /** System */
+            system: string;
+            /** Version */
+            version: number;
         };
         /**
          * LogLine
@@ -4477,6 +4513,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_judge_api_judge_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JudgeView"];
                 };
             };
         };

@@ -87,6 +87,16 @@ class ReviewsConfig(BaseModel):
     dir: Path = Path(".whetstone/reviews")
 
 
+class JudgeConfig(BaseModel):
+    """Where the deployment's judge doctrine lives (`<dir>/JUDGE.md`).
+
+    Absent file means the built-in judge — every deployment's starting state, and the identity
+    hash recorded on runs is the same either way until the words change.
+    """
+
+    dir: Path = Path("judges/default")
+
+
 class MetaEvalConfig(BaseModel):
     """Where human rulings on judge verdicts accumulate as labeled pairs.
 
@@ -154,6 +164,7 @@ class Config(BaseModel):
     runs: RunsConfig = RunsConfig()
     gate: GateDefaults = GateDefaults()
     reviews: ReviewsConfig = ReviewsConfig()
+    judge: JudgeConfig = JudgeConfig()
     meta_eval: MetaEvalConfig = MetaEvalConfig()
     llm: LLMConfig = LLMConfig()
     watch: WatchConfig = WatchConfig()
@@ -183,6 +194,10 @@ class Config(BaseModel):
     @property
     def reviews_dir(self) -> Path:
         return self._resolve(self.reviews.dir)
+
+    @property
+    def judge_dir(self) -> Path:
+        return self._resolve(self.judge.dir)
 
     @property
     def meta_eval_dir(self) -> Path:
@@ -259,6 +274,10 @@ def _apply_env(config: Config) -> Config:
     meta_eval_dir = os.environ.get("WHETSTONE_META_EVAL_DIR")
     if meta_eval_dir:
         config.meta_eval.dir = Path(meta_eval_dir).resolve()
+
+    judge_dir = os.environ.get("WHETSTONE_JUDGE_DIR")
+    if judge_dir:
+        config.judge.dir = Path(judge_dir).resolve()
 
     host = os.environ.get("WHETSTONE_UI_HOST")
     if host:

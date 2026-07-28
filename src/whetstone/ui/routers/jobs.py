@@ -40,6 +40,7 @@ from whetstone.domain.skill import Skill
 from whetstone.gitio import GitError, pending_batch
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
+from whetstone.judge.spec import load_judge
 from whetstone.llm.factory import (
     PRESETS,
     Backend,
@@ -254,6 +255,7 @@ def launch_eval(
                 cancel=handle.cancel_event,
                 sample=policy,
                 wiki_limits=spec.inputs.wiki if spec else None,
+                judge=load_judge(config.judge_dir),
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -348,6 +350,7 @@ def launch_gate(
                 model=backend.model,
                 sample=_sample(spec, request.sample),
                 wiki_limits=spec.inputs.wiki if spec else None,
+                judge=load_judge(config.judge_dir),
                 on_base=side("base", config.git.default_base),
                 on_candidate=side("cand", branch),
                 cancel=handle.cancel_event,

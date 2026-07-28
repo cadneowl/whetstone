@@ -17,11 +17,26 @@
 >   has same/different ruling buttons + a ruled badge (`RulingLine` in `RunDetail.tsx`), hidden
 >   when read-only or when the record predates snapshots. Tests: `tests/api/test_dispute_routes.py`
 >   (note: API error bodies are `{"message": ...}`, not `{"detail": ...}`).
-> - **Next up: Phase 1.1** — `judges/default/JUDGE.md` loader with the current hardcoded text as
->   byte-identical fallback; `judge_identity()` then hashes the file content. After that 1.2
->   (diff-grounded tier-2 + confidence cascade), 1.3 (judge-eval job + ratchet), then Phase 2.
+> - **1.1 — DONE** (this commit): judge doctrine as versioned text. `judge/spec.py`
+>   (`JudgeSpec`, `load_judge`, `builtin_judge`; frontmatter optional, empty body refused with
+>   the way out); `[judge] dir` config (default `judges/default`, env `WHETSTONE_JUDGE_DIR`);
+>   `LLMJudge(system=...)` + `judge_identity(system=None)` hash the *effective* text, so a
+>   JUDGE.md that is word-for-word the default re-baselines nothing (tested). Threaded through
+>   `run_eval`/`record_eval`/`gate_skills`/`record_gate` and both CLI + console-job call sites.
+>   `GET /api/judge` (new `ui/routers/judge.py`) reports doctrine, identity, builtin-vs-file,
+>   and ruling counts; console has a **Judge** nav tab (`routes/JudgePage.tsx`). Dogfood
+>   `judges/default/JUDGE.md` committed with the builtin text verbatim. A malformed JUDGE.md is
+>   422, never a silent fallback to the builtin.
+> - **Deferred from 1.1** (deliberately): editing JUDGE.md from the console via the
+>   GuidanceEditor/staging-branch machinery — display is read-only for now, edits happen in the
+>   file; and the meta-eval **gate** on doctrine changes, which is 1.3's ratchet.
+> - **Next up: Phase 1.2** — diff-grounded tier-2 judge + confidence cascade in
+>   `core/matching.py` (`JudgeVerdictRecord.tier`, threshold in evaluate/step.yaml `judge:`
+>   block, both verdicts recorded, cost banner updated), then 1.3 (judge-eval job + rising bar,
+>   wiring `DisputeStore.meta_eval_cases()` + fixtures into `evaluate_judge`), then Phase 2.
 > - Phase H note: the health endpoint skeleton (`GET /api/skills/{id}/health`) has NOT been
->   started; disputes-pending count belongs in its `judge` block when it lands.
+>   started; disputes-pending count now lives on `GET /api/judge` and belongs in the health
+>   payload's `judge` block when it lands.
 
 This is a handoff document. It assumes the implementer (you) has not read the conversation that
 produced it, so it carries its own reasoning: every step says *what* to build, *why it exists at

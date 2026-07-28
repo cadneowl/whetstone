@@ -45,6 +45,7 @@ from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord, new_gate_id
 from whetstone.judge.llm_judge import LLMJudge, judge_identity
+from whetstone.judge.spec import JudgeSpec
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.counting import CountingClient
 from whetstone.providers.base import IssueConnector, ReviewConnector
@@ -71,6 +72,7 @@ def run_eval(
     judge_effort: Effort = "medium",
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    judge: JudgeSpec | None = None,
     on_event: EventSink | None = None,
     cancel: threading.Event | None = None,
 ) -> SkillScore:
@@ -83,6 +85,7 @@ def run_eval(
         judge_effort=judge_effort,
         sample=sample,
         wiki_limits=wiki_limits,
+        judge=judge,
         on_event=on_event,
         cancel=cancel,
     ).score
@@ -106,6 +109,7 @@ def record_eval(
     now: datetime | None = None,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    judge: JudgeSpec | None = None,
 ) -> RunRecord:
     """Score a skill and return the full run record — every finding and every judge verdict.
 
@@ -116,10 +120,13 @@ def record_eval(
     `skill_hash` is taken from the skill as given, never from the sampled copy — evidence has to be
     attributable to content that exists on disk, the same reason `record_gate` hashes its arguments
     rather than the union-cased skills it builds.
+
+    `judge` is the deployment's judge doctrine (`judges/<id>/JUDGE.md`), None for the built-in.
     """
+    judge_system = judge.system if judge else None
     counted = CountingClient(client)
     reviewer = LLMReviewer(counted, effort=reviewer_effort, wiki_limits=wiki_limits)
-    judge = LLMJudge(counted, effort=judge_effort)
+    llm_judge = LLMJudge(counted, effort=judge_effort, system=judge_system)
 
     drawn = sample_cases(skill.eval_cases, sample)
     scored = skill if not drawn.sampled else skill.model_copy(update={"eval_cases": drawn.cases})
@@ -127,7 +134,8 @@ def record_eval(
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
     score, cases = run_skill_recorded(
-        scored, reviewer, judge, k=trials, on_event=on_event, max_workers=max_workers, cancel=cancel
+        scored, reviewer, llm_judge,
+        k=trials, on_event=on_event, max_workers=max_workers, cancel=cancel,
     )
     duration = time.perf_counter() - clock
 
@@ -143,9 +151,9 @@ def record_eval(
         model=model,
         reviewer_effort=reviewer_effort,
         judge_effort=judge_effort,
-        # The judge these verdicts came from. Taken at record time, not passed in: the judge is
-        # constructed right here, so nothing between construction and recording can drift.
-        judge_hash=judge_identity(),
+        # The judge these verdicts came from. Computed from the same text the judge above was
+        # constructed with, so nothing between construction and recording can drift.
+        judge_hash=judge_identity(judge_system),
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,
@@ -309,6 +317,7 @@ def gate_skills(
     trials: int = 1,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    judge: JudgeSpec | None = None,
     on_base: EventSink | None = None,
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
@@ -339,11 +348,11 @@ def gate_skills(
     # without this the stop button was accepted, ignored, and the spending carried on.
     base_score = run_eval(
         base.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, on_event=on_base, cancel=cancel,
+        wiki_limits=wiki_limits, judge=judge, on_event=on_base, cancel=cancel,
     )
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, on_event=on_candidate, cancel=cancel,
+        wiki_limits=wiki_limits, judge=judge, on_event=on_candidate, cancel=cancel,
     )
     result = gate(base_score, candidate_score, cfg)
     return GateOutcome(result=result, base=base_score, candidate=candidate_score)
@@ -365,6 +374,7 @@ def record_gate(
     now: datetime | None = None,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    judge: JudgeSpec | None = None,
     on_base: EventSink | None = None,
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
@@ -383,7 +393,7 @@ def record_gate(
     clock = time.perf_counter()
     outcome = gate_skills(
         base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
-        on_base=on_base, on_candidate=on_candidate, cancel=cancel,
+        judge=judge, on_base=on_base, on_candidate=on_candidate, cancel=cancel,
     )
     duration = time.perf_counter() - clock
 
@@ -399,7 +409,7 @@ def record_gate(
         candidate_hash=candidate_hash,
         backend=backend,
         model=model,
-        judge_hash=judge_identity(),
+        judge_hash=judge_identity(judge.system if judge else None),
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,

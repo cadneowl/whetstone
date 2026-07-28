@@ -35,6 +35,7 @@ from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
 from whetstone.gitio import GitError
 from whetstone.improve import build_digest, propose, render_step_prompt
+from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
 from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval, render
@@ -414,6 +415,7 @@ def eval_run(
         on_event=None if json_out else _progress,
         sample=drawn,
         wiki_limits=limits,
+        judge=load_judge(load_config().judge_dir),
     )
     if save:
         _store(runs_dir).save(record)
@@ -542,6 +544,7 @@ def eval_gate(
             model=backend.model,
             sample=drawn,
             wiki_limits=limits,
+            judge=load_judge(load_config().judge_dir),
         )
         if save:
             _gates(gates_dir).save(record)

@@ -18,6 +18,7 @@ export type GitState = Schemas['GitState']
 export type TrialRecord = Schemas['TrialRecord']
 export type Dispute = Schemas['Dispute']
 export type DisputeRequest = Schemas['DisputeRequest']
+export type JudgeView = Schemas['JudgeView']
 export type CaseRun = Schemas['CaseRun']
 export type ExpectationOutcome = Schemas['ExpectationOutcome']
 export type Finding = Schemas['Finding']
@@ -140,6 +141,7 @@ export const keys = {
   runs: (skillId?: string) => ['runs', skillId ?? 'all'] as const,
   run: (id: string) => ['run', id] as const,
   disputes: (runId: string) => ['disputes', runId] as const,
+  judge: ['judge'] as const,
   candidates: ['candidates'] as const,
   batch: ['batch'] as const,
   proposal: (id: string) => ['proposal', id] as const,
@@ -217,6 +219,11 @@ export function useRun(id: string) {
     queryKey: keys.run(id),
     queryFn: () => get<RunRecord>(`/api/runs/${encodeURIComponent(id)}`),
   })
+}
+
+/** The judge every score is computed with: its doctrine, identity, and accumulated evidence. */
+export function useJudge() {
+  return useQuery({ queryKey: keys.judge, queryFn: () => get<JudgeView>('/api/judge') })
 }
 
 /** Rulings already made on this run's judge verdicts — what the drill-down badges. */
