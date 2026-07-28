@@ -38,6 +38,20 @@ SIGNAL_FINDING_REJECTED = "finding rejected"
 # above there is no finding behind it — the evidence is the absence of one — so the case is minted
 # straight as a `should_catch` from the human's own description of what was missed.
 SIGNAL_FINDING_MISSED = "finding missed"
+# Generated, not observed (see the synthetic sources below): the parent case's defect removed, or
+# the same defect drafted under different names. In the vocabulary so every surface that renders
+# or filters by signal treats synthetic candidates as what they are, not as hand-written.
+SIGNAL_COUNTERFACTUAL = "synthetic counterfactual"
+SIGNAL_MUTATION = "synthetic mutation"
+
+# Machine-generated cases (ANTI_ROT_PLAN.md 3.2). The prefix is the contract: any source starting
+# with `synthetic-` must be excludable from every "what really ships" analysis — the drift stream,
+# the evidence mix, anything that treats the corpus as a record of real review history. `ref`
+# points at the parent case (`<skill>/<case>`), because a synthetic case's whole authority is
+# inherited and a reader must be able to walk back to where it came from.
+SYNTHETIC_PREFIX = "synthetic-"
+SOURCE_COUNTERFACTUAL = "synthetic-counterfactual"
+SOURCE_MUTATION = "synthetic-mutation"
 
 # How strong a `should_not_flag` case's evidence is.
 #
@@ -46,8 +60,13 @@ SIGNAL_FINDING_MISSED = "finding missed"
 # from silence rewards a reviewer that says nothing. The two *confirmed* signals do not have that
 # problem — a declined suggestion is a concern the team explicitly rejected, and an applied
 # suggestion's own result is code a human endorsed — so what matters is being able to see the mix.
+#
+# `synthetic` is its own bucket rather than folded into `confirmed`: a counterfactual negative is
+# derived from a confirmed defect, but no human confirmed *this* case — letting it count as
+# confirmed would launder generated evidence into the strongest tier.
 EVIDENCE_CONFIRMED = "confirmed"
 EVIDENCE_SILENCE = "silence"
+EVIDENCE_SYNTHETIC = "synthetic"
 EVIDENCE_UNCLASSIFIED = "unclassified"
 
 PRECISION_EVIDENCE: dict[str, str] = {
@@ -76,12 +95,22 @@ class Provenance(BaseModel):
     semantic_drafted_by: str = ""
 
     @property
+    def synthetic(self) -> bool:
+        """Machine-generated, not mined from review history. Checked by prefix so the two current
+        sources and any later generator all answer the same way."""
+        return self.source.startswith(SYNTHETIC_PREFIX)
+
+    @property
     def evidence(self) -> str:
         """How much this provenance is worth as a *precision* signal.
 
         Hand-written cases report `unclassified` rather than being guessed at: a case someone wrote
         deliberately may be the best evidence in the set or the weakest, and this field cannot tell.
+        Synthetic cases report `synthetic` regardless of signal — generated evidence must never
+        read as human-confirmed.
         """
+        if self.synthetic:
+            return EVIDENCE_SYNTHETIC
         return PRECISION_EVIDENCE.get(self.human_signal or "", EVIDENCE_UNCLASSIFIED)
 
 

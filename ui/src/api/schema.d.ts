@@ -622,6 +622,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/synthesize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Synthesize
+         * @description Write synthetic candidates into the triage queue, provenance-tagged to their parents.
+         */
+        post: operations["launch_synthesize_api_jobs_synthesize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/synthesize/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Synthesize Job */
+        post: operations["plan_synthesize_job_api_jobs_synthesize_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/update": {
         parameters: {
             query?: never;
@@ -1488,6 +1525,11 @@ export interface components {
             };
             /** Noflag */
             noflag: number;
+            /**
+             * Synthetic
+             * @default 0
+             */
+            synthetic: number;
         };
         /**
          * Confusion
@@ -2431,7 +2473,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -4074,6 +4116,34 @@ export interface components {
             /** Skipped */
             skipped?: string[];
         };
+        /**
+         * SynthesizeRequest
+         * @description Generate synthetic candidates into the triage queue — never into the corpus directly.
+         *
+         *     `cases` narrows the parents; empty means every active `should_catch` case. Counterfactuals
+         *     are mechanical (no model); mutation drafts go through the normal per-launch backend picker.
+         */
+        SynthesizeRequest: {
+            /** Cases */
+            cases?: string[];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "counterfactual" | "mutation";
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Skill Id */
+            skill_id: string;
+        };
         /** TierRequest */
         TierRequest: {
             /**
@@ -5259,6 +5329,72 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_synthesize_api_jobs_synthesize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SynthesizeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_synthesize_job_api_jobs_synthesize_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SynthesizeRequest"];
             };
         };
         responses: {

@@ -21,7 +21,7 @@ export function HealthPanel({ skillId }: { skillId: string }) {
   return (
     <div className="max-w-3xl space-y-5">
       <ScoreSection health={data} />
-      <CompositionSection health={data} />
+      <CompositionSection skillId={skillId} health={data} />
       <RetirementSection skillId={skillId} retirements={data.retirements ?? []} />
       <DiscriminationSection skillId={skillId} health={data} />
       <DriftSection skillId={skillId} health={data} />
@@ -104,7 +104,7 @@ function ScoreSection({ health }: { health: SkillHealth }) {
   )
 }
 
-function CompositionSection({ health }: { health: SkillHealth }) {
+function CompositionSection({ skillId, health }: { skillId: string; health: SkillHealth }) {
   const c = health.composition
   const mix = c.evidence_mix ?? {}
   const silence = mix.silence ?? 0
@@ -120,9 +120,18 @@ function CompositionSection({ health }: { health: SkillHealth }) {
         <span className="tabular text-muted">
           {c.catch} catch / {c.noflag} noflag
         </span>
+        {(c.synthetic ?? 0) > 0 && (
+          <span
+            className="tabular text-muted"
+            title="Generated from parent cases, not mined from review history — their authority is inherited, and every corpus statistic can tell them apart"
+          >
+            {c.synthetic} synthetic
+          </span>
+        )}
         {c.noflag > 0 && (
           <span className="text-xs text-muted">
             precision evidence: {confirmed} confirmed · {silence} from silence
+            {(mix.synthetic ?? 0) > 0 && ` · ${mix.synthetic} synthetic`}
             {(mix.unclassified ?? 0) > 0 && ` · ${mix.unclassified} hand-written`}
           </span>
         )}
@@ -131,6 +140,20 @@ function CompositionSection({ health }: { health: SkillHealth }) {
             precision rests on silence
           </Badge>
         )}
+      </div>
+      {/* The generators that grow this corpus without waiting for the next incident. Both write
+          to triage — a person still rules on every candidate before it counts. */}
+      <div className="mt-3 flex flex-wrap items-start gap-3 border-t border-line pt-3">
+        <LaunchButton
+          kind="synthesize"
+          request={{ skill_id: skillId, mode: 'counterfactual' }}
+          label="Generate counterfactuals"
+        />
+        <LaunchButton
+          kind="synthesize"
+          request={{ skill_id: skillId, mode: 'mutation' }}
+          label="Draft mutation probes"
+        />
       </div>
     </Section>
   )

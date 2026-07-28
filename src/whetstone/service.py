@@ -34,6 +34,7 @@ from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import (
     EVIDENCE_CONFIRMED,
     EVIDENCE_SILENCE,
+    EVIDENCE_SYNTHETIC,
     EVIDENCE_UNCLASSIFIED,
     CaseTier,
     EvalCase,
@@ -762,7 +763,12 @@ def precision_evidence(skill: Skill) -> dict[str, int]:
     The inference cannot be repaired, so the mix is reported instead of hidden. A skill whose
     precision rests entirely on silence is one whose `fp_rate` should be read with suspicion.
     """
-    counts = {EVIDENCE_CONFIRMED: 0, EVIDENCE_SILENCE: 0, EVIDENCE_UNCLASSIFIED: 0}
+    counts = {
+        EVIDENCE_CONFIRMED: 0,
+        EVIDENCE_SILENCE: 0,
+        EVIDENCE_SYNTHETIC: 0,
+        EVIDENCE_UNCLASSIFIED: 0,
+    }
     for case in skill.eval_cases:
         if case.kind == "should_not_flag":
             counts[case.provenance.evidence] += 1

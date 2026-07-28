@@ -85,6 +85,23 @@ export function DiscussionPane({ candidate }: { candidate: CandidateCase }) {
 function Silence({ candidate }: { candidate: CandidateCase }) {
   const signal = candidate.provenance.human_signal
 
+  if (candidate.provenance.source?.startsWith('synthetic-')) {
+    return (
+      <div className="space-y-1.5 px-3 py-3 text-sm text-muted">
+        <p>
+          There was never a conversation — this candidate was generated from{' '}
+          <ParentCaseLink candidate={candidate} />, and its authority is entirely inherited from
+          that case's evidence.
+        </p>
+        <p className="text-xs">
+          {candidate.kind === 'should_not_flag'
+            ? 'It is the parent diff reversed: the defect being removed. Promote it if a reviewer really should stay silent about this fix; reject it if the reversal is not a change anyone would ship.'
+            : 'It is the parent defect under different names. Promote it if the mutation preserved the defect; reject it if the model changed what is actually wrong.'}
+        </p>
+      </div>
+    )
+  }
+
   if (signal === 'escaped defect') {
     return (
       <p className="px-3 py-3 text-sm text-muted">
@@ -143,9 +160,33 @@ function Silence({ candidate }: { candidate: CandidateCase }) {
   )
 }
 
+/** The parent case a synthetic candidate derives from, as a link into its case page. */
+function ParentCaseLink({ candidate }: { candidate: CandidateCase }) {
+  const ref = candidate.provenance.ref ?? ''
+  const slash = ref.indexOf('/')
+  if (slash <= 0) return <span className="font-mono">{ref || 'a parent case'}</span>
+  const skill = ref.slice(0, slash)
+  const caseId = ref.slice(slash + 1)
+  return (
+    <Link
+      to={`/skills/${encodeURIComponent(skill)}/cases/${encodeURIComponent(caseId)}`}
+      className="font-mono underline decoration-dotted hover:text-accent"
+    >
+      {ref}
+    </Link>
+  )
+}
+
 function MergeRequestLink({ candidate }: { candidate: CandidateCase }) {
   const url = candidate.discussion?.mr_url
   const label = candidate.provenance.ref ?? 'source'
+  if (candidate.provenance.source?.startsWith('synthetic-')) {
+    return (
+      <span className="ml-auto truncate text-xs">
+        <ParentCaseLink candidate={candidate} />
+      </span>
+    )
+  }
   if (!url) {
     return <span className="ml-auto truncate font-mono text-xs text-muted">{label}</span>
   }

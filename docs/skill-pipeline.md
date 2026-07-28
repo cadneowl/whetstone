@@ -236,6 +236,33 @@ and when the uncovered fraction crosses the threshold the inbox says so — "cor
 recent MRs look like nothing in the corpus" — ranked below failing cases, above housekeeping.
 Quarterly is plenty; it is also a button on the Health tab.
 
+### Synthetic cases: counterfactuals and mutation probes
+
+`whetstone corpus synthesize --skill skills/<id> [--counterfactual] [--mutate]` grows the corpus
+without waiting for the next incident — into the **triage queue, never the corpus directly**: a
+person rules on every synthetic candidate exactly as on a mined one.
+
+**`--counterfactual`** attacks the corpus's structural positive-heaviness. A corpus mined from
+defects has few negatives, and an fp_rate over zero negative cases is a flattering zero.
+Reversing a `should_catch` case's diff yields the defect being *removed* — the highest-grade
+negative obtainable, since flagging the fix for the very defect the parent documents is a false
+positive on the exact pattern the rule targets. Mechanical; no model call.
+
+**`--mutate`** attacks instance-memorization, which the holdout cannot see: a rule that names
+variables from one incident passes that incident forever while missing every recurrence. A model
+drafts the same defect wearing different names — identifiers renamed, context restructured,
+defect preserved — and every draft is validated before it may enter the queue: it must parse as
+a diff, must add lines the parent's expectation can anchor to, and must actually differ from the
+parent. Invalid drafts are skipped and reported, never queued.
+
+Both carry `provenance.source: synthetic-counterfactual | synthetic-mutation` with `ref` pointing
+at the parent case, so every corpus statistic can tell them apart: the composition block counts
+synthetic vs mined, the precision-evidence mix gives them their own bucket (generated evidence
+never reads as human-confirmed), and the drift probe excludes them from the recent-MR stream.
+Synthetic parents are refused — the chain always stays one step from real evidence. Both
+generators are buttons on the Health tab's Corpus section, and both jobs answer with what was
+written and what was skipped, with reasons.
+
 ---
 
 ## `improve/step.yaml` — drafting a guidance change

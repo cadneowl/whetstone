@@ -158,6 +158,17 @@ def test_archived_cases_do_not_count_as_coverage() -> None:
     assert report.uncovered[0].ref == "acme/x!1"
 
 
+def test_synthetic_candidates_are_not_the_stream() -> None:
+    """A stream padded with generated candidates measures the corpus against its own reflection."""
+    skill = _skill(_case("c1", "db.get(id).unwrap();"))
+    synthetic = _entry("syn-cf-c1", "rust-errors/c1", "row.unwrap();")
+    synthetic.candidate.provenance.source = "synthetic-counterfactual"
+    real = _entry("x-1-t0", "acme/x!1", "run_sqlquery(q);")
+    report = compute_drift(skill, [synthetic, real], KeywordEmbedder(), now=AT)
+    assert report.recent_mrs == 1
+    assert report.uncovered[0].ref == "acme/x!1"
+
+
 def test_other_skills_candidates_are_not_this_skills_stream() -> None:
     skill = _skill(_case("c1", "db.get(id).unwrap();"))
     entries = [_entry("y-1-t0", "acme/y!1", "row.unwrap();", skill="other")]
