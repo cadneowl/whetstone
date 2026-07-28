@@ -110,6 +110,12 @@ function Header({ run }: { run: RunRecord }) {
         <li title="Content identity — comparison keys on this, not the hand-edited version number">
           hash <code className="font-mono">{run.skill_hash.slice(0, 12)}</code>
         </li>
+        <li title="Identity of the judge whose verdicts this run is built from. Scores from different judges are different measurements — compare runs only within one judge.">
+          judge{' '}
+          <code className="font-mono">
+            {run.judge_hash ? run.judge_hash.slice(0, 12) : 'pre-attribution'}
+          </code>
+        </li>
         {run.principal && <li>by {run.principal}</li>}
       </ul>
     </header>

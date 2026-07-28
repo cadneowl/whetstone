@@ -127,20 +127,36 @@ export function SkillDetail() {
             <Empty>Never evaluated. Run evals above to record one.</Empty>
           ) : (
             <ul className="space-y-1.5">
-              {runs.map((run) => (
-                <li key={run.id}>
-                  <Link
-                    to={`/runs/${encodeURIComponent(run.id)}`}
-                    className="flex flex-wrap items-baseline gap-x-4 rounded-lg border border-line bg-surface px-3 py-2 text-sm transition-colors hover:border-accent/50"
-                  >
-                    <span className="text-muted">{when(run.created_at)}</span>
-                    <span className="tabular">recall {score(run.recall, 2)}</span>
-                    <span className="tabular">fp {score(run.fp_rate, 2)}</span>
-                    <span className="text-xs text-muted">k={run.k}</span>
-                    <span className="ml-auto font-mono text-xs text-muted">{run.model}</span>
-                  </Link>
-                </li>
-              ))}
+              {/* The list is newest-first, so runs[i + 1] is the run before this one in time. A
+                  judge change between the two is a measurement change: the same skill scored by a
+                  different judge is a different number, and a trend read across the seam is
+                  fiction. The seam is drawn rather than inferred-from-hover because the whole
+                  point is to interrupt the eye that was about to compare. */}
+              {runs.map((run, i) => {
+                const older = runs[i + 1]
+                const judgeChanged =
+                  older != null && (older.judge_hash ?? '') !== (run.judge_hash ?? '')
+                return (
+                  <li key={run.id}>
+                    <Link
+                      to={`/runs/${encodeURIComponent(run.id)}`}
+                      className="flex flex-wrap items-baseline gap-x-4 rounded-lg border border-line bg-surface px-3 py-2 text-sm transition-colors hover:border-accent/50"
+                    >
+                      <span className="text-muted">{when(run.created_at)}</span>
+                      <span className="tabular">recall {score(run.recall, 2)}</span>
+                      <span className="tabular">fp {score(run.fp_rate, 2)}</span>
+                      <span className="text-xs text-muted">k={run.k}</span>
+                      <span className="ml-auto font-mono text-xs text-muted">{run.model}</span>
+                    </Link>
+                    {judgeChanged && (
+                      <p className="mt-1.5 border-t border-dashed border-line pt-1.5 text-center text-xs text-muted">
+                        judge changed here — runs below were scored by a different judge, so their
+                        numbers are not comparable with those above
+                      </p>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
           )}
         </Tabs.Content>

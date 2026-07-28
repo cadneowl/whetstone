@@ -224,6 +224,12 @@ class RunRecord(BaseModel):
     model: str = ""
     reviewer_effort: Effort = "high"
     judge_effort: Effort = "medium"
+    # Identity of the judge that produced every verdict in this record — see
+    # `judge.llm_judge.judge_identity`. Defaulted so records written before the judge was
+    # attributable still load; empty means "the judge as it was before attribution existed", which
+    # is itself an honest lineage. Scores across different judge hashes are different measurements:
+    # trend views must break rather than draw a line through a judge change.
+    judge_hash: str = ""
     k: int = 1
     practice_mode: bool = False
 

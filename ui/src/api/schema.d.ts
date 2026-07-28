@@ -1666,6 +1666,11 @@ export interface components {
             /** Id */
             id: string;
             /**
+             * Judge Hash
+             * @default
+             */
+            judge_hash: string;
+            /**
              * K
              * @default 1
              */
@@ -2827,6 +2832,11 @@ export interface components {
              */
             judge_effort: string;
             /**
+             * Judge Hash
+             * @default
+             */
+            judge_hash: string;
+            /**
              * K
              * @default 1
              */
@@ -2901,6 +2911,11 @@ export interface components {
             guidance_hash: string;
             /** Id */
             id: string;
+            /**
+             * Judge Hash
+             * @default
+             */
+            judge_hash: string;
             /**
              * K
              * @default 1

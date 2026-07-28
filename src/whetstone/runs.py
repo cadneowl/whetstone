@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS runs (
     guidance_hash TEXT NOT NULL DEFAULT '',
     backend       TEXT NOT NULL,
     model         TEXT NOT NULL,
+    judge_hash    TEXT NOT NULL DEFAULT '',
     k             INTEGER NOT NULL,
     practice_mode INTEGER NOT NULL,
     recall        REAL NOT NULL,
@@ -69,7 +70,7 @@ CREATE INDEX IF NOT EXISTS case_runs_by_case ON case_runs (skill_id, case_id, cr
 # `indexed_files` to the number of record files, so leaving that counter behind says the now-empty
 # index is current and nothing ever refills it. The console showed every run vanish. So the counter
 # goes with the tables, and the next read repopulates from the files, which are the truth.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _DROP = (
     "DROP TABLE IF EXISTS runs;"
     "DROP TABLE IF EXISTS case_runs;"
@@ -100,6 +101,7 @@ class RunSummary(BaseModel):
     guidance_hash: str = ""
     backend: str = ""
     model: str = ""
+    judge_hash: str = ""
     k: int = 1
     practice_mode: bool = False
     recall: float = 0.0
@@ -279,9 +281,9 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
     conn.execute(
         """
         INSERT INTO runs (id, created_at, skill_id, skill_version, skill_hash, guidance_hash,
-                          backend, model,
+                          backend, model, judge_hash,
                           k, practice_mode, recall, fp_rate, precision, f2, duration_s, llm_calls)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at
         """,
         (
@@ -293,6 +295,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
             record.guidance_hash,
             record.backend,
             record.model,
+            record.judge_hash,
             record.k,
             int(record.practice_mode),
             score.recall,

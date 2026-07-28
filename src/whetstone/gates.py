@@ -52,6 +52,10 @@ class GateRecord(BaseModel):
 
     backend: str = ""
     model: str = ""
+    # Identity of the judge both sides' verdicts came from (`judge.llm_judge.judge_identity`).
+    # One judge serves the whole gate, so the base/candidate comparison is internally valid
+    # regardless — this exists so two *gates* judged differently are never read as one series.
+    judge_hash: str = ""
     k: int = 1
     practice_mode: bool = False
     duration_s: float = 0.0
