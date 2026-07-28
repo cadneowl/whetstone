@@ -1,6 +1,14 @@
 import { Link, useParams } from 'react-router-dom'
-import type { CaseRun, ExpectationOutcome, Finding, RunRecord, TrialRecord } from '@/api/client'
-import { useRun } from '@/api/client'
+import type {
+  CaseRun,
+  Dispute,
+  DisputeRequest,
+  ExpectationOutcome,
+  Finding,
+  RunRecord,
+  TrialRecord,
+} from '@/api/client'
+import { useConsoleConfig, useDisputes, useDisputeVerdict, useRun } from '@/api/client'
 import {
   Badge,
   Empty,
@@ -26,10 +34,19 @@ import {
 export function RunDetail() {
   const { runId = '' } = useParams()
   const { data, isLoading, error } = useRun(runId)
+  const { data: config } = useConsoleConfig()
+  const { data: disputes } = useDisputes(runId)
 
   if (isLoading) return <Loading />
   if (error) return <ErrorNote error={error} />
   if (!data) return <Empty>Not found.</Empty>
+
+  // One ruling per verdict address; the newest wins, which the backend guarantees by replacement.
+  const rulings = new Map<string, Dispute>()
+  for (const d of disputes ?? []) {
+    const key = rulingKey(d.case_id, d.trial, d.expectation_id, d.finding_index)
+    if (!rulings.has(key)) rulings.set(key, d)
+  }
 
   return (
     <div>
@@ -47,12 +64,22 @@ export function RunDetail() {
       ) : (
         <div className="space-y-2">
           {data.cases.map((c) => (
-            <CaseBlock key={c.case_id} run={data} caseRun={c} />
+            <CaseBlock
+              key={c.case_id}
+              run={data}
+              caseRun={c}
+              rulings={rulings}
+              readOnly={config?.read_only ?? true}
+            />
           ))}
         </div>
       )}
     </div>
   )
+}
+
+function rulingKey(caseId: string, trial: number, expectationId: string, findingIndex: number) {
+  return `${caseId}|${trial}|${expectationId}|${findingIndex}`
 }
 
 function Header({ run }: { run: RunRecord }) {
@@ -122,7 +149,17 @@ function Header({ run }: { run: RunRecord }) {
   )
 }
 
-function CaseBlock({ run, caseRun }: { run: RunRecord; caseRun: CaseRun }) {
+function CaseBlock({
+  run,
+  caseRun,
+  rulings,
+  readOnly,
+}: {
+  run: RunRecord
+  caseRun: CaseRun
+  rulings: Map<string, Dispute>
+  readOnly: boolean
+}) {
   const isCatch = caseRun.kind === 'should_catch'
   const totals = caseRun.trials.flatMap((t) => t.outcomes)
   const good = totals.filter((o) => o.outcome === 'tp' || o.outcome === 'tn').length
@@ -158,14 +195,36 @@ function CaseBlock({ run, caseRun }: { run: RunRecord; caseRun: CaseRun }) {
 
       <div className="space-y-2 px-3 pt-1 pb-3 pl-6">
         {caseRun.trials.map((trial) => (
-          <TrialBlock key={trial.index} trial={trial} total={caseRun.trials.length} />
+          <TrialBlock
+            key={trial.index}
+            runId={run.id}
+            caseId={caseRun.case_id}
+            trial={trial}
+            total={caseRun.trials.length}
+            rulings={rulings}
+            readOnly={readOnly}
+          />
         ))}
       </div>
     </details>
   )
 }
 
-function TrialBlock({ trial, total }: { trial: TrialRecord; total: number }) {
+function TrialBlock({
+  runId,
+  caseId,
+  trial,
+  total,
+  rulings,
+  readOnly,
+}: {
+  runId: string
+  caseId: string
+  trial: TrialRecord
+  total: number
+  rulings: Map<string, Dispute>
+  readOnly: boolean
+}) {
   return (
     <details className="rounded-lg border border-line bg-canvas" open={total === 1}>
       <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm">
@@ -181,7 +240,15 @@ function TrialBlock({ trial, total }: { trial: TrialRecord; total: number }) {
 
       <div className="space-y-4 px-3 pt-1 pb-3">
         {trial.outcomes.map((outcome) => (
-          <ExpectationBlock key={outcome.expectation_id} outcome={outcome} trial={trial} />
+          <ExpectationBlock
+            key={outcome.expectation_id}
+            runId={runId}
+            caseId={caseId}
+            outcome={outcome}
+            trial={trial}
+            rulings={rulings}
+            readOnly={readOnly}
+          />
         ))}
         <UnmatchedFindings trial={trial} />
       </div>
@@ -189,7 +256,21 @@ function TrialBlock({ trial, total }: { trial: TrialRecord; total: number }) {
   )
 }
 
-function ExpectationBlock({ outcome, trial }: { outcome: ExpectationOutcome; trial: TrialRecord }) {
+function ExpectationBlock({
+  runId,
+  caseId,
+  outcome,
+  trial,
+  rulings,
+  readOnly,
+}: {
+  runId: string
+  caseId: string
+  outcome: ExpectationOutcome
+  trial: TrialRecord
+  rulings: Map<string, Dispute>
+  readOnly: boolean
+}) {
   const judged = new Set(outcome.verdicts.map((v) => v.finding_index))
   const unjudged = outcome.eligible_finding_indices.filter((i) => !judged.has(i))
   const excluded = excludedFindings(outcome, trial)
@@ -217,6 +298,25 @@ function ExpectationBlock({ outcome, trial }: { outcome: ExpectationOutcome; tri
                 judge: {v.matched ? 'MATCHED' : 'NOT MATCHED'} (confidence {v.confidence.toFixed(2)}
                 ) — {v.reason || 'no reason given'}
               </p>
+              {/* Ruling needs the expectation snapshot to mint an honest pair; records that
+                  predate snapshots get no controls rather than a button that always errors. */}
+              {outcome.where != null && (
+                <RulingLine
+                  runId={runId}
+                  request={{
+                    case_id: caseId,
+                    trial: trial.index,
+                    expectation_id: outcome.expectation_id,
+                    finding_index: v.finding_index,
+                    is_match: false, // overwritten per click
+                    note: '',
+                  }}
+                  existing={rulings.get(
+                    rulingKey(caseId, trial.index, outcome.expectation_id, v.finding_index),
+                  )}
+                  readOnly={readOnly}
+                />
+              )}
             </li>
           ))}
           {unjudged.map((i) => (
@@ -244,6 +344,94 @@ function ExpectationBlock({ outcome, trial }: { outcome: ExpectationOutcome; tri
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * Rule on one judge verdict: same underlying issue, yes or no.
+ *
+ * Every ruling — agreeing with the judge or not — becomes a labeled pair in the judge's own eval
+ * corpus. This is the only moment such a label is free: a person is already looking at the
+ * verdict, deciding whether it was right, and without this control that judgment evaporates. The
+ * two buttons ask about ground truth (do the finding and expectation describe the same issue?),
+ * not about the judge; whether the judge agrees is derived and shown, not asked.
+ */
+function RulingLine({
+  runId,
+  request,
+  existing,
+  readOnly,
+}: {
+  runId: string
+  request: DisputeRequest
+  existing: Dispute | undefined
+  readOnly: boolean
+}) {
+  const rule = useDisputeVerdict(runId)
+
+  return (
+    <div className="mt-1 ml-4 flex flex-wrap items-center gap-2 text-xs text-muted">
+      {existing ? (
+        <span
+          title={`Ruled by ${existing.principal || 'unknown'} — feeds the judge's eval corpus. ${
+            existing.note || ''
+          }`}
+        >
+          ruled: {existing.is_match ? 'same issue' : 'different issue'}
+          {existing.judge_matched === existing.is_match
+            ? ' (judge was right)'
+            : ' (judge was wrong)'}
+        </span>
+      ) : (
+        <span title="Your ruling becomes a labeled pair the judge itself is scored against.">
+          same underlying issue?
+        </span>
+      )}
+      {!readOnly && (
+        <>
+          <RulingButton
+            label="same"
+            active={existing?.is_match === true}
+            pending={rule.isPending}
+            onClick={() => rule.mutate({ ...request, is_match: true })}
+          />
+          <RulingButton
+            label="different"
+            active={existing?.is_match === false}
+            pending={rule.isPending}
+            onClick={() => rule.mutate({ ...request, is_match: false })}
+          />
+        </>
+      )}
+      {rule.error != null && <span className="text-bad">{String(rule.error)}</span>}
+    </div>
+  )
+}
+
+function RulingButton({
+  label,
+  active,
+  pending,
+  onClick,
+}: {
+  label: string
+  active: boolean
+  pending: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      disabled={pending || active}
+      onClick={onClick}
+      className={`rounded border px-1.5 py-0.5 transition-colors ${
+        active
+          ? 'border-accent text-accent'
+          : 'border-line hover:border-accent/50 hover:text-ink disabled:opacity-50'
+      }`}
+    >
+      {label}
+    </button>
   )
 }
 

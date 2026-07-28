@@ -87,6 +87,18 @@ class ReviewsConfig(BaseModel):
     dir: Path = Path(".whetstone/reviews")
 
 
+class MetaEvalConfig(BaseModel):
+    """Where human rulings on judge verdicts accumulate as labeled pairs.
+
+    Every ruling is one (finding, expectation, human label) triple — the judge's own eval corpus.
+    The bundled fixtures are a static floor; this directory is what keeps the judge measured
+    against the disagreements it actually faces as skills and codebases move. Losing it costs the
+    labels people minted from real drill-downs, which nothing can regenerate.
+    """
+
+    dir: Path = Path(".whetstone/meta_eval")
+
+
 class LLMConfig(BaseModel):
     """The default backend for everything the console runs against a model — the live review, an
     eval, a gate, and the improve and triage drafters.
@@ -142,6 +154,7 @@ class Config(BaseModel):
     runs: RunsConfig = RunsConfig()
     gate: GateDefaults = GateDefaults()
     reviews: ReviewsConfig = ReviewsConfig()
+    meta_eval: MetaEvalConfig = MetaEvalConfig()
     llm: LLMConfig = LLMConfig()
     watch: WatchConfig = WatchConfig()
     # Directory the config was loaded from; relative paths resolve against it. None when defaulted.
@@ -170,6 +183,10 @@ class Config(BaseModel):
     @property
     def reviews_dir(self) -> Path:
         return self._resolve(self.reviews.dir)
+
+    @property
+    def meta_eval_dir(self) -> Path:
+        return self._resolve(self.meta_eval.dir)
 
     @property
     def transcripts_dir(self) -> Path:
@@ -238,6 +255,10 @@ def _apply_env(config: Config) -> Config:
     reviews_dir = os.environ.get("WHETSTONE_REVIEWS_DIR")
     if reviews_dir:
         config.reviews.dir = Path(reviews_dir).resolve()
+
+    meta_eval_dir = os.environ.get("WHETSTONE_META_EVAL_DIR")
+    if meta_eval_dir:
+        config.meta_eval.dir = Path(meta_eval_dir).resolve()
 
     host = os.environ.get("WHETSTONE_UI_HOST")
     if host:
