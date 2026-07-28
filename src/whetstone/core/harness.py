@@ -11,6 +11,7 @@ from whetstone.domain.run import CaseRun, RunEvent
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.judge.base import Judge
+from whetstone.judge.cascade import CascadingJudgeFactory, judge_for_case
 from whetstone.reviewer.base import Reviewer
 
 EventSink = Callable[[RunEvent], None]
@@ -23,7 +24,7 @@ class RunCancelled(RuntimeError):
 def run_skill(
     skill: Skill,
     reviewer: Reviewer,
-    judge: Judge,
+    judge: Judge | CascadingJudgeFactory,
     k: int = 1,
     *,
     on_event: EventSink | None = None,
@@ -49,7 +50,7 @@ def run_skill(
 def run_skill_recorded(
     skill: Skill,
     reviewer: Reviewer,
-    judge: Judge,
+    judge: Judge | CascadingJudgeFactory,
     k: int = 1,
     *,
     on_event: EventSink | None = None,
@@ -75,7 +76,9 @@ def run_skill_recorded(
             _check_cancelled(cancel)
             trials.append(reviewer.review(skill, case.change))
             progress.trial_done(case.id, trial_index)
-        record = record_case(case, trials, judge)
+        # A cascading judge grounds its tier-2 calls in this case's own diff, so it is bound per
+        # case; a plain judge passes through unchanged.
+        record = record_case(case, trials, judge_for_case(judge, case.change))
         progress.case_done(case.id, record)
         return record
 

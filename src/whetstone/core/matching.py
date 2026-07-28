@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from whetstone.domain.eval_model import Expectation
 from whetstone.domain.finding import Finding
-from whetstone.domain.run import ExpectationOutcome, JudgeVerdictRecord, outcome_for
+from whetstone.domain.run import (
+    ExpectationOutcome,
+    JudgeVerdictRecord,
+    PriorVerdictRecord,
+    outcome_for,
+)
 from whetstone.judge.base import Judge
 
 
@@ -42,7 +47,16 @@ def evaluate_expectation(
         m = judge.match(findings[i], expectation)
         verdicts.append(
             JudgeVerdictRecord(
-                finding_index=i, matched=m.matched, confidence=m.confidence, reason=m.reason
+                finding_index=i,
+                matched=m.matched,
+                confidence=m.confidence,
+                reason=m.reason,
+                tier=m.tier,
+                prior=PriorVerdictRecord(
+                    matched=m.prior.matched, confidence=m.prior.confidence, reason=m.prior.reason
+                )
+                if m.prior
+                else None,
             )
         )
         if m.matched:

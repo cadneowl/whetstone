@@ -44,6 +44,7 @@ from whetstone.domain.run import RunRecord, guidance_hash, skill_hash
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord, new_gate_id
+from whetstone.judge.cascade import CascadingJudgeFactory, GroundedJudge
 from whetstone.judge.llm_judge import LLMJudge, judge_identity
 from whetstone.judge.spec import JudgeSpec
 from whetstone.llm.base import Effort, LLMClient
@@ -53,7 +54,7 @@ from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
 from whetstone.sampling import sample_cases
-from whetstone.steps import SamplePolicy
+from whetstone.steps import JudgePolicy, SamplePolicy
 from whetstone.wiki import WikiLimits
 
 
@@ -73,6 +74,7 @@ def run_eval(
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
     judge: JudgeSpec | None = None,
+    judge_policy: JudgePolicy | None = None,
     on_event: EventSink | None = None,
     cancel: threading.Event | None = None,
 ) -> SkillScore:
@@ -86,6 +88,7 @@ def run_eval(
         sample=sample,
         wiki_limits=wiki_limits,
         judge=judge,
+        judge_policy=judge_policy,
         on_event=on_event,
         cancel=cancel,
     ).score
@@ -110,6 +113,7 @@ def record_eval(
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
     judge: JudgeSpec | None = None,
+    judge_policy: JudgePolicy | None = None,
 ) -> RunRecord:
     """Score a skill and return the full run record — every finding and every judge verdict.
 
@@ -122,11 +126,25 @@ def record_eval(
     rather than the union-cased skills it builds.
 
     `judge` is the deployment's judge doctrine (`judges/<id>/JUDGE.md`), None for the built-in.
+    `judge_policy` is the skill's cascade config (`judge:` in evaluate/step.yaml); when it enables
+    escalation, low-confidence verdicts are re-judged grounded in the case's diff, and the run's
+    `judge_hash` says so.
     """
     judge_system = judge.system if judge else None
+    cascade = judge_policy if judge_policy is not None and judge_policy.enabled else None
     counted = CountingClient(client)
     reviewer = LLMReviewer(counted, effort=reviewer_effort, wiki_limits=wiki_limits)
-    llm_judge = LLMJudge(counted, effort=judge_effort, system=judge_system)
+    tier1 = LLMJudge(counted, effort=judge_effort, system=judge_system)
+    llm_judge: LLMJudge | CascadingJudgeFactory = (
+        CascadingJudgeFactory(
+            tier1,
+            GroundedJudge(counted, effort=judge_effort, system=judge_system),
+            escalate_below=cascade.escalate_below,
+            max_diff_bytes=cascade.max_diff_bytes,
+        )
+        if cascade
+        else tier1
+    )
 
     drawn = sample_cases(skill.eval_cases, sample)
     scored = skill if not drawn.sampled else skill.model_copy(update={"eval_cases": drawn.cases})
@@ -151,9 +169,12 @@ def record_eval(
         model=model,
         reviewer_effort=reviewer_effort,
         judge_effort=judge_effort,
-        # The judge these verdicts came from. Computed from the same text the judge above was
-        # constructed with, so nothing between construction and recording can drift.
-        judge_hash=judge_identity(judge_system),
+        # The judge these verdicts came from. Computed from the same text and cascade policy the
+        # judge above was constructed with, so nothing between construction and recording can
+        # drift.
+        judge_hash=judge_identity(
+            judge_system, escalate_below=cascade.escalate_below if cascade else 0.0
+        ),
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,
@@ -318,6 +339,7 @@ def gate_skills(
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
     judge: JudgeSpec | None = None,
+    judge_policy: JudgePolicy | None = None,
     on_base: EventSink | None = None,
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
@@ -348,11 +370,13 @@ def gate_skills(
     # without this the stop button was accepted, ignored, and the spending carried on.
     base_score = run_eval(
         base.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, judge=judge, on_event=on_base, cancel=cancel,
+        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy,
+        on_event=on_base, cancel=cancel,
     )
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, judge=judge, on_event=on_candidate, cancel=cancel,
+        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy,
+        on_event=on_candidate, cancel=cancel,
     )
     result = gate(base_score, candidate_score, cfg)
     return GateOutcome(result=result, base=base_score, candidate=candidate_score)
@@ -375,6 +399,7 @@ def record_gate(
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
     judge: JudgeSpec | None = None,
+    judge_policy: JudgePolicy | None = None,
     on_base: EventSink | None = None,
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
@@ -393,7 +418,8 @@ def record_gate(
     clock = time.perf_counter()
     outcome = gate_skills(
         base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
-        judge=judge, on_base=on_base, on_candidate=on_candidate, cancel=cancel,
+        judge=judge, judge_policy=judge_policy,
+        on_base=on_base, on_candidate=on_candidate, cancel=cancel,
     )
     duration = time.perf_counter() - clock
 
@@ -409,7 +435,12 @@ def record_gate(
         candidate_hash=candidate_hash,
         backend=backend,
         model=model,
-        judge_hash=judge_identity(judge.system if judge else None),
+        judge_hash=judge_identity(
+            judge.system if judge else None,
+            escalate_below=judge_policy.escalate_below
+            if judge_policy is not None and judge_policy.enabled
+            else 0.0,
+        ),
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,

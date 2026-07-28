@@ -297,7 +297,21 @@ function ExpectationBlock({
               <p className={`mt-0.5 ml-4 text-[13px] ${v.matched ? 'text-good' : 'text-bad'}`}>
                 judge: {v.matched ? 'MATCHED' : 'NOT MATCHED'} (confidence {v.confidence.toFixed(2)}
                 ) — {v.reason || 'no reason given'}
+                {v.tier === 2 && (
+                  <span
+                    className="ml-2 rounded border border-line px-1 text-xs text-muted"
+                    title="Tier 1 was unsure, so the pair was re-judged grounded in the case's own diff"
+                  >
+                    grounded
+                  </span>
+                )}
               </p>
+              {v.prior && (
+                <p className="mt-0.5 ml-4 text-xs text-muted">
+                  tier 1 first said {v.prior.matched ? 'matched' : 'not matched'} at{' '}
+                  {v.prior.confidence.toFixed(2)} — {v.prior.reason || 'no reason given'}
+                </p>
+              )}
               {/* Ruling needs the expectation snapshot to mint an honest pair; records that
                   predate snapshots get no controls rather than a button that always errors. */}
               {outcome.where != null && (

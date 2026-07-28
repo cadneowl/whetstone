@@ -50,13 +50,29 @@ class RunEvent(BaseModel):
     case: CaseRun | None = None
 
 
+class PriorVerdictRecord(BaseModel):
+    """The tier-1 verdict a cascade escalation replaced — kept so the escalation is auditable."""
+
+    matched: bool
+    confidence: float
+    reason: str = ""
+
+
 class JudgeVerdictRecord(BaseModel):
-    """One judge call: which finding was judged against an expectation, and what it decided."""
+    """The judge's final word on one finding against one expectation.
+
+    `tier` is which cascade tier produced it (1 = pairwise, 2 = grounded in the case diff); when
+    tier 2 ran, `prior` holds what tier 1 said first. One record per finding either way — the
+    *final* verdict is what scoring reads, and the escalation trail hangs off it rather than
+    appearing as a second record that `matched` aggregation could misread.
+    """
 
     finding_index: int  # index into the owning TrialRecord.findings
     matched: bool
     confidence: float
     reason: str
+    tier: int = 1
+    prior: PriorVerdictRecord | None = None
 
 
 class ExpectationOutcome(BaseModel):

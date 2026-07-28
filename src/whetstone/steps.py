@@ -107,6 +107,24 @@ class StepInputs(BaseModel):
     draft: DraftInputs = DraftInputs()
 
 
+class JudgePolicy(BaseModel):
+    """How this skill's verdicts are judged — the cascade knobs, in `evaluate/step.yaml`.
+
+    `escalate_below` is the confidence under which a tier-1 verdict is re-judged grounded in the
+    case's diff. 0 (the default) disables the cascade entirely: no behavior change, no cost
+    change, and the judge identity hashes exactly as before. This is measurement configuration —
+    it does not enter `skill_hash` (steps never do), but it folds into the run's `judge_hash`,
+    because a different escalation policy is a different instrument.
+    """
+
+    escalate_below: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_diff_bytes: int = Field(default=2_000, ge=200, le=100_000)
+
+    @property
+    def enabled(self) -> bool:
+        return self.escalate_below > 0
+
+
 class SamplePolicy(BaseModel):
     """How many eval cases to score, for skills too large to score whole.
 
@@ -131,6 +149,7 @@ class StepSpec(BaseModel):
     model: ModelOverride = ModelOverride()
     inputs: StepInputs = StepInputs()
     sample: SamplePolicy = SamplePolicy()
+    judge: JudgePolicy = JudgePolicy()
     trials: int = Field(default=1, ge=1, le=20)
     # Exactly one of these is set for a model step; `run` alone for a subprocess step.
     prompt: str | None = None
@@ -144,7 +163,7 @@ class StepSpec(BaseModel):
     # A key whose every sub-line is commented out parses as None, which is an easy thing to do
     # while editing a scaffold and produces a baffling "should be a valid dictionary" otherwise.
     # An empty block plainly means "defaults", so read it that way.
-    @field_validator("model", "inputs", "sample", mode="before")
+    @field_validator("model", "inputs", "sample", "judge", mode="before")
     @classmethod
     def _empty_block_is_default(cls, value: object) -> object:
         return {} if value is None else value

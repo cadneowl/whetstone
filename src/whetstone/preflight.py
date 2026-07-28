@@ -94,13 +94,22 @@ def plan_eval(
     cases: int | None = None,
     action: str = "eval run",
     wiki_limits: WikiLimits | None = None,
+    judge_cascade: bool = False,
 ) -> Plan:
-    """The plan for scoring `skill`. `cases` overrides the count when a sample will be used."""
+    """The plan for scoring `skill`. `cases` overrides the count when a sample will be used.
+
+    `judge_cascade` doubles the judge share of the upper bound: with escalation enabled, every
+    judged pair may be re-judged grounded in the case diff. Real runs escalate only the
+    low-confidence minority, but an estimate that hides the possibility is the kind of guess
+    that costs money.
+    """
     total = len(skill.eval_cases) if cases is None else cases
     expectations = sum(len(c.expect) for c in skill.eval_cases)
     per_case_expectations = (expectations / len(skill.eval_cases)) if skill.eval_cases else 0.0
-    # One review per case-trial, plus at most one judge call per expectation on it.
-    calls = int(round(total * trials * (1 + per_case_expectations)))
+    judge_factor = 2 if judge_cascade else 1
+    # One review per case-trial, plus at most one judge call per expectation on it (two with the
+    # cascade: the pairwise verdict, then the grounded re-judge on low confidence).
+    calls = int(round(total * trials * (1 + per_case_expectations * judge_factor)))
     plan = Plan(
         action=action,
         backend=backend.name,
@@ -111,7 +120,7 @@ def plan_eval(
             calls=calls,
             basis=(
                 f"{total} case(s) x {trials} trial(s) x "
-                f"(1 review + up to {per_case_expectations:.1f} judge calls); "
+                f"(1 review + up to {per_case_expectations * judge_factor:.1f} judge calls); "
                 "judging stops at the first match, so real runs usually cost less"
             ),
         ),
@@ -119,6 +128,11 @@ def plan_eval(
     if cases is not None and cases < len(skill.eval_cases):
         plan.details.append(
             f"sampling {cases} of {len(skill.eval_cases)} cases — the score describes the sample"
+        )
+    if judge_cascade:
+        plan.details.append(
+            "judge cascade is on: low-confidence verdicts are re-judged grounded in the case "
+            "diff, so the judge share above is an upper bound of two calls per pair"
         )
     _describe_wiki(plan, skill, wiki_limits)
     return plan

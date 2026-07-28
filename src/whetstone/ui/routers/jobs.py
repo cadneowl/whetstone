@@ -256,6 +256,7 @@ def launch_eval(
                 sample=policy,
                 wiki_limits=spec.inputs.wiki if spec else None,
                 judge=load_judge(config.judge_dir),
+                judge_policy=spec.judge if spec else None,
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -351,6 +352,7 @@ def launch_gate(
                 sample=_sample(spec, request.sample),
                 wiki_limits=spec.inputs.wiki if spec else None,
                 judge=load_judge(config.judge_dir),
+                judge_policy=spec.judge if spec else None,
                 on_base=side("base", config.git.default_base),
                 on_candidate=side("cand", branch),
                 cancel=handle.cancel_event,
@@ -1059,6 +1061,7 @@ def _eval_plan(
         trials=trials,
         cases=scored,
         wiki_limits=spec.inputs.wiki if spec else None,
+        judge_cascade=bool(spec and spec.judge.enabled),
     )
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if request.scope == "working":
