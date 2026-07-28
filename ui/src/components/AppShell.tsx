@@ -49,6 +49,7 @@ export function AppShell() {
             <Tab to="/reviews">Reviews</Tab>
             <Tab to="/skills">Skills</Tab>
             <Tab to="/runs">Runs</Tab>
+            <Tab to="/judge">Judge</Tab>
           </nav>
 
           <div className="ml-auto flex items-center gap-2 text-xs text-muted">

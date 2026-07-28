@@ -336,6 +336,30 @@ def test_runs_and_gates_name_the_judge_that_scored_them() -> None:
     assert gate_record.judge_hash == judge_identity()
 
 
+def test_a_custom_judge_doctrine_is_run_and_attributed() -> None:
+    """The hash recorded must describe the judge that actually ran — spec in, spec's hash out."""
+    from whetstone.judge.llm_judge import judge_identity
+    from whetstone.judge.spec import JudgeSpec
+    from whetstone.service import record_eval
+
+    seen: list[str] = []
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        from whetstone.judge.llm_judge import JudgeVerdict
+
+        if schema is JudgeVerdict:
+            seen.append(system)
+            return JudgeVerdict(matched=True, confidence=1.0, reason="same issue")
+        return _flag_handler(flag_tests=False)(system, user, schema)
+
+    spec = JudgeSpec(id="strict", version=2, system="Judge sternly.", path="judges/x/JUDGE.md")
+    run = record_eval(load_skill(SKILL_DIR), FakeLLMClient(handler), judge=spec)
+
+    assert run.judge_hash == judge_identity("Judge sternly.")
+    assert run.judge_hash != judge_identity()
+    assert seen and all(s == "Judge sternly." for s in seen)
+
+
 def test_a_gate_record_counts_what_it_spent() -> None:
     from whetstone.service import record_gate
 

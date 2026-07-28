@@ -9,6 +9,7 @@ import { SkillDetail } from './routes/SkillDetail'
 import { CaseDetail } from './routes/CaseDetail'
 import { RunsIndex } from './routes/RunsIndex'
 import { RunDetail } from './routes/RunDetail'
+import { JudgePage } from './routes/JudgePage'
 import { Triage } from './routes/Triage'
 import { ReviewsIndex } from './routes/ReviewsIndex'
 import { ReviewDetail } from './routes/ReviewDetail'
@@ -29,6 +30,7 @@ const router = createBrowserRouter([
       { path: 'triage', element: <Triage /> },
       { path: 'runs', element: <RunsIndex /> },
       { path: 'runs/:runId', element: <RunDetail /> },
+      { path: 'judge', element: <JudgePage /> },
     ],
   },
 ])

@@ -77,12 +77,8 @@ def test_judge_prompt_is_byte_for_byte_what_it_was_before_identity_existed() -> 
     )
 
 
-def test_judge_identity_is_stable_and_tracks_the_prompt_text(monkeypatch) -> None:
+def test_judge_identity_is_stable_and_tracks_the_prompt_text() -> None:
     before = judge_identity()
     assert before == judge_identity()  # deterministic
     assert len(before) == 64  # sha256 hex
-
-    import whetstone.judge.llm_judge as mod
-
-    monkeypatch.setattr(mod, "_SYSTEM", mod._SYSTEM + " Be stricter.")
-    assert judge_identity() != before  # a prompt edit is a different judge
+    assert judge_identity("Be stricter.") != before  # a doctrine edit is a different judge
