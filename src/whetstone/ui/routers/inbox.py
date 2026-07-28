@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from whetstone import staging
 from whetstone.candidates import CandidateEntry, CandidateStore
 from whetstone.config import Config
-from whetstone.curation import retirement_proposals
+from whetstone.curation import discrimination, retirement_proposals
 from whetstone.domain.run import RunRecord, skill_hash
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateStore
@@ -110,9 +110,12 @@ def _attention(
     # Proposals are computed against the skill a tier flip would actually edit — the staging branch
     # when one exists — so a retirement confirmed a minute ago stops being proposed immediately
     # instead of nagging until the branch merges.
+    curated = staged_skill or skill
     retirements = retirement_proposals(
-        staged_skill or skill, gates.list(skill_id=skill.id, limit=GATE_HISTORY)
+        curated, gates.list(skill_id=skill.id, limit=GATE_HISTORY)
     )
+    probe = store.latest_baseline(skill.id)
+    saturated = discrimination(curated, probe).flagged if probe else []
     action = decide(
         new_signals=len(pending),
         staged=staged,
@@ -123,6 +126,7 @@ def _attention(
         failing_cases=failing,
         total_cases=len(skill.eval_cases),
         retire_ready=len(retirements),
+        saturated=len(saturated),
     )
     return Attention(
         skill_id=skill.id,
@@ -141,6 +145,7 @@ def _attention(
         can_propose=can_propose,
         blocked_reason=blocked,
         retirements=[Retirement(case_id=p.case_id, evidence=p.evidence) for p in retirements],
+        saturated=[Retirement(case_id=c.case_id, evidence=c.evidence) for c in saturated],
         action=action,
     )
 

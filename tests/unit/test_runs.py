@@ -66,6 +66,44 @@ def test_list_filters_by_skill_and_limit(tmp_path: Path) -> None:
     assert len(store.list(limit=1)) == 1
 
 
+def test_baseline_runs_are_invisible_unless_asked_for(tmp_path: Path) -> None:
+    """A probe scores deliberately-blinded guidance; surfacing it as 'the latest run' would read
+    as a catastrophic regression in every trend and inbox row."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_record(run_id="real"))
+    probe = _record(run_id="probe")
+    probe.baseline = True
+    probe.created_at = AT.replace(day=25)  # newer than the real run
+    store.save(probe)
+
+    assert [s.id for s in store.list(skill_id="s")] == ["real"]  # default: real runs only
+    assert [s.id for s in store.list(skill_id="s", baseline=True)] == ["probe"]
+    assert {s.id for s in store.list(skill_id="s", baseline=None)} == {"real", "probe"}
+    assert store.latest("s").id == "real"  # type: ignore[union-attr]
+    assert store.latest_baseline("s").id == "probe"  # type: ignore[union-attr]
+    assert store.latest_baseline("other") is None
+
+
+def test_case_history_excludes_baseline_runs(tmp_path: Path) -> None:
+    """The flakiness view is about the skill; a run with the guidance stripped is not the skill."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_record(run_id="real"))
+    probe = _record(run_id="probe")
+    probe.baseline = True
+    store.save(probe)
+    assert [o.run_id for o in store.case_history("s", "c1")] == ["real"]
+
+
+def test_baseline_flag_survives_an_index_rebuild(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    probe = _record(run_id="probe")
+    probe.baseline = True
+    store.save(probe)
+    (tmp_path / "runs.db").unlink()  # force a rebuild from the record files
+    assert store.list(skill_id="s") == []
+    assert [s.id for s in store.list(skill_id="s", baseline=True)] == ["probe"]
+
+
 def test_summary_carries_metrics(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs")
     store.save(_record())

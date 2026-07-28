@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from whetstone import staging
 from whetstone.config import Config
-from whetstone.curation import retirement_proposals, tier_counts
+from whetstone.curation import Discrimination, discrimination, retirement_proposals, tier_counts
 from whetstone.domain.score import HoldoutReport
 from whetstone.domain.skill import Skill
 from whetstone.gitio import GitError
@@ -86,8 +86,10 @@ class SkillHealth(BaseModel):
     # which case `judge_error` says so — a broken instrument must never render as a healthy blank.
     judge: JudgeView | None = None
     judge_error: str = ""
-    # Sections whose phases have not landed (ANTI_ROT_PLAN.md 2.3, 3.1, 4.1, 5). Null, not absent.
-    discrimination: None = None
+    # What the last saturation probe says: which active should_catch cases the naked model
+    # already passes, and therefore never measured the guidance. None until a probe has run.
+    discrimination: Discrimination | None = None
+    # Sections whose phases have not landed (ANTI_ROT_PLAN.md 3.1, 4.1, 5). Null, not absent.
     drift: None = None
     index: None = None
     cadence: None = None
@@ -105,11 +107,13 @@ def get_health(
     skill = _load_one(root, skill_id)
 
     tiers = tier_counts(skill.eval_cases)
-    # Proposals check the staging branch first, same as the inbox: a flip confirmed a minute ago
-    # lives on the branch, and re-proposing it here until the branch merges would read as a bug.
+    # Curation views check the staging branch first, same as the inbox: a flip confirmed a minute
+    # ago lives on the branch, and re-proposing it here until the branch merges reads as a bug.
+    curated = _staged_or(config, skill)
     proposals = retirement_proposals(
-        _staged_or(config, skill), gates.list(skill_id=skill.id, limit=GATE_HISTORY)
+        curated, gates.list(skill_id=skill.id, limit=GATE_HISTORY)
     )
+    probe = store.latest_baseline(skill.id)
 
     judge: JudgeView | None = None
     judge_error = ""
@@ -133,6 +137,7 @@ def get_health(
         production=_production(reviews, skill.id),
         judge=judge,
         judge_error=judge_error,
+        discrimination=discrimination(curated, probe) if probe else None,
     )
 
 

@@ -92,6 +92,10 @@ class Attention(BaseModel):
     # Cases whose gate history says they stopped discriminating — see `curation.py`. Carried with
     # their evidence so confirming one is a decision made on the row, not after a hunt.
     retirements: list[Retirement] = Field(default_factory=list)
+    # Cases the last saturation probe flagged: the naked model passes them with no guidance at
+    # all, so they measure nothing. Same shape as retirements — both are curation calls a human
+    # makes on the row.
+    saturated: list[Retirement] = Field(default_factory=list)
     action: NextAction
 
     @property
@@ -136,6 +140,7 @@ def decide(
     failing_cases: int,
     total_cases: int,
     retire_ready: int = 0,
+    saturated: int = 0,
 ) -> NextAction:
     """The next action for one skill.
 
@@ -180,13 +185,24 @@ def decide(
             "Draft a change",
             f"failing {failing_cases} case{plural} that real reviews say it should get right",
         )
-    if retire_ready:
-        plural = "s" if retire_ready != 1 else ""
+    if retire_ready or saturated:
+        total = retire_ready + saturated
+        bits = []
+        if retire_ready:
+            bits.append(
+                f"{retire_ready} solved case{'s pass' if retire_ready != 1 else ' passes'} "
+                "every recent gate"
+            )
+        if saturated:
+            bits.append(
+                f"{saturated} case{'s pass' if saturated != 1 else ' passes'} "
+                "with no guidance at all"
+            )
         return _action(
             "curate",
-            f"Retire {retire_ready} solved case{plural}",
-            "these cases pass every recent gate on every version — archiving them spends the "
-            "eval budget at the live edge instead of re-verifying the solved past",
+            f"Curate {total} case{'s' if total != 1 else ''}",
+            " and ".join(bits) + " — archive or tighten them so the eval budget keeps "
+            "measuring the guidance at the live edge",
         )
     return _action("nothing", "", "passing every case it has, with nothing new waiting")
 

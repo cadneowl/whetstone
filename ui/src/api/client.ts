@@ -629,6 +629,12 @@ function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
   }
   // A gate verdict is exactly what decides whether Propose is available.
   if (job.kind === 'gate' || job.kind === 'update') invalidateSkill(client, job.skill_id)
+  if (job.kind === 'baseline') {
+    // A probe changes the discrimination section, every case's baseline verdict, and the inbox's
+    // saturation proposals — but never the run list, which deliberately excludes baseline records.
+    void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })
+    void client.invalidateQueries({ queryKey: ['case', job.skill_id] })
+  }
 }
 
 export function usePlanJob(kind: JobKind) {

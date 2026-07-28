@@ -98,10 +98,31 @@
 >   UI: SkillDetail **Health** tab (`components/HealthPanel.tsx`) with a "Not yet measured"
 >   section naming the missing panels; SkillsIndex row shows the holdout score + a "diverging"
 >   badge past 0.1. Fill in `discrimination` when 2.3 lands and `drift` when 3.1 does.
-> - **Next up: Phase 2.3 — the saturation probe** (`eval baseline`: score active cases with an
->   empty skill body; a should_catch case the naked model passes never measured the guidance;
->   flags become inbox `curate` proposals and fill the health payload's `discrimination`
->   section). Then 2.4 dedup at the promotion door → Phase 3 (drift + synthetic cases).
+> - **2.3 — DONE** (this commit): the saturation probe. `service.strip_guidance` (body, pages,
+>   wiki all removed; archived cases dropped — the probe informs curation of the *live* corpus)
+>   + `record_baseline` (always the full active corpus, never a sample; no holdout partition —
+>   nothing here is learnable-from; `RunRecord.baseline=True`). Store: schema v4, `baseline`
+>   column on both tables; `RunStore.list(baseline=False|True|None)` — **default excludes
+>   probes**, so no trend, inbox row, staleness check, or improve digest can mistake a
+>   deliberately-blinded run for a catastrophic regression; `latest_baseline()`;
+>   `case_history` excludes probes. `curation.discrimination(skill, probe)`: flagged = active
+>   `should_catch` case the naked model caught in *every* trial (a sometimes-pass still
+>   discriminates); noflag out of scope (a naked model staying quiet is the expected state);
+>   cases promoted since the probe are unmeasured, not guessed at; `testing_guidance` =
+>   active_catch − flagged, computed on read so archiving a case changes the answer
+>   immediately. Surfaces: `whetstone eval baseline` (cost confirm, prints flags, `--json`),
+>   `POST /api/jobs/baseline[/plan]` (JobKind "baseline"), health `discrimination` section
+>   (filled, no longer null), `CaseDetail.baseline` verdict, inbox `saturated` proposals
+>   (join retirements under the `curate` action — label now "Curate N cases" naming both
+>   reasons). UI: HealthPanel Discrimination section with per-case Archive buttons + probe
+>   LaunchButton, case page "passes with no guidance" badge, LaunchButton baseline result.
+> - **2.3 deferral** (deliberate): the plan's `barely` flag (passing verdicts within ε of the
+>   cascade threshold) — only meaningful with the cascade on, which is off by default, and it
+>   needs the judge policy threaded into the discrimination read. Add when a deployment
+>   actually enables `escalate_below`.
+> - **Next up: Phase 2.4 — dedup at the promotion door** (`similar_cases` on triage
+>   candidates: same rule provenance, overlapping path, expectation-text overlap — lexical
+>   first, never auto-reject). Then Phase 3 (drift metric + synthetic counterfactuals).
 > - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
 >   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
 >   scheduled job — cadence lands with Phase 5.

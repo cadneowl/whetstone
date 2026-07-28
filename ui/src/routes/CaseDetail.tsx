@@ -20,7 +20,7 @@ export function CaseDetail() {
   if (error) return <ErrorNote error={error} />
   if (!data) return <Empty>Not found.</Empty>
 
-  const { case: evalCase, diff, history } = data
+  const { case: evalCase, diff, history, baseline } = data
   const isCatch = evalCase.kind === 'should_catch'
 
   const overlays: Overlay[] = evalCase.expect.map((e) => ({
@@ -52,6 +52,24 @@ export function CaseDetail() {
           )}
           {evalCase.provenance.human_signal && (
             <span className="text-xs text-muted">“{evalCase.provenance.human_signal}”</span>
+          )}
+          {evalCase.tier === 'archive' && (
+            <Badge tone="neutral" title="Retired: drawn at low weight as regression insurance">
+              archived
+            </Badge>
+          )}
+          {/* The saturation probe's verdict. For a catch case, "passed with no guidance" means
+              the case measures nothing — the base model already knows the lesson, or the
+              expectation is loose enough that anything matches. */}
+          {baseline && isCatch && baseline.passed && (
+            <Badge tone="warn" title={`Probed ${when(baseline.created_at)}`}>
+              passes with no guidance
+            </Badge>
+          )}
+          {baseline && isCatch && !baseline.passed && (
+            <span className="text-xs text-muted" title={`Probed ${when(baseline.created_at)}`}>
+              naked model misses this — the case measures the guidance
+            </span>
           )}
         </div>
         <Intro>

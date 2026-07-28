@@ -10,6 +10,7 @@ from whetstone.core.loader import load_skill
 from whetstone.curation import (
     CurationError,
     RetirementProposal,
+    discrimination,
     retier_yaml,
     retirement_proposals,
     tier_counts,
@@ -17,6 +18,7 @@ from whetstone.curation import (
 from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.refs import RepoRef
+from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
 from whetstone.domain.score import CaseScore, Confusion, SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord, new_gate_id
@@ -196,3 +198,95 @@ def test_a_flipped_case_round_trips_through_the_loader(tmp_path: Path) -> None:
 def test_tier_counts() -> None:
     counts = tier_counts([_case("a"), _case("b", tier="archive"), _case("c")])
     assert counts == {"active": 2, "archive": 1}
+
+
+# --- the saturation probe's readout ----------------------------------------------
+
+
+def _probe(outcomes: dict[str, str]) -> RunRecord:
+    """A baseline record: case id → 'caught' or 'missed' by the naked model."""
+    case_runs = [
+        CaseRun(
+            case_id=case_id,
+            kind="should_catch",
+            trials=[
+                TrialRecord(
+                    index=0,
+                    outcomes=[
+                        ExpectationOutcome(
+                            expectation_id="e1",
+                            must="appear",
+                            outcome="tp" if result == "caught" else "fn",
+                        )
+                    ],
+                )
+            ],
+        )
+        for case_id, result in outcomes.items()
+    ]
+    return RunRecord(
+        id="probe-1",
+        created_at=AT,
+        skill_id="s",
+        skill_version=3,
+        skill_hash="x" * 64,
+        baseline=True,
+        cases=case_runs,
+        score=SkillScore(skill_id="s", version=3, k=1, cases=[]),
+    )
+
+
+def test_a_case_the_naked_model_catches_is_flagged_as_saturated() -> None:
+    skill = _skill(_case("easy"), _case("hard"))
+    found = discrimination(skill, _probe({"easy": "caught", "hard": "missed"}))
+    assert [c.case_id for c in found.flagged] == ["easy"]
+    assert "no guidance at all" in found.flagged[0].evidence
+    assert found.active_catch == 2
+    assert found.testing_guidance == 1
+
+
+def test_archived_and_noflag_cases_are_out_of_scope() -> None:
+    """The probe informs curation of the live catch corpus: a retired case is already decided,
+    and a naked model staying quiet on a noflag case is the expected state, not saturation."""
+    retired = _case("retired", tier="archive")
+    noflag = EvalCase(
+        id="quiet", kind="should_not_flag", change=CodeChange(repo=REPO), expect=[]
+    )
+    skill = _skill(_case("live"), retired, noflag)
+    probe = _probe({"live": "caught", "retired": "caught", "quiet": "caught"})
+    found = discrimination(skill, probe)
+    assert [c.case_id for c in found.flagged] == ["live"]
+    assert found.active_catch == 1
+
+
+def test_a_case_promoted_since_the_probe_is_unmeasured_not_guessed_at() -> None:
+    skill = _skill(_case("old"), _case("new-since-probe"))
+    found = discrimination(skill, _probe({"old": "missed"}))
+    assert found.active_catch == 1  # only what the probe actually scored
+    assert found.flagged == []
+    assert found.testing_guidance == 1
+
+
+def test_a_sometimes_caught_case_still_discriminates() -> None:
+    """Only a case caught in every trial is flagged — a coin-flip pass is not saturation."""
+    trials = [
+        TrialRecord(
+            index=i,
+            outcomes=[
+                ExpectationOutcome(expectation_id="e1", must="appear", outcome=outcome)
+            ],
+        )
+        for i, outcome in enumerate(["tp", "fn"])
+    ]
+    probe = RunRecord(
+        id="probe-2",
+        created_at=AT,
+        skill_id="s",
+        skill_version=3,
+        skill_hash="x" * 64,
+        baseline=True,
+        k=2,
+        cases=[CaseRun(case_id="flaky", kind="should_catch", trials=trials)],
+        score=SkillScore(skill_id="s", version=3, k=2, cases=[]),
+    )
+    assert discrimination(_skill(_case("flaky")), probe).flagged == []

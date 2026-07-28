@@ -326,6 +326,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/baseline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Baseline
+         * @description Run the saturation probe and store it as a baseline record.
+         *
+         *     The record lands in the run store but is excluded from every default listing — a run with the
+         *     guidance deliberately stripped must never read as a regression in a trend or an inbox. Its one
+         *     consumer is the discrimination view: which cases the naked model already passes.
+         */
+        post: operations["launch_baseline_api_jobs_baseline_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/baseline/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Baseline Job */
+        post: operations["plan_baseline_job_api_jobs_baseline_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/eval": {
         parameters: {
             query?: never;
@@ -1056,6 +1097,8 @@ export interface components {
             recall?: number | null;
             /** Retirements */
             retirements?: components["schemas"]["Retirement"][];
+            /** Saturated */
+            saturated?: components["schemas"]["Retirement"][];
             /**
              * Scored
              * @default false
@@ -1091,6 +1134,39 @@ export interface components {
             label: string;
             /** Name */
             name: string;
+        };
+        /**
+         * BaselineRequest
+         * @description Probe a skill's corpus with the guidance stripped — the saturation diagnostic.
+         */
+        BaselineRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Skill Id */
+            skill_id: string;
+        };
+        /**
+         * BaselineVerdict
+         * @description What the last saturation probe said about one case: did the naked model already pass it?
+         */
+        BaselineVerdict: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Passed */
+            passed: boolean;
+            /** Run Id */
+            run_id: string;
         };
         /**
          * BatchView
@@ -1168,6 +1244,7 @@ export interface components {
         };
         /** CaseDetail */
         CaseDetail: {
+            baseline?: components["schemas"]["BaselineVerdict"] | null;
             case: components["schemas"]["EvalCase"];
             /** Diff */
             diff: string;
@@ -1464,6 +1541,31 @@ export interface components {
             /** Candidate Id */
             candidate_id: string;
             decision: components["schemas"]["Decision"];
+        };
+        /**
+         * Discrimination
+         * @description What the latest saturation probe says about the corpus — the health payload's section.
+         *
+         *     Computed on read from the probe record and the current corpus, never stored: a case archived
+         *     or promoted since the probe should change the answer immediately, not at the next probe.
+         */
+        Discrimination: {
+            /** Active Catch */
+            active_catch: number;
+            /** Baseline Run Id */
+            baseline_run_id: string;
+            /** Flagged */
+            flagged: components["schemas"]["SaturatedCase"][];
+            /**
+             * Measured At
+             * Format: date-time
+             */
+            measured_at: string;
+            /**
+             * Testing Guidance
+             * @description Cases the naked model failed — the ones still capable of measuring the guidance.
+             */
+            readonly testing_guidance: number;
         };
         /**
          * Discussion
@@ -2177,7 +2279,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -3192,6 +3294,11 @@ export interface components {
              */
             backend: string;
             /**
+             * Baseline
+             * @default false
+             */
+            baseline: boolean;
+            /**
              * Cases
              * @default []
              */
@@ -3275,6 +3382,11 @@ export interface components {
              */
             backend: string;
             /**
+             * Baseline
+             * @default false
+             */
+            baseline: boolean;
+            /**
              * Created At
              * Format: date-time
              */
@@ -3342,6 +3454,16 @@ export interface components {
             skill_id: string;
             /** Skill Version */
             skill_version: number;
+        };
+        /**
+         * SaturatedCase
+         * @description One active case the naked model already passes — a case that measures nothing.
+         */
+        SaturatedCase: {
+            /** Case Id */
+            case_id: string;
+            /** Evidence */
+            evidence: string;
         };
         /**
          * ScoreNow
@@ -3578,8 +3700,7 @@ export interface components {
             /** Cadence */
             cadence?: null;
             composition: components["schemas"]["Composition"];
-            /** Discrimination */
-            discrimination?: null;
+            discrimination?: components["schemas"]["Discrimination"] | null;
             /** Drift */
             drift?: null;
             /** Index */
@@ -4455,6 +4576,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Job"][];
+                };
+            };
+        };
+    };
+    launch_baseline_api_jobs_baseline_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BaselineRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_baseline_job_api_jobs_baseline_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BaselineRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
