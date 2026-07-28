@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from pydantic import BaseModel
 
 from whetstone.domain.eval_model import EvalCase
+from whetstone.domain.score import Confusion, HoldoutReport, SkillScore
 from whetstone.steps import SamplePolicy
 
 
@@ -138,3 +139,58 @@ def _ordered(cases: list[EvalCase], seed: int) -> list[EvalCase]:
 
 def _rank(case_id: str, seed: int) -> str:
     return hashlib.sha256(f"{seed}:{case_id}".encode()).hexdigest()
+
+
+# --- the holdout partition ------------------------------------------------------
+
+
+def partition_of(case_id: str, fraction: float) -> str:
+    """Which partition a case belongs to: `train` (the improve loop may learn from it) or
+    `holdout` (it may only ever be scored).
+
+    The improve digest reads failures from the same corpus the gate then scores — train equals
+    test, structurally — so over many cycles the score is guaranteed to climb faster than real
+    capability: the drafter is shown the answers. The holdout is the always-on alarm for that:
+    a slice of cases the drafter never sees, whose score diverging from train's is overfitting
+    made visible.
+
+    Membership is a hash of the case id and nothing else — deliberately **unseeded**. A seed
+    would offer exactly the workaround this partition exists to prevent: re-rolling until the
+    failures you want to learn from land in train. Stable forever, on any machine; a case's
+    partition is decided the moment it is named.
+    """
+    if fraction <= 0:
+        return "train"
+    digest = hashlib.sha256(b"holdout:" + case_id.encode("utf-8")).digest()
+    bucket = int.from_bytes(digest[:8], "big") / 2**64
+    return "holdout" if bucket < fraction else "train"
+
+
+def holdout_report(score: SkillScore, fraction: float) -> HoldoutReport | None:
+    """Per-partition metrics for a scored run, or None when there is nothing to compare.
+
+    None rather than a report full of zeros: a divergence computed over zero holdout cases is
+    noise wearing the costume of a number, and the UI should say "no holdout cases scored"
+    instead of charting it.
+    """
+    if fraction <= 0:
+        return None
+    parts: dict[str, list[Confusion]] = {"train": [], "holdout": []}
+    counts = {"train": 0, "holdout": 0}
+    for case in score.cases:
+        part = partition_of(case.case_id, fraction)
+        parts[part].append(case.confusion)
+        counts[part] += 1
+    if not counts["holdout"]:
+        return None
+    train = sum(parts["train"], Confusion())
+    held = sum(parts["holdout"], Confusion())
+    return HoldoutReport(
+        fraction=fraction,
+        train_cases=counts["train"],
+        train_recall=train.recall,
+        train_fp_rate=train.fp_rate,
+        holdout_cases=counts["holdout"],
+        holdout_recall=held.recall,
+        holdout_fp_rate=held.fp_rate,
+    )

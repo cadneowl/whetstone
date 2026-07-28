@@ -481,8 +481,10 @@ def launch_improve(
             "rationale": result.proposal.rationale,
             "targeted_cases": result.proposal.targeted_cases,
             "unknown_cases": result.unknown_cases,
+            "holdout_cases": result.holdout_cases,
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
+            "holdout_withheld": result.digest.holdout_withheld,
             "shown": len(result.digest.clusters),
         }
 

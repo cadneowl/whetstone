@@ -20,7 +20,7 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalKind, Must
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region
-from whetstone.domain.score import Confusion, SkillScore
+from whetstone.domain.score import Confusion, HoldoutReport, SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort
 from whetstone.wiki import wiki_digest
@@ -187,6 +187,11 @@ class CaseRun(BaseModel):
 
     case_id: str
     kind: EvalKind
+    # Which side of the holdout split this case is on (`sampling.partition_of`). Stamped at record
+    # time so the digest and the drill-down read the run's own truth instead of recomputing with a
+    # fraction that may have been reconfigured since. "train" is also what every pre-holdout
+    # record loads as, which is honest: everything was learnable-from before the split existed.
+    partition: Literal["train", "holdout"] = "train"
     trials: list[TrialRecord] = []
 
     @property
@@ -255,6 +260,10 @@ class RunRecord(BaseModel):
 
     cases: list[CaseRun] = []
     score: SkillScore
+    # Train vs holdout, when the skill's sample policy holds cases out. None for pre-holdout
+    # records and for runs whose draw contained no holdout cases — absent, not zeros, because a
+    # divergence over nothing is noise wearing the costume of a number.
+    holdout: HoldoutReport | None = None
 
     def case(self, case_id: str) -> CaseRun | None:
         return next((c for c in self.cases if c.case_id == case_id), None)

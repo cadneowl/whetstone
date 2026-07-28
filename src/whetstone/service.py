@@ -41,7 +41,7 @@ from whetstone.domain.eval_model import (
 )
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunRecord, guidance_hash, skill_hash
-from whetstone.domain.score import SkillScore
+from whetstone.domain.score import HoldoutReport, SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord, new_gate_id
 from whetstone.judge.cascade import CascadingJudgeFactory, GroundedJudge
@@ -53,7 +53,7 @@ from whetstone.providers.base import IssueConnector, ReviewConnector
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
-from whetstone.sampling import sample_cases
+from whetstone.sampling import holdout_report, partition_of, sample_cases
 from whetstone.steps import JudgePolicy, SamplePolicy
 from whetstone.wiki import WikiLimits
 
@@ -157,6 +157,13 @@ def record_eval(
     )
     duration = time.perf_counter() - clock
 
+    # Stamp each case's holdout partition into the record, so the improve digest and the
+    # drill-down read the run's own truth rather than recomputing with a fraction that may have
+    # been reconfigured since.
+    fraction = (sample or SamplePolicy()).holdout_fraction
+    for case_run in cases:
+        case_run.partition = partition_of(case_run.case_id, fraction)  # type: ignore[assignment]
+
     return RunRecord(
         id=new_run_id(skill.id, started_at),
         created_at=started_at,
@@ -182,6 +189,7 @@ def record_eval(
         git_ref=git_ref,
         cases=cases,
         score=score,
+        holdout=holdout_report(score, fraction),
     )
 
 
@@ -357,6 +365,18 @@ def gate_skills(
     function rather than anything it constructs.
     """
     cfg = cfg or GateConfig()
+    fraction = (sample or SamplePolicy()).holdout_fraction
+    # A targeted case must come from the train partition: a change may only claim to fix cases
+    # the improve drafter was allowed to see. Without this rule, targeted-case pressure leaks
+    # holdout cases into prompts one at a time, and the overfitting alarm quietly disconnects
+    # itself.
+    leaked = sorted(c for c in cfg.targeted_cases if partition_of(c, fraction) == "holdout")
+    if leaked:
+        raise ValueError(
+            f"targeted case(s) {', '.join(leaked)} are in the holdout partition — the improve "
+            "loop never sees their failures, so a change cannot claim to fix them. They are "
+            "still scored; their effect shows up in the holdout score, which is the point."
+        )
     # Sampled once, from the union, and handed to both sides. Sampling each side separately would
     # draw different cases whenever their case sets differ, which is exactly the situation a gate
     # exists for. Targeted cases are forced in: a change claiming to fix case X that is then never
@@ -368,14 +388,17 @@ def gate_skills(
     # `cancel` reaches both sides. A gate is the most expensive thing here — it scores two skills
     # over the same cases — so it is the one an operator is most likely to want to stop, and
     # without this the stop button was accepted, ignored, and the spending carried on.
+    # The cases are already drawn; this no-draw policy only carries the holdout fraction down so
+    # each side's partition stamping matches the skill's own configuration.
+    no_draw = SamplePolicy(max_cases=None, holdout_fraction=fraction)
     base_score = run_eval(
         base.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy,
+        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_base, cancel=cancel,
     )
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy,
+        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_candidate, cancel=cancel,
     )
     result = gate(base_score, candidate_score, cfg)
@@ -423,6 +446,7 @@ def record_gate(
     )
     duration = time.perf_counter() - clock
 
+    fraction = (sample or SamplePolicy()).holdout_fraction
     candidate_hash = skill_hash(candidate)
     return GateRecord(
         id=new_gate_id(candidate.id, candidate_hash, started_at),
@@ -449,6 +473,8 @@ def record_gate(
         result=outcome.result,
         base_score=outcome.base,
         candidate_score=outcome.candidate,
+        base_holdout=holdout_report(outcome.base, fraction),
+        candidate_holdout=holdout_report(outcome.candidate, fraction),
     )
 
 
@@ -800,6 +826,16 @@ def format_score(score: SkillScore) -> str:
         )
         lines.append(f"    [{tag}] {c.case_id:<32} {metric}")
     return "\n".join(lines)
+
+
+def format_holdout(h: HoldoutReport) -> str:
+    """Train vs holdout on one line, divergence last because it is the number to react to."""
+    return (
+        f"  train   recall {h.train_recall:.3f}  fp_rate {h.train_fp_rate:.3f}  "
+        f"({h.train_cases} case(s))\n"
+        f"  holdout recall {h.holdout_recall:.3f}  fp_rate {h.holdout_fp_rate:.3f}  "
+        f"({h.holdout_cases} case(s))  divergence {h.divergence:+.3f}"
+    )
 
 
 def format_gate(r: GateResult) -> str:

@@ -15,7 +15,6 @@ from whetstone.providers.base import Capability, ConnectorError
 from whetstone.providers.gitlab.client import GitLabHttp
 from whetstone.providers.gitlab.normalize import file_change, mr_ref, review_thread
 
-
 # A GitLab merge-request URL: `<base>/<group>/<project>/-/merge_requests/<iid>`, where the project
 # path may itself be nested groups (`a/b/c`). Anything after the number — `/diffs`, `#note_5`, a
 # query string — is ignored, so a link copied from anywhere in the MR still resolves.
