@@ -24,7 +24,7 @@ def test_skills_list() -> None:
     result = runner.invoke(app, ["skills", "list", "--root", str(SKILLS_ROOT)])
     assert result.exit_code == 0
     assert "code-review-rust-error-handling" in result.stdout
-    assert "3 eval cases" in result.stdout
+    assert "4 eval cases" in result.stdout
 
 
 def test_providers_list() -> None:
@@ -341,7 +341,7 @@ def test_eval_run_dry_run_needs_no_credentials() -> None:
     result = runner.invoke(app, ["eval", "run", "--skill", skill, "--dry-run"])
     assert result.exit_code == 0
     assert "code-review-rust-error-handling" in result.stdout
-    assert "3 eval case" in result.stdout
+    assert "4 eval case" in result.stdout
 
 
 def test_eval_gate_dry_run_dir_mode() -> None:

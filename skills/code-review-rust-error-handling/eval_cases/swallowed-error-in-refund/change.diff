@@ -1,0 +1,11 @@
+diff --git a/src/handlers/refund.rs b/src/handlers/refund.rs
+--- a/src/handlers/refund.rs
++++ b/src/handlers/refund.rs
+@@ -30,5 +30,5 @@ impl RefundHandler {
+     pub fn refund(&self, id: u64) -> Result<()> {
+         let amount = self.lookup(id)?;
+-        self.ledger.commit(amount)?;
++        let _ = self.ledger.commit(amount);
+         Ok(())
+     }
+ }

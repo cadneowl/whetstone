@@ -36,7 +36,8 @@ FAKE_REPO = RepoRef.parse("gitlab:acme/payments")
 
 
 def _flag_handler(flag_tests: bool):
-    """Build a fake-LLM handler: flags unwrap in the handler file, optionally also in test files."""
+    """Build a fake-LLM handler: catches the two real defects (the unwrap and the swallowed error),
+    optionally also flagging the idiomatic unwrap in test files."""
 
     from whetstone.judge.llm_judge import JudgeVerdict
 
@@ -53,6 +54,16 @@ def _flag_handler(flag_tests: bool):
                 ]
             )
         if "refund.rs" in user:
+            # refund.rs carries two cases: the swallowed-error catch case (`let _ =`) and the
+            # error-mapped noflag case (`?`). Flag the swallow; stay silent on the clean one.
+            if "let _ =" in user:
+                return LLMFindingList(
+                    findings=[
+                        LLMFinding(
+                            path="src/handlers/refund.rs", line=32, message="swallowed error"
+                        )
+                    ]
+                )
             return LLMFindingList(findings=[])
         return LLMFindingList(
             findings=[LLMFinding(path="src/handlers/charge.rs", line=41, message="unwrap panics")]

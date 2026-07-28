@@ -51,7 +51,12 @@ def test_loads_references_from_meta() -> None:
 def test_loads_eval_cases_with_parsed_changes() -> None:
     skill = load_skill(SKILL_DIR)
     ids = {c.id for c in skill.eval_cases}
-    assert ids == {"unwrap-in-handler", "unwrap-in-test", "error-mapped-question-mark"}
+    assert ids == {
+        "unwrap-in-handler",
+        "unwrap-in-test",
+        "error-mapped-question-mark",
+        "swallowed-error-in-refund",
+    }
 
     handler = next(c for c in skill.eval_cases if c.id == "unwrap-in-handler")
     assert handler.kind == "should_catch"

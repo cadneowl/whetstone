@@ -197,9 +197,16 @@ def test_a_diff_with_no_hunk_header_is_left_alone() -> None:
 
 
 def test_reviewer_plugs_into_run_skill() -> None:
-    # A finding only for the handler file → should_catch passes, should_not_flag cases stay clean.
+    # Catch the two real defects, stay silent on the noflag cases: an unwrap finding on charge.rs,
+    # a swallowed-error finding on refund.rs's `let _ =` case, and nothing on the clean files.
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        if "charge_test.rs" in user or "refund.rs" in user:
+        if "refund.rs" in user:
+            if "let _ =" in user:
+                return LLMFindingList(
+                    findings=[LLMFinding(path="src/handlers/refund.rs", line=32, message="swallow")]
+                )
+            return LLMFindingList(findings=[])
+        if "charge_test.rs" in user:
             return LLMFindingList(findings=[])
         return LLMFindingList(
             findings=[LLMFinding(path="src/handlers/charge.rs", line=41, message="unwrap")]

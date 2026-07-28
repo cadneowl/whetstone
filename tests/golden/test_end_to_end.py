@@ -4,6 +4,11 @@ Demonstrates the whole point of Milestone 1: two versions of the same skill's *r
 one (flags every unwrap) and a sharpened one (scopes the rule out of test files) — are scored over
 the committed eval cases, and the regression gate correctly PASSES the improvement and FAILS the
 reverse.
+
+The reference skill exercises both of its rules: R1 (no unchecked panics) has the two unwrap
+catch cases, and R2 (no swallowed errors) has `swallowed-error-in-refund`. Both reviewers carry an
+identical R2 rule, so R2 is caught either way — it adds a second true positive without touching the
+naive-vs-sharpened false-positive contrast, which is entirely about R1's test-file scoping.
 """
 
 from pathlib import Path
@@ -20,10 +25,21 @@ JUDGE = DeterministicJudge()
 
 UNWRAP = r"\.unwrap\(\)"
 MSG = "avoid unwrap() in non-test code"
+NOT_TEST = r"(_test\.rs$|/tests/|test)"
+
+# R2 is the same in both reviewers: swallowing an error is wrong in service code whether or not
+# the unwrap rule has been sharpened, so it catches `swallowed-error-in-refund` on each side.
+R2 = PatternRule(
+    rule_id="R2",
+    pattern=r"let _ =",
+    severity=Severity.warning,
+    message="swallowed error: Result discarded without handling",
+    exclude_path=NOT_TEST,
+)
 
 NAIVE = PatternReviewer(
     "code-review-rust-error-handling",
-    [PatternRule(rule_id="R1", pattern=UNWRAP, severity=Severity.warning, message=MSG)],
+    [PatternRule(rule_id="R1", pattern=UNWRAP, severity=Severity.warning, message=MSG), R2],
 )
 SHARPENED = PatternReviewer(
     "code-review-rust-error-handling",
@@ -33,8 +49,9 @@ SHARPENED = PatternReviewer(
             pattern=UNWRAP,
             severity=Severity.warning,
             message=MSG,
-            exclude_path=r"(_test\.rs$|/tests/|test)",
-        )
+            exclude_path=NOT_TEST,
+        ),
+        R2,
     ],
 )
 
@@ -42,10 +59,11 @@ SHARPENED = PatternReviewer(
 def test_naive_reviewer_has_false_positive_on_test_file() -> None:
     skill = load_skill(SKILL_DIR)
     score = run_skill(skill, NAIVE, JUDGE)
-    # catches the real unwrap, but also flags the idiomatic unwrap in the test file.
+    # catches both real defects (the unwrap and the swallowed error), but also flags the idiomatic
+    # unwrap in the test file.
     assert score.recall == 1.0
     assert score.fp_rate == 0.5  # 1 FP (test file) out of 2 not_appear cases
-    assert score.confusion.tp == 1 and score.confusion.fp == 1 and score.confusion.tn == 1
+    assert score.confusion.tp == 2 and score.confusion.fp == 1 and score.confusion.tn == 1
 
 
 def test_sharpened_reviewer_removes_false_positive() -> None:
@@ -53,7 +71,7 @@ def test_sharpened_reviewer_removes_false_positive() -> None:
     score = run_skill(skill, SHARPENED, JUDGE)
     assert score.recall == 1.0
     assert score.fp_rate == 0.0
-    assert score.confusion.tp == 1 and score.confusion.fp == 0 and score.confusion.tn == 2
+    assert score.confusion.tp == 2 and score.confusion.fp == 0 and score.confusion.tn == 2
 
 
 def test_gate_passes_the_improvement() -> None:

@@ -1,0 +1,17 @@
+id: swallowed-error-in-refund
+kind: should_catch
+repo: "gitlab:acme/payments"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/payments!780"
+  human_signal: "reviewer requested change; error was being discarded with `let _ =`"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: src/handlers/refund.rs
+      line_range: [30, 34]
+    semantic: "the ledger commit's Result is discarded with `let _ =`, so a failed write is swallowed silently instead of propagated"
+    severity_min: warning
+    pattern: "swallow"
