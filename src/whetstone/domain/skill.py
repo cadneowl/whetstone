@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from whetstone.caseindex import SkillIndex
 from whetstone.domain.eval_model import EvalCase, Provenance
 from whetstone.wiki import SkillWiki
 
@@ -62,3 +63,6 @@ class Skill(BaseModel):
     # Repo context, retrieved per change and injected into the review prompt. Empty for most
     # skills; a skill with one is reviewing against knowledge of the codebase, not just rules.
     wiki: SkillWiki = SkillWiki()
+    # The committed retrieval index over the eval corpus (`caseindex.py`). Empty for skills that
+    # have never built one — retrieval then simply does not happen, the no-wiki precedent.
+    index: SkillIndex = SkillIndex()

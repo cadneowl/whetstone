@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from whetstone.caseindex import INDEX_DIR, CaseIndexError, load_index
 from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalCase, Expectation, Provenance
@@ -31,7 +32,7 @@ SKILL_FILE_NAME = "SKILL.md"
 
 # Folders under a skill that hold something other than guidance. Everything else is guidance and is
 # sent to the reviewer, so this list is the whole contract — see `GuidancePage`.
-_NOT_GUIDANCE = {"eval_cases", WIKI_DIR, *STEP_KINDS}
+_NOT_GUIDANCE = {"eval_cases", WIKI_DIR, INDEX_DIR, *STEP_KINDS}
 
 
 def _is_markdown(name: str) -> bool:
@@ -125,6 +126,12 @@ def load_skill(path: str | Path) -> Skill:
         # so a skill that loads with a silently-empty wiki would score against different content
         # than the one a gate approved.
         raise SkillLoadError(f"{path}: invalid wiki: {e}") from e
+    try:
+        index = load_index(path / INDEX_DIR)
+    except CaseIndexError as e:
+        # Same reasoning as the wiki: the index is inside `skill_hash`, so loading around a broken
+        # one would score content no gate has ever identified.
+        raise SkillLoadError(f"{path}: invalid case index: {e}") from e
 
     return Skill(
         id=skill_id,
@@ -140,6 +147,7 @@ def load_skill(path: str | Path) -> Skill:
         owner=str(fm.get("owner") or meta.get("owner") or ""),
         provenance=_load_provenance(meta.get("provenance")),
         wiki=wiki,
+        index=index,
     )
 
 

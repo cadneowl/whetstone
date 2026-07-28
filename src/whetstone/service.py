@@ -15,6 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from whetstone.caseindex import PrecedentLimits, SkillIndex
 from whetstone.core.gate import GateConfig, GateResult, gate
 from whetstone.core.harness import EventSink, run_skill_recorded
 from whetstone.corpus.builder import (
@@ -51,6 +52,7 @@ from whetstone.judge.llm_judge import LLMJudge, judge_identity
 from whetstone.judge.spec import JudgeSpec
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.counting import CountingClient
+from whetstone.llm.embedding import Embedder, build_embedder
 from whetstone.providers.base import IssueConnector, ReviewConnector
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
@@ -75,6 +77,7 @@ def run_eval(
     judge_effort: Effort = "medium",
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    precedent_limits: PrecedentLimits | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     on_event: EventSink | None = None,
@@ -89,6 +92,7 @@ def run_eval(
         judge_effort=judge_effort,
         sample=sample,
         wiki_limits=wiki_limits,
+        precedent_limits=precedent_limits,
         judge=judge,
         judge_policy=judge_policy,
         on_event=on_event,
@@ -114,6 +118,7 @@ def record_eval(
     now: datetime | None = None,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    precedent_limits: PrecedentLimits | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     baseline: bool = False,
@@ -136,7 +141,13 @@ def record_eval(
     judge_system = judge.system if judge else None
     cascade = judge_policy if judge_policy is not None and judge_policy.enabled else None
     counted = CountingClient(client)
-    reviewer = LLMReviewer(counted, effort=reviewer_effort, wiki_limits=wiki_limits)
+    reviewer = LLMReviewer(
+        counted,
+        effort=reviewer_effort,
+        wiki_limits=wiki_limits,
+        embedder=_embedder_for(skill),
+        precedent_limits=precedent_limits,
+    )
     tier1 = LLMJudge(counted, effort=judge_effort, system=judge_system)
     llm_judge: LLMJudge | CascadingJudgeFactory = (
         CascadingJudgeFactory(
@@ -197,19 +208,35 @@ def record_eval(
     )
 
 
+def _embedder_for(skill: Skill) -> Embedder | None:
+    """The pinned embedding backend the skill's index names, or None when there is no index.
+
+    Built from the committed manifest rather than injected: the model is part of the index's
+    identity, so the caller has nothing to choose — a knob here would let a run retrieve with a
+    model the vectors were not built with, which is precisely the nondeterminism the pin exists
+    to rule out.
+    """
+    if skill.index.is_empty():
+        return None
+    return build_embedder(skill.index.provider, model=skill.index.model)
+
+
 def strip_guidance(skill: Skill) -> Skill:
     """The skill with everything that could help the reviewer removed — what a baseline probes.
 
-    Body, companion pages, and wiki all go: each reaches the review prompt, and the question the
-    probe asks is what the *naked* model catches, not what the model minus one kind of help
-    catches. Archived cases are dropped too — the probe informs curation of the live corpus, and
-    counting deliberately-retired cases would re-litigate decisions already made.
+    Body, companion pages, wiki, and the case index all go: each reaches the review prompt, and
+    the question the probe asks is what the *naked* model catches, not what the model minus one
+    kind of help catches — a probe with precedent retrieval left on would credit the base model
+    with the corpus's own lessons. Archived cases are dropped too: the probe informs curation of
+    the live corpus, and counting deliberately-retired cases would re-litigate decisions already
+    made.
     """
     return skill.model_copy(
         update={
             "body": "",
             "pages": [],
             "wiki": SkillWiki(),
+            "index": SkillIndex(),
             "eval_cases": [c for c in skill.eval_cases if c.tier == "active"],
         }
     )
@@ -289,7 +316,7 @@ def record_review(
     guidance that has since been rewritten describe a reviewer that no longer exists.
     """
     counted = CountingClient(client)
-    reviewer = LLMReviewer(counted, effort=reviewer_effort)
+    reviewer = LLMReviewer(counted, effort=reviewer_effort, embedder=_embedder_for(skill))
 
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
@@ -317,6 +344,9 @@ def record_review(
         llm_calls=counted.calls,
         change=change,
         findings=findings,
+        # Which corpus cases shaped this review — what makes a finding explainable as "flagged
+        # like case-X was". Empty for a skill without an index, exactly as before.
+        precedents=reviewer.last_precedents,
     )
 
 
@@ -416,6 +446,7 @@ def gate_skills(
     trials: int = 1,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    precedent_limits: PrecedentLimits | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     on_base: EventSink | None = None,
@@ -461,14 +492,18 @@ def gate_skills(
     # The cases are already drawn; this no-draw policy only carries the holdout fraction down so
     # each side's partition stamping matches the skill's own configuration.
     no_draw = SamplePolicy(max_cases=None, holdout_fraction=fraction)
+    # Each side keeps its own index (or lack of one): a gate for "does precedent injection help?"
+    # is precisely base-without against candidate-with, over the same cases.
     base_score = run_eval(
         base.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy, sample=no_draw,
+        wiki_limits=wiki_limits, precedent_limits=precedent_limits,
+        judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_base, cancel=cancel,
     )
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, judge=judge, judge_policy=judge_policy, sample=no_draw,
+        wiki_limits=wiki_limits, precedent_limits=precedent_limits,
+        judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_candidate, cancel=cancel,
     )
     result = gate(base_score, candidate_score, cfg)
@@ -491,6 +526,7 @@ def record_gate(
     now: datetime | None = None,
     sample: SamplePolicy | None = None,
     wiki_limits: WikiLimits | None = None,
+    precedent_limits: PrecedentLimits | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     on_base: EventSink | None = None,
@@ -511,7 +547,7 @@ def record_gate(
     clock = time.perf_counter()
     outcome = gate_skills(
         base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
-        judge=judge, judge_policy=judge_policy,
+        precedent_limits=precedent_limits, judge=judge, judge_policy=judge_policy,
         on_base=on_base, on_candidate=on_candidate, cancel=cancel,
     )
     duration = time.perf_counter() - clock

@@ -18,6 +18,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from whetstone import staging
+from whetstone.caseindex import stale_cases
 from whetstone.config import Config
 from whetstone.curation import Discrimination, discrimination, retirement_proposals, tier_counts
 from whetstone.domain.score import HoldoutReport
@@ -97,6 +98,22 @@ class DriftSection(BaseModel):
 DRIFT_HISTORY = 10
 
 
+class IndexSection(BaseModel):
+    """The committed retrieval index, and how far the live corpus has moved past it.
+
+    `stale` names active cases the index does not cover — promoted or edited since the last
+    build. A non-empty list is not an error; it is the newest lessons not yet retrievable, and a
+    rebuild is how the index catches up (at the price of a fresh gate, since the index is inside
+    `skill_hash`).
+    """
+
+    model: str
+    provider: str = ""
+    built_at: str = ""
+    cases: int
+    stale: list[str] = []
+
+
 class SkillHealth(BaseModel):
     skill_id: str
     version: int
@@ -114,8 +131,9 @@ class SkillHealth(BaseModel):
     discrimination: Discrimination | None = None
     # Whether the corpus still looks like the recent MR stream. None until a drift probe has run.
     drift: DriftSection | None = None
-    # Sections whose phases have not landed (ANTI_ROT_PLAN.md 4.1, 5). Null, not absent.
-    index: None = None
+    # The retrieval index precedent injection reads. None until one has been built.
+    index: IndexSection | None = None
+    # The one section whose phase has not landed (ANTI_ROT_PLAN.md 5). Null, not absent.
     cadence: None = None
 
 
@@ -165,6 +183,21 @@ def get_health(
         judge_error=judge_error,
         discrimination=discrimination(curated, probe) if probe else None,
         drift=_drift_section(drift, skill.id),
+        # From the staged skill, like every curation view: a rebuild staged a minute ago must
+        # show here immediately, not after its branch merges.
+        index=_index_section(curated),
+    )
+
+
+def _index_section(skill: Skill) -> IndexSection | None:
+    if skill.index.is_empty():
+        return None
+    return IndexSection(
+        model=skill.index.model,
+        provider=skill.index.provider,
+        built_at=skill.index.built_at,
+        cases=len(skill.index.cases),
+        stale=stale_cases(skill),
     )
 
 

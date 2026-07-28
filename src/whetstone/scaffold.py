@@ -59,6 +59,11 @@ inputs:
     # of every trial on both sides of a gate, which is why these are small.
     max_pages: 4
     max_bytes: 24000
+  precedents:
+    # Precedent cases injected per review, when this skill has a committed case index
+    # (`whetstone skills index`). Same cost discipline as the wiki caps.
+    max_cases: 3
+    max_bytes: 8000
 
 judge:
   # Confidence under which a verdict is re-judged grounded in the case's own diff. The judge's
