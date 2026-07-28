@@ -238,6 +238,15 @@ def draft_expectation(
         )
     except StepError as exc:
         raise Unprocessable(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a backend failure must not 500 with a raw traceback
+        # This is the one model call the console makes synchronously — eval, gate and review run as
+        # jobs, whose runner catches backend failures and shows the message. A missing API key, an
+        # unreachable local server, or a malformed response would otherwise escape as a bare 500, so
+        # convert it to the reason plus the fix the operator can actually act on.
+        raise Unprocessable(
+            f"the drafting model call failed via {backend.label}: {exc}. Check that backend, or "
+            "switch the model (top-right) to one that is reachable — e.g. a local Ollama."
+        ) from exc
     return DraftResponse(draft=draft, drafted_by=backend.model)
 
 
