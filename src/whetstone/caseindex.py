@@ -259,6 +259,7 @@ def retrieve_precedents(
     *,
     query_hash: str = "",
     limits: PrecedentLimits | None = None,
+    corpus: list[EvalCase] | None = None,
 ) -> Precedents:
     """The k nearest indexed cases to an already-embedded change.
 
@@ -266,6 +267,14 @@ def retrieve_precedents(
     stays a pure function of (vector, index, corpus) — same inputs, same precedents, which is the
     property that keeps a gate comparison fair. Ranked by cosine similarity, ties broken by case
     id so filesystem order can never reorder a prompt.
+
+    `corpus` is the set of cases a precedent may be *rendered* from — the skill's full active
+    corpus, defaulting to `skill.eval_cases`. It is a separate argument because on a sampled run
+    `skill.eval_cases` is only the drawn subset, and resolving precedents from it would silently
+    shrink the precedent pool to whatever cases happened to be scored — defeating the feature
+    exactly on the large corpora that need sampling. The index is built over the whole active
+    corpus; retrieval must be able to see all of it. (A precedent still needs its `EvalCase` to be
+    renderable at all: one truly gone from the corpus is skipped, as before.)
 
     `query_hash` is the content hash of the change being reviewed, and it exists because a case
     must never be its own precedent: at eval time the query diff *is* a case diff, and retrieval
@@ -278,7 +287,12 @@ def retrieve_precedents(
     if index.is_empty() or not change_vector:
         return Precedents()
 
-    by_id = {c.id: c for c in skill.eval_cases}
+    by_id = {c.id: c for c in (corpus if corpus is not None else skill.eval_cases)}
+    # Hoisted out of the per-case loop: the query norm is the same for every candidate, so
+    # recomputing it N times is wasted work that grows with the corpus. Case norms are still per
+    # vector; if a live corpus ever outgrows a pure-Python scan, precompute those too (or a numpy
+    # matmul) — the vectors are already resident, so it is purely a CPU question, not a memory one.
+    query_norm = sqrt(sum(x * x for x in change_vector))
     ranked: list[tuple[float, str]] = []
     for case_id, case_hash in index.cases.items():
         if query_hash and case_hash == query_hash:
@@ -289,7 +303,7 @@ def retrieve_precedents(
         vector = index.vectors.get(case_hash)
         if not vector:
             continue
-        ranked.append((_cosine(change_vector, vector), case_id))
+        ranked.append((_cosine(change_vector, vector, a_norm=query_norm), case_id))
     ranked.sort(key=lambda row: (-row[0], row[1]))
 
     refs: list[PrecedentRef] = []
@@ -330,9 +344,13 @@ def _render_precedent(case: EvalCase, similarity: float) -> str:
     )
 
 
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+def _cosine(a: Sequence[float], b: Sequence[float], *, a_norm: float | None = None) -> float:
     if len(a) != len(b) or not a:
         return 0.0
     dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm = sqrt(sum(x * x for x in a)) * sqrt(sum(y * y for y in b))
+    # `a_norm` lets a caller ranking many `b` against one fixed `a` compute ‖a‖ once; None keeps
+    # the standalone behaviour identical.
+    norm = (a_norm if a_norm is not None else sqrt(sum(x * x for x in a))) * sqrt(
+        sum(y * y for y in b)
+    )
     return dot / norm if norm else 0.0

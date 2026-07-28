@@ -229,6 +229,58 @@ def test_a_case_is_never_its_own_precedent() -> None:
     assert [r.case_id for r in found.refs] == ["other"]
 
 
+def test_a_sampled_run_still_retrieves_from_the_whole_corpus() -> None:
+    """The bug this guards: a sampled run hands `review` only the drawn cases, and resolving
+    precedents from *those* would shrink the pool to the sample — silently defeating the feature
+    on exactly the large corpora that need sampling. The full corpus is passed separately."""
+    full = _indexed(
+        _case("unwrap-case", "row.unwrap();"),
+        _case("sql-case", "run_sqlquery(q);"),
+        _case("timeout-case", "set_timeout(1);"),
+    )
+    # The skill as the harness hands it to the reviewer on a sampled run: only one case drawn, but
+    # the committed index (and therefore the vectors) still covers all three.
+    sampled = full.model_copy(update={"eval_cases": [full.eval_cases[1]]})  # only sql-case
+    change = _query("db.get(id).unwrap();")
+    [vector] = KeywordEmbedder().embed([change.to_unified_diff()])
+
+    # Without the corpus, only the drawn case is retrievable — the shrinkage the bug caused.
+    narrowed = retrieve_precedents(sampled, change, vector, limits=PrecedentLimits(max_cases=3))
+    assert [r.case_id for r in narrowed.refs] == ["sql-case"]
+
+    # With the full corpus, the nearest case (unwrap-case, not in the sample) is retrieved.
+    full_pool = retrieve_precedents(
+        sampled, change, vector, limits=PrecedentLimits(max_cases=3), corpus=full.eval_cases
+    )
+    assert full_pool.refs[0].case_id == "unwrap-case"
+    assert full_pool.refs[0].similarity == pytest.approx(1.0)
+    assert {r.case_id for r in full_pool.refs} == {"unwrap-case", "sql-case", "timeout-case"}
+
+
+def test_the_reviewer_draws_precedents_from_the_corpus_it_was_given() -> None:
+    """The wiring: `LLMReviewer(corpus=…)` overrides the reviewed skill's own cases, so the
+    service can hand it the full corpus while the harness reviews the sample."""
+    full = _indexed(
+        _case("unwrap-case", "row.unwrap();"),
+        _case("sql-case", "run_sqlquery(q);"),
+    )
+    sampled = full.model_copy(update={"eval_cases": [full.eval_cases[1]]})  # only sql-case
+    embedder = KeywordEmbedder()
+    prompts: list[str] = []
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        from whetstone.reviewer.llm_reviewer import LLMFindingList
+
+        prompts.append(system)
+        return LLMFindingList(findings=[])
+
+    reviewer = LLMReviewer(FakeLLMClient(handler), embedder=embedder, corpus=full.eval_cases)
+    reviewer.review(sampled, _query("db.get(id).unwrap();"))
+    # unwrap-case is not in the sampled skill, but it is the nearest precedent and must appear.
+    assert "unwrap-case" in prompts[0]
+    assert reviewer.last_precedents[0].case_id == "unwrap-case"
+
+
 def test_the_case_cap_keeps_the_nearest() -> None:
     skill = _indexed(_case("near", "row.unwrap();"), _case("far", "run_sqlquery(q);"))
     change = _query("x.unwrap();")
