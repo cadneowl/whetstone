@@ -318,6 +318,24 @@ def test_record_gate_hashes_the_committed_skills_not_the_scored_ones() -> None:
     assert len(record.base_score.cases) == 2
 
 
+def test_runs_and_gates_name_the_judge_that_scored_them() -> None:
+    """Every verdict-bearing record carries `judge_identity()` — the same attribution `backend`
+    already gives the reviewer. Two runs judged by different judges are different measurements;
+    without the hash they are indistinguishable.
+    """
+    from whetstone.judge.llm_judge import judge_identity
+    from whetstone.service import record_eval, record_gate
+
+    skill = load_skill(SKILL_DIR)
+    client = FakeLLMClient(_flag_handler(flag_tests=False))
+
+    run = record_eval(skill, client)
+    assert run.judge_hash == judge_identity()
+
+    gate_record = record_gate(skill, skill, FakeLLMClient(_flag_handler(flag_tests=False)))
+    assert gate_record.judge_hash == judge_identity()
+
+
 def test_a_gate_record_counts_what_it_spent() -> None:
     from whetstone.service import record_gate
 

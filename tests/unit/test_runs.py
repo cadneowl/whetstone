@@ -105,6 +105,25 @@ def test_guidance_hash_survives_the_index(tmp_path: Path) -> None:
     assert [s.guidance_hash for s in store.list()] == ["g1"]
 
 
+def test_judge_hash_survives_the_index(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    store.save(_record().model_copy(update={"judge_hash": "j1"}))
+    assert [s.judge_hash for s in store.list()] == ["j1"]
+
+
+def test_a_record_without_a_judge_hash_still_loads_and_lists(tmp_path: Path) -> None:
+    """Runs recorded before the judge was attributable carry '' — an honest 'the judge as it was
+    before attribution existed' — rather than failing to parse."""
+    store = RunStore(tmp_path / "runs")
+    raw = _record(run_id="old").model_dump(mode="json")
+    del raw["judge_hash"]
+    import json
+
+    store.root.mkdir(parents=True, exist_ok=True)
+    store.path_for("old").write_text(json.dumps(raw), encoding="utf-8")
+    assert [s.judge_hash for s in store.list()] == [""]
+
+
 def test_index_self_heals_for_out_of_band_records(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs")
     store.save(_record(run_id="known"))

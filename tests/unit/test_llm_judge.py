@@ -6,7 +6,7 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import Expectation
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region
-from whetstone.judge.llm_judge import JudgeVerdict, LLMJudge
+from whetstone.judge.llm_judge import JudgeVerdict, LLMJudge, judge_identity
 from whetstone.llm import FakeLLMClient
 
 FINDING = Finding(
@@ -51,3 +51,38 @@ def test_judge_prompt_includes_both_sides_and_uses_medium_effort() -> None:
     assert "unwrap can panic" in captured["user"]  # expectation semantic
     assert "unwrap panics" in captured["user"]  # finding message
     assert client.calls[0].effort == "medium"
+
+
+def test_judge_prompt_is_byte_for_byte_what_it_was_before_identity_existed() -> None:
+    """Characterization: introducing `judge_identity` restructured `_user_prompt` around a template
+    constant. The rendered prompt must be identical to the old f-string output, or the refactor
+    silently changed the judge — the exact drift the identity hash exists to make visible.
+    """
+    captured: dict[str, str] = {}
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        captured["system"] = system
+        captured["user"] = user
+        return JudgeVerdict(matched=True, confidence=1.0, reason="ok")
+
+    LLMJudge(FakeLLMClient(handler)).match(FINDING, EXPECT)
+
+    assert captured["user"] == (
+        "Expected issue: unwrap can panic\n"
+        "Expected location: a.rs lines 40-45\n\n"
+        "Reviewer finding: unwrap panics\n"
+        "Reviewer location: a.rs line 41\n\n"
+        "Do they describe the same underlying issue? Return matched (bool), confidence 0-1, and a "
+        "one-sentence reason."
+    )
+
+
+def test_judge_identity_is_stable_and_tracks_the_prompt_text(monkeypatch) -> None:
+    before = judge_identity()
+    assert before == judge_identity()  # deterministic
+    assert len(before) == 64  # sha256 hex
+
+    import whetstone.judge.llm_judge as mod
+
+    monkeypatch.setattr(mod, "_SYSTEM", mod._SYSTEM + " Be stricter.")
+    assert judge_identity() != before  # a prompt edit is a different judge

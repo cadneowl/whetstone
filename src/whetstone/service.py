@@ -44,7 +44,7 @@ from whetstone.domain.run import RunRecord, guidance_hash, skill_hash
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord, new_gate_id
-from whetstone.judge.llm_judge import LLMJudge
+from whetstone.judge.llm_judge import LLMJudge, judge_identity
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.counting import CountingClient
 from whetstone.providers.base import IssueConnector, ReviewConnector
@@ -143,6 +143,9 @@ def record_eval(
         model=model,
         reviewer_effort=reviewer_effort,
         judge_effort=judge_effort,
+        # The judge these verdicts came from. Taken at record time, not passed in: the judge is
+        # constructed right here, so nothing between construction and recording can drift.
+        judge_hash=judge_identity(),
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,
@@ -396,6 +399,7 @@ def record_gate(
         candidate_hash=candidate_hash,
         backend=backend,
         model=model,
+        judge_hash=judge_identity(),
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,
