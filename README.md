@@ -1046,6 +1046,12 @@ whetstone report --run 20260725T040013Z-...-349fb3 --out report.html
 
 ## Run records & reports
 
+Run records are one of several plain-JSON stores, each a directory owning one concern — runs, gates,
+drift, cadence, meta-eval, candidates, reviews, and the skills registry itself. The console and CLI
+read all of them and write through staging branches:
+
+![Where Whetstone keeps its evidence: eight on-disk stores — RunStore, GateStore, DriftStore, CadenceStore, meta-eval, CandidateStore, ReviewStore, and the skills registry — all read by the console and CLI, which write through staging branches.](docs/assets/store-map.png)
+
 `SkillScore` answers *what* a skill scored. A **run record** answers *why*: it keeps every finding
 the reviewer produced and every verdict the judge returned, so a failing case can be diagnosed long
 after the run.
