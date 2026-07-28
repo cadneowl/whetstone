@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import shutil
 import webbrowser
 from collections.abc import Callable, Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -71,12 +72,16 @@ skills_app = typer.Typer(
 providers_app = typer.Typer(help="Inspect provider plugins.")
 llm_app = typer.Typer(help="Choose and health-check the model backend (cloud or local).")
 runs_app = typer.Typer(help="Inspect stored run records.")
+judge_app = typer.Typer(
+    help="Measure the judge — the instrument every score is computed with."
+)
 app.add_typer(eval_app, name="eval")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(skills_app, name="skills")
 app.add_typer(providers_app, name="providers")
 app.add_typer(llm_app, name="llm")
 app.add_typer(runs_app, name="runs")
+app.add_typer(judge_app, name="judge")
 
 @app.callback()
 def main(
@@ -1580,6 +1585,91 @@ def llm_check(
         typer.echo(f"FAIL: {type(exc).__name__}: {exc}")
         raise typer.Exit(code=1) from exc
     typer.echo(f"OK: backend returned ok={ping.ok} note={ping.note!r}")
+
+
+@judge_app.command("eval")
+def judge_eval(
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    yes: YesOpt = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Measure the current judge against every labeled pair the deployment has.
+
+    The corpus is `fixtures.json` in the meta-eval directory (optional seed data) plus every
+    ruling minted from run drill-downs. The result is stored, and the accuracy bar ratchets: once
+    a judge has demonstrated an accuracy over enough pairs, no later doctrine clears meaningfully
+    below it. Exit code 1 when the current judge misses the bar — CI-friendly, like `eval gate`.
+
+    Measures the pairwise judge. Labeled pairs carry no case diff, so a skill's grounded cascade
+    tier is exercised by real runs but not by this corpus (yet).
+    """
+    from whetstone.judge.llm_judge import LLMJudge, judge_identity
+    from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
+    from whetstone.meta_eval.ratchet import JudgeEvalRecord, RatchetStore, new_eval_id
+
+    config = load_config()
+    spec = load_judge(config.judge_dir)
+    corpus = load_judge_corpus(config.meta_eval_dir)
+    if not corpus:
+        typer.echo(
+            "no labeled pairs yet — rule on judge verdicts in a run drill-down (the console's "
+            f"same-issue/different-issue buttons), or seed {config.meta_eval_dir / 'fixtures.json'}"
+        )
+        raise typer.Exit(code=1)
+
+    backend = _resolve(llm, model, base_url)
+    plan = plan_calls(
+        "judge eval",
+        backend,
+        calls=len(corpus),
+        basis=f"{len(corpus)} labeled pair(s) x 1 judge call",
+        details=["measures the judge itself; no reviewer runs and no skill is scored"],
+    )
+    _preflight(plan, yes)
+
+    client = _client(llm, model, base_url, api_key_env, label="judge-eval")
+    system = spec.system if spec else None
+    report = evaluate_judge(LLMJudge(client, system=system), corpus)
+
+    store = RatchetStore(config.meta_eval_dir)
+    record = JudgeEvalRecord(
+        id=new_eval_id(datetime.now(UTC)),
+        at=datetime.now(UTC),
+        judge_hash=judge_identity(system),
+        backend=backend.name,
+        model=backend.model,
+        total=report.total,
+        correct=report.correct,
+        missed=report.missed,
+        spurious=report.spurious,
+    )
+    store.save(record)
+    bar = store.bar()
+
+    if json_out:
+        payload = record.model_dump(mode="json") | {
+            "accuracy": report.accuracy,
+            "bar": bar.bar,
+            "passed": bar.passes(report.accuracy),
+        }
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        typer.echo(
+            f"judge accuracy {report.accuracy:.3f} over {report.total} pair(s)  "
+            f"(missed {report.missed}, spurious {report.spurious})"
+        )
+        typer.echo(
+            f"bar {bar.bar:.3f}"
+            + (f"  (best demonstrated {bar.best:.3f})" if bar.best is not None else "  (floor)")
+        )
+        if not record.binding:
+            typer.echo(
+                "note: too few pairs to move the bar — collect more rulings before trusting this"
+            )
+    raise typer.Exit(code=0 if bar.passes(report.accuracy) else 1)
 
 
 if __name__ == "__main__":

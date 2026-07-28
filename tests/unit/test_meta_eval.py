@@ -47,6 +47,45 @@ def test_perfect_and_empty() -> None:
     assert evaluate_judge(_StubJudge(matched=True), []).accuracy == 1.0  # nothing to disagree on
 
 
+def test_the_two_error_kinds_are_held_apart() -> None:
+    """`missed` reads as red and wastes an investigation; `spurious` reads as green and quietly
+    kills a case's power to discriminate. Pooling them hides the number that matters."""
+    cases = [_case(True), _case(True), _case(False)]
+    always_no = evaluate_judge(_StubJudge(matched=False), cases)
+    assert (always_no.missed, always_no.spurious) == (2, 0)
+    always_yes = evaluate_judge(_StubJudge(matched=True), cases)
+    assert (always_yes.missed, always_yes.spurious) == (0, 1)
+    assert always_yes.correct + always_yes.missed + always_yes.spurious == always_yes.total
+
+
+def test_judge_corpus_is_fixtures_plus_rulings(tmp_path: Path) -> None:
+    import json
+    import shutil
+    from datetime import UTC, datetime
+
+    from whetstone.meta_eval.disputes import Dispute, DisputeStore
+    from whetstone.meta_eval.evaluate import load_judge_corpus
+
+    assert load_judge_corpus(tmp_path) == []  # nothing yet is an empty corpus, not an error
+
+    shutil.copy(FIXTURE, tmp_path / "fixtures.json")
+    assert len(load_judge_corpus(tmp_path)) == 4
+
+    ruling = _case(False)
+    DisputeStore(tmp_path).save(
+        Dispute(
+            id="r1", run_id="run-1", skill_id="s", case_id="c", trial=0, expectation_id="e",
+            finding_index=0, judge_matched=True, is_match=False, at=datetime.now(UTC),
+            finding=ruling.finding, expectation=ruling.expectation,
+        )
+    )
+    corpus = load_judge_corpus(tmp_path)
+    assert len(corpus) == 5
+    # A malformed fixtures file should fail loudly, not shrink the corpus silently — but that is
+    # `load_meta_eval_cases`' contract; here we only assert the union arithmetic.
+    assert json.loads(FIXTURE.read_text(encoding="utf-8"))  # fixture itself is sane
+
+
 def test_labeled_fixture_loads() -> None:
     cases = load_meta_eval_cases(FIXTURE)
     assert len(cases) == 4

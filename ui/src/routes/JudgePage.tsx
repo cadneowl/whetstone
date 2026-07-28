@@ -1,5 +1,7 @@
-import { useJudge } from '@/api/client'
-import { Badge, Empty, ErrorNote, Intro, Loading, Metric } from '@/components/primitives'
+import { useQueryClient } from '@tanstack/react-query'
+import { keys, useJudge } from '@/api/client'
+import { LaunchButton } from '@/components/LaunchButton'
+import { Badge, Empty, ErrorNote, Intro, Loading, Metric, when } from '@/components/primitives'
 
 /**
  * The judge is the instrument every score is computed with — recall, fp rate, gate verdicts are
@@ -10,10 +12,14 @@ import { Badge, Empty, ErrorNote, Intro, Loading, Metric } from '@/components/pr
  */
 export function JudgePage() {
   const { data, isLoading, error } = useJudge()
+  const queryClient = useQueryClient()
 
   if (isLoading) return <Loading />
   if (error) return <ErrorNote error={error} />
   if (!data) return <Empty>Not found.</Empty>
+
+  const measured = data.measured
+  const passes = measured ? measured.accuracy >= data.bar : null
 
   return (
     <div>
@@ -42,14 +48,48 @@ export function JudgePage() {
       <div className="mt-3 flex flex-wrap gap-2">
         <Metric label="rulings collected" value={String(data.rulings_total)} />
         <Metric label="judge overruled" value={String(data.rulings_overruled)} />
+        {measured && (
+          <>
+            <Metric label="accuracy" value={measured.accuracy.toFixed(3)} />
+            <Metric label="missed / spurious" value={`${measured.missed} / ${measured.spurious}`} />
+            <Metric label="bar" value={data.bar.toFixed(3)} />
+          </>
+        )}
       </div>
-      <p className="mt-1 text-xs text-muted">
-        Rulings are minted from run drill-downs — every “same issue / different issue” click on a
-        verdict becomes a labeled pair. They are the judge's own eval corpus; measuring accuracy
-        against it (and gating doctrine changes on that accuracy) is the judge-eval job, which is
-        not built yet. Until then, collect rulings: the more that accumulate, the more a future
-        accuracy number will mean.
-      </p>
+
+      {measured ? (
+        <p className="mt-1 text-xs">
+          <span className={passes ? 'text-good' : 'text-bad'}>
+            {passes ? 'Clears the bar.' : 'Below the bar.'}
+          </span>{' '}
+          <span className="text-muted">
+            Measured {when(measured.at)} over {measured.total} pair(s)
+            {measured.binding
+              ? '.'
+              : ' — too few pairs to move the bar; keep ruling on verdicts.'}{' '}
+            <em>Spurious</em> is the number to watch: a spurious match reads as green while it
+            quietly stops a case from discriminating.
+          </span>
+        </p>
+      ) : (
+        <p className="mt-1 text-xs text-muted">
+          This doctrine has not been measured. Rulings are minted from run drill-downs — every
+          “same issue / different issue” click becomes a labeled pair — and the measurement below
+          scores the judge against all of them. The bar ratchets: once a judge demonstrates an
+          accuracy over enough pairs, no later doctrine clears meaningfully below it.
+        </p>
+      )}
+
+      <div className="mt-3">
+        <LaunchButton
+          kind="judge-eval"
+          request={{}}
+          label="Measure the judge"
+          disabled={data.pairs_total === 0}
+          disabledReason="No labeled pairs yet — rule on judge verdicts in a run drill-down first."
+          onDone={() => void queryClient.invalidateQueries({ queryKey: keys.judge })}
+        />
+      </div>
 
       <h2 className="mt-6 mb-2 text-xs tracking-wide text-muted uppercase">
         Doctrine

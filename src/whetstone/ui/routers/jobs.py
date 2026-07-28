@@ -21,6 +21,7 @@ money is a write, whatever it leaves on disk.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -49,6 +50,7 @@ from whetstone.llm.factory import (
     resolve_backend,
 )
 from whetstone.llm.transcript import RecordingClient, Transcript, transcript_path
+from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
 from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval
 from whetstone.providers.base import ConnectorError
 from whetstone.sampling import sample_cases
@@ -610,6 +612,107 @@ def launch_review(
         }
 
     return _launch(jobs, "review", skill.id, work, plan)
+
+
+class JudgeEvalRequest(BaseModel):
+    """Measure the judge against every labeled pair. No skill — the judge is deployment-wide."""
+
+    # Per-launch backend; see `EvalRequest.provider` and `_pick`.
+    provider: str = ""
+    model: str = ""
+
+
+@router.post("/judge-eval/plan", response_model=Plan)
+def plan_judge_eval_job(
+    request: JudgeEvalRequest, config: ConfigDep, selection: SelectionDep
+) -> Plan:
+    selection = _pick(request.provider, request.model, selection)
+    corpus = load_judge_corpus(config.meta_eval_dir)
+    if not corpus:
+        raise Unprocessable(
+            "no labeled pairs yet — rule on judge verdicts in a run drill-down first (the "
+            "same-issue/different-issue buttons), or seed fixtures.json in the meta-eval directory"
+        )
+    plan = plan_calls(
+        "judge eval",
+        _backend(selection, None),
+        calls=len(corpus),
+        basis=f"{len(corpus)} labeled pair(s) x 1 judge call",
+        details=["measures the judge itself; no reviewer runs and no skill is scored"],
+    )
+    check_budget(plan, config.runs.max_llm_calls_per_run)
+    return plan
+
+
+@router.post("/judge-eval", response_model=Job, dependencies=[Writable])
+def launch_judge_eval(
+    request: JudgeEvalRequest, config: ConfigDep, jobs: JobsDep, selection: SelectionDep
+) -> Job:
+    """Score the current judge over the labeled corpus and ratchet the accuracy bar.
+
+    This is what turns drill-down rulings into an enforced quality standard: the measurement is
+    stored per doctrine, and once a judge has demonstrated an accuracy over enough pairs, no
+    later doctrine clears meaningfully below it.
+    """
+    from whetstone.judge.llm_judge import LLMJudge, judge_identity
+    from whetstone.meta_eval.ratchet import JudgeEvalRecord, RatchetStore, new_eval_id
+
+    selection = _pick(request.provider, request.model, selection)
+    plan = plan_judge_eval_job(request, config, selection)
+    spec = load_judge(config.judge_dir)
+    corpus = load_judge_corpus(config.meta_eval_dir)
+    backend = _backend(selection, None)
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, len(corpus), "judging labeled pairs")
+        system = spec.system if spec else None
+        judge = LLMJudge(_client(config, None, selection, label="judge-eval"), system=system)
+        report = evaluate_judge(judge, corpus)
+        handle.check()
+
+        store = RatchetStore(config.meta_eval_dir)
+        now = datetime.now(UTC)
+        record = JudgeEvalRecord(
+            id=new_eval_id(now),
+            at=now,
+            judge_hash=judge_identity(system),
+            backend=backend.name,
+            model=backend.model,
+            total=report.total,
+            correct=report.correct,
+            missed=report.missed,
+            spurious=report.spurious,
+        )
+        store.save(record)
+        bar = store.bar()
+        handle.log(
+            LogLine(
+                text=(
+                    f"accuracy {report.accuracy:.3f} over {report.total} pair(s) — "
+                    f"missed {report.missed}, spurious {report.spurious}"
+                ),
+                tone="ok" if bar.passes(report.accuracy) else "bad",
+            )
+        )
+        if not record.binding:
+            handle.log(
+                LogLine(
+                    text="too few pairs to move the bar — collect more rulings",
+                    tone="said",
+                )
+            )
+        handle.progress(len(corpus), len(corpus), "done")
+        return {
+            "total": report.total,
+            "accuracy": report.accuracy,
+            "missed": report.missed,
+            "spurious": report.spurious,
+            "bar": bar.bar,
+            "passed": bar.passes(report.accuracy),
+            "llm_calls": report.total,
+        }
+
+    return _launch(jobs, "judge-eval", "judge", work, plan)
 
 
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:

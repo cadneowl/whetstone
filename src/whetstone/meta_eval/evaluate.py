@@ -24,8 +24,19 @@ class MetaEvalCase(BaseModel):
 
 
 class MetaEvalReport(BaseModel):
+    """Judge accuracy against human labels, with the two error kinds held apart.
+
+    They are reported separately because they fail differently (see `drafting.py`): a *missed*
+    match reads as red — recall drops and someone investigates guidance that was working — while a
+    *spurious* match reads as green: the case quietly stops discriminating, which is the failure
+    nothing else ever surfaces. An aggregate accuracy that pools them hides exactly the number
+    that matters.
+    """
+
     total: int
     correct: int
+    missed: int = 0  # human said same issue; the judge said no
+    spurious: int = 0  # human said different issue; the judge matched anyway
 
     @property
     def accuracy(self) -> float:
@@ -34,8 +45,31 @@ class MetaEvalReport(BaseModel):
 
 def evaluate_judge(judge: Judge, cases: list[MetaEvalCase]) -> MetaEvalReport:
     """Run the judge over labeled pairs and report how often it agrees with the human label."""
-    correct = sum(1 for c in cases if judge.match(c.finding, c.expectation).matched == c.is_match)
-    return MetaEvalReport(total=len(cases), correct=correct)
+    correct = missed = spurious = 0
+    for c in cases:
+        verdict = judge.match(c.finding, c.expectation).matched
+        if verdict == c.is_match:
+            correct += 1
+        elif c.is_match:
+            missed += 1
+        else:
+            spurious += 1
+    return MetaEvalReport(total=len(cases), correct=correct, missed=missed, spurious=spurious)
+
+
+def load_judge_corpus(directory: str | Path) -> list[MetaEvalCase]:
+    """The deployment's whole labeled corpus: bundled fixtures plus every drill-down ruling.
+
+    `fixtures.json` in the meta-eval directory is optional seed data in the `load_meta_eval_cases`
+    format; the rulings (`meta_eval.disputes`) are what grow. Imported lazily to keep this module
+    free of a disputes dependency for callers that only score fixtures.
+    """
+    from whetstone.meta_eval.disputes import DisputeStore
+
+    directory = Path(directory)
+    fixtures = directory / "fixtures.json"
+    cases = load_meta_eval_cases(fixtures) if fixtures.is_file() else []
+    return cases + DisputeStore(directory).meta_eval_cases()
 
 
 def load_meta_eval_cases(path: str | Path) -> list[MetaEvalCase]:
