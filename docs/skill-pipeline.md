@@ -183,6 +183,22 @@ confirms, and the flip lands as a one-line commit on the skill's staging branch.
 rewritten case changes `skill_hash`, the archived corpus needs a fresh passing gate before it can
 be proposed — de-weighting a case can move the score, and a moved score gets re-proven.
 
+### The saturation probe
+
+A case can stop discriminating two ways the pass-rate cannot tell apart: the guidance genuinely
+internalized the lesson (good — retire it), or the expectation is so loose anything matches (bad —
+the case is dead but looks alive). `whetstone eval baseline` separates them: it scores every
+active case through the normal harness with the guidance stripped — no body, no pages, no wiki. A
+`should_catch` case the *naked* model passes never measured the guidance either way, and the
+console flags it for a human to tighten or retire.
+
+The record is stored as a `baseline` variant: queryable history, but excluded from every default
+listing — a deliberately-blinded run must never surface as "the latest run" in a trend, an inbox
+row, or an improve digest. The health panel's Discrimination section reads the newest probe
+("N of M active catch cases still measure the guidance"), each case page shows its verdict, and
+flagged cases appear in the inbox as curation proposals. A diagnostic sweep, not a gate — run it
+monthly, on a local model if you have one.
+
 ---
 
 ## `improve/step.yaml` — drafting a guidance change

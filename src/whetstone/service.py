@@ -56,7 +56,7 @@ from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_re
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
 from whetstone.sampling import holdout_report, partition_of, sample_cases
 from whetstone.steps import JudgePolicy, SamplePolicy
-from whetstone.wiki import WikiLimits
+from whetstone.wiki import SkillWiki, WikiLimits
 
 
 class GateOutcome(BaseModel):
@@ -115,6 +115,7 @@ def record_eval(
     wiki_limits: WikiLimits | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
+    baseline: bool = False,
 ) -> RunRecord:
     """Score a skill and return the full run record — every finding and every judge verdict.
 
@@ -185,12 +186,79 @@ def record_eval(
         ),
         k=trials,
         practice_mode=practice_mode,
+        baseline=baseline,
         duration_s=duration,
         llm_calls=counted.calls,
         git_ref=git_ref,
         cases=cases,
         score=score,
         holdout=holdout_report(score, fraction),
+    )
+
+
+def strip_guidance(skill: Skill) -> Skill:
+    """The skill with everything that could help the reviewer removed — what a baseline probes.
+
+    Body, companion pages, and wiki all go: each reaches the review prompt, and the question the
+    probe asks is what the *naked* model catches, not what the model minus one kind of help
+    catches. Archived cases are dropped too — the probe informs curation of the live corpus, and
+    counting deliberately-retired cases would re-litigate decisions already made.
+    """
+    return skill.model_copy(
+        update={
+            "body": "",
+            "pages": [],
+            "wiki": SkillWiki(),
+            "eval_cases": [c for c in skill.eval_cases if c.tier == "active"],
+        }
+    )
+
+
+def record_baseline(
+    skill: Skill,
+    client: LLMClient,
+    *,
+    trials: int = 1,
+    reviewer_effort: Effort = "high",
+    judge_effort: Effort = "medium",
+    backend: str = "",
+    model: str = "",
+    practice_mode: bool = False,
+    principal: str = "",
+    on_event: EventSink | None = None,
+    cancel: threading.Event | None = None,
+    now: datetime | None = None,
+    judge: JudgeSpec | None = None,
+    judge_policy: JudgePolicy | None = None,
+) -> RunRecord:
+    """Score the skill's active cases with the guidance stripped — the saturation probe.
+
+    A case can stop discriminating two ways the pass-rate cannot tell apart: the guidance
+    genuinely internalized the lesson (good — retire it), or the expectation is so loose anything
+    matches (bad — the case is dead but looks alive). This separates them: a `should_catch` case
+    the model passes *with no guidance at all* never measured the guidance either way.
+
+    Always the full active corpus, never a sample — the output is a per-case verdict, and a case
+    the draw skipped would simply have no answer. No holdout partition either: nothing here is
+    learnable-from, because nothing here says anything about the guidance.
+    """
+    return record_eval(
+        strip_guidance(skill),
+        client,
+        trials=trials,
+        reviewer_effort=reviewer_effort,
+        judge_effort=judge_effort,
+        backend=backend,
+        model=model,
+        practice_mode=practice_mode,
+        principal=principal,
+        on_event=on_event,
+        cancel=cancel,
+        now=now,
+        sample=SamplePolicy(max_cases=None, holdout_fraction=0.0),
+        judge=judge,
+        judge_policy=judge_policy,
+        baseline=True,
     )
 
 
@@ -648,11 +716,21 @@ class SkillDetail(BaseModel):
     pending_cases: list[PendingCase] = []
 
 
+class BaselineVerdict(BaseModel):
+    """What the last saturation probe said about one case: did the naked model already pass it?"""
+
+    run_id: str
+    created_at: datetime
+    passed: bool
+
+
 class CaseDetail(BaseModel):
     skill_id: str
     case: EvalCase
     diff: str
     history: list[CaseHistoryEntry] = []
+    # None when the skill has never been probed, or the probe predates this case.
+    baseline: BaselineVerdict | None = None
 
 
 # Rules are id-tagged in bold in the guidance body ("- **R1 — no unchecked panics…**"), which is how
@@ -811,6 +889,21 @@ def case_detail(skill: Skill, case_id: str, store: RunStore, *, runs: int = 20) 
         case=case,
         diff=case.change.to_unified_diff(),
         history=case_history(case_id, skill.id, store, runs=runs),
+        baseline=_baseline_verdict(store, skill.id, case_id),
+    )
+
+
+def _baseline_verdict(store: RunStore, skill_id: str, case_id: str) -> BaselineVerdict | None:
+    """How this case fared in the last saturation probe, if one has run and scored it."""
+    probe = store.latest_baseline(skill_id)
+    run = probe.case(case_id) if probe else None
+    if probe is None or run is None:
+        return None
+    confusion = run.confusion
+    return BaselineVerdict(
+        run_id=probe.id,
+        created_at=probe.created_at,
+        passed=confusion.fn == 0 and confusion.fp == 0,
     )
 
 

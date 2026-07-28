@@ -91,13 +91,27 @@ def test_one_failing_case_is_not_pluralised() -> None:
 def test_solved_cases_ready_to_retire_ask_for_curation() -> None:
     action = _decide(retire_ready=2)
     assert action.kind == "curate"  # type: ignore[attr-defined]
-    assert "Retire 2 solved cases" in action.label  # type: ignore[attr-defined]
-    assert "live edge" in action.why  # type: ignore[attr-defined]
+    assert action.label == "Curate 2 cases"  # type: ignore[attr-defined]
+    assert "pass every recent gate" in action.why  # type: ignore[attr-defined]
+
+
+def test_saturated_cases_ask_for_curation_too() -> None:
+    action = _decide(saturated=1)
+    assert action.kind == "curate"  # type: ignore[attr-defined]
+    assert action.label == "Curate 1 case"  # type: ignore[attr-defined]
+    assert "no guidance at all" in action.why  # type: ignore[attr-defined]
+
+
+def test_mixed_curation_names_both_reasons() -> None:
+    action = _decide(retire_ready=2, saturated=1)
+    assert action.label == "Curate 3 cases"  # type: ignore[attr-defined]
+    assert "pass every recent gate" in action.why  # type: ignore[attr-defined]
+    assert "no guidance at all" in action.why  # type: ignore[attr-defined]
 
 
 def test_a_failing_case_outranks_housekeeping() -> None:
     """Retiring a solved case never matters more than a case the skill is currently failing."""
-    action = _decide(failing_cases=1, retire_ready=5)
+    action = _decide(failing_cases=1, retire_ready=5, saturated=2)
     assert action.kind == "improve"  # type: ignore[attr-defined]
 
 

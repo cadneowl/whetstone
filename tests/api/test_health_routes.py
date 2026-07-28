@@ -122,7 +122,7 @@ def test_retirements_reach_the_inbox_with_their_evidence(
 
     row = client.get("/api/inbox").json()["inbox"]["attention"][0]
     assert row["action"]["kind"] == "curate"
-    assert "Retire 2 solved cases" in row["action"]["label"]
+    assert row["action"]["label"] == "Curate 2 cases"
     assert len(row["retirements"]) == 2
 
 

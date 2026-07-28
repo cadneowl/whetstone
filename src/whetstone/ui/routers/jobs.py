@@ -717,6 +717,112 @@ def launch_judge_eval(
     return _launch(jobs, "judge-eval", "judge", work, plan)
 
 
+class BaselineRequest(BaseModel):
+    """Probe a skill's corpus with the guidance stripped — the saturation diagnostic."""
+
+    skill_id: str
+    # Per-launch backend; see `EvalRequest.provider` and `_pick`. A probe is a diagnostic sweep,
+    # not a gate, so the picker is how it goes to a local model without moving the default.
+    provider: str = ""
+    model: str = ""
+
+
+@router.post("/baseline/plan", response_model=Plan)
+def plan_baseline_job(
+    request: BaselineRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
+    from whetstone.service import strip_guidance
+
+    selection = _pick(request.provider, request.model, selection)
+    skill = _skill(root, request.skill_id)
+    naked = strip_guidance(skill)
+    if not naked.eval_cases:
+        raise Unprocessable(
+            f"{skill.id} has no active eval cases to probe — promote some from triage first"
+        )
+    spec = _step(root, skill, "evaluate")
+    plan = plan_eval(
+        naked,
+        _backend(selection, spec),
+        trials=1,
+        cases=len(naked.eval_cases),
+        wiki_limits=None,
+        judge_cascade=bool(spec and spec.judge.enabled),
+    )
+    plan.action = "baseline"
+    plan.details.append(
+        "scores every active case with the guidance stripped — a should_catch case the naked "
+        "model passes never measured the guidance"
+    )
+    check_budget(plan, config.runs.max_llm_calls_per_run)
+    return plan
+
+
+@router.post("/baseline", response_model=Job, dependencies=[Writable])
+def launch_baseline(
+    request: BaselineRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    store: StoreDep,
+    jobs: JobsDep,
+    selection: SelectionDep,
+) -> Job:
+    """Run the saturation probe and store it as a baseline record.
+
+    The record lands in the run store but is excluded from every default listing — a run with the
+    guidance deliberately stripped must never read as a regression in a trend or an inbox. Its one
+    consumer is the discrimination view: which cases the naked model already passes.
+    """
+    from whetstone.curation import discrimination
+    from whetstone.service import record_baseline
+
+    selection = _pick(request.provider, request.model, selection)
+    skill = _skill(root, request.skill_id)
+    plan = plan_baseline_job(request, config, root, selection)
+    spec = _step(root, skill, "evaluate")
+    backend = _backend(selection, spec)
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        total = sum(1 for c in skill.eval_cases if c.tier == "active")
+        handle.progress(0, total, "probing with no guidance")
+
+        def on_event(event: RunEvent) -> None:
+            if event.kind == "case_done":
+                handle.progress(event.completed_cases, event.total_cases, event.case_id)
+                handle.log(*transcript(event))
+            elif event.kind == "case_started":
+                handle.progress(event.completed_cases, event.total_cases, f"{event.case_id}…")
+
+        try:
+            record = record_baseline(
+                skill,
+                _client(config, spec, selection, label=f"baseline-{skill.id}"),
+                backend=backend.name,
+                model=backend.model,
+                on_event=on_event,
+                cancel=handle.cancel_event,
+                judge=load_judge(config.judge_dir),
+                judge_policy=spec.judge if spec else None,
+            )
+        except RunCancelled as exc:
+            raise Cancelled from exc
+        store.save(record)
+        found = discrimination(skill, record)
+        for case in found.flagged:
+            handle.log(
+                LogLine(text=f"  saturated: {case.case_id} — passes with no guidance", tone="bad")
+            )
+        return {
+            "run_id": record.id,
+            "active_catch": found.active_catch,
+            "testing_guidance": found.testing_guidance,
+            "flagged": [c.case_id for c in found.flagged],
+            "llm_calls": record.llm_calls,
+        }
+
+    return _launch(jobs, "baseline", skill.id, work, plan)
+
+
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:
     """The change to review: a pasted diff, or a merge request pulled through `[watch]`'s forge."""
     mr = request.mr.strip()

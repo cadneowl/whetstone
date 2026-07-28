@@ -448,6 +448,76 @@ def _progress(event: RunEvent) -> None:
         )
 
 
+@eval_app.command("baseline")
+def eval_baseline(
+    skill: Annotated[Path, typer.Option("--skill", help="Path to a skill folder")],
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    runs_dir: RunsDirOpt = None,
+    yes: YesOpt = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Probe the corpus with the guidance stripped — which cases still measure anything?
+
+    Scores every active case with an empty skill body through the normal harness. A
+    `should_catch` case the naked model passes never measured the guidance: either the base
+    model already knows the lesson (retire the case) or the expectation is loose enough that
+    anything matches (tighten it). The record is stored as a baseline variant, excluded from
+    trends and staleness — a deliberately-blinded run is a diagnostic, not a regression.
+    """
+    from whetstone.curation import discrimination
+    from whetstone.service import record_baseline, strip_guidance
+
+    sk = load_skill(skill)
+    naked = strip_guidance(sk)
+    if not naked.eval_cases:
+        typer.echo(f"{sk.id} has no active eval cases to probe", err=True)
+        raise typer.Exit(1)
+
+    policy = _step(skill, "evaluate")
+    pick = _backend_for(policy, llm, model, base_url)
+    backend = _resolve(*pick)
+    plan = plan_eval(
+        naked,
+        backend,
+        trials=1,
+        cases=len(naked.eval_cases),
+        wiki_limits=None,
+        judge_cascade=bool(policy and policy.judge.enabled),
+    )
+    plan.action = "baseline"
+    check_budget(plan, load_config().runs.max_llm_calls_per_run)
+    _preflight(plan, yes)
+
+    client = _client(*pick, api_key_env, label=f"baseline-{sk.id}")
+    record = record_baseline(
+        sk,
+        client,
+        backend=backend.name,
+        model=backend.model,
+        on_event=None if json_out else _progress,
+        judge=load_judge(load_config().judge_dir),
+        judge_policy=policy.judge if policy else None,
+    )
+    _store(runs_dir).save(record)
+    found = discrimination(sk, record)
+    if json_out:
+        typer.echo(found.model_dump_json(indent=2))
+        return
+
+    typer.echo(
+        f"{found.testing_guidance} of {found.active_catch} active should_catch case(s) "
+        f"still measure the guidance"
+    )
+    for case in found.flagged:
+        typer.echo(f"  saturated: {case.case_id} — passes with no guidance at all")
+    if not found.flagged:
+        typer.echo("  no saturated cases — every case still discriminates")
+    typer.echo(f"\nbaseline {record.id}  ({record.llm_calls} llm calls)")
+
+
 @eval_app.command("gate")
 def eval_gate(
     base: Annotated[Path | None, typer.Option("--base", help="Baseline skill folder")] = None,

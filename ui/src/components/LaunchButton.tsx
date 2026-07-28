@@ -472,6 +472,24 @@ function JobResult({ job }: { job: Job }) {
       </p>
     )
   }
+  if (job.kind === 'baseline') {
+    const flagged = (r.flagged as string[]) ?? []
+    return (
+      <p className="mt-2 text-xs">
+        {flagged.length === 0 ? (
+          <span className="text-good">
+            every case still discriminates — {String(r.testing_guidance)} of{' '}
+            {String(r.active_catch)} catch case(s) fail with no guidance
+          </span>
+        ) : (
+          <span className="text-bad">
+            {flagged.length} saturated case{flagged.length === 1 ? '' : 's'} pass with no guidance
+            at all: {flagged.join(', ')} — see the Health tab
+          </span>
+        )}
+      </p>
+    )
+  }
   if (job.kind === 'review') {
     const found = Number(r.findings ?? 0)
     return (

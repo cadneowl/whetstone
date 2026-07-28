@@ -22,11 +22,13 @@ deliberate: de-weighting a case can move the score, so the score gets re-proven.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 from whetstone.domain.eval_model import CaseTier, EvalCase
+from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord
 
@@ -94,6 +96,67 @@ def retirement_proposals(
                 )
             )
     return proposals
+
+
+class SaturatedCase(BaseModel):
+    """One active case the naked model already passes — a case that measures nothing."""
+
+    case_id: str
+    evidence: str
+
+
+class Discrimination(BaseModel):
+    """What the latest saturation probe says about the corpus — the health payload's section.
+
+    Computed on read from the probe record and the current corpus, never stored: a case archived
+    or promoted since the probe should change the answer immediately, not at the next probe.
+    """
+
+    baseline_run_id: str
+    measured_at: datetime
+    # Active `should_catch` cases the probe has a verdict for. Cases promoted since the probe are
+    # simply unmeasured — absent from both counts, not guessed at.
+    active_catch: int
+    flagged: list[SaturatedCase]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def testing_guidance(self) -> int:
+        """Cases the naked model failed — the ones still capable of measuring the guidance."""
+        return self.active_catch - len(self.flagged)
+
+
+def discrimination(skill: Skill, probe: RunRecord) -> Discrimination:
+    """Which of the skill's active `should_catch` cases still discriminate, per the probe.
+
+    A case the naked model passes with no guidance at all never measured the guidance: either the
+    lesson is genuinely in the base model (retire the case) or the expectation is loose enough
+    that anything matches (tighten it). Either way it is a human's call — this only produces the
+    evidence. `should_not_flag` cases are out of scope: a naked model staying quiet is the
+    expected state, not saturation.
+
+    Strict about what counts as saturated: only a case the probe caught in *every* trial is
+    flagged — a case the naked model only sometimes passes still discriminates.
+    """
+    active_catch = {
+        c.id for c in skill.eval_cases if c.tier == "active" and c.kind == "should_catch"
+    }
+    scored = [c for c in probe.cases if c.case_id in active_catch]
+    flagged = [
+        SaturatedCase(
+            case_id=c.case_id,
+            evidence="the naked model catches this with no guidance at all, so the case never "
+            "measured the guidance — tighten its expectation or retire it",
+        )
+        for c in scored
+        if c.confusion.fn == 0 and c.confusion.tp > 0
+    ]
+    return Discrimination(
+        baseline_run_id=probe.id,
+        measured_at=probe.created_at,
+        active_catch=len(scored),
+        flagged=flagged,
+    )
 
 
 class CurationError(ValueError):

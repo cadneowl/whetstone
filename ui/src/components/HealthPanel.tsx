@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useHealth, useSetTier, type Retirement, type SkillHealth } from '@/api/client'
+import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
 /**
@@ -22,6 +23,7 @@ export function HealthPanel({ skillId }: { skillId: string }) {
       <ScoreSection health={data} />
       <CompositionSection health={data} />
       <RetirementSection skillId={skillId} retirements={data.retirements ?? []} />
+      <DiscriminationSection skillId={skillId} health={data} />
       <JudgeSection health={data} />
       <ProductionSection health={data} />
       <PendingSections />
@@ -173,6 +175,71 @@ function RetirementSection({
   )
 }
 
+/**
+ * The saturation probe's readout: which active should-catch cases the naked model already passes.
+ *
+ * A flagged case never measured the guidance — either the base model knows the lesson (retire
+ * it) or the expectation is loose enough that anything matches (tighten it). Both are the
+ * operator's call; the probe only produces the evidence.
+ */
+function DiscriminationSection({ skillId, health }: { skillId: string; health: SkillHealth }) {
+  const flip = useSetTier(skillId)
+  const d = health.discrimination
+  return (
+    <Section
+      title="Discrimination"
+      intro="Cases scored with the guidance stripped. A should-catch case the naked model passes measures nothing — the score credits the guidance for what the base model already knew."
+    >
+      {d ? (
+        <div className="space-y-2">
+          <p className="tabular">
+            {d.testing_guidance} of {d.active_catch} active catch case
+            {d.active_catch === 1 ? '' : 's'} still measure the guidance
+            <span className="ml-2 text-xs text-muted">probed {when(d.measured_at)}</span>
+          </p>
+          {(d.flagged ?? []).length > 0 && (
+            <ul className="space-y-1.5 border-t border-line pt-2">
+              {(d.flagged ?? []).map((c) => (
+                <li key={c.case_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <Link
+                    to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(c.case_id)}`}
+                    className="font-mono text-xs hover:text-accent"
+                  >
+                    {c.case_id}
+                  </Link>
+                  <span className="text-xs text-muted">
+                    passes with no guidance — tighten its expectation or retire it
+                  </span>
+                  <button
+                    type="button"
+                    disabled={flip.isPending}
+                    onClick={() => flip.mutate({ caseId: c.case_id, tier: 'archive' })}
+                    className="ml-auto rounded border border-line px-2 py-0.5 text-xs transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
+                  >
+                    {flip.isPending ? 'Archiving…' : 'Archive'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {flip.error && <ErrorNote error={flip.error} />}
+        </div>
+      ) : (
+        <p className="text-muted italic">
+          Never probed — the baseline scores every active case with an empty skill body.
+        </p>
+      )}
+      <div className="mt-3">
+        <LaunchButton
+          kind="baseline"
+          request={{ skill_id: skillId }}
+          label={d ? 'Re-run baseline probe' : 'Run baseline probe'}
+        />
+      </div>
+    </Section>
+  )
+}
+
 function JudgeSection({ health }: { health: SkillHealth }) {
   const j = health.judge
   if (health.judge_error) {
@@ -242,7 +309,6 @@ function ProductionSection({ health }: { health: SkillHealth }) {
  */
 function PendingSections() {
   const pending = [
-    ['Discrimination', 'which cases still measure the guidance — lands with the zero-guidance baseline probe'],
     ['Drift', 'whether the corpus still looks like the MR stream — lands with the drift metric'],
     ['Cadence', 'when the maintenance passes last ran and what is due — lands with the cadence clocks'],
   ] as const

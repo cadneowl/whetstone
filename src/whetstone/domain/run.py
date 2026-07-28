@@ -253,6 +253,12 @@ class RunRecord(BaseModel):
     judge_hash: str = ""
     k: int = 1
     practice_mode: bool = False
+    # A saturation-probe run: the skill's guidance stripped, its active cases scored anyway, so a
+    # `should_catch` case the naked model passes is exposed as never having measured the guidance.
+    # Baseline records live in the same store but are excluded from every default listing — a
+    # deliberately-blinded run must never read as a catastrophic regression in a trend, an inbox,
+    # or an improve digest.
+    baseline: bool = False
 
     duration_s: float = 0.0
     llm_calls: int = 0

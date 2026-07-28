@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS runs (
     judge_hash    TEXT NOT NULL DEFAULT '',
     k             INTEGER NOT NULL,
     practice_mode INTEGER NOT NULL,
+    baseline      INTEGER NOT NULL DEFAULT 0,
     recall        REAL NOT NULL,
     fp_rate       REAL NOT NULL,
     precision     REAL NOT NULL,
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS case_runs (
     recall     REAL NOT NULL,
     fp_rate    REAL NOT NULL,
     flaky      INTEGER NOT NULL,
+    baseline   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, case_id)
 );
 CREATE INDEX IF NOT EXISTS case_runs_by_case ON case_runs (skill_id, case_id, created_at DESC);
@@ -70,7 +72,7 @@ CREATE INDEX IF NOT EXISTS case_runs_by_case ON case_runs (skill_id, case_id, cr
 # `indexed_files` to the number of record files, so leaving that counter behind says the now-empty
 # index is current and nothing ever refills it. The console showed every run vanish. So the counter
 # goes with the tables, and the next read repopulates from the files, which are the truth.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _DROP = (
     "DROP TABLE IF EXISTS runs;"
     "DROP TABLE IF EXISTS case_runs;"
@@ -104,6 +106,7 @@ class RunSummary(BaseModel):
     judge_hash: str = ""
     k: int = 1
     practice_mode: bool = False
+    baseline: bool = False
     recall: float = 0.0
     fp_rate: float = 0.0
     precision: float = 0.0
@@ -182,18 +185,34 @@ class RunStore:
     # --- index (derived, disposable) -----------------------------------------
 
     def list(
-        self, *, skill_id: str | None = None, limit: int | None = None
+        self,
+        *,
+        skill_id: str | None = None,
+        limit: int | None = None,
+        baseline: bool | None = False,
     ) -> list[RunSummary]:
-        """Most recent first. Self-heals if the index is missing or out of step with the files."""
+        """Most recent first. Self-heals if the index is missing or out of step with the files.
+
+        `baseline=False` (the default) lists only real runs — a saturation probe deliberately
+        scores blinded guidance, and letting one surface as "the latest run" would read as a
+        catastrophic regression everywhere the console shows a trend. `True` lists only probes;
+        `None` lists everything, for consumers that genuinely want the mixed history.
+        """
         with self._connect() as conn:
             files = self.record_files()
             if _indexed_file_count(conn) != len(files):
                 _rebuild(conn, self._iter_records(), len(files))
             sql = "SELECT * FROM runs"
+            clauses: list[str] = []
             params: list[object] = []
             if skill_id is not None:
-                sql += " WHERE skill_id = ?"
+                clauses.append("skill_id = ?")
                 params.append(skill_id)
+            if baseline is not None:
+                clauses.append("baseline = ?")
+                params.append(int(baseline))
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY created_at DESC, id DESC"
             if limit is not None:
                 sql += " LIMIT ?"
@@ -205,6 +224,14 @@ class RunStore:
         found = self.list(skill_id=skill_id, limit=1)
         return self.load(found[0].id) if found else None
 
+    def latest_baseline(self, skill_id: str) -> RunRecord | None:
+        """The newest saturation-probe record, or None when the skill has never been probed."""
+        found = self.list(skill_id=skill_id, limit=1, baseline=True)
+        try:
+            return self.load(found[0].id) if found else None
+        except (FileNotFoundError, CorruptRecord):
+            return None
+
     def case_history(self, skill_id: str, case_id: str, *, limit: int = 20) -> CaseOutcomes:
         """How one case has fared across recent runs, read from the index.
 
@@ -215,9 +242,11 @@ class RunStore:
             files = self.record_files()
             if _indexed_file_count(conn) != len(files):
                 _rebuild(conn, self._iter_records(), len(files))
+            # Baseline probes are excluded: the history view is about how the *skill* fares on
+            # this case, and a run with the guidance deliberately stripped is not that.
             rows = conn.execute(
                 "SELECT run_id, case_id, created_at, kind, recall, fp_rate, flaky "
-                "FROM case_runs WHERE skill_id = ? AND case_id = ? "
+                "FROM case_runs WHERE skill_id = ? AND case_id = ? AND baseline = 0 "
                 "ORDER BY created_at DESC, run_id DESC LIMIT ?",
                 (skill_id, case_id, limit),
             ).fetchall()
@@ -282,8 +311,9 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
         """
         INSERT INTO runs (id, created_at, skill_id, skill_version, skill_hash, guidance_hash,
                           backend, model, judge_hash,
-                          k, practice_mode, recall, fp_rate, precision, f2, duration_s, llm_calls)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          k, practice_mode, baseline,
+                          recall, fp_rate, precision, f2, duration_s, llm_calls)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at
         """,
         (
@@ -298,6 +328,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
             record.judge_hash,
             record.k,
             int(record.practice_mode),
+            int(record.baseline),
             score.recall,
             score.fp_rate,
             score.precision,
@@ -309,7 +340,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
     conn.execute("DELETE FROM case_runs WHERE run_id = ?", (record.id,))
     conn.executemany(
         "INSERT INTO case_runs (run_id, case_id, skill_id, created_at, kind, recall, fp_rate, "
-        "flaky) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "flaky, baseline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 record.id,
@@ -320,6 +351,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
                 case.confusion.recall,
                 case.confusion.fp_rate,
                 int(case.flaky),
+                int(record.baseline),
             )
             for case in record.cases
         ],

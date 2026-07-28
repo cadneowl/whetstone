@@ -157,8 +157,13 @@ function Row({ row }: { row: Attention }) {
       <p className="mt-1 text-sm text-muted">{row.action.why}</p>
 
       {signals.length > 0 && <Signals signals={signals} total={row.new_signals} />}
-      {row.action.kind === 'curate' && (row.retirements ?? []).length > 0 && (
-        <Retirements skillId={row.skill_id} retirements={row.retirements ?? []} />
+      {/* One list for both curation kinds — the evidence sentence carries the difference
+          ("passed the last 10 gates" vs "passes with no guidance at all"). */}
+      {row.action.kind === 'curate' && (
+        <Retirements
+          skillId={row.skill_id}
+          retirements={[...(row.retirements ?? []), ...(row.saturated ?? [])]}
+        />
       )}
 
       <div className="mt-3 flex flex-wrap items-start gap-3">
