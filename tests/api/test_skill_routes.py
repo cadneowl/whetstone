@@ -47,6 +47,51 @@ def test_index_sorts_weakest_first(client: TestClient, store: RunStore, skills_r
     assert ids == ["weak-skill", "rust-errors"]
 
 
+def test_a_quiet_skill_shows_no_rot_lights(client: TestClient) -> None:
+    """The index row admits the honest all-clear when nothing has been probed."""
+    [skill] = client.get("/api/skills").json()
+    rot = skill["rot"]
+    assert rot["signals"] == 0
+    assert rot["drift_alarm"] is False
+    assert rot["saturated"] == 0 and rot["cadence_due"] == 0 and rot["dead_rules"] == 0
+    assert rot["days_since_anchor"] is None
+
+
+def test_a_saturated_probe_lights_the_rot_signal_on_the_index(
+    client: TestClient, store: RunStore
+) -> None:
+    """A should-catch case the naked model passes is a rot signal the index must surface — the
+    whole point of the strip is that 'which skill needs me' is answerable without a click."""
+    # A baseline probe where the naked model still caught the unwrap: that case measures nothing.
+    probe = make_record("probe", recall_tp=True)
+    probe.baseline = True
+    store.save(probe)
+
+    [skill] = client.get("/api/skills").json()
+    assert skill["rot"]["saturated"] == 1
+    assert skill["rot"]["signals"] >= 1
+
+
+def test_rot_flagged_skills_sort_ahead_of_a_merely_low_score(
+    client: TestClient, store: RunStore, skills_root  # type: ignore[no-untyped-def]
+) -> None:
+    """A saturated corpus is a more urgent call than a slightly lower F2, so it floats to the top
+    even though its score is perfect and the other skill's is zero."""
+    weak = skills_root / "weak-skill"
+    weak.mkdir()
+    (weak / "SKILL.md").write_text("---\nid: weak-skill\nversion: 1\n---\n\nbody\n", "utf-8")
+    # weak-skill: a real, measured failure (F2 = 0) but no rot lights.
+    store.save(make_record("weak", skill_id="weak-skill", recall_tp=False))
+    # rust-errors: perfect score, but a saturation probe flags a case as measuring nothing.
+    store.save(make_record("strong", skill_id="rust-errors", recall_tp=True))
+    probe = make_record("probe", skill_id="rust-errors", recall_tp=True)
+    probe.baseline = True
+    store.save(probe)
+
+    ids = [s["id"] for s in client.get("/api/skills").json()]
+    assert ids == ["rust-errors", "weak-skill"]  # rot beats a low score
+
+
 def test_detail_exposes_guidance_rules_and_provenance(client: TestClient) -> None:
     body = client.get("/api/skills/rust-errors").json()
     assert body["skill"]["version"] == 2

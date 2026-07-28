@@ -13,6 +13,14 @@ import { HealthPanel } from '@/components/HealthPanel'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
+// The tab keys, in strip order. An unknown `?tab=` value coerces to the first — a blank content
+// pane under a full tab strip reads as a broken page, and a bad link should land somewhere real.
+const TAB_KEYS = ['guidance', 'edit', 'cases', 'runs', 'health', 'meta'] as const
+
+function activeTab(raw: string | null): string {
+  return raw && (TAB_KEYS as readonly string[]).includes(raw) ? raw : 'guidance'
+}
+
 export function SkillDetail() {
   const { skillId = '' } = useParams()
   const [params, setParams] = useSearchParams()
@@ -48,9 +56,11 @@ export function SkillDetail() {
       </header>
 
       {/* The tab lives in the URL so the inbox can send you straight to the step it named, and
-          so a reload lands where you were rather than back on the overview. */}
+          so a reload lands where you were rather than back on the overview. An unknown value —
+          a stale bookmark, or `?tab=history` when the key is `runs` — falls back to Guidance
+          rather than rendering a blank pane under the tab strip. */}
       <Tabs.Root
-        value={params.get('tab') ?? 'guidance'}
+        value={activeTab(params.get('tab'))}
         onValueChange={(tab) => setParams(tab === 'guidance' ? {} : { tab }, { replace: true })}
       >
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">

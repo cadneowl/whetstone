@@ -980,7 +980,7 @@ export interface paths {
         };
         /**
          * List Skills
-         * @description Every skill, weakest first — the console's landing order.
+         * @description Every skill, worst first — the console's landing order, rot signals ahead of low scores.
          */
         get: operations["list_skills_api_skills_get"];
         put?: never;
@@ -3698,6 +3698,45 @@ export interface components {
             verdicts: components["schemas"]["IngestVerdict"][];
         };
         /**
+         * RotStatus
+         * @description The rot signals the index needs to answer "which skill needs me" without a click.
+         *
+         *     Each is a fact the Health tab already computes, reduced to what a traffic-light needs. Every
+         *     field defaults to quiet, so a skill with no probes and no history simply shows no lights — the
+         *     honest reading, not a false all-clear. Without these the index carried only the score, and a
+         *     skill with a saturated case, an overdue distill, a drift alarm, or a dead rule looked identical
+         *     to a healthy one — the rot the rest of the product detects was invisible where triage happens.
+         */
+        RotStatus: {
+            /**
+             * Cadence Due
+             * @default 0
+             */
+            cadence_due: number;
+            /** Days Since Anchor */
+            days_since_anchor?: number | null;
+            /**
+             * Dead Rules
+             * @default 0
+             */
+            dead_rules: number;
+            /**
+             * Drift Alarm
+             * @default false
+             */
+            drift_alarm: boolean;
+            /**
+             * Saturated
+             * @default 0
+             */
+            saturated: number;
+            /**
+             * Signals
+             * @description How many distinct rot lights are lit — what the index sorts on, worst first.
+             */
+            readonly signals: number;
+        };
+        /**
          * RunListItem
          * @description A run summary plus whether its version is trustworthy as a comparison key.
          *
@@ -4295,6 +4334,16 @@ export interface components {
              * @default []
              */
             recall_trend: number[];
+            /**
+             * @default {
+             *       "cadence_due": 0,
+             *       "dead_rules": 0,
+             *       "drift_alarm": false,
+             *       "saturated": 0,
+             *       "signals": 0
+             *     }
+             */
+            rot: components["schemas"]["RotStatus"];
             /**
              * Stale Version
              * @default false
