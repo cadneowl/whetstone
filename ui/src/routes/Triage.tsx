@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   useBatch,
   useConsoleConfig,
@@ -106,20 +107,27 @@ export function Triage() {
     [preview],
   )
 
-  const doPromote = useCallback(() => {
-    if (!current || !edits) return
-    promote.mutate(
-      { id: current.entry.candidate.id, edits },
-      {
-        onSuccess: (result) => {
-          setNotice({
-            text: `${result.prepared.case_id} → ${result.branch} (${result.batch_commits} queued)`,
-          })
-          setIndex((i) => Math.min(i, Math.max(0, items.length - 2)))
+  const promoteWith = useCallback(
+    (tier: 'active' | 'archive') => {
+      if (!current || !edits) return
+      promote.mutate(
+        { id: current.entry.candidate.id, edits: { ...edits, tier } },
+        {
+          onSuccess: (result) => {
+            setNotice({
+              text:
+                `${result.prepared.case_id} → ${result.branch} (${result.batch_commits} queued)` +
+                (tier === 'archive' ? ' — archived: counted at low weight' : ''),
+            })
+            setIndex((i) => Math.min(i, Math.max(0, items.length - 2)))
+          },
         },
-      },
-    )
-  }, [current, edits, items.length, promote])
+      )
+    },
+    [current, edits, items.length, promote],
+  )
+  const doPromote = useCallback(() => promoteWith('active'), [promoteWith])
+  const doArchive = useCallback(() => promoteWith('archive'), [promoteWith])
 
   const doReject = useCallback(() => {
     if (!current || !reason.trim()) return
@@ -306,6 +314,7 @@ export function Triage() {
               onCancelReject={() => setRejecting(false)}
               onReject={doReject}
               onPromote={doPromote}
+              onArchive={doArchive}
               onValidate={() => preview.mutate({ id: current.entry.candidate.id, edits })}
               busy={promote.isPending || reject.isPending}
               error={promote.error ?? preview.error ?? reject.error}
@@ -585,6 +594,7 @@ function FormPane({
   onCancelReject,
   onReject,
   onPromote,
+  onArchive,
   onValidate,
   busy,
   error,
@@ -602,6 +612,7 @@ function FormPane({
   onCancelReject: () => void
   onReject: () => void
   onPromote: () => void
+  onArchive: () => void
   onValidate: () => void
   busy: boolean
   error: unknown
@@ -622,6 +633,8 @@ function FormPane({
     // This column is only what will be written.
     <aside className="flex min-w-0 flex-col text-sm xl:h-full xl:min-h-0">
       <div className="min-h-0 flex-1 space-y-4 xl:overflow-y-auto xl:pr-1">
+        <Similars item={item} current={edits.semantic} />
+
         <Field label="Kind">
           <div className="flex gap-3">
             {(['should_catch', 'should_not_flag'] as EvalKind[]).map((kind) => (
@@ -873,6 +886,20 @@ function FormPane({
             >
               Promote
             </button>
+            {/* The middle disposition, offered only when there is a resemblance to act on:
+                counted as regression insurance at low draw weight, rather than either
+                re-verifying a duplicate forever or throwing real evidence away. */}
+            {(item.similar_cases ?? []).length > 0 && (
+              <button
+                type="button"
+                onClick={onArchive}
+                disabled={readOnly || busy}
+                title="Promote with tier: archive — kept as regression insurance, sampled at low weight"
+                className="rounded-lg border border-line px-3 py-1.5 text-muted transition-colors hover:border-good/50 hover:text-good disabled:opacity-40"
+              >
+                Promote to archive
+              </button>
+            )}
             <button
               type="button"
               onClick={onValidate}
@@ -893,6 +920,55 @@ function FormPane({
         )}
       </div>
     </aside>
+  )
+}
+
+/**
+ * Existing cases this candidate may duplicate, expandable to the side-by-side expectations.
+ *
+ * Evidence, never a verdict: hundreds of MRs of real defects are heavily repetitive, and promoted
+ * naively they skew the sample toward the skill's favourite catch — but the ninth unwrap case in a
+ * new subsystem may be exactly the promotion you want. The chip surfaces the resemblance; the
+ * dispositions below (promote / promote to archive / reject) stay a human's call.
+ */
+function Similars({ item, current }: { item: QueueItem; current: string }) {
+  const similars = item.similar_cases ?? []
+  if (similars.length === 0) return null
+  const skillId = item.edits.skill_id
+  return (
+    <details className="rounded-lg border border-warn/40 bg-warn/5 px-3 py-2">
+      <summary className="cursor-pointer text-xs text-warn">
+        similar to {similars.length} existing case{similars.length === 1 ? '' : 's'} — consider
+        “Promote to archive” or reject as a duplicate
+      </summary>
+      <ul className="mt-2 space-y-2">
+        {similars.map((s) => (
+          <li key={s.case_id} className="text-xs">
+            <Link
+              to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(s.case_id)}`}
+              className="font-mono hover:text-accent"
+            >
+              {s.case_id}
+            </Link>
+            <span className="ml-2 text-muted">{s.why}</span>
+            {s.semantic && (
+              <div className="mt-1 grid gap-1 sm:grid-cols-2">
+                <p className="rounded border border-line bg-canvas px-2 py-1 text-muted">
+                  <span className="mb-0.5 block text-[10px] uppercase">existing</span>
+                  {s.semantic}
+                </p>
+                <p className="rounded border border-line bg-canvas px-2 py-1">
+                  <span className="mb-0.5 block text-[10px] uppercase text-muted">
+                    this candidate
+                  </span>
+                  {current || <em className="text-muted">no expectation yet</em>}
+                </p>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </details>
   )
 }
 

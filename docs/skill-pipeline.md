@@ -183,6 +183,14 @@ confirms, and the flip lands as a one-line commit on the skill's staging branch.
 rewritten case changes `skill_hash`, the archived corpus needs a fresh passing gate before it can
 be proposed — de-weighting a case can move the score, and a moved score gets re-proven.
 
+Cases can also *arrive* archived. The triage screen compares each candidate against the skill's
+existing cases (same source MR, same file, overlapping expectation words — lexical on purpose,
+and computed only at triage load, never near the review path) and surfaces the resemblance with
+the two expectations side by side. When similars exist the promote button gains a third
+disposition: **promote to archive** — for the duplicate that is still worth counting as
+regression insurance rather than re-verified at full weight forever, or thrown away. Nothing is
+auto-rejected: the ninth unwrap case in a new subsystem may be exactly the promotion you want.
+
 ### The saturation probe
 
 A case can stop discriminating two ways the pass-rate cannot tell apart: the guidance genuinely

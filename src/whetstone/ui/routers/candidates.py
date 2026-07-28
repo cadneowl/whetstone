@@ -12,9 +12,12 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, StringConstraints
 
-from whetstone import drafting
+from whetstone import drafting, staging
 from whetstone.candidates import CandidateEntry, CandidateStore, Decision, new_decision
 from whetstone.config import Config
+from whetstone.core.loader import SkillLoadError, load_skill
+from whetstone.curation import SimilarCase, similar_cases
+from whetstone.domain.skill import Skill
 from whetstone.drafting import SemanticDraft
 from whetstone.gitio import (
     Author,
@@ -48,6 +51,10 @@ class QueueItem(BaseModel):
 
     entry: CandidateEntry
     edits: CaseEdits
+    # Existing cases this candidate may duplicate — see `curation.similar_cases`. Computed at
+    # triage load only, never anywhere near the review path, and only evidence: the promote flow
+    # offers dispositions (active / straight to archive / reject), a person picks.
+    similar_cases: list[SimilarCase] = []
 
 
 class Queue(BaseModel):
@@ -86,15 +93,54 @@ def list_candidates(
     include_decided: bool = Query(default=False),
 ) -> Queue:
     store = _store(config)
+    corpora = _CorpusCache(config)
     return Queue(
         items=[
-            QueueItem(entry=e, edits=edits_from(e))
+            QueueItem(entry=e, edits=edits_from(e), similar_cases=corpora.similars(e))
             for e in store.list(include_decided=include_decided)
         ],
         counts=store.counts(),
         root=str(config.candidates_dir),
         available=store.exists(),
     )
+
+
+class _CorpusCache:
+    """The case corpus each candidate is compared against, loaded once per request.
+
+    Per skill: the working tree *plus* whatever the triage batch already carries — the batch is
+    where this session's promotions live, and the commonest duplicate in a queue mined from
+    overlapping windows is the candidate you promoted an hour ago. Best-effort throughout: a
+    malformed skill or a missing batch means no similars for it, never a queue that fails to load.
+    """
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self._skills: dict[str, Skill | None] = {}
+
+    def similars(self, entry: CandidateEntry) -> list[SimilarCase]:
+        skill = self._skill_for(entry.candidate.suggested_skill or "")
+        if skill is None:
+            return []
+        return similar_cases(entry.candidate, skill)
+
+    def _skill_for(self, skill_id: str) -> Skill | None:
+        if not skill_id:
+            return None
+        if skill_id not in self._skills:
+            self._skills[skill_id] = self._load(skill_id)
+        return self._skills[skill_id]
+
+    def _load(self, skill_id: str) -> Skill | None:
+        directory = self.config.skills_root / skill_id
+        if not (directory / "SKILL.md").is_file():
+            return None
+        try:
+            skill = load_skill(directory)
+        except SkillLoadError:
+            return None
+        promoted = staging.promoted_skill(self.config, skill_id)
+        return skill if promoted is None else staging.merge_cases(skill, promoted)
 
 
 class BatchView(Batch):
@@ -134,7 +180,11 @@ def get_batch(config: ConfigDep) -> BatchView:
 @router.get("/{candidate_id}", response_model=QueueItem)
 def get_candidate(candidate_id: str, config: ConfigDep) -> QueueItem:
     entry = _load(config, candidate_id)
-    return QueueItem(entry=entry, edits=edits_from(entry))
+    return QueueItem(
+        entry=entry,
+        edits=edits_from(entry),
+        similar_cases=_CorpusCache(config).similars(entry),
+    )
 
 
 class DraftRequest(BaseModel):
@@ -329,7 +379,11 @@ def undo(candidate_id: str, config: ConfigDep) -> QueueItem:
     _load(config, candidate_id)
     store.clear_decision(candidate_id)
     entry = store.load(candidate_id)
-    return QueueItem(entry=entry, edits=edits_from(entry))
+    return QueueItem(
+        entry=entry,
+        edits=edits_from(entry),
+        similar_cases=_CorpusCache(config).similars(entry),
+    )
 
 
 def prepare_promotion(

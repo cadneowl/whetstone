@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from whetstone.candidates import CandidateEntry
 from whetstone.core.loader import SkillLoadError, load_skill
 from whetstone.domain.enums import Severity
-from whetstone.domain.eval_model import EvalCase, EvalKind, Provenance
+from whetstone.domain.eval_model import CaseTier, EvalCase, EvalKind, Provenance
 from whetstone.naming import describe_unsafe, is_safe_segment
 
 CASE_FILE = "case.yaml"
@@ -56,6 +56,11 @@ class CaseEdits(BaseModel):
     # Set when a triage step drafted the semantic and the operator kept it. Carried into the case's
     # provenance, so a corpus can be asked how its expectations were written.
     semantic_drafted_by: str = ""
+    # "archive" promotes the case straight to the low-weight tier — the disposition for a
+    # candidate that duplicates existing coverage but is still worth counting as regression
+    # insurance. The evidence (provenance, ref) is preserved either way; only the draw weight
+    # differs. See `curation.similar_cases` for how the console surfaces the duplicates.
+    tier: CaseTier = "active"
 
     @property
     def must(self) -> str:
@@ -128,6 +133,10 @@ def render_case_yaml(entry: CandidateEntry, edits: CaseEdits) -> str:
         "provenance": provenance,
         "expect": [expectation],
     }
+    if edits.tier != "active":
+        # Written only when it says something — absent means active, and every case file written
+        # before tiers existed reads that way.
+        payload["tier"] = edits.tier
     return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
 
 

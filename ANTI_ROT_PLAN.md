@@ -120,9 +120,26 @@
 >   cascade threshold) — only meaningful with the cascade on, which is off by default, and it
 >   needs the judge policy threaded into the discrimination read. Add when a deployment
 >   actually enables `escalate_below`.
-> - **Next up: Phase 2.4 — dedup at the promotion door** (`similar_cases` on triage
->   candidates: same rule provenance, overlapping path, expectation-text overlap — lexical
->   first, never auto-reject). Then Phase 3 (drift metric + synthetic counterfactuals).
+> - **2.4 — DONE** (this commit): dedup at the promotion door. `curation.similar_cases(candidate,
+>   skill)`: lexical only, three signals with the *why* as a sentence — same provenance ref
+>   ("mined from the same merge request"), expectation token-overlap ≥ 0.5 (Jaccard over
+>   lowercased words minus a tiny closed stopword set), or same file + overlap ≥ 0.25. Same-kind
+>   cases only; capped at 5, best first; `SimilarCase.semantic` carries the existing expectation
+>   so the triage screen lays the two side by side. Wired at triage load only (`_CorpusCache` in
+>   `ui/routers/candidates.py` — per-skill working tree **merged with the triage batch**, because
+>   the commonest duplicate is the candidate promoted an hour ago; best-effort, a malformed skill
+>   never 500s the queue). Never near the review path. Dispositions: `CaseEdits.tier` — promote
+>   active (default, file unchanged from pre-tier days), **promote to archive** (case.yaml gains
+>   `tier: archive`, provenance/ref chain intact, low draw weight from day one), or reject with
+>   reason (already existed). UI: warn-toned expandable chip on the triage form ("similar to N
+>   existing cases") with side-by-side expectations and case links; "Promote to archive" button
+>   appears only when similars exist.
+> - **Next up: Phase 3 — representativeness.** 3.1 corpus drift metric (embeddings allowed —
+>   offline, never in the gate path): centroid distance between recent-MR-stream vectors and
+>   corpus vectors, plus uncovered-MR list linking into triage; fills the health payload's
+>   `drift` section. 3.2 synthetic counterfactuals/mutations (clearly provenance-tagged
+>   `synthetic`, shown in composition). Then Phase 4.1 case-RAG / 4.2 judge distillation,
+>   Phase 5 cadence + dead-rule report.
 > - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
 >   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
 >   scheduled job — cadence lands with Phase 5.

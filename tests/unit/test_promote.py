@@ -117,6 +117,21 @@ def test_kind_change_flips_must() -> None:
     assert payload["expect"][0]["must"] == "not_appear"
 
 
+def test_tier_is_written_only_when_it_says_something(tmp_path: Path) -> None:
+    """Absent means active — the default disposition leaves the file exactly as before tiers."""
+    entry = _entry()
+    edits = edits_from(entry)
+    assert "tier" not in yaml.safe_load(render_case_yaml(entry, edits))
+
+    edits.semantic = "unwrap on the DB result can panic on a normal error path"
+    edits.tier = "archive"
+    payload = yaml.safe_load(render_case_yaml(entry, edits))
+    assert payload["tier"] == "archive"
+    # And it survives the loader round-trip prepare() performs.
+    prepared = prepare(entry, edits, skills_root=tmp_path)
+    assert prepared.case.tier == "archive"
+
+
 def test_severity_min_is_written_as_a_name(tmp_path: Path) -> None:
     entry = _entry()
     edits = edits_from(entry)
