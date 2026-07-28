@@ -1207,6 +1207,12 @@ export interface components {
              */
             kind: "should_catch" | "should_not_flag";
             /**
+             * Partition
+             * @default train
+             * @enum {string}
+             */
+            partition: "train" | "holdout";
+            /**
              * Trials
              * @default []
              */
@@ -1789,6 +1795,7 @@ export interface components {
             backend: string;
             /** Base Hash */
             base_hash: string;
+            base_holdout?: components["schemas"]["HoldoutReport"] | null;
             /**
              * Base Ref
              * @default
@@ -1797,6 +1804,7 @@ export interface components {
             base_score: components["schemas"]["SkillScore"];
             /** Candidate Hash */
             candidate_hash: string;
+            candidate_holdout?: components["schemas"]["HoldoutReport"] | null;
             /**
              * Candidate Ref
              * @default
@@ -1963,6 +1971,36 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * HoldoutReport
+         * @description Train vs holdout, side by side — the overfitting alarm's readout.
+         *
+         *     The improve loop learns only from the train partition (see `sampling.partition_of`), so the
+         *     two numbers answer different questions: train recall is "did the drafting work?", holdout
+         *     recall is "did the *skill* get better, or just better at its own exam?". A widening gap is
+         *     the earliest signal that guidance is memorizing cases rather than learning patterns.
+         */
+        HoldoutReport: {
+            /**
+             * Divergence
+             * @description Train minus holdout recall — positive and growing means overfitting.
+             */
+            readonly divergence: number;
+            /** Fraction */
+            fraction: number;
+            /** Holdout Cases */
+            holdout_cases: number;
+            /** Holdout Fp Rate */
+            holdout_fp_rate: number;
+            /** Holdout Recall */
+            holdout_recall: number;
+            /** Train Cases */
+            train_cases: number;
+            /** Train Fp Rate */
+            train_fp_rate: number;
+            /** Train Recall */
+            train_recall: number;
         };
         /** ImproveRequest */
         ImproveRequest: {
@@ -3074,6 +3112,7 @@ export interface components {
              * @default
              */
             guidance_hash: string;
+            holdout?: components["schemas"]["HoldoutReport"] | null;
             /** Id */
             id: string;
             /**

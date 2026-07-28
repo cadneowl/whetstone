@@ -42,6 +42,11 @@ sample:
   # should_catch will sometimes contain no negative cases at all — and a false-positive rate
   # measured over zero negative cases is a flattering zero.
   stratify: true
+  # Share of cases held out from the improve loop: still scored, never shown to the drafter,
+  # reported separately. Train score climbing while holdout stalls is overfitting made visible —
+  # the drafter memorizing its cases rather than learning the pattern. Membership is an unseeded
+  # hash of the case id, so there is no knob to re-roll it. 0 disables the split.
+  holdout_fraction: 0.2
 
 inputs:
   wiki:

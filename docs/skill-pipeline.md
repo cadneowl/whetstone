@@ -96,6 +96,7 @@ sample:
   max_cases: null         # null scores everything; a number caps it
   seed: 0                 # selection is a hash of this and the case id
   stratify: true          # draw proportionally from each case kind
+  holdout_fraction: 0.2   # share of cases scored but never shown to the improve drafter
 
 inputs:
   wiki:
@@ -150,6 +151,20 @@ Turn it off and a sample of a corpus that is 90% positive will sometimes contain
 at all — and a false-positive rate measured over zero negative cases is a flattering zero.
 
 Override per run: `--sample 200 --sample-seed 7`.
+
+### The holdout partition
+
+`skills improve` reads failures from the same corpus the gate then scores — train equals test,
+structurally — so over many improve cycles the score is guaranteed to climb faster than real
+capability: the drafter is shown the answers. `holdout_fraction` holds a slice of cases out of
+that loop: they are **still scored on every run and gate**, but their failures never reach an
+improve digest (the digest says how many were withheld), a proposal may not name them in
+`targeted_cases`, and the gate refuses `--targeted` ids that fall in the partition. Scores are
+reported per partition, and train running ahead of holdout is the overfitting alarm — the moment
+to promote fresh cases rather than polish further.
+
+Membership is an unseeded hash of the case id: stable forever, on every machine, with deliberately
+no way to re-roll it — a seed would offer exactly the workaround the partition exists to prevent.
 
 ---
 

@@ -51,6 +51,7 @@ from whetstone.scaffold import write_scaffold
 from whetstone.service import (
     apply_ruling,
     format_gate,
+    format_holdout,
     format_score,
     precision_evidence,
     record_eval,
@@ -432,6 +433,8 @@ def eval_run(
         typer.echo(record.score.model_dump_json(indent=2))
         return
     typer.echo(format_score(record.score))
+    if record.holdout:
+        typer.echo(format_holdout(record.holdout))
     if save:
         typer.echo(f"\nrun {record.id}  ({record.llm_calls} llm calls, {record.duration_s:.1f}s)")
         typer.echo(f"  whetstone report --run {record.id}")
@@ -562,6 +565,9 @@ def eval_gate(
             typer.echo(record.model_dump_json(indent=2))
         else:
             typer.echo(format_gate(record.result))
+            if record.candidate_holdout:
+                typer.echo("candidate, by partition:")
+                typer.echo(format_holdout(record.candidate_holdout))
             if save:
                 typer.echo(f"\ngate {record.id}")
         raise typer.Exit(code=0 if record.result.passed else 1)
@@ -1121,6 +1127,17 @@ def skills_improve(
         typer.echo(
             f"# dropped {len(result.unknown_cases)} targeted case id(s) that do not exist: "
             f"{', '.join(result.unknown_cases)}",
+            err=True,
+        )
+    if result.holdout_cases:
+        typer.echo(
+            f"# dropped {len(result.holdout_cases)} holdout case id(s) a change may not claim "
+            f"to fix: {', '.join(result.holdout_cases)}",
+            err=True,
+        )
+    if d.holdout_withheld:
+        typer.echo(
+            f"# {d.holdout_withheld} failure(s) on holdout cases were withheld from the digest",
             err=True,
         )
     if result.proposal.rationale:

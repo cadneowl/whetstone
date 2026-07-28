@@ -137,6 +137,12 @@ class SamplePolicy(BaseModel):
     # Draw proportionally from each `kind` (should_catch / should_not_flag / …) rather than
     # uniformly, so a sample cannot accidentally omit every negative case and flatter the skill.
     stratify: bool = True
+    # Share of cases held out from the improve loop (see `sampling.partition_of`): still scored,
+    # never shown to the drafter, reported separately so train-vs-holdout divergence is visible.
+    # Membership is an unseeded hash of the case id — there is deliberately no knob to re-roll it.
+    # 0 disables the partition entirely; capped at 0.5 because a "holdout" that outweighs the
+    # training half is a corpus that mostly can't be learned from.
+    holdout_fraction: float = Field(default=0.2, ge=0.0, le=0.5)
 
 
 class StepSpec(BaseModel):

@@ -62,6 +62,30 @@ class Confusion(BaseModel):
         return (1 + b2) * p * r / (b2 * p + r)
 
 
+class HoldoutReport(BaseModel):
+    """Train vs holdout, side by side — the overfitting alarm's readout.
+
+    The improve loop learns only from the train partition (see `sampling.partition_of`), so the
+    two numbers answer different questions: train recall is "did the drafting work?", holdout
+    recall is "did the *skill* get better, or just better at its own exam?". A widening gap is
+    the earliest signal that guidance is memorizing cases rather than learning patterns.
+    """
+
+    fraction: float
+    train_cases: int
+    train_recall: float
+    train_fp_rate: float
+    holdout_cases: int
+    holdout_recall: float
+    holdout_fp_rate: float
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def divergence(self) -> float:
+        """Train minus holdout recall — positive and growing means overfitting."""
+        return self.train_recall - self.holdout_recall
+
+
 class CaseScore(BaseModel):
     """Per-eval-case result: one Confusion per trial, plus the aggregate."""
 

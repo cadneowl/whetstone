@@ -118,7 +118,26 @@ function Header({ run }: { run: RunRecord }) {
         <Metric label="fp rate" value={score(s.fp_rate)} />
         <Metric label="precision" value={score(s.precision)} />
         {run.k > 1 && <Metric label="recall stdev" value={score(s.recall_stdev)} />}
+        {run.holdout && (
+          <>
+            <Metric
+              label={`train recall (${run.holdout.train_cases})`}
+              value={score(run.holdout.train_recall)}
+            />
+            <Metric
+              label={`holdout recall (${run.holdout.holdout_cases})`}
+              value={score(run.holdout.holdout_recall)}
+            />
+            <Metric label="divergence" value={run.holdout.divergence.toFixed(2)} />
+          </>
+        )}
       </div>
+      {run.holdout && run.holdout.divergence > 0.1 && (
+        <p className="mt-1 text-xs text-bad">
+          Train is running well ahead of holdout — the guidance may be memorizing its cases rather
+          than learning the pattern. Promote fresh cases before polishing further.
+        </p>
+      )}
 
       <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
         <li>{when(run.created_at)}</li>
@@ -181,6 +200,14 @@ function CaseBlock({
         {flaky && (
           <Badge tone="warn" title="Trials disagreed — unstable, as opposed to simply wrong">
             flaky
+          </Badge>
+        )}
+        {caseRun.partition === 'holdout' && (
+          <Badge
+            tone="neutral"
+            title="Holdout: scored but never shown to the improve drafter, so its score measures learning rather than memorization. A change may not claim to fix it."
+          >
+            holdout
           </Badge>
         )}
         <span className="ml-auto flex items-center gap-1.5">

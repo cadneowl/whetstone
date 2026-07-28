@@ -57,10 +57,23 @@
 >   mint time unlocks grounded-tier measurement later. A hard "adopt" gate on doctrine changes —
 >   currently the bar is enforced by exit code (CI) and visible verdicts (Judge page), not by
 >   blocking runs. Inbox surfacing of "rulings pile up unmeasured".
-> - **Next up: Phase 2.1 — the holdout split** in `sampling.py` (hash-partition, digest
->   blindfold in `improve.py`, per-partition scores in gate output, targeted-must-be-train
->   rule), then 2.2 tiers → 2.3 saturation probe → 2.4 dedup. Phase H health endpoint skeleton
->   should land with 2.1 so the divergence number has somewhere to live.
+> - **2.1 — DONE** (this commit): the holdout split, ON by default at 0.2.
+>   `sampling.partition_of` (unseeded hash — no re-roll knob, deliberately) +
+>   `holdout_report(score, fraction)` (None when nothing to compare, never zeros);
+>   `SamplePolicy.holdout_fraction`; `CaseRun.partition` stamped at record time (old records
+>   load as train, honestly); `RunRecord.holdout` + `GateRecord.base_holdout/candidate_holdout`
+>   (`HoldoutReport` in domain/score.py with computed `divergence`). The blindfold lives in
+>   `improve._failures` (digest reports `holdout_withheld`; render says "improve from the
+>   pattern, not the exam"); `propose` drops model-named holdout ids like unknown ids
+>   (`ProposalResult.holdout_cases`); `gate_skills` refuses `--targeted` holdout ids before any
+>   spend, and threads the fraction to both sides via a no-draw SamplePolicy. CLI prints the
+>   partition lines (`format_holdout`); drill-down shows train/holdout/divergence metrics, a
+>   red note past 0.1 divergence, and a holdout badge per case. Aggregate scores unchanged —
+>   every case is still scored; only learnability changed.
+> - **Next up: Phase 2.2 — case tiers** (active/archive, inbox `curate` retirement proposals,
+>   low-weight archive sampling) and the **Phase H health endpoint skeleton**
+>   (`GET /api/skills/{id}/health`) so divergence, composition, and judge state get one surface.
+>   Then 2.3 saturation probe → 2.4 dedup → Phase 3.
 > - Phase H note: the health endpoint skeleton (`GET /api/skills/{id}/health`) has NOT been
 >   started; disputes-pending count now lives on `GET /api/judge` and belongs in the health
 >   payload's `judge` block when it lands.

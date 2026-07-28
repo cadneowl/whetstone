@@ -96,6 +96,9 @@ class Digest(BaseModel):
     total_cases: int
     scored_cases: int
     total_failures: int
+    # Failing outcomes on holdout cases, deliberately kept out of `clusters` and out of the
+    # count above: the drafter must not see the exam. Reported so the exclusion is never silent.
+    holdout_withheld: int = 0
     clusters: list[Cluster] = Field(default_factory=list)
     wiki: str = ""
     recall: float | None = None
@@ -105,13 +108,19 @@ class Digest(BaseModel):
     instruction: str = ""
 
     def render_failures(self) -> str:
+        withheld = (
+            f"\n\n({self.holdout_withheld} further failure(s) are on holdout cases and "
+            "deliberately withheld — improve from the pattern, not the exam.)"
+            if self.holdout_withheld
+            else ""
+        )
         if not self.clusters:
-            return "No failures in the last run."
+            return "No failures in the last run." + withheld
         blocks = []
         for cluster in self.clusters:
             note = f" (and {cluster.size - 1} more like it)" if cluster.size > 1 else ""
             blocks.append(cluster.representative.render() + note)
-        return "\n\n".join(blocks)
+        return "\n\n".join(blocks) + withheld
 
     def render_pages(self) -> str:
         """The companion guidance, each page under the path it must be returned as."""
@@ -179,6 +188,9 @@ class ProposalResult(BaseModel):
     proposal: GuidanceProposal
     digest: Digest
     unknown_cases: list[str] = Field(default_factory=list)
+    # Targeted ids the model named that sit in the holdout partition — dropped, not honored, for
+    # the reason `_failures` withholds those cases in the first place.
+    holdout_cases: list[str] = Field(default_factory=list)
     llm_calls: int = 0
 
 
@@ -201,6 +213,7 @@ def build_digest(
         total_cases=len(skill.eval_cases),
         scored_cases=0 if record is None else len(record.cases),
         total_failures=len(failures),
+        holdout_withheld=0 if record is None else _withheld(record, inputs),
         clusters=clusters,
         wiki=wiki_text,
         recall=None if record is None else record.score.recall,
@@ -212,9 +225,16 @@ def build_digest(
 def _failures(
     record: RunRecord, cases: dict[str, EvalCase], inputs: FailureInputs
 ) -> list[Failure]:
+    """Train-partition failures only. The blindfold is unconditional and lives here — at digest
+    assembly, the one door failures pass through to reach a prompt — because a drafter shown a
+    holdout failure converts the overfitting alarm into part of the training set. The digest
+    reports how many were withheld (`Digest.holdout_withheld`), so nothing is dropped silently.
+    """
     wanted = set(inputs.outcomes)
     out: list[Failure] = []
     for case_run in record.cases:
+        if case_run.partition == "holdout":
+            continue
         trial = case_run.representative_trial
         if trial is None:
             continue
@@ -225,6 +245,20 @@ def _failures(
                 _failure(case_run, trial, outcome, cases.get(case_run.case_id), inputs)
             )
     return out
+
+
+def _withheld(record: RunRecord, inputs: FailureInputs) -> int:
+    """How many failing outcomes the holdout blindfold kept out of the digest."""
+    wanted = set(inputs.outcomes)
+    count = 0
+    for case_run in record.cases:
+        if case_run.partition != "holdout":
+            continue
+        trial = case_run.representative_trial
+        if trial is None:
+            continue
+        count += sum(1 for o in trial.outcomes if o.outcome in wanted)
+    return count
 
 
 def _failure(
@@ -366,8 +400,16 @@ def propose(
     known = {c.id for c in skill.eval_cases}
     unknown = [c for c in proposal.targeted_cases if c not in known]
     proposal.targeted_cases = [c for c in proposal.targeted_cases if c in known]
+    # A model may only claim to fix cases it was shown. It never sees holdout failures, but
+    # nothing stops it naming a holdout case id it inferred from the guidance — and that name
+    # would become a `--targeted` flag the gate rejects. Dropped here with a report, for the same
+    # reason unknown ids are.
+    held = {c.case_id for c in record.cases if c.partition == "holdout"} if record else set()
+    holdout_named = [c for c in proposal.targeted_cases if c in held]
+    proposal.targeted_cases = [c for c in proposal.targeted_cases if c not in held]
     return ProposalResult(
-        proposal=proposal, digest=digest, unknown_cases=unknown, llm_calls=calls
+        proposal=proposal, digest=digest, unknown_cases=unknown,
+        holdout_cases=holdout_named, llm_calls=calls,
     )
 
 

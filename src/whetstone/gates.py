@@ -25,7 +25,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from whetstone.core.gate import GateConfig, GateResult
-from whetstone.domain.score import SkillScore
+from whetstone.domain.score import HoldoutReport, SkillScore
 from whetstone.runs import CorruptRecord
 
 DEFAULT_GATES_DIR = Path(".whetstone/gates")
@@ -65,6 +65,11 @@ class GateRecord(BaseModel):
     result: GateResult
     base_score: SkillScore
     candidate_score: SkillScore
+    # Train vs holdout per side, when the sample policy holds cases out. The gate itself still
+    # compares aggregates; these exist so a pass with widening holdout divergence is readable as
+    # what it is — "nothing broke, but the sharpening may be memorization".
+    base_holdout: HoldoutReport | None = None
+    candidate_holdout: HoldoutReport | None = None
 
     @property
     def evidential(self) -> bool:
