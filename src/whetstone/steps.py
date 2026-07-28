@@ -111,6 +111,26 @@ class StepInputs(BaseModel):
     precedents: PrecedentLimits = PrecedentLimits()
 
 
+class Tier1Backend(BaseModel):
+    """The backend tier-1 verdicts run on, when it should differ from the run's own client.
+
+    The deployment seam for a distilled judge (ANTI_ROT_PLAN.md 4.2): a small local model
+    fine-tuned to reproduce the trustworthy judge's verdicts takes the bulk pairwise calls, while
+    the grounded tier 2 — and the reviewer itself — stay on the run's backend. Unset (the
+    default), tier 1 uses the run's client exactly as it always has. Rollback is deleting the
+    block. The resolved model folds into the run's `judge_hash`: a different tier-1 model is a
+    different instrument, and trend lines must break rather than draw through the swap.
+    """
+
+    llm: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.llm or self.model)
+
+
 class JudgePolicy(BaseModel):
     """How this skill's verdicts are judged — the cascade knobs, in `evaluate/step.yaml`.
 
@@ -123,6 +143,7 @@ class JudgePolicy(BaseModel):
 
     escalate_below: float = Field(default=0.0, ge=0.0, le=1.0)
     max_diff_bytes: int = Field(default=2_000, ge=200, le=100_000)
+    tier1: Tier1Backend = Tier1Backend()
 
     @property
     def enabled(self) -> bool:

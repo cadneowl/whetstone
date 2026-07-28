@@ -1630,6 +1630,12 @@ def _eval_plan(
         judge_cascade=bool(spec and spec.judge.enabled),
     )
     check_budget(plan, config.runs.max_llm_calls_per_run)
+    if spec and spec.judge.tier1.configured:
+        plan.details.append(
+            f"judge tier 1 runs on its own backend "
+            f"({spec.judge.tier1.model or spec.judge.tier1.llm}) — the distilled-judge seam; "
+            "the reviewer and grounded tier 2 stay on the backend above"
+        )
     if request.scope == "working":
         _warn_if_a_change_is_staged(plan, config, skill)
     return plan

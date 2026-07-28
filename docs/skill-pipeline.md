@@ -290,6 +290,34 @@ review's record lists which precedents it saw — findings become explainable as
 case-X was" — and the Health tab's index card shows the pinned model, the case count, and which
 active cases are not yet retrievable (promoted or edited since the last build).
 
+### Distilling the judge
+
+Judge calls are the largest cost line — they scale as cases × trials × both gate sides — and a
+near-free tier 1 is what makes the *unsampled* full-corpus run affordable weekly instead of
+quarterly. `whetstone judge export` writes every recorded verdict as training triples (finding,
+expectation, grounding diff → verdict), filtered to one judge identity so the student never
+learns from an instrument nobody ran; escalated verdicts carry the tier-1 call the grounded
+teacher corrected — the hard negatives worth oversampling. The fine-tune happens outside
+Whetstone (`judges/default/distill.md` is the recipe); validation is `whetstone judge eval --llm
+ollama --model <distilled>` against the ratcheted bar, and a model that has not cleared it does
+not deploy.
+
+Deployment is two lines in `evaluate/step.yaml`:
+
+```yaml
+judge:
+  escalate_below: 0.8
+  tier1:
+    llm: ollama
+    model: judge-distilled
+```
+
+The student takes the bulk pairwise calls on its own client; the reviewer and the grounded tier 2
+stay on the run's backend, and unsure verdicts still escalate to the teacher. The resolved tier-1
+model folds into every run's `judge_hash` — a swapped judge is a different instrument, and trends
+break at the seam instead of drawing through it. The Judge page shows the escalation rate over
+recent runs: the number a distilled tier 1 has to keep honest. Rollback is deleting the block.
+
 ---
 
 ## `improve/step.yaml` — drafting a guidance change

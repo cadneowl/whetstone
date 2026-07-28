@@ -161,7 +161,7 @@ def get_health(
     judge: JudgeView | None = None
     judge_error = ""
     try:
-        judge = get_judge(config)
+        judge = get_judge(config, store)
     except Unprocessable as exc:
         judge_error = str(exc)
 
