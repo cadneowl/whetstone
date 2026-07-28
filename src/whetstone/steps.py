@@ -39,6 +39,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from whetstone.caseindex import PrecedentLimits
 from whetstone.wiki import WikiEntry, WikiLimits
 
 StepKind = Literal["evaluate", "improve", "update", "triage"]
@@ -105,6 +106,9 @@ class StepInputs(BaseModel):
     failures: FailureInputs = FailureInputs()
     wiki: WikiLimits = WikiLimits()
     draft: DraftInputs = DraftInputs()
+    # How much precedent a review may see, when the skill carries a case index (`caseindex.py`).
+    # Same discipline as the wiki cap: paid on every case of every trial on both gate sides.
+    precedents: PrecedentLimits = PrecedentLimits()
 
 
 class JudgePolicy(BaseModel):

@@ -84,6 +84,7 @@ export function ReviewDetail() {
   return (
     <div>
       <Header record={record} stale={data.stale_skill} />
+      <PrecedentStrip record={record} />
 
       {record.findings.length === 0 ? (
         <>
@@ -230,6 +231,36 @@ function Header({ record, stale }: { record: ReviewRecord; stale: boolean }) {
         </p>
       )}
     </header>
+  )
+}
+
+/**
+ * The corpus cases injected into this review's prompt — what makes a finding explainable as
+ * "flagged like case-X was". Absent for skills without an index and for pre-retrieval records.
+ */
+function PrecedentStrip({ record }: { record: ReviewRecord }) {
+  const refs = record.precedents ?? []
+  if (refs.length === 0) return null
+  return (
+    <p className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted">
+      <span title="These cases were shown to the reviewer as calibration — precedent, not rules.">
+        reviewed with precedent:
+      </span>
+      {refs.map((ref) => (
+        <Link
+          key={ref.case_id}
+          to={`/skills/${encodeURIComponent(record.skill_id)}/cases/${encodeURIComponent(ref.case_id)}`}
+          className="rounded border border-line px-1.5 py-0.5 font-mono hover:border-accent/50 hover:text-accent"
+          title={
+            ref.kind === 'should_catch'
+              ? `a catch precedent, similarity ${(ref.similarity ?? 0).toFixed(2)}`
+              : `a stay-silent precedent, similarity ${(ref.similarity ?? 0).toFixed(2)}`
+          }
+        >
+          {ref.case_id}
+        </Link>
+      ))}
+    </p>
   )
 }
 

@@ -25,6 +25,7 @@ export function HealthPanel({ skillId }: { skillId: string }) {
       <RetirementSection skillId={skillId} retirements={data.retirements ?? []} />
       <DiscriminationSection skillId={skillId} health={data} />
       <DriftSection skillId={skillId} health={data} />
+      <IndexSection skillId={skillId} health={data} />
       <JudgeSection health={data} />
       <ProductionSection health={data} />
       <PendingSections />
@@ -360,6 +361,73 @@ function UncoveredRow({ mr }: { mr: UncoveredMr }) {
           : 'no case comes close'}
       </span>
     </li>
+  )
+}
+
+/**
+ * The committed retrieval index — what precedent injection reads at review time.
+ *
+ * A rebuild is a content change: the index folds into skill_hash, so the job stages it on the
+ * skill's branch and the gate must re-prove the skill before it can be proposed. Staleness is
+ * not an error, it is the newest lessons not yet retrievable.
+ */
+function IndexSection({ skillId, health }: { skillId: string; health: SkillHealth }) {
+  const idx = health.index
+  return (
+    <Section
+      title="Case index"
+      intro="Precedents at review time: the incoming change is embedded with the pinned model and the nearest cases are injected as calibration — a case promoted this morning sharpens this afternoon's reviews, no improve cycle needed."
+    >
+      {idx ? (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1">
+            <span className="tabular">{idx.cases} case{idx.cases === 1 ? '' : 's'} indexed</span>
+            <span className="font-mono text-xs text-muted">
+              {idx.model}
+              {idx.provider ? ` via ${idx.provider}` : ''}
+            </span>
+            {idx.built_at && <span className="text-xs text-muted">built {idx.built_at}</span>}
+            {(idx.stale ?? []).length > 0 && (
+              <Badge
+                tone="warn"
+                title="Active cases the index does not cover — promoted or edited since the last build. Rebuild to make them retrievable."
+              >
+                {(idx.stale ?? []).length} not indexed
+              </Badge>
+            )}
+          </div>
+          {(idx.stale ?? []).length > 0 && (
+            <p className="text-xs text-muted">
+              not yet retrievable:{' '}
+              {(idx.stale ?? []).map((caseId, i) => (
+                <span key={caseId}>
+                  {i > 0 && ', '}
+                  <Link
+                    to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(caseId)}`}
+                    className="font-mono hover:text-accent"
+                  >
+                    {caseId}
+                  </Link>
+                </span>
+              ))}
+            </p>
+          )}
+        </div>
+      ) : (
+        <p className="text-muted italic">
+          No index — the reviewer sees guidance and wiki only, exactly as before the feature
+          existed. Building one pins an embedding model and stages the vectors on the skill's
+          branch.
+        </p>
+      )}
+      <div className="mt-3">
+        <LaunchButton
+          kind="index"
+          request={{ skill_id: skillId }}
+          label={idx ? 'Rebuild case index' : 'Build case index'}
+        />
+      </div>
+    </Section>
   )
 }
 

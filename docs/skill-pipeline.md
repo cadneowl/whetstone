@@ -263,6 +263,33 @@ Synthetic parents are refused — the chain always stays one step from real evid
 generators are buttons on the Health tab's Corpus section, and both jobs answer with what was
 written and what was skipped, with reasons.
 
+### The case index: precedents at review time
+
+Without retrieval, every lesson the corpus holds must pass through improve cycles into guidance
+prose — a lossy distillation with one-full-loop latency, and the direct cause of guidance bloat.
+`whetstone skills index --skill skills/<id>` inverts it: every active case's diff is embedded with
+a **pinned** model and committed as `index/manifest.yaml` + `index/vectors.json`. At review time
+the incoming change is embedded with that same model and the nearest cases are injected after the
+guidance and wiki, labelled as **precedent, not rules** — both kinds, because a stay-silent
+precedent teaches restraint that prose is notoriously bad at encoding. A case promoted this
+morning sharpens this afternoon's reviews with zero improve cycles.
+
+Why this is admissible when `wiki.py` bans embeddings from retrieval: the objection is that
+retrieval must be a pure function of the diff so both gate sides see identical context. A pinned
+model over a versioned, committed index satisfies exactly that — and the manifest's digest folds
+into `skill_hash`, so rebuilding the index **retracts gate evidence** exactly as a wiki refresh
+does (C6): re-gate before proposing. The console's rebuild job stages the index on the skill's
+branch, never the working tree. A skill without an index hashes and reviews exactly as before the
+feature existed.
+
+Guardrails: a case is never its own precedent (at eval time the query diff *is* the case diff, and
+retrieval would otherwise hand the reviewer the answer key); the saturation probe strips the index
+along with the guidance; caps live in `evaluate/step.yaml` under `inputs.precedents` (same
+discipline as the wiki caps) and the preflight names the per-case embedding cost. Each live
+review's record lists which precedents it saw — findings become explainable as "flagged like
+case-X was" — and the Health tab's index card shows the pinned model, the case count, and which
+active cases are not yet retrievable (promoted or edited since the last build).
+
 ---
 
 ## `improve/step.yaml` — drafting a guidance change

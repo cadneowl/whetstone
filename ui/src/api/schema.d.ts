@@ -541,6 +541,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/index": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Index
+         * @description Embed the active corpus and stage the index on the skill's branch.
+         */
+        post: operations["launch_index_api_jobs_index_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/index/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Index Job */
+        post: operations["plan_index_job_api_jobs_index_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/judge-eval": {
         parameters: {
             query?: never;
@@ -2415,6 +2452,60 @@ export interface components {
             watch: components["schemas"]["WatchState"];
         };
         /**
+         * IndexRequest
+         * @description Rebuild a skill's case index — the committed retrieval index precedent injection reads.
+         *
+         *     The result is staged on the skill's branch, never written to the working tree: the index is
+         *     inside `skill_hash`, so a rebuild is a content change that must pass a gate before it ships —
+         *     exactly the wiki-refresh path. `provider`/`model` default to the deployment's embedding
+         *     backend (`[drift]`); the model chosen here is *pinned* into the manifest and every later
+         *     review retrieves with it.
+         */
+        IndexRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Skill Id */
+            skill_id: string;
+        };
+        /**
+         * IndexSection
+         * @description The committed retrieval index, and how far the live corpus has moved past it.
+         *
+         *     `stale` names active cases the index does not cover — promoted or edited since the last
+         *     build. A non-empty list is not an error; it is the newest lessons not yet retrievable, and a
+         *     rebuild is how the index catches up (at the price of a fresh gate, since the index is inside
+         *     `skill_hash`).
+         */
+        IndexSection: {
+            /**
+             * Built At
+             * @default
+             */
+            built_at: string;
+            /** Cases */
+            cases: number;
+            /** Model */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /**
+             * Stale
+             * @default []
+             */
+            stale: string[];
+        };
+        /**
          * IngestFinding
          * @description One comment the skill made. `skill_id` is not repeated — the upload names it once.
          */
@@ -2473,7 +2564,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize" | "index";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -2800,6 +2891,21 @@ export interface components {
             model: string;
             /** Warnings */
             warnings?: string[];
+        };
+        /**
+         * PrecedentRef
+         * @description One injected precedent, as recorded on a review — which case, and how near it was.
+         */
+        PrecedentRef: {
+            /** Case Id */
+            case_id: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Similarity
+             * @default 0
+             */
+            similarity: number;
         };
         /**
          * PreparedCase
@@ -3213,6 +3319,11 @@ export interface components {
              * @default false
              */
             practice_mode: boolean;
+            /**
+             * Precedents
+             * @default []
+             */
+            precedents: components["schemas"]["PrecedentRef"][];
             /**
              * Principal
              * @default
@@ -3799,6 +3910,16 @@ export interface components {
             /** Id */
             id: string;
             /**
+             * @default {
+             *       "built_at": "",
+             *       "cases": {},
+             *       "model": "",
+             *       "provider": "ollama",
+             *       "vectors": {}
+             *     }
+             */
+            index: components["schemas"]["SkillIndex"];
+            /**
              * Name
              * @default
              */
@@ -3920,8 +4041,7 @@ export interface components {
             composition: components["schemas"]["Composition"];
             discrimination?: components["schemas"]["Discrimination"] | null;
             drift?: components["schemas"]["DriftSection"] | null;
-            /** Index */
-            index?: null;
+            index?: components["schemas"]["IndexSection"] | null;
             judge?: components["schemas"]["JudgeView"] | null;
             /**
              * Judge Error
@@ -3939,6 +4059,40 @@ export interface components {
             skill_id: string;
             /** Version */
             version: number;
+        };
+        /**
+         * SkillIndex
+         * @description A skill's committed retrieval index: one vector per indexed case, plus the pinned model.
+         *
+         *     `cases` maps case id → sha256 of the diff text the vector was computed from; `vectors` is
+         *     keyed by that content hash. The split is what makes staleness answerable: a case whose current
+         *     diff hashes differently than the manifest entry is indexed-but-stale, and a case absent from
+         *     `cases` was promoted after the last build.
+         */
+        SkillIndex: {
+            /**
+             * Built At
+             * @default
+             */
+            built_at: string;
+            /** Cases */
+            cases?: {
+                [key: string]: string;
+            };
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default ollama
+             */
+            provider: string;
+            /** Vectors */
+            vectors?: {
+                [key: string]: number[];
+            };
         };
         /** SkillScore */
         SkillScore: {
@@ -5207,6 +5361,72 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_index_api_jobs_index_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IndexRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_index_job_api_jobs_index_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IndexRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
                 };
             };
             /** @description Validation Error */

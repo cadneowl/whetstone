@@ -261,6 +261,7 @@ def launch_eval(
                 cancel=handle.cancel_event,
                 sample=policy,
                 wiki_limits=spec.inputs.wiki if spec else None,
+                precedent_limits=spec.inputs.precedents if spec else None,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
             )
@@ -357,6 +358,7 @@ def launch_gate(
                 model=backend.model,
                 sample=_sample(spec, request.sample),
                 wiki_limits=spec.inputs.wiki if spec else None,
+                precedent_limits=spec.inputs.precedents if spec else None,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
                 on_base=side("base", config.git.default_base),
@@ -843,7 +845,7 @@ class DriftRequest(BaseModel):
 @router.post("/drift/plan", response_model=Plan)
 def plan_drift_job(request: DriftRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
     skill = _skill(root, request.skill_id)
-    provider, backend = _drift_backend(config, request)
+    provider, backend = _embedding_backend(config, request.provider, request.model)
     case_texts, units = _drift_inputs(config, skill)
     plan = plan_calls(
         "drift",
@@ -875,7 +877,7 @@ def launch_drift(
     watcher already maintain, so the only network this touches is the embedding endpoint.
     """
     skill = _skill(root, request.skill_id)
-    provider, backend = _drift_backend(config, request)
+    provider, backend = _embedding_backend(config, request.provider, request.model)
     plan = plan_drift_job(request, config, root)
     entries = CandidateStore(config.candidates_dir).list(include_decided=True)
 
@@ -913,19 +915,27 @@ def launch_drift(
     return _launch(jobs, "drift", skill.id, work, plan)
 
 
-def _drift_backend(config: Config, request: DriftRequest) -> tuple[str, Backend]:
-    """The embedding backend a drift launch resolves to, refused early when it cannot work."""
-    provider = request.provider or config.drift.embed_provider
-    model = request.model or config.drift.embed_model
+def _embedding_backend(
+    config: Config, requested_provider: str, requested_model: str
+) -> tuple[str, Backend]:
+    """The embedding backend a launch resolves to, refused early when it cannot work.
+
+    Shared by the drift probe and the index build — the deployment has one embedding backend
+    (`[drift] embed_provider`/`embed_model`), and two features resolving it differently would let
+    them silently disagree about which model "the" vectors come from.
+    """
+    provider = requested_provider or config.drift.embed_provider
+    model = requested_model or config.drift.embed_model
     if not model:
         raise Unprocessable(
-            "drift needs an embedding model — set [drift] embed_model in whetstone.toml "
+            "this needs an embedding model — set [drift] embed_model in whetstone.toml "
             "(e.g. nomic-embed-text after `ollama pull nomic-embed-text`), or name one for "
             "this launch"
         )
-    if request.provider and request.provider not in PRESETS:
+    if requested_provider and requested_provider not in PRESETS:
         raise Unprocessable(
-            f"unknown provider {request.provider!r}; choose one of: {', '.join(sorted(PRESETS))}"
+            f"unknown provider {requested_provider!r}; choose one of: "
+            f"{', '.join(sorted(PRESETS))}"
         )
     try:
         backend = resolve_backend(provider, model=model, inherit_env=False)
@@ -1067,6 +1077,105 @@ def launch_synthesize(
         }
 
     return _launch(jobs, "synthesize", skill.id, work, plan)
+
+
+class IndexRequest(BaseModel):
+    """Rebuild a skill's case index — the committed retrieval index precedent injection reads.
+
+    The result is staged on the skill's branch, never written to the working tree: the index is
+    inside `skill_hash`, so a rebuild is a content change that must pass a gate before it ships —
+    exactly the wiki-refresh path. `provider`/`model` default to the deployment's embedding
+    backend (`[drift]`); the model chosen here is *pinned* into the manifest and every later
+    review retrieves with it.
+    """
+
+    skill_id: str
+    provider: str = ""
+    model: str = ""
+
+
+@router.post("/index/plan", response_model=Plan)
+def plan_index_job(request: IndexRequest, config: ConfigDep, root: SkillsRootDep) -> Plan:
+    skill = _skill(root, request.skill_id)
+    provider, backend = _embedding_backend(config, request.provider, request.model)
+    indexable = sum(1 for c in skill.eval_cases if c.tier == "active" and c.change.files)
+    if not indexable:
+        raise Unprocessable(
+            f"{skill.id} has no active eval cases with a diff — there is nothing to index"
+        )
+    plan = plan_calls(
+        "index",
+        backend,
+        calls=indexable,
+        basis=f"{indexable} active case diff(s), one embedding each (vectors cached by content)",
+        details=[
+            "the result is staged on the skill's branch and folds into skill_hash — a rebuild "
+            "retracts gate evidence, so the skill must be re-gated before it can be proposed",
+            f"the model is pinned: every later review retrieves with {backend.model}",
+        ],
+    )
+    if not skill.index.is_empty() and skill.index.model != backend.model:
+        plan.warnings.append(
+            f"the committed index was built with {skill.index.model}; rebuilding with "
+            f"{backend.model} re-embeds everything and changes retrieval behaviour"
+        )
+    return plan
+
+
+@router.post("/index", response_model=Job, dependencies=[Writable])
+def launch_index(
+    request: IndexRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    jobs: JobsDep,
+) -> Job:
+    """Embed the active corpus and stage the index on the skill's branch."""
+    from whetstone.caseindex import build_index, render_index
+
+    skill = _skill(root, request.skill_id)
+    provider, backend = _embedding_backend(config, request.provider, request.model)
+    plan = plan_index_job(request, config, root)
+    rel_root = staging.relative_skills_root(config)
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, 1, f"embedding {skill.id}'s corpus with {backend.model}")
+        embedder = build_embedder(
+            provider, model=backend.model, cache_dir=config.drift_cache_dir
+        )
+        index = build_index(
+            skill,
+            embedder,
+            provider=provider,
+            built_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        )
+        files = {
+            f"{rel_root}/{skill.id}/{relative}": content
+            for relative, content in render_index(index).items()
+        }
+        try:
+            commit = staging.stage(
+                config,
+                skill.id,
+                files,
+                f"index: {skill.id}\n\nRebuilt the case index ({len(index.cases)} case(s), "
+                f"{backend.model}). Changes what the reviewer sees, so this needs a fresh gate.",
+            )
+        except (staging.StagingError, GitError) as exc:
+            raise Unprocessable(str(exc)) from exc
+        handle.log(
+            LogLine(
+                text=f"  indexed {len(index.cases)} case(s) with {backend.model}", tone="ok"
+            )
+        )
+        handle.progress(1, 1, "staged")
+        return {
+            "cases": len(index.cases),
+            "model": backend.model,
+            "branch": staging.skill_branch(config, skill.id),
+            "commit": commit,
+        }
+
+    return _launch(jobs, "index", skill.id, work, plan)
 
 
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:

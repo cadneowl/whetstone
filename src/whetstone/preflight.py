@@ -129,6 +129,14 @@ def plan_eval(
         plan.details.append(
             f"sampling {cases} of {len(skill.eval_cases)} cases — the score describes the sample"
         )
+    if not skill.index.is_empty():
+        # Invariant 4: retrieval is a per-case cost the estimate above does not count (embedding
+        # calls are not LLM calls), so it is named rather than left to be discovered mid-run.
+        plan.details.append(
+            f"case index present: nearest precedents are injected per review, one embedding "
+            f"call per case ({skill.index.model} via {skill.index.provider} — the endpoint "
+            "must be reachable or the run fails)"
+        )
     if judge_cascade:
         plan.details.append(
             "judge cascade is on: low-confidence verdicts are re-judged grounded in the case "

@@ -26,6 +26,8 @@ export type TierResult = Schemas['TierResult']
 export type DriftSection = Schemas['DriftSection']
 export type DriftReport = Schemas['DriftReport']
 export type UncoveredMr = Schemas['UncoveredMr']
+export type IndexSection = Schemas['IndexSection']
+export type PrecedentRef = Schemas['PrecedentRef']
 export type CaseTier = CaseSummary['tier']
 export type HoldoutReport = Schemas['HoldoutReport']
 export type CaseRun = Schemas['CaseRun']
@@ -648,6 +650,12 @@ function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
   if (job.kind === 'synthesize') {
     void client.invalidateQueries({ queryKey: keys.candidates })
     void client.invalidateQueries({ queryKey: keys.batch })
+  }
+  // An index rebuild stages a content change: the proposal state, the health card, and the skill
+  // all read differently the moment it lands.
+  if (job.kind === 'index') {
+    invalidateSkill(client, job.skill_id)
+    void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })
   }
 }
 

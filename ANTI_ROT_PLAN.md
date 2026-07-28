@@ -192,11 +192,44 @@
 >   generators as LaunchButtons; LaunchButton synthesize result names written and skipped.
 >   Tests: `test_synthesize.py`, `test_synthesize_routes.py` — including the done-when
 >   round-trip: counterfactual → triage → promote, provenance intact on the batch branch.
-> - **Next up: Phase 4 — capability.** 4.1 case-corpus RAG at review time (pinned embedding
->   model over a versioned index staged on the skill branch; manifest hash folded into
->   `skill_hash` so an index rebuild retracts gates exactly as a wiki refresh does — fills the
->   health payload's `index` section). 4.2 judge distillation. Then Phase 5 cadence + dead-rule
->   report (fills `cadence`).
+> - **4.1 — DONE** (this commit): case-corpus RAG at review time. `caseindex.py` (domain-free,
+>   like `wiki.py`): `SkillIndex {model, provider, built_at, cases: id→content_hash, vectors:
+>   hash→floats}` committed as `skills/<id>/index/{manifest.yaml,vectors.json}`;
+>   `index_digest` over model+provider+case-hash map — **not** `built_at` (a no-change rebuild
+>   must not retract gates; the `wiki_digest`-ignores-`source` precedent) and not the vectors
+>   (pure function of model+content). Digest folds into BOTH `skill_hash` and `guidance_hash`
+>   via `_feed_index` — empty index = byte-identical hashes, pinned by a characterization test
+>   against digests captured pre-4.1 (`test_caseindex.PINNED_*`; failing it means every stored
+>   gate stops covering its content). Loader loads `index/` (broken → SkillLoadError, the wiki
+>   rule); `index/` joined `_NOT_GUIDANCE`. Retrieval: reviewer embeds the incoming diff with
+>   the manifest's pinned model (service builds the embedder from the manifest — the caller
+>   gets no knob, that's the pin), memoized per diff so k trials cost one embedding;
+>   `retrieve_precedents` is a pure function of (vector, index, corpus), cosine-ranked, tie-broken
+>   by case id, capped by `PrecedentLimits {max_cases: 3, max_bytes: 8000}` (configurable via
+>   `inputs.precedents` in evaluate/step.yaml; drops are named). **A case is never its own
+>   precedent** (`query_hash` exclusion): at eval time the query diff IS the case diff, and
+>   without this every indexed case scores with its own answer key in the prompt. Injected after
+>   guidance+wiki, framed "precedents … NOT rules"; both kinds (a stay-silent precedent teaches
+>   restraint). `strip_guidance` strips the index too — the naked probe must not be credited
+>   with the corpus's lessons. Gate sides each keep their own index (base-without vs
+>   candidate-with is exactly the "did retrieval help?" gate). `ReviewRecord.precedents`
+>   (`PrecedentRef {case_id, kind, similarity}`) from `reviewer.last_precedents`. Preflight
+>   names the per-case embedding cost when an index is present. Surfaces: `whetstone skills
+>   index` (stage-by-default like `skills update`, `--working-tree` opt-out, preflight),
+>   `POST /api/jobs/index[/plan]` (JobKind "index", stages on `whetstone/skill/<id>` — C6 test:
+>   inbox flips to "run the gate", can_propose false); `_embedding_backend` shared with drift.
+>   Health `index` section filled (model, provider, built_at, cases, `stale` = active cases the
+>   index does not cover, read from the staged skill); HealthPanel Case-index card with
+>   build/rebuild LaunchButton and stale-case links; ReviewDetail "reviewed with precedent"
+>   chips linking case pages. Tests: `test_caseindex.py` (deterministic retrieval twice,
+>   self-exclusion, caps, digest properties, round-trip, characterization),
+>   `test_index_routes.py` (staged rebuild + C6 retraction, staleness, eval-plan detail, review
+>   precedents recorded end-to-end).
+> - **Next up: 4.2 judge distillation** (export (finding, expectation, hunk → verdict) triples
+>   for the current judge version; fine-tune small local model outside Whetstone, recipe in
+>   `judges/default/distill.md`; validate via `judge eval` + ratchet; deploy as cascade tier 1
+>   by config, grounded judge stays tier 2; record before/after full-corpus run cost). Then
+>   Phase 5 cadence + dead-rule report (fills `cadence`).
 > - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
 >   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
 >   scheduled job — cadence lands with Phase 5.

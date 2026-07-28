@@ -30,6 +30,7 @@ from typing import Literal
 
 from pydantic import BaseModel, computed_field, field_validator
 
+from whetstone.caseindex import PrecedentRef
 from whetstone.domain.change import CodeChange, parse_unified_diff
 from whetstone.domain.enums import Severity
 from whetstone.domain.finding import Finding
@@ -98,6 +99,10 @@ class ReviewRecord(BaseModel):
     change: CodeChange
     findings: list[Finding] = []
     verdicts: list[FindingVerdict] = []
+    # The precedent cases injected into this review's prompt (`caseindex.py`), so a finding is
+    # explainable as "flagged like case-X was". Empty for skills without an index, and for records
+    # written before retrieval existed.
+    precedents: list[PrecedentRef] = []
 
     def verdict_for(self, index: int) -> FindingVerdict | None:
         return next((v for v in self.verdicts if v.finding_index == index), None)

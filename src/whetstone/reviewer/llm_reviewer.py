@@ -5,11 +5,19 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from whetstone.caseindex import (
+    PrecedentLimits,
+    PrecedentRef,
+    Precedents,
+    content_hash,
+    retrieve_precedents,
+)
 from whetstone.domain.change import CodeChange
 from whetstone.domain.enums import Severity
 from whetstone.domain.finding import Finding
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
+from whetstone.llm.embedding import Embedder
 from whetstone.wiki import Retrieved, WikiLimits, paths_of, retrieve
 
 
@@ -41,6 +49,12 @@ class LLMReviewer:
     keeps a base-versus-candidate score difference attributable to the guidance. What the caps left
     out is reported by `whetstone eval run`'s preflight rather than from inside this loop, so the
     warning is printed once per run instead of once per case.
+
+    When the skill also carries a case index (`caseindex.py`) and an `embedder` was supplied, the
+    nearest precedent cases are injected after the wiki, labelled as precedent-not-rules. The
+    embedding of one diff is memoized per reviewer instance, so k trials of the same case cost one
+    embedding call, not k. `last_precedents` records what the most recent `review` injected — how
+    a live review's record can say which cases shaped it.
     """
 
     def __init__(
@@ -49,15 +63,23 @@ class LLMReviewer:
         *,
         effort: Effort = "high",
         wiki_limits: WikiLimits | None = None,
+        embedder: Embedder | None = None,
+        precedent_limits: PrecedentLimits | None = None,
     ) -> None:
         self._client = client
         self._effort = effort
         self._wiki_limits = wiki_limits or WikiLimits()
+        self._embedder = embedder
+        self._precedent_limits = precedent_limits or PrecedentLimits()
+        self._vector_memo: dict[str, list[float]] = {}
+        self.last_precedents: list[PrecedentRef] = []
 
     def review(self, skill: Skill, change: CodeChange) -> list[Finding]:
         context = retrieve(skill.wiki, paths_of(change), self._wiki_limits)
+        precedents = self._precedents(skill, change)
+        self.last_precedents = list(precedents.refs)
         result = self._client.structured(
-            _system_prompt(skill, context),
+            _system_prompt(skill, context, precedents),
             _user_prompt(change),
             LLMFindingList,
             effort=self._effort,
@@ -74,6 +96,19 @@ class LLMReviewer:
             )
             for f in result.findings
         ]
+
+    def _precedents(self, skill: Skill, change: CodeChange) -> Precedents:
+        if skill.index.is_empty() or self._embedder is None:
+            return Precedents()
+        diff = change.to_unified_diff()
+        key = content_hash(diff)
+        vector = self._vector_memo.get(key)
+        if vector is None:
+            [vector] = self._embedder.embed([diff])
+            self._vector_memo[key] = vector
+        return retrieve_precedents(
+            skill, change, vector, query_hash=key, limits=self._precedent_limits
+        )
 
 
 # How much companion guidance may be inlined, across all pages, per review call.
@@ -109,7 +144,7 @@ def render_pages(skill: Skill, *, max_bytes: int = MAX_PAGE_BYTES) -> tuple[str,
     return "\n\n".join(blocks), dropped
 
 
-def _system_prompt(skill: Skill, context: Retrieved) -> str:
+def _system_prompt(skill: Skill, context: Retrieved, precedents: Precedents | None = None) -> str:
     name = skill.name or skill.id
     parts = [
         f'You are an automated code reviewer running the skill "{name}".\n'
@@ -143,6 +178,17 @@ def _system_prompt(skill: Skill, context: Retrieved) -> str:
             "whether the guidance above is violated, and never report a finding solely because the "
             "change disagrees with this background:\n\n"
             f"{context.to_prompt()}"
+        )
+    # After everything else, for the same caching reason as the wiki — and framed as precedent,
+    # never as rules: the cases show how similar changes were judged, but the guidance above is
+    # the only authority. A false-positive precedent teaches restraint the rules cannot spell out.
+    if precedents is not None and not precedents.is_empty:
+        parts.append(
+            "Precedents: how similar past changes were judged. These are examples for calibration, "
+            "NOT rules — apply only the guidance above, and use these to judge borderline calls "
+            "the way earlier reviews did. A 'stay silent' precedent means flagging that kind of "
+            "change was ruled a false positive:\n\n"
+            f"{precedents.to_prompt()}"
         )
     parts.append(
         "Report every issue the guidance would flag, including low-confidence ones; a later step "

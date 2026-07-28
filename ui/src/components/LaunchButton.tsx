@@ -536,6 +536,14 @@ function JobResult({ job }: { job: Job }) {
       </p>
     )
   }
+  if (job.kind === 'index') {
+    return (
+      <p className="mt-2 text-xs text-muted">
+        indexed {String(r.cases)} case(s) with <span className="font-mono">{String(r.model)}</span>{' '}
+        — staged on the skill branch. The reviewer's context changed, so re-gate before proposing.
+      </p>
+    )
+  }
   if (job.kind === 'review') {
     const found = Number(r.findings ?? 0)
     return (

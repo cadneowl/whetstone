@@ -424,6 +424,7 @@ def eval_run(
         on_event=None if json_out else _progress,
         sample=drawn,
         wiki_limits=limits,
+        precedent_limits=policy.inputs.precedents if policy else None,
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
     )
@@ -626,6 +627,7 @@ def eval_gate(
             model=backend.model,
             sample=drawn,
             wiki_limits=limits,
+            precedent_limits=policy.inputs.precedents if policy else None,
             judge=load_judge(load_config().judge_dir),
             judge_policy=policy.judge if policy else None,
         )
@@ -1612,6 +1614,130 @@ def skills_update(
         f"--skill-path {staging.skill_path(config, sk.id)} "
         f"--base-ref {config.git.default_base} --candidate-ref {branch}"
     )
+
+
+@skills_app.command("index")
+def skills_index(
+    skill: SkillDirOpt,
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Embedding provider preset (default: [drift] embed_provider, i.e. ollama)",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Embedding model to pin, e.g. nomic-embed-text (default: [drift] embed_model)",
+        ),
+    ] = None,
+    base_url: Annotated[
+        str | None, typer.Option("--base-url", help="OpenAI-compatible base URL override")
+    ] = None,
+    working_tree: Annotated[
+        bool,
+        typer.Option(
+            "--working-tree",
+            help="Write into the checked-out folder instead of staging on the skill's branch",
+        ),
+    ] = False,
+    yes: YesOpt = False,
+) -> None:
+    """Build this skill's case index — the retrieval layer precedent injection reads.
+
+    Embeds every active eval case's diff with the named model and writes `index/manifest.yaml`
+    plus `index/vectors.json`. The manifest — including which model — is *pinned*: every later
+    review embeds the incoming change with that model and injects the nearest cases as precedent,
+    so retrieval stays a pure function of the diff and both sides of a gate see identical context.
+
+    The index folds into `skill_hash`, so building or rebuilding it retracts the skill's passing
+    gate: re-gate before proposing, exactly as after a wiki refresh. Stages on
+    `whetstone/skill/<id>` by default; `--working-tree` writes the files beside the skill instead.
+    """
+    from whetstone.caseindex import build_index, render_index
+    from whetstone.llm.embedding import EmbeddingError, build_embedder
+
+    sk = load_skill(skill)
+    config = load_config()
+    prov = provider or config.drift.embed_provider
+    mod = model or config.drift.embed_model
+    indexable = sum(1 for c in sk.eval_cases if c.tier == "active" and c.change.files)
+    if not indexable:
+        typer.echo(f"{sk.id} has no active eval cases with a diff — nothing to index", err=True)
+        raise typer.Exit(1)
+    try:
+        if not mod:
+            raise ValueError(
+                "an embedding model is required — pass --model or set [drift] embed_model "
+                "(e.g. nomic-embed-text)"
+            )
+        backend = resolve_backend(prov, model=mod, base_url=base_url, inherit_env=False)
+        if backend.kind != "openai":
+            raise ValueError(
+                f"provider {backend.name!r} has no embeddings endpoint — use a local model, "
+                "e.g. --provider ollama --model nomic-embed-text"
+            )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    plan = plan_calls(
+        "index",
+        backend,
+        calls=indexable,
+        basis=f"{indexable} active case diff(s), one embedding each (vectors cached by content)",
+        details=["the index folds into skill_hash — rebuilding retracts gate evidence (C6)"],
+    )
+    _preflight(plan, yes)
+
+    try:
+        embedder = build_embedder(
+            prov, model=mod, base_url=base_url or "", cache_dir=config.drift_cache_dir
+        )
+        built = build_index(
+            sk, embedder, provider=prov,
+            built_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        )
+    except (ValueError, EmbeddingError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    rendered = render_index(built)
+
+    if working_tree:
+        for relative, content in rendered.items():
+            path = skill / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        typer.echo(
+            f"indexed {len(built.cases)} case(s) with {mod} — wrote {len(rendered)} file(s) "
+            f"under {skill / 'index'} (working tree only)"
+        )
+        typer.echo("the index is inside skill_hash: commit it, and re-gate before proposing")
+        return
+
+    try:
+        root = staging.relative_skills_root(config)
+        commit = staging.stage(
+            config,
+            _staging_id(config, skill, sk),
+            {f"{root}/{sk.id}/{rel}": content for rel, content in rendered.items()},
+            f"index: {sk.id}\n\nRebuilt the case index ({len(built.cases)} case(s), {mod}). "
+            f"Changes what the reviewer sees, so this needs a fresh gate.",
+        )
+    except (GitError, staging.StagingError) as exc:
+        typer.echo(
+            f"could not stage the index: {exc}\n"
+            f"(--working-tree writes the files into the checked-out folder instead)",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    branch = staging.skill_branch(config, sk.id)
+    typer.echo(
+        f"indexed {len(built.cases)} case(s) with {mod} — staged on {branch} ({commit[:10]})"
+    )
+    typer.echo("the reviewer's context changed: re-gate before proposing")
 
 
 def _run_to_improve_from(

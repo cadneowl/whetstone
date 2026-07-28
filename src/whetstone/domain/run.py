@@ -16,6 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from whetstone.caseindex import index_digest
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalKind, Must
 from whetstone.domain.finding import Finding
@@ -300,6 +301,7 @@ def skill_hash(skill: Skill) -> str:
         h.update(b"\0case\0")
         h.update(case.model_dump_json().encode("utf-8"))
     _feed_wiki(h, skill)
+    _feed_index(h, skill)
     return h.hexdigest()
 
 
@@ -327,6 +329,10 @@ def guidance_hash(skill: Skill) -> str:
     h.update(b"guidance\0")
     _feed_rules(h, skill)
     _feed_wiki(h, skill)
+    # The index is in the guidance identity too: precedent injection changes what the reviewer
+    # sees on every case, so failures recorded under a different index describe a different
+    # reviewer — the same reason the wiki is here.
+    _feed_index(h, skill)
     return h.hexdigest()
 
 
@@ -347,6 +353,14 @@ def _feed_wiki(h: hashlib._Hash, skill: Skill) -> None:
     if not skill.wiki.is_empty():
         h.update(b"\0wiki\0")
         h.update(wiki_digest(skill.wiki).encode("utf-8"))
+
+
+def _feed_index(h: hashlib._Hash, skill: Skill) -> None:
+    """The retrieval index, when one exists — rebuilding it retracts gates exactly as a wiki
+    refresh does (C6). A skill without one hashes exactly as before the feature existed."""
+    if not skill.index.is_empty():
+        h.update(b"\0index\0")
+        h.update(index_digest(skill.index).encode("utf-8"))
 
 
 # `RunEvent.case` is annotated with a class defined further down the module, so the reference has to
