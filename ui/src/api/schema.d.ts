@@ -1008,6 +1008,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/cadence/distill": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark Distill
+         * @description Record that the guidance distill pass ran. The one hand-marked clock: a distill is an
+         *     ordinary improve run with a consolidating instruction, so nothing in its record distinguishes
+         *     it — the operator says when one happened. The derived clocks have no endpoint on purpose;
+         *     marking them by hand could only disagree with the stores they are read from.
+         */
+        post: operations["mark_distill_api_skills__skill_id__cadence_distill_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills/{skill_id}/cases/{case_id}": {
         parameters: {
             query?: never;
@@ -1175,6 +1198,8 @@ export interface components {
              * @default
              */
             blocked_reason: string;
+            /** Cadence Due */
+            cadence_due?: string[];
             /**
              * Can Propose
              * @default false
@@ -1306,6 +1331,55 @@ export interface components {
              * @default []
              */
             skills: string[];
+        };
+        /**
+         * CadenceClock
+         * @description One routine pass: when it last happened, and whether it is due.
+         */
+        CadenceClock: {
+            /**
+             * Due
+             * @default false
+             */
+            due: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "distill" | "saturation" | "anchor" | "drift";
+            /**
+             * Label
+             * @default
+             */
+            label: string;
+            /** Last Done */
+            last_done?: string | null;
+            /** Period Days */
+            period_days: number;
+        };
+        /**
+         * CadenceMarked
+         * @description What a mark wrote, and the clocks as they now read.
+         */
+        CadenceMarked: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            cadence: components["schemas"]["CadenceSection"];
+            /** Kind */
+            kind: string;
+        };
+        /**
+         * CadenceSection
+         * @description The health payload's cadence section: every clock, and the due ones as sentences.
+         */
+        CadenceSection: {
+            /** Clocks */
+            clocks: components["schemas"]["CadenceClock"][];
+            /** Due */
+            readonly due: string[];
         };
         /**
          * CandidateCase
@@ -1628,6 +1702,31 @@ export interface components {
             skills_repo: string;
             /** Skills Root */
             skills_root: string;
+        };
+        /**
+         * DeadRule
+         * @description One rule the evidence no longer stands behind, and the case for saying so.
+         */
+        DeadRule: {
+            /**
+             * Case Ids
+             * @default []
+             */
+            case_ids: string[];
+            /** Evidence */
+            evidence: string;
+            /**
+             * Refs
+             * @default []
+             */
+            refs: string[];
+            /** Rule Id */
+            rule_id: string;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "unreferenced" | "evidence-archived" | "no-evidence";
         };
         /**
          * Decision
@@ -2841,7 +2940,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "propose" | "gate" | "triage" | "score" | "improve" | "drift" | "curate" | "nothing";
+            kind: "propose" | "gate" | "triage" | "score" | "improve" | "drift" | "curate" | "cadence" | "nothing";
             /** Label */
             label: string;
             /** Rank */
@@ -4056,9 +4155,13 @@ export interface components {
         };
         /** SkillHealth */
         SkillHealth: {
-            /** Cadence */
-            cadence?: null;
+            cadence: components["schemas"]["CadenceSection"];
             composition: components["schemas"]["Composition"];
+            /**
+             * Dead Rules
+             * @default []
+             */
+            dead_rules: components["schemas"]["DeadRule"][];
             discrimination?: components["schemas"]["Discrimination"] | null;
             drift?: components["schemas"]["DriftSection"] | null;
             index?: components["schemas"]["IndexSection"] | null;
@@ -6206,6 +6309,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SkillDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_distill_api_skills__skill_id__cadence_distill_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CadenceMarked"];
                 };
             };
             /** @description Validation Error */

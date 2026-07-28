@@ -19,6 +19,7 @@ from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from whetstone import staging
+from whetstone.cadence import CadenceStore
 from whetstone.config import Config
 from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
@@ -80,6 +81,11 @@ def get_drift(request: Request) -> DriftStore:
     return drift
 
 
+def get_cadence(request: Request) -> CadenceStore:
+    cadence: CadenceStore = request.app.state.cadence
+    return cadence
+
+
 def get_selection(request: Request) -> ModelSelection:
     """The model the console is set to use right now — the runtime override over each step."""
     selection: ModelSelection = request.app.state.model_selection
@@ -137,6 +143,7 @@ JobsDep = Annotated[JobStore, Depends(get_jobs)]
 WatcherDep = Annotated[Watcher, Depends(get_watcher)]
 ReviewsDep = Annotated[ReviewStore, Depends(get_reviews)]
 DriftDep = Annotated[DriftStore, Depends(get_drift)]
+CadenceDep = Annotated[CadenceStore, Depends(get_cadence)]
 SelectionDep = Annotated[ModelSelection, Depends(get_selection)]
 SkillsRootDep = Annotated[Path, Depends(get_skills_root)]
 PrincipalDep = Annotated[Principal, Depends(get_principal)]

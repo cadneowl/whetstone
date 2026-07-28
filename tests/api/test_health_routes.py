@@ -66,10 +66,12 @@ def test_health_before_any_run_admits_what_it_does_not_know(client: TestClient) 
     assert body["score"] is None
     assert body["production"] is None
     assert body["retirements"] == []
-    # Sections whose phases have not landed are present and null, not absent — the payload's
-    # shape is the plan's, so the UI never restructures when a phase fills one in.
-    for pending in ("discrimination", "drift", "index", "cadence"):
+    # Sections that need a measurement nobody has run are present and null, not absent — the
+    # payload admits what it does not know rather than hiding the field.
+    for pending in ("discrimination", "drift", "index"):
         assert pending in body and body[pending] is None
+    # The cadence clocks always exist; with no runs at all they simply owe nothing.
+    assert body["cadence"]["due"] == []
 
 
 def test_health_reports_the_corpus_composition(client: TestClient) -> None:

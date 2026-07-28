@@ -1,5 +1,13 @@
 import { Link } from 'react-router-dom'
-import { useHealth, useSetTier, type Retirement, type SkillHealth, type UncoveredMr } from '@/api/client'
+import {
+  useHealth,
+  useMarkDistill,
+  useSetTier,
+  type CadenceClock,
+  type Retirement,
+  type SkillHealth,
+  type UncoveredMr,
+} from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
@@ -28,7 +36,8 @@ export function HealthPanel({ skillId }: { skillId: string }) {
       <IndexSection skillId={skillId} health={data} />
       <JudgeSection health={data} />
       <ProductionSection health={data} />
-      <PendingSections />
+      <CadenceSection skillId={skillId} health={data} />
+      <DeadRulesSection skillId={skillId} health={data} />
     </div>
   )
 }
@@ -493,25 +502,96 @@ function ProductionSection({ health }: { health: SkillHealth }) {
   )
 }
 
+const CLOCK_NAMES: Record<CadenceClock['kind'], string> = {
+  distill: 'Guidance distill pass',
+  saturation: 'Saturation probe',
+  anchor: 'Full-corpus anchor run',
+  drift: 'Drift probe',
+}
+
 /**
- * Measurements the plan defines that have not been built yet, named rather than omitted. A blank
- * where a number should be is the honest state; a panel that only shows what exists would read as
- * complete when it is not.
+ * The routine clocks — the upkeep nothing ever fails loudly enough to demand.
+ *
+ * Three clocks reset themselves when their pass runs (the probes record themselves; the anchor is
+ * read from the run store). Only the distill pass is hand-marked, because a distill is an ordinary
+ * improve run with a consolidating instruction and nothing in its record distinguishes it.
  */
-function PendingSections() {
-  const pending = [
-    ['Cadence', 'when the maintenance passes last ran and what is due — lands with the cadence clocks'],
-  ] as const
+function CadenceSection({ skillId, health }: { skillId: string; health: SkillHealth }) {
+  const mark = useMarkDistill(skillId)
+  const clocks = health.cadence?.clocks ?? []
   return (
-    <section className="rounded-lg border border-dashed border-line p-4 text-xs text-muted">
-      <h3 className="mb-1 text-sm font-medium text-muted">Not yet measured</h3>
-      <ul className="space-y-0.5">
-        {pending.map(([name, what]) => (
-          <li key={name}>
-            <span className="font-medium">{name}</span> — {what}
+    <Section
+      title="Cadence"
+      intro="Routine passes on a clock: monthly distill and saturation probe, quarterly anchor run and drift review. A clock that has never fired starts counting from the skill's first run."
+    >
+      <ul className="space-y-1.5">
+        {clocks.map((c) => (
+          <li key={c.kind} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="w-44">{CLOCK_NAMES[c.kind]}</span>
+            <span className="text-xs text-muted tabular">every {c.period_days}d</span>
+            <span className="text-xs text-muted">
+              {c.last_done ? `last done ${when(c.last_done)}` : 'never done'}
+            </span>
+            {c.due && (
+              <Badge tone="warn" title={c.label || undefined}>
+                due
+              </Badge>
+            )}
+            {c.kind === 'distill' && (
+              <button
+                type="button"
+                disabled={mark.isPending}
+                onClick={() => mark.mutate()}
+                title="Record that a distill pass ran — an improve with a consolidating instruction, gated over the full corpus including the archive"
+                className="ml-auto rounded border border-line px-2 py-0.5 text-xs transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
+              >
+                {mark.isPending ? 'Marking…' : 'Mark done'}
+              </button>
+            )}
           </li>
         ))}
       </ul>
-    </section>
+      {mark.error && <ErrorNote error={mark.error} />}
+    </Section>
+  )
+}
+
+/**
+ * Rules the evidence no longer stands behind — the removal list the distill pass reads before it
+ * deletes anything. An empty report renders nothing: no rule provenance, or all of it healthy.
+ */
+function DeadRulesSection({ skillId, health }: { skillId: string; health: SkillHealth }) {
+  const rules = health.dead_rules ?? []
+  if (rules.length === 0) return null
+  return (
+    <Section
+      title={`Dead rules (${rules.length})`}
+      intro="meta.yaml rule provenance crossed with the corpus. A rule listed here could vanish without any case going red — evidence for the distill pass, never an automatic deletion."
+    >
+      <ul className="space-y-1.5">
+        {rules.map((r) => (
+          <li key={r.rule_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="font-mono text-xs">{r.rule_id}</span>
+            <Badge tone="warn">{r.verdict}</Badge>
+            <span className="text-xs text-muted">{r.evidence}</span>
+            {(r.case_ids ?? []).length > 0 && (
+              <span className="text-xs text-muted">
+                {(r.case_ids ?? []).map((caseId, i) => (
+                  <span key={caseId}>
+                    {i > 0 && ', '}
+                    <Link
+                      to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(caseId)}`}
+                      className="font-mono hover:text-accent"
+                    >
+                      {caseId}
+                    </Link>
+                  </span>
+                ))}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Section>
   )
 }

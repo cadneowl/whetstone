@@ -19,6 +19,7 @@ something new:
     improve  it is failing cases we already know about
     drift    the corpus stopped resembling what ships — review the uncovered MRs
     curate   corpus housekeeping is waiting on a human ruling — e.g. solved cases to retire
+    cadence  a routine pass is overdue — the clockwork nothing ever fails loudly enough to demand
     nothing  nothing to do, said plainly rather than left to inference
 
 A skill with nothing to do says so. An inbox that lists everything is the list of everything, which
@@ -34,7 +35,7 @@ from pydantic import BaseModel, Field
 from whetstone.drift import DRIFT_ALARM
 
 ActionKind = Literal[
-    "propose", "gate", "triage", "score", "improve", "drift", "curate", "nothing"
+    "propose", "gate", "triage", "score", "improve", "drift", "curate", "cadence", "nothing"
 ]
 
 
@@ -104,6 +105,10 @@ class Attention(BaseModel):
     # What the latest drift probe read: the fraction of recent MRs no case comes near. None means
     # never probed — which is different from 0.0, a probe that found full coverage.
     drift_uncovered: float | None = None
+    # The overdue routine passes, as sentences ("guidance distill pass due — last done 47 days
+    # ago"). Carried even when a higher-ranked action wins the row, so the row still shows what
+    # the calendar owes.
+    cadence_due: list[str] = Field(default_factory=list)
     action: NextAction
 
     @property
@@ -135,6 +140,10 @@ _RANK: dict[ActionKind, int] = {
     # while an unretired solved case only wastes budget.
     "drift": 5,
     "curate": 6,
+    # Last before idle: an overdue routine pass matters — it is the only pressure entropy ever
+    # gets — but every action above it is evidence of something already wrong, and evidence
+    # outranks a calendar.
+    "cadence": 7,
     "nothing": 9,
 }
 
@@ -152,6 +161,7 @@ def decide(
     retire_ready: int = 0,
     saturated: int = 0,
     drift_uncovered: float | None = None,
+    cadence_due: list[str] | None = None,
 ) -> NextAction:
     """The next action for one skill.
 
@@ -221,6 +231,14 @@ def decide(
             f"Curate {total} case{'s' if total != 1 else ''}",
             " and ".join(bits) + " — archive or tighten them so the eval budget keeps "
             "measuring the guidance at the live edge",
+        )
+    if cadence_due:
+        plural = "es" if len(cadence_due) != 1 else ""
+        return _action(
+            "cadence",
+            f"Run {len(cadence_due)} overdue pass{plural}",
+            "; ".join(cadence_due)
+            + " — routine upkeep on a clock, because entropy never fails loudly enough to ask",
         )
     return _action("nothing", "", "passing every case it has, with nothing new waiting")
 

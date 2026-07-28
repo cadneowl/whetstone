@@ -318,6 +318,37 @@ model folds into every run's `judge_hash` — a swapped judge is a different ins
 break at the seam instead of drawing through it. The Judge page shows the escalation rate over
 recent runs: the number a distilled tier 1 has to keep honest. Rollback is deleting the block.
 
+### The operating cadence
+
+Everything above fires on evidence — a failing case, an uncovered MR, a saturated expectation.
+Entropy is the exception: improve cycles add rules weekly and nothing else ever removes one, so
+the passes that manage it run on a clock. Four clocks per skill, visible on the Health tab and in
+`whetstone cadence status --skill skills/<id>`:
+
+- **Guidance distill pass** (monthly) — `skills improve --instruction "consolidate; merge
+  redundant rules, remove subsumed ones, shorten"`, no targeted cases, gated over the full corpus
+  *including the archive at full weight* (`max_cases: null` for the occasion) — archived cases
+  are the tripwires against over-aggressive deletion. The one hand-marked clock (`whetstone
+  cadence done --skill …`, or the button on the Health tab), because a distill is an ordinary
+  improve run and nothing in its record distinguishes it.
+- **Saturation probe** (monthly) and **drift probe** (quarterly) — reset themselves; the probes
+  record their own runs.
+- **Full-corpus anchor run** (quarterly) — sampled scores are estimates, and estimates need
+  ground-truthing. Read from the run store: the newest real run whose draw covered every
+  currently-active case. Judged against the corpus *as it is now*, so a promotion restarts the
+  clock — which is the right reading.
+
+When a clock is overdue and nothing evidence-backed is pending, the inbox says so ("guidance
+distill pass due — last done 47 days ago") — a cadence that lives in a document is a cadence that
+dies in the document. A clock that has never fired starts counting from the skill's first real
+run, so a day-one skill owes nothing.
+
+Before a distill pass, read the dead-rule report (`whetstone skills rules --skill skills/<id>`,
+or the Health tab): it crosses `meta.yaml` rule→signal provenance with the corpus and lists rules
+that could vanish without any case going red — the guidance no longer mentions them, their
+supporting cases are all archived, or no case carries their evidence at all. That list is what
+turns distillation from "the model shortened some prose" into an evidenced removal list.
+
 ---
 
 ## `improve/step.yaml` — drafting a guidance change

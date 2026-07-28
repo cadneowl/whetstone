@@ -224,6 +224,23 @@ class RunStore:
         found = self.list(skill_id=skill_id, limit=1)
         return self.load(found[0].id) if found else None
 
+    def earliest_at(self, skill_id: str) -> datetime | None:
+        """When this skill was first really measured — its oldest non-baseline, non-practice run.
+
+        The cadence clocks read this to decide whether "never done" means overdue: a routine pass
+        is owed by a skill that has been operating for a while, not by one measured yesterday.
+        """
+        with self._connect() as conn:
+            files = self.record_files()
+            if _indexed_file_count(conn) != len(files):
+                _rebuild(conn, self._iter_records(), len(files))
+            row = conn.execute(
+                "SELECT MIN(created_at) AS at FROM runs "
+                "WHERE skill_id = ? AND baseline = 0 AND practice_mode = 0",
+                (skill_id,),
+            ).fetchone()
+        return datetime.fromisoformat(row["at"]) if row and row["at"] else None
+
     def latest_baseline(self, skill_id: str) -> RunRecord | None:
         """The newest saturation-probe record, or None when the skill has never been probed."""
         found = self.list(skill_id=skill_id, limit=1, baseline=True)

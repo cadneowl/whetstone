@@ -139,6 +139,31 @@ def test_drift_outranks_curation() -> None:
     assert _decide(drift_uncovered=0.5, retire_ready=3).kind == "drift"  # type: ignore[attr-defined]
 
 
+DUE = ["guidance distill pass due — last done 47 days ago"]
+
+
+def test_an_overdue_routine_pass_asks_for_the_cadence() -> None:
+    action = _decide(cadence_due=DUE)
+    assert action.kind == "cadence"  # type: ignore[attr-defined]
+    assert action.label == "Run 1 overdue pass"  # type: ignore[attr-defined]
+    assert "last done 47 days ago" in action.why  # type: ignore[attr-defined]
+
+
+def test_several_due_passes_are_all_named() -> None:
+    action = _decide(cadence_due=DUE + ["drift probe due — never done"])
+    assert action.label == "Run 2 overdue passes"  # type: ignore[attr-defined]
+    assert "distill pass due" in action.why  # type: ignore[attr-defined]
+    assert "drift probe due" in action.why  # type: ignore[attr-defined]
+
+
+def test_every_evidence_backed_action_outranks_the_calendar() -> None:
+    """An overdue pass is the only pressure entropy ever gets, but evidence of something already
+    wrong still comes first."""
+    assert _decide(retire_ready=1, cadence_due=DUE).kind == "curate"  # type: ignore[attr-defined]
+    assert _decide(drift_uncovered=0.5, cadence_due=DUE).kind == "drift"  # type: ignore[attr-defined]
+    assert _decide(failing_cases=1, cadence_due=DUE).kind == "improve"  # type: ignore[attr-defined]
+
+
 def test_ranks_order_the_pipeline_backwards() -> None:
     """Closest to shipping first — the property the console sorts rows on."""
     ranks = [
@@ -149,6 +174,7 @@ def test_ranks_order_the_pipeline_backwards() -> None:
         _decide(failing_cases=1).rank,  # type: ignore[attr-defined]
         _decide(drift_uncovered=0.5).rank,  # type: ignore[attr-defined]
         _decide(retire_ready=1).rank,  # type: ignore[attr-defined]
+        _decide(cadence_due=DUE).rank,  # type: ignore[attr-defined]
         _decide().rank,  # type: ignore[attr-defined]
     ]
     assert ranks == sorted(ranks)

@@ -124,6 +124,17 @@ class DriftConfig(BaseModel):
     embed_model: str = ""
 
 
+class CadenceConfig(BaseModel):
+    """Where the hand-marked cadence timestamps live (`cadence.CadenceStore`).
+
+    Only the distill pass is ever marked by hand — the other clocks are derived from stores that
+    already record their events. Losing this directory costs nothing but the clocks reading
+    overdue, which prompts housekeeping done again: the safe direction.
+    """
+
+    dir: Path = Path(".whetstone/cadence")
+
+
 class LLMConfig(BaseModel):
     """The default backend for everything the console runs against a model — the live review, an
     eval, a gate, and the improve and triage drafters.
@@ -182,6 +193,7 @@ class Config(BaseModel):
     judge: JudgeConfig = JudgeConfig()
     meta_eval: MetaEvalConfig = MetaEvalConfig()
     drift: DriftConfig = DriftConfig()
+    cadence: CadenceConfig = CadenceConfig()
     llm: LLMConfig = LLMConfig()
     watch: WatchConfig = WatchConfig()
     # Directory the config was loaded from; relative paths resolve against it. None when defaulted.
@@ -230,6 +242,10 @@ class Config(BaseModel):
     @property
     def drift_cache_dir(self) -> Path:
         return self.drift_dir / "cache"
+
+    @property
+    def cadence_dir(self) -> Path:
+        return self._resolve(self.cadence.dir)
 
     def _resolve(self, path: Path) -> Path:
         if path.is_absolute() or self.source_dir is None:

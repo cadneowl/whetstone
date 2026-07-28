@@ -287,9 +287,9 @@ function Action({ row }: { row: Attention }) {
       </Link>
     )
   }
-  if (kind === 'curate' || kind === 'drift') {
-    // The confirm buttons (curate) and the uncovered list (drift) live on the health tab; the
-    // row leads to the fuller picture rather than duplicating it.
+  if (kind === 'curate' || kind === 'drift' || kind === 'cadence') {
+    // The confirm buttons (curate), the uncovered list (drift) and the clocks (cadence) live on
+    // the health tab; the row leads to the fuller picture rather than duplicating it.
     return (
       <Link
         to={`/skills/${encodeURIComponent(row.skill_id)}?tab=health`}
@@ -311,6 +311,7 @@ function ActionBadge({ kind }: { kind: ActionKind }) {
     improve: 'warn',
     drift: 'warn',
     curate: 'neutral',
+    cadence: 'neutral',
     nothing: 'neutral',
   } as const
   return <Badge tone={tone[kind]}>{kind}</Badge>
