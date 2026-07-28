@@ -25,16 +25,27 @@ from whetstone.service import (
     skill_detail,
     skill_summaries,
 )
-from whetstone.ui.deps import ConfigDep, Principal, PrincipalDep, SkillsRootDep, StoreDep, Writable
+from whetstone.ui.deps import (
+    CadenceDep,
+    ConfigDep,
+    DriftDep,
+    Principal,
+    PrincipalDep,
+    SkillsRootDep,
+    StoreDep,
+    Writable,
+)
 from whetstone.ui.errors import NotFound, Unprocessable
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 
 @router.get("", response_model=list[SkillSummary])
-def list_skills(root: SkillsRootDep, store: StoreDep) -> list[SkillSummary]:
-    """Every skill, weakest first — the console's landing order."""
-    return skill_summaries(_load_all(root), store)
+def list_skills(
+    root: SkillsRootDep, store: StoreDep, drift: DriftDep, cadence: CadenceDep
+) -> list[SkillSummary]:
+    """Every skill, worst first — the console's landing order, rot signals ahead of low scores."""
+    return skill_summaries(_load_all(root), store, drift=drift, cadence=cadence)
 
 
 @router.get("/{skill_id}", response_model=SkillDetail)

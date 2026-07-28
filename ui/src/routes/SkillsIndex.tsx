@@ -1,12 +1,15 @@
 import { Link } from 'react-router-dom'
-import { useSkills } from '@/api/client'
+import { useSkills, type RotStatus } from '@/api/client'
 import { Badge, Empty, ErrorNote, Intro, Loading, Sparkline, score } from '@/components/primitives'
 
 /**
- * The landing page, ordered weakest first.
+ * The landing page, ordered worst first.
  *
- * "Which of our skills is actually weak?" is the question this exists to answer, so the answer is
- * the sort order rather than something you assemble by running the CLI once per skill.
+ * "Which of our skills needs me?" is the question this exists to answer, so the answer is the sort
+ * order and the rot strip rather than something you assemble by running the CLI once per skill. A
+ * skill with a lit rot signal — drift, saturation, an overdue pass, a dead rule — sorts ahead of a
+ * merely low score, because those are the calls the rest of the product detects but the score alone
+ * would hide.
  */
 export function SkillsIndex() {
   const { data, isLoading, error } = useSkills()
@@ -22,12 +25,13 @@ export function SkillsIndex() {
       <header className="mb-4">
         <div className="flex items-baseline justify-between">
           <h1 className="text-lg font-semibold">Skills</h1>
-          {Boolean(data?.length) && <p className="text-xs text-muted">weakest first</p>}
+          {Boolean(data?.length) && <p className="text-xs text-muted">worst first</p>}
         </div>
         <Intro>
-          Every skill Whetstone can see, worst score first — so "which of ours is actually weak?" is
-          the sort order rather than something you assemble by hand. Open one to read its guidance,
-          edit it, see the cases holding it to account, and score it.
+          Every skill Whetstone can see, worst first — a skill with a lit rot signal (drift,
+          saturation, an overdue pass, a dead rule) sorts ahead of a merely low score, so "which of
+          ours needs me?" is the order rather than something you assemble by hand. Open one to read
+          its guidance, edit it, see the cases holding it to account, and score it.
         </Intro>
       </header>
 
@@ -98,11 +102,58 @@ export function SkillsIndex() {
                   )}
                 </div>
               </div>
+              <RotStrip rot={skill.rot} />
               {skill.description && <p className="mt-1 text-sm text-muted">{skill.description}</p>}
             </Link>
           </li>
         ))}
       </ul>
+    </div>
+  )
+}
+
+/**
+ * The rot traffic-light: the same signals the Health tab computes, reduced to what triage-at-a-
+ * glance needs. Renders nothing when every light is quiet — an all-clear skill stays uncluttered,
+ * and the strip's presence is itself the signal that something wants attention. `days since anchor`
+ * is shown whenever known, since a stale anchor is context even when no clock is overdue yet.
+ */
+function RotStrip({ rot }: { rot: RotStatus }) {
+  const anchor =
+    rot.days_since_anchor !== null && rot.days_since_anchor !== undefined
+      ? `anchored ${rot.days_since_anchor}d ago`
+      : null
+  if (rot.signals === 0 && !anchor) return null
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+      {rot.drift_alarm && (
+        <Badge tone="warn" title="The latest drift probe read past the alarm — the corpus stopped resembling what ships">
+          drift
+        </Badge>
+      )}
+      {rot.saturated > 0 && (
+        <Badge tone="warn" title="Active catch cases the naked model already passes — they measure nothing">
+          {rot.saturated} saturated
+        </Badge>
+      )}
+      {rot.cadence_due > 0 && (
+        <Badge tone="warn" title="Overdue routine passes — distill, saturation probe, anchor run, or drift review">
+          {rot.cadence_due} pass{rot.cadence_due === 1 ? '' : 'es'} due
+        </Badge>
+      )}
+      {rot.dead_rules > 0 && (
+        <Badge tone="warn" title="meta.yaml rules the evidence no longer stands behind — the distill pass's removal list">
+          {rot.dead_rules} dead rule{rot.dead_rules === 1 ? '' : 's'}
+        </Badge>
+      )}
+      {anchor && (
+        <span
+          className="text-xs text-muted"
+          title="Days since the active corpus was last scored whole — sampled scores are estimates until re-anchored"
+        >
+          {anchor}
+        </span>
+      )}
     </div>
   )
 }

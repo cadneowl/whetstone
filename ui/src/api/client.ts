@@ -4,6 +4,7 @@ import type { components } from './schema'
 type Schemas = components['schemas']
 
 export type SkillSummary = Schemas['SkillSummary']
+export type RotStatus = Schemas['RotStatus']
 export type SkillDetail = Schemas['SkillDetail']
 export type CaseDetail = Schemas['CaseDetail']
 export type CaseSummary = Schemas['CaseSummary']

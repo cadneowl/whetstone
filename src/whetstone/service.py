@@ -13,8 +13,9 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
+from whetstone.cadence import CadenceStore, clocks, last_anchor_at
 from whetstone.caseindex import PrecedentLimits, SkillIndex
 from whetstone.core.gate import GateConfig, GateResult, gate
 from whetstone.core.harness import EventSink, run_skill_recorded
@@ -31,6 +32,8 @@ from whetstone.corpus.builder import (
     write_candidate,
 )
 from whetstone.corpus.model import CandidateCase
+from whetstone.curation import discrimination
+from whetstone.deadrules import dead_rules
 from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import (
     EVIDENCE_CONFIRMED,
@@ -46,6 +49,7 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunRecord, guidance_hash, skill_hash
 from whetstone.domain.score import HoldoutReport, SkillScore
 from whetstone.domain.skill import Skill
+from whetstone.drift import DRIFT_ALARM, DriftStore
 from whetstone.gates import GateRecord, new_gate_id
 from whetstone.judge.cascade import CascadingJudgeFactory, GroundedJudge
 from whetstone.judge.llm_judge import LLMJudge, judge_identity
@@ -721,6 +725,39 @@ class PendingCase(BaseModel):
     last_fp_rate: float | None = None
 
 
+class RotStatus(BaseModel):
+    """The rot signals the index needs to answer "which skill needs me" without a click.
+
+    Each is a fact the Health tab already computes, reduced to what a traffic-light needs. Every
+    field defaults to quiet, so a skill with no probes and no history simply shows no lights — the
+    honest reading, not a false all-clear. Without these the index carried only the score, and a
+    skill with a saturated case, an overdue distill, a drift alarm, or a dead rule looked identical
+    to a healthy one — the rot the rest of the product detects was invisible where triage happens.
+    """
+
+    # The latest drift probe read past the alarm: the corpus stopped resembling what ships.
+    drift_alarm: bool = False
+    # Active should_catch cases the naked model already passes — they measure nothing.
+    saturated: int = 0
+    # Overdue routine passes (distill, saturation, anchor, drift).
+    cadence_due: int = 0
+    # meta.yaml rules the evidence no longer stands behind.
+    dead_rules: int = 0
+    # Days since the active corpus was last scored whole. None: never anchored, or no runs at all.
+    days_since_anchor: int | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def signals(self) -> int:
+        """How many distinct rot lights are lit — what the index sorts on, worst first."""
+        return (
+            int(self.drift_alarm)
+            + int(self.saturated > 0)
+            + int(self.cadence_due > 0)
+            + int(self.dead_rules > 0)
+        )
+
+
 class SkillSummary(BaseModel):
     """A skill as it appears on the index, with just enough history to rank and chart it."""
 
@@ -743,6 +780,9 @@ class SkillSummary(BaseModel):
     # `should_not_flag` cases by evidence strength — see `precision_evidence`. Carried on the index
     # row because "is this skill's precision score worth anything?" should not need a click.
     precision_evidence: dict[str, int] = {}
+    # The rot traffic-light. All quiet unless the drift/cadence stores are wired (they are for the
+    # console; the plain `skill_summaries(skills, store)` call leaves this empty by design).
+    rot: RotStatus = RotStatus()
 
 
 class CaseHistoryEntry(BaseModel):
@@ -862,20 +902,46 @@ def untested_rules(skill: Skill, record: RunRecord | None) -> list[str]:
 
 
 def skill_summaries(
-    skills: list[Skill], store: RunStore, *, trend: int = 10
+    skills: list[Skill],
+    store: RunStore,
+    *,
+    drift: DriftStore | None = None,
+    cadence: CadenceStore | None = None,
+    trend: int = 10,
 ) -> list[SkillSummary]:
-    """Index rows for every skill, weakest first — the console's landing order.
+    """Index rows for every skill, worst first — the console's landing order.
 
-    Scored skills are ranked by F2. Never-evaluated skills sort *after* them: "unknown" is not the
-    same as "known bad", and a skill with a real, measured F2 of 0 is the more urgent problem.
-    An unevaluated skill is still called out in the UI, just not ahead of a demonstrated failure.
+    Skills with a lit rot signal (drift alarm, saturation, overdue cadence, dead rule) sort ahead
+    of everything, most-lit first, because the index's job is triage of attention and a saturated
+    corpus is a more urgent call than a slightly-lower F2. Among the rest, scored skills rank by
+    F2; never-evaluated skills sort last, since "unknown" is not the same as "known bad".
+
+    `drift`/`cadence` are optional so the plain domain call (`skill_summaries(skills, store)`) still
+    works — it just leaves every rot light quiet. The console passes both, so its index is lit.
     """
-    summaries = [_skill_summary(skill, store, trend=trend) for skill in skills]
-    summaries.sort(key=lambda s: (s.latest is None, s.latest.f2 if s.latest else 0.0, s.id))
+    summaries = [
+        _skill_summary(skill, store, drift=drift, cadence=cadence, trend=trend)
+        for skill in skills
+    ]
+    summaries.sort(
+        key=lambda s: (
+            -s.rot.signals,
+            s.latest is None,
+            s.latest.f2 if s.latest else 0.0,
+            s.id,
+        )
+    )
     return summaries
 
 
-def _skill_summary(skill: Skill, store: RunStore, *, trend: int) -> SkillSummary:
+def _skill_summary(
+    skill: Skill,
+    store: RunStore,
+    *,
+    drift: DriftStore | None,
+    cadence: CadenceStore | None,
+    trend: int,
+) -> SkillSummary:
     history = store.list(skill_id=skill.id, limit=trend)
     # Staleness is a property of the whole history, not of the trend window: a version reused
     # further back is exactly the case someone would otherwise miss.
@@ -895,6 +961,51 @@ def _skill_summary(skill: Skill, store: RunStore, *, trend: int) -> SkillSummary
         recall_trend=[s.recall for s in reversed(history)],
         stale_version=bool(latest and latest.id in stale),
         precision_evidence=precision_evidence(skill),
+        rot=_rot_status(skill, store, drift, cadence),
+    )
+
+
+def _rot_status(
+    skill: Skill, store: RunStore, drift: DriftStore | None, cadence: CadenceStore | None
+) -> RotStatus:
+    """The index's rot traffic-light, from the same stores the Health tab reads.
+
+    Deliberately reuses the domain functions health.py calls — one source for each signal, so the
+    index light and the Health section can never quietly disagree. Reads the working-tree skill,
+    not the staged one: the index is a fast landing view, and a staged flip shows the moment its
+    branch merges. Quiet whenever a store is absent (the plain domain call) rather than guessed at.
+    """
+    if drift is None and cadence is None:
+        return RotStatus()
+
+    probe = store.latest_baseline(skill.id)
+    saturated = len(discrimination(skill, probe).flagged) if probe else 0
+    report = drift.latest(skill.id) if drift is not None else None
+    drift_alarm = report is not None and report.uncovered_fraction >= DRIFT_ALARM
+
+    anchor = last_anchor_at(store, skill)
+    now = datetime.now(UTC)
+    days_since_anchor = (now - anchor).days if anchor is not None else None
+    due = 0
+    if cadence is not None:
+        due = sum(
+            1
+            for c in clocks(
+                distill_at=cadence.marks(skill.id).marks.get("distill"),
+                saturation_at=probe.created_at if probe else None,
+                anchor_at=anchor,
+                drift_at=report.measured_at if report else None,
+                first_run_at=store.earliest_at(skill.id),
+                now=now,
+            )
+            if c.due
+        )
+    return RotStatus(
+        drift_alarm=drift_alarm,
+        saturated=saturated,
+        cadence_due=due,
+        dead_rules=len(dead_rules(skill)),
+        days_since_anchor=days_since_anchor,
     )
 
 
