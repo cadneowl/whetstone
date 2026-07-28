@@ -18,6 +18,7 @@ dist/
 node_modules/
 src/whetstone/ui/static/
 ui/openapi.json
+*.tsbuildinfo
 .playwright-mcp/
 
 # The throwaway skills repo the sharpening demo builds; recreated on every run.
