@@ -10,9 +10,12 @@ is a net improvement**, because every change passes an evaluated regression gate
 > measurable improvements to it. The output isn't a review; it's a *better reviewer for next time*,
 > tool-agnostic and governed.
 
-This repository is **Milestone 1: the eval / backtest harness + regression gate** — the measurement
-substrate everything else (distillation, proposal generation, the control-plane API) plugs into.
-See [`docs/milestone-1-eval-harness.md`](docs/milestone-1-eval-harness.md) for the design and
+At its core is **the eval / backtest harness and regression gate** — the measurement substrate
+everything else stands on. Built on top of it is the **anti-rot loop** (see
+[below](#keeping-skills-sharp-the-anti-rot-loop) and [`ANTI_ROT_PLAN.md`](ANTI_ROT_PLAN.md)): corpus
+mining and triage, a guidance drafter, the holdout/tier/saturation/drift machinery, a versioned and
+self-measuring judge, and a console that puts every skill's state of affairs on one surface. See
+[`docs/milestone-1-eval-harness.md`](docs/milestone-1-eval-harness.md) for the harness design and
 [`docs/decisions.md`](docs/decisions.md) for the architecture decisions.
 
 ---
@@ -20,27 +23,28 @@ See [`docs/milestone-1-eval-harness.md`](docs/milestone-1-eval-harness.md) for t
 ## Table of contents
 
 1. [How it works](#how-it-works)
-2. [Architecture](#architecture)
-3. [Install & setup](#install--setup)
-4. [The skill format](#the-skill-format)
-5. [Eval cases](#eval-cases)
-6. [Scoring model](#scoring-model)
-7. [The regression gate](#the-regression-gate)
-8. [The skill pipeline](docs/skill-pipeline.md) — `evaluate/`, `improve/`, `update/`, and the wiki
-9. [CLI reference](#cli-reference)
-10. [Run records & reports](#run-records--reports)
-11. [The console (`whetstone ui`)](#the-console-whetstone-ui)
-12. [Configuration (`whetstone.toml`)](#configuration-whetstonetoml)
-13. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
-14. [Providers & the plugin architecture](#providers--the-plugin-architecture)
-15. [The corpus builder](#the-corpus-builder)
-16. [The LLM layer](#the-llm-layer)
-17. [Reviewers & judges](#reviewers--judges)
-18. [Meta-evaluation (validating the judge and the drafter)](#meta-evaluation-validating-the-judge-and-the-drafter)
-19. [Testing](#testing)
-20. [Extending Whetstone](#extending-whetstone)
-21. [Environment variables](#environment-variables)
-22. [Repository layout](#repository-layout)
+2. [Keeping skills sharp: the anti-rot loop](#keeping-skills-sharp-the-anti-rot-loop)
+3. [Architecture](#architecture)
+4. [Install & setup](#install--setup)
+5. [The skill format](#the-skill-format)
+6. [Eval cases](#eval-cases)
+7. [Scoring model](#scoring-model)
+8. [The regression gate](#the-regression-gate)
+9. [The skill pipeline](docs/skill-pipeline.md) — `evaluate/`, `improve/`, `update/`, and the wiki
+10. [CLI reference](#cli-reference)
+11. [Run records & reports](#run-records--reports)
+12. [The console (`whetstone ui`)](#the-console-whetstone-ui)
+13. [Configuration (`whetstone.toml`)](#configuration-whetstonetoml)
+14. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
+15. [Providers & the plugin architecture](#providers--the-plugin-architecture)
+16. [The corpus builder](#the-corpus-builder)
+17. [The LLM layer](#the-llm-layer)
+18. [Reviewers & judges](#reviewers--judges)
+19. [Meta-evaluation (validating the judge and the drafter)](#meta-evaluation-validating-the-judge-and-the-drafter)
+20. [Testing](#testing)
+21. [Extending Whetstone](#extending-whetstone)
+22. [Environment variables](#environment-variables)
+23. [Repository layout](#repository-layout)
 
 ---
 
@@ -98,11 +102,130 @@ being precise about which parts are automatic and which are a person's judgement
   merge request
 ```
 
-**Nothing here writes guidance for you.** The corpus builder proposes test data, the gate rules on
-whether a rewrite was an improvement, and the console refuses to publish one that has not been
-measured — but a human writes the rule. Automating that step is the proposal engine, and it is the
-next milestone; when it lands, its output enters this loop at the same place a person's does and
-faces the same gate.
+**Nothing here writes guidance blind.** The corpus builder proposes test data, the *improve* step
+drafts a guidance change from a run's clustered failures, and the gate rules on whether that rewrite
+was an improvement — but a human reads every draft before it is staged, and the console refuses to
+publish one no passing gate covers. The drafter is an assistant inside the loop, not an autopilot
+around it: its output enters at the same place a person's edit does and faces the same gate.
+
+---
+
+## Keeping skills sharp: the anti-rot loop
+
+A test suite that never changes rots: the reviewer keeps passing an exam that stopped resembling the
+job. Whetstone's answer is a loop that continuously *replaces its own exam* from live signal, plus
+four layers of machinery that keep the loop honest. The whole system is below; the rest of this
+section is a guided tour of it.
+
+![The anti-rot loop: a six-stage improvement cycle wrapped by four layers — measurement integrity, corpus hygiene, representativeness, and capability — with an operating cadence beneath.](docs/assets/anti-rot-loop.png)
+
+> **Rot enters at three points — and they are not equal.** The instrument miscounts, the test set
+> drifts from reality, or the guidance bloats. **Fix the instrument first:** every score, gate, and
+> alarm downstream reads the judge's output, so a judge that is wrong makes every other number a
+> confident lie. The layers below are ordered by that priority.
+
+```mermaid
+flowchart TB
+    R1["① The instrument miscounts<br/>(the judge is wrong)"] --> L1["Layer 1 — Measurement integrity<br/>fix this first; everything downstream reads its output"]
+    R2["② The test set drifts from reality"] --> L3["Layer 3 — Representativeness<br/>drift metric + synthetic cases"]
+    R3["③ The guidance bloats"] --> L2["Layer 2 — Corpus hygiene<br/>holdout · tiers · saturation probe · dedup"]
+```
+
+### The improvement loop
+
+Live review signal becomes eval cases; eval cases score the reviewer; failures draft a change; a
+gate proves the change is a net improvement before it ships — and the misses and false positives the
+shipped skill produces become the next round's cases. It closes on itself.
+
+```mermaid
+flowchart LR
+    P("① Production signal<br/>merge requests · shipped defects · dismissed findings")
+    M("② Mine and Triage<br/>a person promotes candidates to eval cases")
+    E("③ Eval Run<br/>the LLM reviewer, scored against the case corpus")
+    I("④ Improve<br/>clustered failures → a drafted guidance change")
+    G("⑤ Gate<br/>no regressions, and targeted cases must pass")
+    S("⑥ Propose and Ship<br/>merged guidance")
+
+    P --> M --> E --> I --> G --> S
+    S -. "new misses and false positives<br/>become new cases" .-> P
+```
+
+| Stage | What runs | In the code / console |
+|---|---|---|
+| ① Production signal | GitLab MRs, shipped defects, dismissed findings | `corpus pull`, the `[watch]` connector |
+| ② Mine and Triage | a person promotes candidates to eval cases | `corpus/builder.py`, **Triage** screen |
+| ③ Eval Run | the reviewer scored against the corpus | `service.record_eval`, **Skill → Runs** |
+| ④ Improve | clustered failures → a drafted guidance change | `improve/` step, **Skill → Edit → Draft a change** |
+| ⑤ Gate | no regressions; targeted cases must pass | `service.record_gate`, **Skill → Edit → Run the gate** |
+| ⑥ Propose and Ship | the merged guidance | *Propose MR*, refused without a passing gate (C6) |
+
+### Layer 1 — Measurement integrity (fix the instrument first)
+
+The judge decides whether a finding *means* what an expectation describes; every score is built on
+its verdicts. So the judge is versioned, identified, cross-examined on the hard calls, ruled on by
+people, and held to a bar that only rises.
+
+```mermaid
+flowchart LR
+    A["Judge =<br/>versioned JUDGE.md"] --> B["Identity hash<br/>recorded on every run"]
+    B --> C["Confidence cascade<br/>unsure verdicts re-judged,<br/>grounded in the case's diff"]
+    C --> D["Human rulings<br/>agree / dispute →<br/>the judge's own eval corpus"]
+    D --> E["Accuracy ratchet<br/>a new doctrine must beat<br/>the previous best"]
+```
+
+- **Versioned doctrine** — the judge's instructions live in `judges/<id>/JUDGE.md`, not in code.
+- **Identity on every run** — `judge_identity()` folds the doctrine text, cascade threshold, and
+  tier-1 model into a `judge_hash` stamped on every run and gate, so a changed instrument is
+  visible and gate evidence keyed to the old one is retracted.
+- **Confidence cascade** — a low-confidence pairwise verdict is re-judged *grounded in the case's
+  own diff* (`judge/cascade.py`), paid for only on the contested calls.
+- **Human rulings → corpus** — same/different rulings in the run drill-down become labeled pairs
+  the judge is itself measured against (`meta_eval/disputes.py`).
+- **Accuracy ratchet** — `meta_eval/ratchet.py` sets a bar from the best measured doctrine; a new
+  JUDGE.md must clear it, so the instrument can only get sharper.
+
+### Layer 2 — Corpus hygiene (keep the exam lean and live)
+
+| Mechanism | What it catches | Where |
+|---|---|---|
+| **Holdout split** (20% hidden from Improve) | overfitting — guidance memorising its own exam | `sampling.partition_of`; holdout/divergence on runs |
+| **Case tiers** (active / archive) | solved cases crowding the live edge and flattering the score | `curation.retirement_proposals`; Health → *Ready to retire* |
+| **Saturation probe** (zero-guidance baseline) | dead cases the naked model already passes | `service.record_baseline`; Health → *Discrimination* |
+| **Dedup at the promotion door** | a repetitive corpus skewing the stratified sample | `curation.similar_cases`; Triage |
+
+### Layer 3 — Representativeness (does the corpus still look like the code?)
+
+| Mechanism | What it catches | Where |
+|---|---|---|
+| **Drift metric** | the corpus no longer resembles the recent MR stream | `drift.compute_drift`; Health → *Drift* |
+| **Synthetic cases** — counterfactual negatives + mutation probes | too few negatives; rules that memorised one incident | `corpus/synthesize.py`; Health → *Corpus* |
+
+### Layer 4 — Capability (make the reviewer and judge cheaper and sharper)
+
+| Mechanism | What it buys | Where |
+|---|---|---|
+| **Case-RAG** — precedent retrieval at review time | a case promoted this morning sharpens this afternoon's reviews, no improve cycle needed | `caseindex.retrieve_precedents`; Health → *Case index* |
+| **Judge distillation** — a cheap local tier-1 judge | judge cost that scales with cases × trials × both gate sides | the `judge: {tier1: …}` seam in `evaluate/step.yaml` |
+
+### Operating cadence
+
+Rot detectors fire on evidence; entropy has none — nothing *breaks* when a distill or an anchor run
+is skipped, it just quietly stops being true that the corpus is lean and the scores are grounded. So
+the routine lives on clocks the console surfaces (Health → *Cadence*, and the inbox), not in a
+document nobody reopens.
+
+| Cadence | Passes |
+|---|---|
+| **Weekly** | work the inbox |
+| **Monthly** | distill guidance · saturation probe · dead-rule report |
+| **Quarterly** | full-corpus re-anchor · wiki refresh · drift review |
+| **On model change** | re-baseline everything |
+
+The **Skill Health** tab is where all of this lands on one surface — train/holdout scores and
+divergence, saturation, drift, judge status, the cadence clocks — with the **production catch rate**
+(human rulings on live findings) as the ground-truth KPI the eval scores are a proxy for.
+
+The full design, phase by phase, is in [`ANTI_ROT_PLAN.md`](ANTI_ROT_PLAN.md).
 
 ---
 
@@ -748,7 +871,7 @@ List skills under a root, their eval-case counts, and how well their precision c
 
 ```bash
 whetstone skills list --root skills
-# code-review-rust-error-handling  v1  (3 eval cases)
+# code-review-rust-error-handling  v1  (4 eval cases)
 # secrets-in-logs                  v4  (22 eval cases)
 #     ⚠ 18 of 20 precision case(s) rest on nobody having commented
 ```
@@ -1133,9 +1256,9 @@ dir = ".whetstone/runs"          # where run records are read from
 Relative paths in `whetstone.toml` resolve against the file's own directory; paths from environment
 variables resolve against the current working directory, as environment variables conventionally do.
 
-> **`practice_mode` is declared but inert.** It is reported to the UI and shown as a badge, but
-> nothing consumes it yet, because the console does not launch runs — that is Phase 4. Setting it
-> today changes only what the header displays.
+> **`practice_mode`** tags a run or gate as a throwaway — a demo or a dry run of the workflow. It is
+> reported to the UI and shown as a badge, and such records are held out of the trend listings and
+> the cadence clocks and never anchor a corpus, so practising never disturbs a skill's real history.
 
 **Pointing at a separate skills repo:**
 
@@ -1191,29 +1314,37 @@ whetstone corpus pull --base-url https://gitlab.acme.com --project acme/payments
 
 | Route | Screen |
 |---|---|
-| `/` | Skills index |
-| `/skills/<id>` | Skill detail — guidance, **edit**, cases, runs, metadata |
-| `/skills/<id>/cases/<case-id>` | Eval case — diff, expectations, history |
+| `/` | Skills index — **worst first**, with a rot strip per skill |
+| `/skills/<id>` | Skill detail — guidance, **edit**, cases, runs, **health**, metadata |
+| `/skills/<id>/cases/<case-id>` | Eval case — diff, expectations, history, baseline verdict |
 | `/triage` | Candidate queue |
 | `/runs` | Run history |
-| `/runs/<run-id>` | Run drill-down |
+| `/runs/<run-id>` | Run drill-down — findings, judge verdicts, train/holdout, rulings |
+| `/inbox` | What wants attention across every skill, ranked |
+| `/judge` | The deployment judge — doctrine, identity, accuracy vs the bar |
 
 Every URL is deep-linkable. Paste a run link into a merge request and it opens where you left it.
 
 #### Skills index
 
-One row per skill, **weakest first** — the landing order answers "which of our skills is actually
-weak?", which otherwise takes a CLI run per skill and eyeballing.
+One row per skill, **worst first** — the landing order answers "which of our skills needs me?",
+which otherwise takes a CLI run per skill and eyeballing. A skill with a lit **rot signal** sorts
+ahead of a merely low score, because the rest of the product detects rot the score alone would hide.
 
 - **`8 catch / 5 noflag`** — the case split. A skill with no `should_not_flag` cases has nothing
-  keeping its precision honest.
+  keeping its precision honest. `· N archived` counts retired cases sampled at low weight.
 - **`R` / `FP`** — recall and false-positive rate from the most recent run.
+- **`hold` / `diverging`** — the latest run's holdout recall, and a badge when train runs well ahead
+  of it — the overfitting light (see [Layer 2](#keeping-skills-sharp-the-anti-rot-loop)).
+- **Rot strip** — `drift`, `N saturated`, `N passes due`, `N dead rules`, and days since the corpus
+  was last anchored. Present only when something wants attention; the strip's absence is the
+  all-clear. Every badge is the same fact the **Health** tab computes, reduced to a traffic light.
 - **Sparkline** — recall over recent runs, oldest to newest. Direction, not precision.
 - **`version reused`** — another run shares this `skill_version` with different content, so the two
   are not comparable despite appearances. Almost always means guidance was edited without bumping
   `version` in frontmatter.
-- **`never evaluated`** — no runs. These sort *after* scored skills: a measured F2 of 0 is a more
-  urgent problem than an unknown.
+- **`never evaluated`** — no runs. These sort *after* scored skills (but behind rot-flagged ones): a
+  measured F2 of 0 is a more urgent problem than an unknown.
 
 #### Skill detail
 
@@ -1227,6 +1358,18 @@ last run. A **flaky** badge means trials disagreed — unstable, as opposed to s
 
 **Runs** is this skill's history, newest first. **Metadata** shows owner, declared rules, trigger
 labels, and references.
+
+#### Health — one skill's state of affairs on one surface
+
+The integrating screen for [the anti-rot loop](#keeping-skills-sharp-the-anti-rot-loop). Every
+mechanism reports somewhere else too — the holdout pair on runs, the judge on its own page, rulings
+on reviews — but "how is this skill actually doing?" is one question, so Health answers it in one
+eyeline: the latest **score** with its train/holdout divergence; **corpus** composition and the
+synthetic generators; cases **ready to retire**; the **saturation** and **drift** probes and their
+launch buttons; the **case index** and its staleness; the **judge** and its accuracy; the
+**production** catch rate; the **cadence** clocks; and the **dead-rule** report the distill pass
+reads. A section whose measurement has not been run yet says so and offers the button to run it —
+a health surface that hid what it could not see would read as healthier than it is.
 
 #### Edit — changing what the reviewer does
 
@@ -1705,7 +1848,9 @@ The console launches everything the CLI does. Nothing in the loop requires a ter
 | **Skill → Runs** | *Run evals* — scores the skill, with live progress and cancellation |
 | **Skill → Edit** | *Draft a change* — improve step writes a proposal into the editor |
 | **Skill → Edit** | *Run the gate* — appears exactly where C6 blocks publishing, and clears it |
-| API | `POST /api/jobs/{eval,gate,improve,update}` |
+| **Skill → Health** | *Baseline probe*, *Drift probe*, *Build/rebuild case index*, *Generate synthetic cases* |
+| **Judge** | *Measure the judge* against the labeled corpus and ratchet the bar |
+| API | `POST /api/jobs/{eval,gate,improve,update,review,baseline,drift,index,synthesize,judge-eval}` |
 
 **Nothing starts without saying what it costs.** Every launch takes two clicks: the first fetches
 the plan and shows it — the resolved backend, whether it bills, and an upper bound on the calls —
@@ -1725,8 +1870,9 @@ reconnection logic on both sides.
 
 - **A case editor** — hand-writing an eval case with no source merge request. Triage covers the
   case that starts from one.
-- **Compare & judge lab** — diffing two runs with client-side tolerance tuning, and labelling judge
-  verdicts to grow the meta-eval set.
+- **Run-vs-run compare lab** — diffing two runs side by side with client-side tolerance tuning.
+  (Labelling judge verdicts to grow the meta-eval set *is* built — the same/different buttons in the
+  run drill-down, measured on the **Judge** page.)
 
 ---
 
