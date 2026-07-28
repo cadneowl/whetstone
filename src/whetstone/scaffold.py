@@ -47,6 +47,11 @@ sample:
   # the drafter memorizing its cases rather than learning the pattern. Membership is an unseeded
   # hash of the case id, so there is no knob to re-roll it. 0 disables the split.
   holdout_fraction: 0.2
+  # How much of its proportional share an archived case keeps in a sampled draw. Cases marked
+  # `tier: archive` in their case.yaml are lessons the skill has demonstrably internalized —
+  # kept as regression insurance rather than deleted, but drawn lightly so the budget is spent
+  # at the live edge. 1.0 ignores tiers; full runs (max_cases: null) always score everything.
+  archive_weight: 0.1
 
 inputs:
   wiki:

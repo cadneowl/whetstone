@@ -35,6 +35,7 @@ from whetstone.domain.eval_model import (
     EVIDENCE_CONFIRMED,
     EVIDENCE_SILENCE,
     EVIDENCE_UNCLASSIFIED,
+    CaseTier,
     EvalCase,
     EvalKind,
     Provenance,
@@ -564,6 +565,7 @@ class CaseSummary(BaseModel):
 
     id: str
     kind: EvalKind
+    tier: CaseTier = "active"
     path: str = ""  # the file the case is about; cases are narrowed to one
     expectations: int = 0
     provenance: Provenance = Provenance()
@@ -602,7 +604,13 @@ class SkillSummary(BaseModel):
     owner: str = ""
     catch_cases: int = 0
     noflag_cases: int = 0
+    # Cases retired to the archive tier — still counted in the kind totals above, called out here
+    # so the index can show how much of the corpus is regression insurance vs live edge.
+    archive_cases: int = 0
     latest: RunSummary | None = None
+    # The latest run's train-vs-holdout pair — the index's overfitting light. None when the run
+    # predates the partition, drew no holdout cases, or its record is unreadable.
+    holdout: HoldoutReport | None = None
     recall_trend: list[float] = []  # oldest → newest
     stale_version: bool = False
     # `should_not_flag` cases by evidence strength — see `precision_evidence`. Carried on the index
@@ -739,11 +747,28 @@ def _skill_summary(skill: Skill, store: RunStore, *, trend: int) -> SkillSummary
         owner=skill.owner,
         catch_cases=sum(1 for c in skill.eval_cases if c.kind == "should_catch"),
         noflag_cases=sum(1 for c in skill.eval_cases if c.kind == "should_not_flag"),
+        archive_cases=sum(1 for c in skill.eval_cases if c.tier == "archive"),
         latest=latest,
+        holdout=_latest_holdout(store, latest),
         recall_trend=[s.recall for s in reversed(history)],
         stale_version=bool(latest and latest.id in stale),
         precision_evidence=precision_evidence(skill),
     )
+
+
+def _latest_holdout(store: RunStore, latest: RunSummary | None) -> HoldoutReport | None:
+    """The newest run's holdout report, best-effort.
+
+    The index only carries summaries, and the report lives on the full record — so this is one
+    extra record read per skill, and an unreadable record degrades to "no holdout" rather than
+    failing the whole index page.
+    """
+    if latest is None:
+        return None
+    try:
+        return store.load(latest.id).holdout
+    except (FileNotFoundError, ValueError):
+        return None
 
 
 def skill_detail(skill: Skill, store: RunStore, *, runs: int = 20) -> SkillDetail:
@@ -767,6 +792,7 @@ def _case_summary(case: EvalCase, latest: RunRecord | None) -> CaseSummary:
     return CaseSummary(
         id=case.id,
         kind=case.kind,
+        tier=case.tier,
         path=case.change.files[0].path if case.change.files else "",
         expectations=len(case.expect),
         provenance=case.provenance,

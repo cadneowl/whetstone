@@ -870,6 +870,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/cases/{case_id}/tier": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Case Tier
+         * @description Flip one eval case between `active` and `archive` — as a commit, never a disk write.
+         *
+         *     The flip lands on the skill's staging branch like a guidance edit, because it is the same kind
+         *     of thing: a change to what the skill's score measures. A rewritten case changes `skill_hash`,
+         *     so C6 requires a fresh passing gate before the archived corpus can be proposed — de-weighting
+         *     a case can move the score, and a moved score gets re-proven, not waved through.
+         */
+        post: operations["set_case_tier_api_skills__skill_id__cases__case_id__tier_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills/{skill_id}/guidance": {
         parameters: {
             query?: never;
@@ -904,6 +929,23 @@ export interface paths {
          * @description Validate an edit and return exactly what would be committed. Writes nothing.
          */
         post: operations["preview_guidance_api_skills__skill_id__guidance_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Health */
+        get: operations["get_health_api_skills__skill_id__health_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1012,6 +1054,8 @@ export interface components {
             new_signals: number;
             /** Recall */
             recall?: number | null;
+            /** Retirements */
+            retirements?: components["schemas"]["Retirement"][];
             /**
              * Scored
              * @default false
@@ -1276,6 +1320,12 @@ export interface components {
              *     }
              */
             provenance: components["schemas"]["Provenance"];
+            /**
+             * Tier
+             * @default active
+             * @enum {string}
+             */
+            tier: "active" | "archive";
         };
         /** CodeChange */
         CodeChange: {
@@ -1295,6 +1345,24 @@ export interface components {
              */
             head_ref: string;
             repo: components["schemas"]["RepoRef"];
+        };
+        /**
+         * Composition
+         * @description What the corpus is made of — the denominator under every score.
+         */
+        Composition: {
+            /** Active */
+            active: number;
+            /** Archive */
+            archive: number;
+            /** Catch */
+            catch: number;
+            /** Evidence Mix */
+            evidence_mix: {
+                [key: string]: number;
+            };
+            /** Noflag */
+            noflag: number;
         };
         /**
          * Confusion
@@ -1579,6 +1647,12 @@ export interface components {
              *     }
              */
             provenance: components["schemas"]["Provenance"];
+            /**
+             * Tier
+             * @default active
+             * @enum {string}
+             */
+            tier: "active" | "archive";
         };
         /** EvalRequest */
         EvalRequest: {
@@ -2360,7 +2434,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "propose" | "gate" | "triage" | "score" | "improve" | "nothing";
+            kind: "propose" | "gate" | "triage" | "score" | "improve" | "curate" | "nothing";
             /** Label */
             label: string;
             /** Rank */
@@ -2507,6 +2581,20 @@ export interface components {
              * @default
              */
             reason: string;
+        };
+        /**
+         * ProductionWindow
+         * @description Human rulings on live findings — the ground truth the eval scores are a proxy for.
+         */
+        ProductionWindow: {
+            /** Confirmed */
+            confirmed: number;
+            /** Pending */
+            pending: number;
+            /** Rejected */
+            rejected: number;
+            /** Reviews */
+            reviews: number;
         };
         /**
          * PromoteFindingRequest
@@ -2722,6 +2810,19 @@ export interface components {
             head: string;
             /** Remote */
             remote?: string | null;
+        };
+        /**
+         * Retirement
+         * @description A retirement proposal as the inbox shows it: the case, and the evidence for archiving it.
+         *
+         *     A serializable copy of `curation.RetirementProposal` with the evidence sentence materialized —
+         *     the property does not survive `model_dump`, and the sentence is the row's whole point.
+         */
+        Retirement: {
+            /** Case Id */
+            case_id: string;
+            /** Evidence */
+            evidence: string;
         };
         /** ReviewDetail */
         ReviewDetail: {
@@ -3243,6 +3344,26 @@ export interface components {
             skill_version: number;
         };
         /**
+         * ScoreNow
+         * @description The latest run's answer to "how good is it?", per partition where the run recorded one.
+         */
+        ScoreNow: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** F2 */
+            f2: number;
+            /** Fp Rate */
+            fp_rate: number;
+            holdout?: components["schemas"]["HoldoutReport"] | null;
+            /** Recall */
+            recall: number;
+            /** Run Id */
+            run_id: string;
+        };
+        /**
          * SemanticDraft
          * @description What a triage step returns.
          */
@@ -3452,6 +3573,35 @@ export interface components {
                 [key: string]: string;
             };
         };
+        /** SkillHealth */
+        SkillHealth: {
+            /** Cadence */
+            cadence?: null;
+            composition: components["schemas"]["Composition"];
+            /** Discrimination */
+            discrimination?: null;
+            /** Drift */
+            drift?: null;
+            /** Index */
+            index?: null;
+            judge?: components["schemas"]["JudgeView"] | null;
+            /**
+             * Judge Error
+             * @default
+             */
+            judge_error: string;
+            production?: components["schemas"]["ProductionWindow"] | null;
+            /**
+             * Retirements
+             * @default []
+             */
+            retirements: components["schemas"]["Retirement"][];
+            score?: components["schemas"]["ScoreNow"] | null;
+            /** Skill Id */
+            skill_id: string;
+            /** Version */
+            version: number;
+        };
         /** SkillScore */
         SkillScore: {
             /** Cases */
@@ -3485,6 +3635,11 @@ export interface components {
          */
         SkillSummary: {
             /**
+             * Archive Cases
+             * @default 0
+             */
+            archive_cases: number;
+            /**
              * Catch Cases
              * @default 0
              */
@@ -3494,6 +3649,7 @@ export interface components {
              * @default
              */
             description: string;
+            holdout?: components["schemas"]["HoldoutReport"] | null;
             /** Id */
             id: string;
             latest?: components["schemas"]["RunSummary"] | null;
@@ -3621,6 +3777,36 @@ export interface components {
             projects?: string[];
             /** Skipped */
             skipped?: string[];
+        };
+        /** TierRequest */
+        TierRequest: {
+            /**
+             * Tier
+             * @enum {string}
+             */
+            tier: "active" | "archive";
+        };
+        /** TierResult */
+        TierResult: {
+            /**
+             * Branch
+             * @default
+             */
+            branch: string;
+            /** Case Id */
+            case_id: string;
+            /**
+             * Commit
+             * @default
+             */
+            commit: string;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Tier
+             * @enum {string}
+             */
+            tier: "active" | "archive";
         };
         /**
          * TrialRecord
@@ -5231,6 +5417,42 @@ export interface operations {
             };
         };
     };
+    set_case_tier_api_skills__skill_id__cases__case_id__tier_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TierRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TierResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     put_guidance_api_skills__skill_id__guidance_put: {
         parameters: {
             query?: never;
@@ -5288,6 +5510,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PreparedSkill"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_health_api_skills__skill_id__health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillHealth"];
                 };
             };
             /** @description Validation Error */

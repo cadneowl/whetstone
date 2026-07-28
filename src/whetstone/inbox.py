@@ -17,6 +17,7 @@ something new:
     triage   new signal arrived that nobody has ruled on
     score    the skill has never been measured, or was measured as different content
     improve  it is failing cases we already know about
+    curate   corpus housekeeping is waiting on a human ruling — e.g. solved cases to retire
     nothing  nothing to do, said plainly rather than left to inference
 
 A skill with nothing to do says so. An inbox that lists everything is the list of everything, which
@@ -29,7 +30,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ActionKind = Literal["propose", "gate", "triage", "score", "improve", "nothing"]
+ActionKind = Literal["propose", "gate", "triage", "score", "improve", "curate", "nothing"]
 
 
 class Signal(BaseModel):
@@ -59,6 +60,17 @@ class NextAction(BaseModel):
     rank: int
 
 
+class Retirement(BaseModel):
+    """A retirement proposal as the inbox shows it: the case, and the evidence for archiving it.
+
+    A serializable copy of `curation.RetirementProposal` with the evidence sentence materialized —
+    the property does not survive `model_dump`, and the sentence is the row's whole point.
+    """
+
+    case_id: str
+    evidence: str
+
+
 class Attention(BaseModel):
     """One skill's row in the inbox: what arrived, what is known, and what to do."""
 
@@ -77,6 +89,9 @@ class Attention(BaseModel):
     staged: bool = False
     can_propose: bool = False
     blocked_reason: str = ""
+    # Cases whose gate history says they stopped discriminating — see `curation.py`. Carried with
+    # their evidence so confirming one is a decision made on the row, not after a hunt.
+    retirements: list[Retirement] = Field(default_factory=list)
     action: NextAction
 
     @property
@@ -103,6 +118,9 @@ _RANK: dict[ActionKind, int] = {
     "triage": 2,
     "score": 3,
     "improve": 4,
+    # Housekeeping ranks below improvement: retiring a solved case matters, but never more than a
+    # case the skill is currently failing.
+    "curate": 5,
     "nothing": 9,
 }
 
@@ -117,6 +135,7 @@ def decide(
     stale_run: bool,
     failing_cases: int,
     total_cases: int,
+    retire_ready: int = 0,
 ) -> NextAction:
     """The next action for one skill.
 
@@ -160,6 +179,14 @@ def decide(
             "improve",
             "Draft a change",
             f"failing {failing_cases} case{plural} that real reviews say it should get right",
+        )
+    if retire_ready:
+        plural = "s" if retire_ready != 1 else ""
+        return _action(
+            "curate",
+            f"Retire {retire_ready} solved case{plural}",
+            "these cases pass every recent gate on every version — archiving them spends the "
+            "eval budget at the live edge instead of re-verifying the solved past",
         )
     return _action("nothing", "", "passing every case it has, with nothing new waiting")
 

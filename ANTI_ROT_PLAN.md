@@ -1,6 +1,6 @@
 # ANTI_ROT_PLAN — keeping skills sharp across hundreds of MRs and defects
 
-> **Implementation status (updated 2026-07-27, branch `anti-rot/phase-0`)**
+> **Implementation status (updated 2026-07-28, branch `anti-rot/phase-0`)**
 >
 > - **0.1 — DONE** (commit "Name the judge on every run and gate record"): `judge_identity()` in
 >   `judge/llm_judge.py` (prompt text now a hashable template constant, characterization test pins
@@ -70,13 +70,41 @@
 >   partition lines (`format_holdout`); drill-down shows train/holdout/divergence metrics, a
 >   red note past 0.1 divergence, and a holdout badge per case. Aggregate scores unchanged —
 >   every case is still scored; only learnability changed.
-> - **Next up: Phase 2.2 — case tiers** (active/archive, inbox `curate` retirement proposals,
->   low-weight archive sampling) and the **Phase H health endpoint skeleton**
->   (`GET /api/skills/{id}/health`) so divergence, composition, and judge state get one surface.
->   Then 2.3 saturation probe → 2.4 dedup → Phase 3.
-> - Phase H note: the health endpoint skeleton (`GET /api/skills/{id}/health`) has NOT been
->   started; disputes-pending count now lives on `GET /api/judge` and belongs in the health
->   payload's `judge` block when it lands.
+> - **2.2 — DONE** (this commit): case tiers. `EvalCase.tier` (`active`/`archive`, absent means
+>   active so every existing case file keeps its meaning); loader reads it;
+>   `SamplePolicy.archive_weight` (default 0.1) and `sampling._stratified` now stratifies over
+>   `(kind, tier)` with archive strata weighted — full-corpus runs (`max_cases: null`) still
+>   score everything at full weight (the monthly-distill posture). `curation.py`:
+>   `retirement_proposals(skill, gates)` — an active case that passed its last
+>   `RETIREMENT_GATES` (10) non-practice gate *appearances* (sampled-out gates are skipped, not
+>   counted against) on the candidate side is proposed with evidence ("passed the last 10 gates
+>   it appeared in, across N skill versions"); one recent failure kills it. `retier_yaml` edits
+>   exactly one top-level line of `case.yaml` and validates the result — never a YAML round-trip
+>   (hand-written files keep their bytes). The flip endpoint
+>   `POST /api/skills/{id}/cases/{case_id}/tier` stages a commit on `whetstone/skill/<id>`
+>   (never the working tree; reads the branch's copy first so flips compound) — and because a
+>   rewritten case changes `skill_hash`, C6 demands a fresh gate before the archived corpus
+>   ships. Inbox: new `curate` action kind (rank 5, below improve), `Attention.retirements`
+>   with evidence, computed against the staged skill so a confirmed flip stops nagging
+>   immediately. UI: Cases tab archive badge + show/hide filter, inbox rows with per-case
+>   Archive buttons, SkillsIndex archive count.
+> - **Phase H — endpoint + Health tab LANDED** (this commit, fills per phase):
+>   `GET /api/skills/{id}/health` (`ui/routers/health.py`) aggregates `score` (latest run +
+>   holdout pair), `composition` (tiers, kinds, evidence mix), `retirements`, `production`
+>   (confirmed/rejected/pending over the last 20 reviews), and `judge` (reuses `get_judge`;
+>   malformed JUDGE.md surfaces as `judge_error`, never a healthy blank). Sections whose phases
+>   have not landed — `discrimination` (2.3), `drift` (3.1), `index` (4.1), `cadence` (5) — are
+>   present and null, so the payload's shape is the plan's and the UI never restructures.
+>   UI: SkillDetail **Health** tab (`components/HealthPanel.tsx`) with a "Not yet measured"
+>   section naming the missing panels; SkillsIndex row shows the holdout score + a "diverging"
+>   badge past 0.1. Fill in `discrimination` when 2.3 lands and `drift` when 3.1 does.
+> - **Next up: Phase 2.3 — the saturation probe** (`eval baseline`: score active cases with an
+>   empty skill body; a should_catch case the naked model passes never measured the guidance;
+>   flags become inbox `curate` proposals and fill the health payload's `discrimination`
+>   section). Then 2.4 dedup at the promotion door → Phase 3 (drift + synthetic cases).
+> - 2.2 deferrals: `RETIREMENT_GATES` is a module constant, not yet config; the monthly
+>   archive-at-full-weight distill gate is a documented posture (`max_cases: null`), not a
+>   scheduled job — cadence lands with Phase 5.
 
 This is a handoff document. It assumes the implementer (you) has not read the conversation that
 produced it, so it carries its own reasoning: every step says *what* to build, *why it exists at

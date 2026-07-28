@@ -143,6 +143,11 @@ class SamplePolicy(BaseModel):
     # 0 disables the partition entirely; capped at 0.5 because a "holdout" that outweighs the
     # training half is a corpus that mostly can't be learned from.
     holdout_fraction: float = Field(default=0.2, ge=0.0, le=0.5)
+    # How much of its proportional share an `archive`-tier case keeps in a sampled draw. Archived
+    # cases are lessons the skill has demonstrably internalized; drawing them at full weight spends
+    # an ever-growing slice of the budget re-verifying the solved past. 1.0 ignores tiers entirely;
+    # full-corpus runs (`max_cases: null`) always score everything regardless.
+    archive_weight: float = Field(default=0.1, ge=0.0, le=1.0)
 
 
 class StepSpec(BaseModel):
