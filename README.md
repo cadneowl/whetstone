@@ -184,6 +184,11 @@ flowchart LR
 - **Accuracy ratchet** — `meta_eval/ratchet.py` sets a bar from the best measured doctrine; a new
   JUDGE.md must clear it, so the instrument can only get sharper.
 
+The cascade — the third step above, zoomed in — is where the judge spends effort only on the calls
+it is unsure about:
+
+![The confidence cascade: a tier-1 pairwise verdict is kept when confident; a low-confidence verdict escalates to a tier-2 judge grounded in the case's own diff, unless there is no hunk to ground in.](docs/assets/judge-cascade.png)
+
 ### Layer 2 — Corpus hygiene (keep the exam lean and live)
 
 | Mechanism | What it catches | Where |
@@ -230,6 +235,8 @@ The full design, phase by phase, is in [`ANTI_ROT_PLAN.md`](ANTI_ROT_PLAN.md).
 ---
 
 ## Architecture
+
+![Whetstone's plugin boundary: ui and cli depend on service, service and core and reviewer and judge all depend inward on the domain model, and providers (gitlab, jira, fake) implement capability Protocols — the core never imports GitLab.](docs/assets/architecture-plugin-boundary.png)
 
 ```
 src/whetstone/
@@ -470,6 +477,8 @@ score.recall, score.fp_rate, score.precision, score.f_beta(), score.recall_stdev
 
 ## The regression gate
 
+![The regression gate: one deterministic stratified sample drawn from the union of cases is scored on both the base and the candidate through the same reviewer-judge-confusion pipeline; gate() compares the two and a PASS produces a GateRecord keyed on skill_hash — the evidence C6 requires before Propose MR.](docs/assets/regression-gate.png)
+
 `gate(old_score, new_score, cfg)` in `core/gate.py` compares a baseline skill version against a
 candidate. It **PASSes only if all guards hold**:
 
@@ -531,6 +540,8 @@ candidate skill as committed** (`domain/run.skill_hash` — the guidance body pl
 That record is what makes "never ship a skill change you can't prove is an improvement" a property
 of the system rather than a habit: the console will not publish a guidance branch unless a passing
 record exists for the exact content it would push (see [ADR-008](docs/decisions.md)).
+
+![skill_hash and C6: a guidance edit, wiki refresh, index rebuild, or case retier all change skill_hash, which retracts the prior gate evidence and forces a re-gate before publishing — while rebuilds that change nothing do not retract.](docs/assets/skill-hash-c6.png)
 
 Four consequences worth knowing:
 
@@ -1543,6 +1554,8 @@ guidance is edited they describe a reviewer that no longer exists, and the scree
 letting you spend attention on a version nobody runs.
 
 ### Triage: the full workflow
+
+![Growing the corpus: production signal and synthetic generators feed the candidate queue; a person triages each one (rewrite, route, set region, dedup) and promotes it to a batch branch; the batch is scored, gated, and proposed as one merge request.](docs/assets/triage-to-propose.png)
 
 `corpus pull` proposes candidate eval cases; a person decides which are real. This is the screen
 that exists because the CLI genuinely could not do the job.
