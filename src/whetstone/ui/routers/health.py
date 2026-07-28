@@ -6,8 +6,8 @@ Each is honest alone and a scavenger hunt together. This endpoint is the aggrega
 this skill actually doing?" answered in one payload.
 
 The shape is the plan's, not the current feature set's: sections whose phases have not landed yet
-(`discrimination`, `drift`, `index`, `cadence`) are present and null rather than absent, so the
-payload admits what it does not know and the UI never restructures when a phase fills a section in.
+(`index`, `cadence`) are present and null rather than absent, so the payload admits what it does
+not know and the UI never restructures when a phase fills a section in.
 """
 
 from __future__ import annotations
@@ -22,12 +22,13 @@ from whetstone.config import Config
 from whetstone.curation import Discrimination, discrimination, retirement_proposals, tier_counts
 from whetstone.domain.score import HoldoutReport
 from whetstone.domain.skill import Skill
+from whetstone.drift import DRIFT_ALARM, DriftPoint, DriftReport, DriftStore, trend_point
 from whetstone.gitio import GitError
 from whetstone.inbox import Retirement
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 from whetstone.service import precision_evidence
-from whetstone.ui.deps import ConfigDep, GatesDep, ReviewsDep, SkillsRootDep, StoreDep
+from whetstone.ui.deps import ConfigDep, DriftDep, GatesDep, ReviewsDep, SkillsRootDep, StoreDep
 from whetstone.ui.errors import Unprocessable
 from whetstone.ui.routers.inbox import GATE_HISTORY
 from whetstone.ui.routers.judge import JudgeView, get_judge
@@ -74,6 +75,24 @@ class ProductionWindow(BaseModel):
     pending: int
 
 
+class DriftSection(BaseModel):
+    """What the latest drift probe says, with the trend behind it.
+
+    `alarm` is computed here rather than left to the UI so the console and the inbox cross the
+    same threshold — the inbox action and a calm-looking health panel must not disagree.
+    """
+
+    report: DriftReport
+    # Earlier probes, newest first — the trend line. The latest is excluded; it is `report`.
+    history: list[DriftPoint] = []
+    alarm: bool = False
+
+
+# Probes kept behind the latest for the trend. More than a screenful says nothing new — drift is
+# quarterly-cadence data, so ten points is years.
+DRIFT_HISTORY = 10
+
+
 class SkillHealth(BaseModel):
     skill_id: str
     version: int
@@ -89,8 +108,9 @@ class SkillHealth(BaseModel):
     # What the last saturation probe says: which active should_catch cases the naked model
     # already passes, and therefore never measured the guidance. None until a probe has run.
     discrimination: Discrimination | None = None
-    # Sections whose phases have not landed (ANTI_ROT_PLAN.md 3.1, 4.1, 5). Null, not absent.
-    drift: None = None
+    # Whether the corpus still looks like the recent MR stream. None until a drift probe has run.
+    drift: DriftSection | None = None
+    # Sections whose phases have not landed (ANTI_ROT_PLAN.md 4.1, 5). Null, not absent.
     index: None = None
     cadence: None = None
 
@@ -102,6 +122,7 @@ def get_health(
     store: StoreDep,
     gates: GatesDep,
     reviews: ReviewsDep,
+    drift: DriftDep,
     config: ConfigDep,
 ) -> SkillHealth:
     skill = _load_one(root, skill_id)
@@ -138,6 +159,19 @@ def get_health(
         judge=judge,
         judge_error=judge_error,
         discrimination=discrimination(curated, probe) if probe else None,
+        drift=_drift_section(drift, skill.id),
+    )
+
+
+def _drift_section(drift: DriftStore, skill_id: str) -> DriftSection | None:
+    reports = drift.list(skill_id=skill_id, limit=DRIFT_HISTORY + 1)
+    if not reports:
+        return None
+    latest = reports[0]
+    return DriftSection(
+        report=latest,
+        history=[trend_point(r) for r in reports[1:]],
+        alarm=latest.uncovered_fraction >= DRIFT_ALARM,
     )
 
 

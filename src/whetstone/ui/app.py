@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from whetstone.config import Config, load_config
+from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
 from whetstone.jobs import JobStore
 from whetstone.llm.factory import ModelSelection
@@ -72,6 +73,7 @@ def create_app(
     app.state.store = store or RunStore(resolved.runs_dir)
     app.state.gates = gates or GateStore(resolved.gates_dir)
     app.state.reviews = reviews or ReviewStore(resolved.reviews_dir)
+    app.state.drift = DriftStore(resolved.drift_dir)
     # One runner per server. In memory by design: see `jobs.py`.
     app.state.jobs = JobStore()
     # The model everything the console launches resolves to. Seeded from `[llm]`, changeable at

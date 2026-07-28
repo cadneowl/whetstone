@@ -109,6 +109,21 @@ class MetaEvalConfig(BaseModel):
     dir: Path = Path(".whetstone/meta_eval")
 
 
+class DriftConfig(BaseModel):
+    """Corpus drift probes: where the reports live, and which embedding backend measures them.
+
+    A separate backend from `[llm]` on purpose — chat models do not embed, so pointing the drift
+    probe at the deployment's reviewer model would fail at the first call. `embed_model` empty
+    means "not configured": the probe refuses to run until an operator names one (for Ollama,
+    `ollama pull nomic-embed-text` and set it here). Vectors are cached under `<dir>/cache`,
+    keyed by content hash — disposable, never committed.
+    """
+
+    dir: Path = Path(".whetstone/drift")
+    embed_provider: str = "ollama"
+    embed_model: str = ""
+
+
 class LLMConfig(BaseModel):
     """The default backend for everything the console runs against a model — the live review, an
     eval, a gate, and the improve and triage drafters.
@@ -166,6 +181,7 @@ class Config(BaseModel):
     reviews: ReviewsConfig = ReviewsConfig()
     judge: JudgeConfig = JudgeConfig()
     meta_eval: MetaEvalConfig = MetaEvalConfig()
+    drift: DriftConfig = DriftConfig()
     llm: LLMConfig = LLMConfig()
     watch: WatchConfig = WatchConfig()
     # Directory the config was loaded from; relative paths resolve against it. None when defaulted.
@@ -206,6 +222,14 @@ class Config(BaseModel):
     @property
     def transcripts_dir(self) -> Path:
         return self._resolve(self.runs.transcripts_dir)
+
+    @property
+    def drift_dir(self) -> Path:
+        return self._resolve(self.drift.dir)
+
+    @property
+    def drift_cache_dir(self) -> Path:
+        return self.drift_dir / "cache"
 
     def _resolve(self, path: Path) -> Path:
         if path.is_absolute() or self.source_dir is None:

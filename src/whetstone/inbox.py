@@ -17,6 +17,7 @@ something new:
     triage   new signal arrived that nobody has ruled on
     score    the skill has never been measured, or was measured as different content
     improve  it is failing cases we already know about
+    drift    the corpus stopped resembling what ships — review the uncovered MRs
     curate   corpus housekeeping is waiting on a human ruling — e.g. solved cases to retire
     nothing  nothing to do, said plainly rather than left to inference
 
@@ -30,7 +31,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ActionKind = Literal["propose", "gate", "triage", "score", "improve", "curate", "nothing"]
+from whetstone.drift import DRIFT_ALARM
+
+ActionKind = Literal[
+    "propose", "gate", "triage", "score", "improve", "drift", "curate", "nothing"
+]
 
 
 class Signal(BaseModel):
@@ -96,6 +101,9 @@ class Attention(BaseModel):
     # all, so they measure nothing. Same shape as retirements — both are curation calls a human
     # makes on the row.
     saturated: list[Retirement] = Field(default_factory=list)
+    # What the latest drift probe read: the fraction of recent MRs no case comes near. None means
+    # never probed — which is different from 0.0, a probe that found full coverage.
+    drift_uncovered: float | None = None
     action: NextAction
 
     @property
@@ -122,9 +130,11 @@ _RANK: dict[ActionKind, int] = {
     "triage": 2,
     "score": 3,
     "improve": 4,
-    # Housekeeping ranks below improvement: retiring a solved case matters, but never more than a
-    # case the skill is currently failing.
-    "curate": 5,
+    # Below improvement — a failing case is a known defect, drift a growing blind spot — but above
+    # housekeeping: a corpus that stopped resembling what ships makes every score above suspect,
+    # while an unretired solved case only wastes budget.
+    "drift": 5,
+    "curate": 6,
     "nothing": 9,
 }
 
@@ -141,6 +151,7 @@ def decide(
     total_cases: int,
     retire_ready: int = 0,
     saturated: int = 0,
+    drift_uncovered: float | None = None,
 ) -> NextAction:
     """The next action for one skill.
 
@@ -184,6 +195,13 @@ def decide(
             "improve",
             "Draft a change",
             f"failing {failing_cases} case{plural} that real reviews say it should get right",
+        )
+    if drift_uncovered is not None and drift_uncovered >= DRIFT_ALARM:
+        return _action(
+            "drift",
+            "Review uncovered MRs",
+            f"corpus drift: {drift_uncovered:.0%} of recent MRs look like nothing in the corpus, "
+            "so the scores are measuring history — promote from the uncovered list",
         )
     if retire_ready or saturated:
         total = retire_ready + saturated

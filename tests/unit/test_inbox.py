@@ -115,6 +115,30 @@ def test_a_failing_case_outranks_housekeeping() -> None:
     assert action.kind == "improve"  # type: ignore[attr-defined]
 
 
+def test_drift_past_the_alarm_asks_for_the_uncovered_list() -> None:
+    action = _decide(drift_uncovered=0.4)
+    assert action.kind == "drift"  # type: ignore[attr-defined]
+    assert action.label == "Review uncovered MRs"  # type: ignore[attr-defined]
+    assert "40% of recent MRs" in action.why  # type: ignore[attr-defined]
+
+
+def test_drift_under_the_alarm_falls_through_to_housekeeping() -> None:
+    """Some churn is normal — a probe that read 0.2 uncovered is information, not an action."""
+    assert _decide(drift_uncovered=0.2, retire_ready=1).kind == "curate"  # type: ignore[attr-defined]
+    assert _decide(drift_uncovered=0.2).kind == "nothing"  # type: ignore[attr-defined]
+
+
+def test_a_failing_case_outranks_drift() -> None:
+    """A known defect beats a growing blind spot — fix what is already measured first."""
+    assert _decide(failing_cases=1, drift_uncovered=0.9).kind == "improve"  # type: ignore[attr-defined]
+
+
+def test_drift_outranks_curation() -> None:
+    """A corpus that stopped resembling what ships makes every score suspect; an unretired solved
+    case only wastes budget."""
+    assert _decide(drift_uncovered=0.5, retire_ready=3).kind == "drift"  # type: ignore[attr-defined]
+
+
 def test_ranks_order_the_pipeline_backwards() -> None:
     """Closest to shipping first — the property the console sorts rows on."""
     ranks = [
@@ -123,6 +147,7 @@ def test_ranks_order_the_pipeline_backwards() -> None:
         _decide(new_signals=1).rank,  # type: ignore[attr-defined]
         _decide(scored=False).rank,  # type: ignore[attr-defined]
         _decide(failing_cases=1).rank,  # type: ignore[attr-defined]
+        _decide(drift_uncovered=0.5).rank,  # type: ignore[attr-defined]
         _decide(retire_ready=1).rank,  # type: ignore[attr-defined]
         _decide().rank,  # type: ignore[attr-defined]
     ]

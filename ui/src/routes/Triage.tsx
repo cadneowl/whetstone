@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   useBatch,
   useConsoleConfig,
@@ -66,6 +66,25 @@ export function Triage() {
   const items = useMemo(() => all.filter((i) => !hidden.has(signalOf(i))), [all, hidden])
   const index = Math.min(rawIndex, Math.max(0, items.length - 1))
   const current: QueueItem | undefined = items[index]
+
+  // `?focus=<candidate-id>` opens the queue on a specific candidate — how the health panel's
+  // uncovered-MRs list lands here. Consumed once the queue has loaded, so moving through the
+  // queue afterwards is not pinned back to it, and a candidate already ruled on is simply absent.
+  const [params, setParams] = useSearchParams()
+  const focus = params.get('focus')
+  useEffect(() => {
+    if (!focus || items.length === 0) return
+    const at = items.findIndex((i) => i.entry.candidate.id === focus)
+    if (at >= 0) setIndex(at)
+    setParams(
+      (p) => {
+        p.delete('focus')
+        return p
+      },
+      { replace: true },
+    )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, items.length])
 
   const preview = usePreview()
   const promote = usePromote()

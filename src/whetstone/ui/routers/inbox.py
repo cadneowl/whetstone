@@ -17,10 +17,19 @@ from whetstone.config import Config
 from whetstone.curation import discrimination, retirement_proposals
 from whetstone.domain.run import RunRecord, skill_hash
 from whetstone.domain.skill import Skill
+from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
 from whetstone.inbox import Attention, Inbox, Retirement, Signal, decide
 from whetstone.runs import CorruptRecord, RunStore
-from whetstone.ui.deps import ConfigDep, GatesDep, SkillsRootDep, StoreDep, WatcherDep, Writable
+from whetstone.ui.deps import (
+    ConfigDep,
+    DriftDep,
+    GatesDep,
+    SkillsRootDep,
+    StoreDep,
+    WatcherDep,
+    Writable,
+)
 from whetstone.watch import Sweep, WatchState
 
 router = APIRouter(tags=["inbox"])
@@ -46,13 +55,17 @@ def get_inbox(
     root: SkillsRootDep,
     store: StoreDep,
     gates: GatesDep,
+    drift: DriftDep,
     watcher: WatcherDep,
 ) -> InboxView:
     from whetstone.ui.routers.skills import _load_all
 
     skills = _load_all(root)
     pending = _pending_by_skill(config)
-    rows = [_attention(config, store, gates, skill, pending.get(skill.id, [])) for skill in skills]
+    rows = [
+        _attention(config, store, gates, drift, skill, pending.get(skill.id, []))
+        for skill in skills
+    ]
     rows.sort(key=lambda a: (a.action.rank, -a.new_signals, a.skill_id))
 
     known = {s.id for s in skills}
@@ -91,6 +104,7 @@ def _attention(
     config: Config,
     store: RunStore,
     gates: GateStore,
+    drift: DriftStore,
     skill: Skill,
     pending: list[CandidateEntry],
 ) -> Attention:
@@ -116,6 +130,8 @@ def _attention(
     )
     probe = store.latest_baseline(skill.id)
     saturated = discrimination(curated, probe).flagged if probe else []
+    drift_report = drift.latest(skill.id)
+    drift_uncovered = None if drift_report is None else drift_report.uncovered_fraction
     action = decide(
         new_signals=len(pending),
         staged=staged,
@@ -127,6 +143,7 @@ def _attention(
         total_cases=len(skill.eval_cases),
         retire_ready=len(retirements),
         saturated=len(saturated),
+        drift_uncovered=drift_uncovered,
     )
     return Attention(
         skill_id=skill.id,
@@ -146,6 +163,7 @@ def _attention(
         blocked_reason=blocked,
         retirements=[Retirement(case_id=p.case_id, evidence=p.evidence) for p in retirements],
         saturated=[Retirement(case_id=c.case_id, evidence=c.evidence) for c in saturated],
+        drift_uncovered=drift_uncovered,
         action=action,
     )
 

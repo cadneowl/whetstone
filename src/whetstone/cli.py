@@ -1005,6 +1005,99 @@ def corpus_promote(
     typer.echo(f"promoted {candidate.name} -> {dest}")
 
 
+@corpus_app.command("drift")
+def corpus_drift(
+    skill: Annotated[Path, typer.Option("--skill", help="Path to a skill folder")],
+    provider: Annotated[
+        str | None,
+        typer.Option(
+            "--provider",
+            help="Embedding provider preset (default: [drift] embed_provider, i.e. ollama)",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Embedding model, e.g. nomic-embed-text (default: [drift] embed_model)",
+        ),
+    ] = None,
+    base_url: Annotated[
+        str | None, typer.Option("--base-url", help="OpenAI-compatible base URL override")
+    ] = None,
+    yes: YesOpt = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Measure whether a skill's corpus still looks like the recent MR stream.
+
+    Embeds the diffs of the skill's active cases and of the merge requests in the candidate queue
+    (which `corpus pull` and the watcher keep current), then reports centroid distance and
+    coverage — the fraction of recent MRs with a case within a similarity radius. The uncovered
+    list names the MRs that look like nothing the skill is tested on: those are the
+    triage-priority promotions.
+
+    Entirely offline apart from the embedding endpoint — a local model via Ollama is the intended
+    backend (`ollama pull nomic-embed-text`). Never touches the review path: scoring stays
+    deterministic and embedding-free.
+    """
+    from whetstone.candidates import CandidateStore
+    from whetstone.drift import DriftError, DriftStore, compute_drift, drift_inputs
+    from whetstone.llm.embedding import EmbeddingError, build_embedder
+
+    config = load_config()
+    sk = load_skill(skill)
+    prov = provider or config.drift.embed_provider
+    mod = model or config.drift.embed_model
+    entries = CandidateStore(config.candidates_dir).list(include_decided=True)
+    try:
+        case_texts, units = drift_inputs(sk, entries)
+        embedder = build_embedder(
+            prov, model=mod, base_url=base_url or "", cache_dir=config.drift_cache_dir
+        )
+    except (DriftError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    backend = resolve_backend(prov, model=mod, base_url=base_url, inherit_env=False)
+    plan = plan_calls(
+        "drift",
+        backend,
+        calls=len(case_texts) + len(units),
+        basis=(
+            f"{len(case_texts)} active case diff(s) + {len(units)} recent merge request(s), "
+            "one embedding each"
+        ),
+        details=["embeddings only; vectors are cached by content under the drift directory"],
+    )
+    _preflight(plan, yes)
+
+    try:
+        report = compute_drift(sk, entries, embedder, provider=prov)
+    except (DriftError, EmbeddingError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    DriftStore(config.drift_dir).save(report)
+
+    if json_out:
+        typer.echo(report.model_dump_json(indent=2))
+        return
+    typer.echo(
+        f"coverage {report.coverage:.2f} over {report.recent_mrs} recent MR(s) — "
+        f"centroid distance {report.centroid_distance:.3f}"
+    )
+    for mr in report.uncovered:
+        nearest = f"nearest case {mr.nearest_case}" if mr.nearest_case else "no case comes close"
+        typer.echo(f"  uncovered: {mr.ref} — {nearest} at {mr.similarity:.2f}")
+    if not report.uncovered:
+        typer.echo("  every recent MR has a case within the similarity radius")
+    elif report.uncovered_total > len(report.uncovered):
+        typer.echo(
+            f"  … and {report.uncovered_total - len(report.uncovered)} more — "
+            "the stored report keeps the count"
+        )
+    typer.echo(f"\ndrift report {report.id}")
+
+
 @skills_app.command("list")
 def skills_list(
     root: Annotated[Path, typer.Option(help="Skills root folder")] = Path("skills"),
