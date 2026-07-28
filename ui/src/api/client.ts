@@ -16,6 +16,8 @@ export type BackendInfo = Schemas['BackendInfo']
 export type ModelChoice = Schemas['ModelChoice']
 export type GitState = Schemas['GitState']
 export type TrialRecord = Schemas['TrialRecord']
+export type Dispute = Schemas['Dispute']
+export type DisputeRequest = Schemas['DisputeRequest']
 export type CaseRun = Schemas['CaseRun']
 export type ExpectationOutcome = Schemas['ExpectationOutcome']
 export type Finding = Schemas['Finding']
@@ -137,6 +139,7 @@ export const keys = {
   case: (skillId: string, caseId: string) => ['case', skillId, caseId] as const,
   runs: (skillId?: string) => ['runs', skillId ?? 'all'] as const,
   run: (id: string) => ['run', id] as const,
+  disputes: (runId: string) => ['disputes', runId] as const,
   candidates: ['candidates'] as const,
   batch: ['batch'] as const,
   proposal: (id: string) => ['proposal', id] as const,
@@ -213,6 +216,30 @@ export function useRun(id: string) {
   return useQuery({
     queryKey: keys.run(id),
     queryFn: () => get<RunRecord>(`/api/runs/${encodeURIComponent(id)}`),
+  })
+}
+
+/** Rulings already made on this run's judge verdicts — what the drill-down badges. */
+export function useDisputes(runId: string) {
+  return useQuery({
+    queryKey: keys.disputes(runId),
+    queryFn: () => get<Dispute[]>(`/api/runs/${encodeURIComponent(runId)}/disputes`),
+  })
+}
+
+/**
+ * Rule on one judge verdict: same underlying issue, yes or no. Every ruling — agreeing or not —
+ * becomes a labeled pair the judge itself is measured against, which is how the judge's quality
+ * bar keeps tracking the disagreements it actually faces instead of a frozen fixture.
+ */
+export function useDisputeVerdict(runId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (request: DisputeRequest) =>
+      send<Dispute>('POST', `/api/runs/${encodeURIComponent(runId)}/disputes`, request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.disputes(runId) })
+    },
   })
 }
 

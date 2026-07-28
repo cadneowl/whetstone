@@ -711,6 +711,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}/disputes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Disputes
+         * @description Rulings already made on this run's verdicts — how the drill-down knows what to badge.
+         */
+        get: operations["list_disputes_api_runs__run_id__disputes_get"];
+        put?: never;
+        /**
+         * Dispute Verdict
+         * @description Rule on one judge verdict and mint the labeled pair the judge will be measured against.
+         *
+         *     Same address rules again: replaces any earlier ruling on the same verdict rather than
+         *     accumulating — a person changing their mind must not leave both labels in the corpus.
+         */
+        post: operations["dispute_verdict_api_runs__run_id__disputes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs/{run_id}/report": {
         parameters: {
             query?: never;
@@ -1365,6 +1392,82 @@ export interface components {
              * @default
              */
             body: string;
+        };
+        /**
+         * Dispute
+         * @description One human ruling on one judge verdict, with everything needed to re-judge the pair.
+         *
+         *     The finding and expectation are copied in, not referenced: the run record they came from can
+         *     be deleted (runs are telemetry, deletable by design) and the skill edited, but a labeled pair
+         *     must stay usable forever — it is training/eval data, not a pointer.
+         */
+        Dispute: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Case Id */
+            case_id: string;
+            expectation: components["schemas"]["Expectation"];
+            /** Expectation Id */
+            expectation_id: string;
+            finding: components["schemas"]["Finding"];
+            /** Finding Index */
+            finding_index: number;
+            /** Id */
+            id: string;
+            /** Is Match */
+            is_match: boolean;
+            /**
+             * Judge Hash
+             * @default
+             */
+            judge_hash: string;
+            /** Judge Matched */
+            judge_matched: boolean;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Principal
+             * @default
+             */
+            principal: string;
+            /** Run Id */
+            run_id: string;
+            /** Skill Id */
+            skill_id: string;
+            /** Trial */
+            trial: number;
+        };
+        /**
+         * DisputeRequest
+         * @description A human ruling on one judge verdict: same underlying issue, yes or no.
+         *
+         *     Addresses the verdict by position — (case, trial, expectation, finding) — because that is the
+         *     only address a verdict has. `is_match` is the human label; whether it agrees with the judge is
+         *     derived, and an agreeing ruling is stored too: the corpus needs pairs the judge got right, or
+         *     its accuracy is measured only over the failures people happened to notice.
+         */
+        DisputeRequest: {
+            /** Case Id */
+            case_id: string;
+            /** Expectation Id */
+            expectation_id: string;
+            /** Finding Index */
+            finding_index: number;
+            /** Is Match */
+            is_match: boolean;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /** Trial */
+            trial: number;
         };
         /**
          * DraftRequest
@@ -4663,6 +4766,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_disputes_api_runs__run_id__disputes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dispute"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dispute_verdict_api_runs__run_id__disputes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DisputeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Dispute"];
                 };
             };
             /** @description Validation Error */
