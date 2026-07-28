@@ -9,9 +9,13 @@ from whetstone.steps import SamplePolicy
 REPO = RepoRef.parse("local:x")
 
 
-def _cases(n: int, kind: EvalKind = "should_catch", prefix: str = "c") -> list[EvalCase]:
+def _cases(
+    n: int, kind: EvalKind = "should_catch", prefix: str = "c", tier: str = "active"
+) -> list[EvalCase]:
     return [
-        EvalCase(id=f"{prefix}{i:04d}", kind=kind, change=CodeChange(repo=REPO), expect=[])
+        EvalCase(
+            id=f"{prefix}{i:04d}", kind=kind, change=CodeChange(repo=REPO), expect=[], tier=tier
+        )
         for i in range(n)
     ]
 
@@ -115,3 +119,51 @@ def test_note_says_what_the_score_describes() -> None:
     got = sample_cases(_cases(900), SamplePolicy(max_cases=30))
     assert "scored 30 of 900" in got.note
     assert sample_cases(_cases(5), SamplePolicy(max_cases=30)).note == ""
+
+
+# --- tiers: the archive draws at low weight --------------------------------------
+
+
+def _tiers(drawn: list[EvalCase]) -> tuple[int, int]:
+    tiers = [c.tier for c in drawn]
+    return tiers.count("active"), tiers.count("archive")
+
+
+def test_archive_cases_draw_at_a_fraction_of_their_share() -> None:
+    """100 active + 100 archive at weight 0.1 weigh 100 + 10 — so a budget of 20 spends 18 at the
+    live edge and keeps 2 as regression insurance, instead of splitting 10/10."""
+    cases = _cases(100, prefix="live") + _cases(100, prefix="old", tier="archive")
+    drawn = sample_cases(cases, SamplePolicy(max_cases=20)).cases
+    assert _tiers(drawn) == (18, 2)
+
+
+def test_weight_one_ignores_tiers() -> None:
+    cases = _cases(100, prefix="live") + _cases(100, prefix="old", tier="archive")
+    drawn = sample_cases(cases, SamplePolicy(max_cases=20, archive_weight=1.0)).cases
+    assert _tiers(drawn) == (10, 10)
+
+
+def test_a_full_corpus_run_scores_the_archive_at_full_weight() -> None:
+    """`max_cases: null` is the monthly-distill posture: everything scored, tiers irrelevant."""
+    cases = _cases(30, prefix="live") + _cases(30, prefix="old", tier="archive")
+    assert sample_cases(cases, SamplePolicy()).cases == cases
+
+
+def test_leftover_budget_spills_into_the_archive_rather_than_going_unspent() -> None:
+    cases = _cases(5, prefix="live") + _cases(100, prefix="old", tier="archive")
+    drawn = sample_cases(cases, SamplePolicy(max_cases=50)).cases
+    assert len(drawn) == 50  # the budget is spent, never silently trimmed
+    assert _tiers(drawn)[0] == 5  # every active case is in
+
+
+def test_an_all_archive_corpus_at_weight_zero_still_draws() -> None:
+    cases = _cases(40, tier="archive")
+    drawn = sample_cases(cases, SamplePolicy(max_cases=10, archive_weight=0.0)).cases
+    assert len(drawn) == 10
+
+
+def test_tiered_draws_are_deterministic() -> None:
+    cases = _cases(80, prefix="live") + _cases(80, prefix="old", tier="archive")
+    first = [c.id for c in sample_cases(cases, SamplePolicy(max_cases=25)).cases]
+    for _ in range(3):
+        assert [c.id for c in sample_cases(cases, SamplePolicy(max_cases=25)).cases] == first

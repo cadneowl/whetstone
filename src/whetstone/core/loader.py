@@ -208,6 +208,8 @@ def _load_eval_case(case_dir: Path, skill_id: str) -> EvalCase:
         change=change,
         expect=expectations,
         provenance=provenance,
+        # Absent means active — every case file written before tiers existed keeps its meaning.
+        tier=raw.get("tier", "active"),
     )
 
 

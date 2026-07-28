@@ -58,6 +58,12 @@ export function SkillsIndex() {
                 <div className="ml-auto flex items-center gap-4 text-sm">
                   <span className="text-muted">
                     {skill.catch_cases} catch / {skill.noflag_cases} noflag
+                    {skill.archive_cases > 0 && (
+                      <span title="Retired cases, sampled at low weight as regression insurance">
+                        {' '}
+                        · {skill.archive_cases} archived
+                      </span>
+                    )}
                   </span>
                   {skill.latest ? (
                     <>
@@ -67,6 +73,22 @@ export function SkillsIndex() {
                       <span className="tabular" title="false-positive rate">
                         FP {score(skill.latest.fp_rate, 2)}
                       </span>
+                      {/* The overfitting light: the latest run's train-vs-holdout pair. Green
+                          means the skill performs on cases the improve loop has never seen;
+                          a warn badge means the sharpening may be memorization. */}
+                      {skill.holdout && (
+                        <span
+                          className="tabular text-xs text-muted"
+                          title={`train ${score(skill.holdout.train_recall, 2)} vs holdout ${score(skill.holdout.holdout_recall, 2)} — the slice the improve loop never sees`}
+                        >
+                          hold {score(skill.holdout.holdout_recall, 2)}
+                        </span>
+                      )}
+                      {skill.holdout && skill.holdout.divergence > 0.1 && (
+                        <Badge tone="warn" title="Train runs well ahead of holdout — possible overfitting">
+                          diverging
+                        </Badge>
+                      )}
                       <span className="text-accent">
                         <Sparkline values={skill.recall_trend} />
                       </span>

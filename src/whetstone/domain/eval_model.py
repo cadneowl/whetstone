@@ -11,6 +11,13 @@ from whetstone.domain.refs import Region
 EvalKind = Literal["should_catch", "should_not_flag"]
 Must = Literal["appear", "not_appear"]
 
+# Whether a case still earns its share of the eval budget. `active` is the default and the live
+# edge; `archive` is a case the skill has demonstrably internalized — sampled at low weight as
+# regression insurance rather than deleted, because the distill pass that later drops a rule must
+# still trip the case that motivated it. Membership changes are commits on the case file, made by
+# a person (see `curation.py`) — never by anything automatic.
+CaseTier = Literal["active", "archive"]
+
 
 # The vocabulary `human_signal` is drawn from. Kept closed and free of detail — which merge request
 # or issue a case came from belongs in `ref` — so the field stays answerable by machine as well as
@@ -97,3 +104,4 @@ class EvalCase(BaseModel):
     change: CodeChange
     expect: list[Expectation]
     provenance: Provenance = Provenance()
+    tier: CaseTier = "active"

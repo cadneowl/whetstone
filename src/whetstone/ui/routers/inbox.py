@@ -14,10 +14,11 @@ from pydantic import BaseModel
 from whetstone import staging
 from whetstone.candidates import CandidateEntry, CandidateStore
 from whetstone.config import Config
+from whetstone.curation import retirement_proposals
 from whetstone.domain.run import RunRecord, skill_hash
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateStore
-from whetstone.inbox import Attention, Inbox, Signal, decide
+from whetstone.inbox import Attention, Inbox, Retirement, Signal, decide
 from whetstone.runs import CorruptRecord, RunStore
 from whetstone.ui.deps import ConfigDep, GatesDep, SkillsRootDep, StoreDep, WatcherDep, Writable
 from whetstone.watch import Sweep, WatchState
@@ -27,6 +28,11 @@ router = APIRouter(tags=["inbox"])
 # Signals shown per skill. Enough to recognise a pattern — "three unwraps in payments" — without
 # turning the home screen into the triage queue it links to.
 SIGNALS_SHOWN = 4
+
+# Gate records consulted for retirement proposals. Ten passes retire a case, so fifty records is
+# generous headroom for cases that get sampled out of some gates — while bounding what one inbox
+# render reads off disk.
+GATE_HISTORY = 50
 
 
 class InboxView(BaseModel):
@@ -100,7 +106,13 @@ def _attention(
     stale = record is not None and record.skill_hash != skill_hash(under_test)
     failing = _failing(record) if record is not None and not stale else 0
 
-    staged, can_propose, blocked = _proposal_state(config, skill.id, promoted)
+    staged, can_propose, blocked, staged_skill = _proposal_state(config, skill.id, promoted)
+    # Proposals are computed against the skill a tier flip would actually edit — the staging branch
+    # when one exists — so a retirement confirmed a minute ago stops being proposed immediately
+    # instead of nagging until the branch merges.
+    retirements = retirement_proposals(
+        staged_skill or skill, gates.list(skill_id=skill.id, limit=GATE_HISTORY)
+    )
     action = decide(
         new_signals=len(pending),
         staged=staged,
@@ -110,6 +122,7 @@ def _attention(
         stale_run=stale,
         failing_cases=failing,
         total_cases=len(skill.eval_cases),
+        retire_ready=len(retirements),
     )
     return Attention(
         skill_id=skill.id,
@@ -127,6 +140,7 @@ def _attention(
         staged=staged,
         can_propose=can_propose,
         blocked_reason=blocked,
+        retirements=[Retirement(case_id=p.case_id, evidence=p.evidence) for p in retirements],
         action=action,
     )
 
@@ -172,8 +186,9 @@ def _failing(record: RunRecord) -> int:
 
 def _proposal_state(
     config: Config, skill_id: str, promoted: Skill | None = None
-) -> tuple[bool, bool, str]:
-    """Whether a change is staged for this skill, and whether it may be published.
+) -> tuple[bool, bool, str, Skill | None]:
+    """Whether a change is staged for this skill, whether it may be published — and the staged
+    skill itself, so callers that need the branch's content do not pay for a second git export.
 
     Degrades rather than raises: a repo without the branch, or without git at all, means nothing is
     staged — which is true, and far better than an inbox that fails to load because one skill's
@@ -184,17 +199,17 @@ def _proposal_state(
     try:
         branch = staging.skill_branch(config, skill_id)
         if not ref_exists(config.skills_repo, branch):
-            return False, False, ""
+            return False, False, "", None
         if commits_ahead(config.skills_repo, config.git.default_base, branch) == 0:
-            return False, False, ""
+            return False, False, "", None
         staged = staging.skill_at(config, branch, skill_id)
         if staged is None:
-            return False, False, ""
+            return False, False, "", None
         # Hashed as the gate scores it — with the promoted cases folded in. The third and last of
         # the C6 read sites; missing it here left the inbox looking a passing gate up under a hash
         # nothing ever records, so it went on saying "run the gate" after every run of the gate.
         under_test = staged[0] if promoted is None else staging.merge_cases(staged[0], promoted)
         verdict = GateStore(config.gates_dir).verdict_for(skill_id, skill_hash(under_test))
-        return True, verdict.can_propose, verdict.reason
+        return True, verdict.can_propose, verdict.reason, staged[0]
     except (GitError, staging.StagingError, OSError):
-        return False, False, ""
+        return False, False, "", None

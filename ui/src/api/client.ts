@@ -19,6 +19,11 @@ export type TrialRecord = Schemas['TrialRecord']
 export type Dispute = Schemas['Dispute']
 export type DisputeRequest = Schemas['DisputeRequest']
 export type JudgeView = Schemas['JudgeView']
+export type SkillHealth = Schemas['SkillHealth']
+export type Retirement = Schemas['Retirement']
+export type TierResult = Schemas['TierResult']
+export type CaseTier = CaseSummary['tier']
+export type HoldoutReport = Schemas['HoldoutReport']
 export type CaseRun = Schemas['CaseRun']
 export type ExpectationOutcome = Schemas['ExpectationOutcome']
 export type Finding = Schemas['Finding']
@@ -143,6 +148,7 @@ export const keys = {
   run: (id: string) => ['run', id] as const,
   disputes: (runId: string) => ['disputes', runId] as const,
   judge: ['judge'] as const,
+  health: (skillId: string) => ['health', skillId] as const,
   candidates: ['candidates'] as const,
   batch: ['batch'] as const,
   proposal: (id: string) => ['proposal', id] as const,
@@ -225,6 +231,36 @@ export function useRun(id: string) {
 /** The judge every score is computed with: its doctrine, identity, and accumulated evidence. */
 export function useJudge() {
   return useQuery({ queryKey: keys.judge, queryFn: () => get<JudgeView>('/api/judge') })
+}
+
+/** One skill's state of affairs on one payload — scores, corpus composition, instrument, ground truth. */
+export function useHealth(skillId: string) {
+  return useQuery({
+    queryKey: keys.health(skillId),
+    queryFn: () => get<SkillHealth>(`/api/skills/${encodeURIComponent(skillId)}/health`),
+  })
+}
+
+/**
+ * Flip one eval case between active and archive. The flip is a commit on the skill's staging
+ * branch — never a disk write — and C6 requires a fresh gate before the changed corpus ships.
+ */
+export function useSetTier(skillId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ caseId, tier }: { caseId: string; tier: CaseTier }) =>
+      send<TierResult>(
+        'POST',
+        `/api/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(caseId)}/tier`,
+        { tier },
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.health(skillId) })
+      void client.invalidateQueries({ queryKey: keys.skill(skillId) })
+      void client.invalidateQueries({ queryKey: keys.proposal(skillId) })
+      void client.invalidateQueries({ queryKey: keys.inbox })
+    },
+  })
 }
 
 /** Rulings already made on this run's judge verdicts — what the drill-down badges. */

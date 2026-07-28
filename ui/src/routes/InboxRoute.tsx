@@ -2,8 +2,10 @@ import { Link } from 'react-router-dom'
 import {
   useCheckNow,
   useInbox,
+  useSetTier,
   type Attention,
   type ActionKind,
+  type Retirement,
   type Signal,
   type Sweep,
   type WatchState,
@@ -155,6 +157,9 @@ function Row({ row }: { row: Attention }) {
       <p className="mt-1 text-sm text-muted">{row.action.why}</p>
 
       {signals.length > 0 && <Signals signals={signals} total={row.new_signals} />}
+      {row.action.kind === 'curate' && (row.retirements ?? []).length > 0 && (
+        <Retirements skillId={row.skill_id} retirements={row.retirements ?? []} />
+      )}
 
       <div className="mt-3 flex flex-wrap items-start gap-3">
         <Action row={row} />
@@ -191,6 +196,45 @@ function Signals({ signals, total }: { signals: Signal[]; total: number }) {
       ))}
       {total > signals.length && (
         <li className="text-xs text-muted">and {total - signals.length} more</li>
+      )}
+    </ul>
+  )
+}
+
+/**
+ * Retirement proposals, confirmable on the row.
+ *
+ * The evidence is the sentence — "passed the last 10 gates it appeared in" — so the decision can
+ * be made here. Archive stages a one-line commit on the skill branch; C6 then asks for a fresh
+ * gate before the changed corpus ships, which is why nothing here is automatic.
+ */
+function Retirements({ skillId, retirements }: { skillId: string; retirements: Retirement[] }) {
+  const flip = useSetTier(skillId)
+  return (
+    <ul className="mt-2 space-y-1 border-l-2 border-line pl-3">
+      {retirements.map((r) => (
+        <li key={r.case_id} className="flex flex-wrap items-baseline gap-x-3 text-xs">
+          <Link
+            to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(r.case_id)}`}
+            className="font-mono hover:text-accent"
+          >
+            {r.case_id}
+          </Link>
+          <span className="text-muted">{r.evidence}</span>
+          <button
+            type="button"
+            disabled={flip.isPending}
+            onClick={() => flip.mutate({ caseId: r.case_id, tier: 'archive' })}
+            className="rounded border border-line px-2 py-0.5 transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
+          >
+            {flip.isPending ? 'Archiving…' : 'Archive'}
+          </button>
+        </li>
+      ))}
+      {flip.error && (
+        <li>
+          <ErrorNote error={flip.error} />
+        </li>
       )}
     </ul>
   )
@@ -238,6 +282,17 @@ function Action({ row }: { row: Attention }) {
       </Link>
     )
   }
+  if (kind === 'curate') {
+    // The confirm buttons are on the row above; this leads to the fuller picture.
+    return (
+      <Link
+        to={`/skills/${encodeURIComponent(row.skill_id)}?tab=health`}
+        className="inline-block rounded-lg border border-line px-3 py-1.5 text-sm text-muted transition-colors hover:border-accent/50 hover:text-accent"
+      >
+        Health →
+      </Link>
+    )
+  }
   return null
 }
 
@@ -248,6 +303,7 @@ function ActionBadge({ kind }: { kind: ActionKind }) {
     triage: 'accent',
     score: 'neutral',
     improve: 'warn',
+    curate: 'neutral',
     nothing: 'neutral',
   } as const
   return <Badge tone={tone[kind]}>{kind}</Badge>

@@ -9,6 +9,7 @@ import {
 } from '@/api/client'
 import { Guidance } from '@/components/Guidance'
 import { GuidanceEditor } from '@/components/GuidanceEditor'
+import { HealthPanel } from '@/components/HealthPanel'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
@@ -59,6 +60,7 @@ export function SkillDetail() {
           {/* "History", not "Runs": the top nav already has a Runs, and two screens by that name —
               only one of which could start a run — is how someone ends up on the wrong one. */}
           <Trigger value="runs">History ({runs.length})</Trigger>
+          <Trigger value="health">Health</Trigger>
           <Trigger value="meta">Metadata</Trigger>
         </Tabs.List>
 
@@ -159,6 +161,15 @@ export function SkillDetail() {
               })}
             </ul>
           )}
+        </Tabs.Content>
+
+        <Tabs.Content value="health">
+          <TabIntro>
+            The state of affairs in one look: the latest score with its train/holdout split, what
+            the corpus is made of, cases ready to retire, the judge behind every number, and how
+            the skill is doing on live reviews — the ground truth the scores are a proxy for.
+          </TabIntro>
+          <HealthPanel skillId={skill.id} />
         </Tabs.Content>
 
         <Tabs.Content value="meta">
@@ -339,36 +350,61 @@ function PrecisionEvidence({ counts }: { counts: Record<string, number> }) {
 }
 
 function CaseTable({ skillId, cases }: { skillId: string; cases: CaseSummary[] }) {
+  const archived = cases.filter((c) => c.tier === 'archive').length
+  // The filter exists only once there is something to filter — a corpus with no archive yet
+  // should not grow a control that does nothing.
+  const [showArchive, setShowArchive] = useState(true)
   if (cases.length === 0) {
     return <Empty>No eval cases. Nothing gates a change to this skill's guidance.</Empty>
   }
+  const shown = showArchive ? cases : cases.filter((c) => c.tier !== 'archive')
   return (
-    <ul className="space-y-1.5">
-      {cases.map((c) => (
-        <li key={c.id}>
-          <Link
-            to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(c.id)}`}
-            className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm transition-colors hover:border-accent/50"
-          >
-            <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
-              {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
-            </Badge>
-            <span className="font-mono">{c.id}</span>
-            {c.flaky && (
-              <Badge tone="warn" title="Trials disagreed about this case">
-                flaky
+    <div>
+      {archived > 0 && (
+        <label className="mb-2 flex items-center gap-2 text-xs text-muted">
+          <input
+            type="checkbox"
+            checked={showArchive}
+            onChange={(e) => setShowArchive(e.target.checked)}
+          />
+          show {archived} archived case{archived === 1 ? '' : 's'} — retired lessons kept as
+          regression insurance, sampled at low weight
+        </label>
+      )}
+      <ul className="space-y-1.5">
+        {shown.map((c) => (
+          <li key={c.id}>
+            <Link
+              to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(c.id)}`}
+              className={`flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm transition-colors hover:border-accent/50 ${
+                c.tier === 'archive' ? 'opacity-60' : ''
+              }`}
+            >
+              <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
+                {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
               </Badge>
-            )}
-            <span className="font-mono text-xs text-muted">{c.path}</span>
-            <span className="ml-auto tabular text-muted">
-              {c.kind === 'should_catch'
-                ? `recall ${score(c.last_recall, 2)}`
-                : `fp ${score(c.last_fp_rate, 2)}`}
-            </span>
-          </Link>
-        </li>
-      ))}
-    </ul>
+              <span className="font-mono">{c.id}</span>
+              {c.tier === 'archive' && (
+                <Badge tone="neutral" title="Retired: drawn at low weight as regression insurance">
+                  archived
+                </Badge>
+              )}
+              {c.flaky && (
+                <Badge tone="warn" title="Trials disagreed about this case">
+                  flaky
+                </Badge>
+              )}
+              <span className="font-mono text-xs text-muted">{c.path}</span>
+              <span className="ml-auto tabular text-muted">
+                {c.kind === 'should_catch'
+                  ? `recall ${score(c.last_recall, 2)}`
+                  : `fp ${score(c.last_fp_rate, 2)}`}
+              </span>
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 

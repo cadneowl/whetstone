@@ -97,6 +97,7 @@ sample:
   seed: 0                 # selection is a hash of this and the case id
   stratify: true          # draw proportionally from each case kind
   holdout_fraction: 0.2   # share of cases scored but never shown to the improve drafter
+  archive_weight: 0.1     # share of its proportional draw an archived (tier: archive) case keeps
 
 inputs:
   wiki:
@@ -165,6 +166,22 @@ to promote fresh cases rather than polish further.
 
 Membership is an unseeded hash of the case id: stable forever, on every machine, with deliberately
 no way to re-roll it — a seed would offer exactly the workaround the partition exists to prevent.
+
+### Case tiers: active and archive
+
+A corpus mined from a live MR stream only grows, and deterministic sampling gives every case an
+equal draw forever — so an ever-larger slice of each run re-verifies what the skill demonstrably
+internalized long ago, while the aggregate score gets more flattering. A case can carry
+`tier: archive` in its `case.yaml` (absent means `active`): archived cases stay in the corpus as
+regression insurance but draw at `archive_weight` of their proportional share in sampled runs.
+Full-corpus runs (`max_cases: null`) score everything at full weight regardless — that is the
+posture for a periodic everything-still-holds pass.
+
+Nothing archives a case automatically. The console proposes retirement when a case has passed its
+last ten gate appearances across several skill versions, with the evidence spelled out; a person
+confirms, and the flip lands as a one-line commit on the skill's staging branch. Because a
+rewritten case changes `skill_hash`, the archived corpus needs a fresh passing gate before it can
+be proposed — de-weighting a case can move the score, and a moved score gets re-proven.
 
 ---
 

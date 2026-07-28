@@ -88,6 +88,19 @@ def test_one_failing_case_is_not_pluralised() -> None:
     assert "failing 1 case " in _decide(failing_cases=1).why + " "  # type: ignore[attr-defined]
 
 
+def test_solved_cases_ready_to_retire_ask_for_curation() -> None:
+    action = _decide(retire_ready=2)
+    assert action.kind == "curate"  # type: ignore[attr-defined]
+    assert "Retire 2 solved cases" in action.label  # type: ignore[attr-defined]
+    assert "live edge" in action.why  # type: ignore[attr-defined]
+
+
+def test_a_failing_case_outranks_housekeeping() -> None:
+    """Retiring a solved case never matters more than a case the skill is currently failing."""
+    action = _decide(failing_cases=1, retire_ready=5)
+    assert action.kind == "improve"  # type: ignore[attr-defined]
+
+
 def test_ranks_order_the_pipeline_backwards() -> None:
     """Closest to shipping first — the property the console sorts rows on."""
     ranks = [
@@ -96,6 +109,7 @@ def test_ranks_order_the_pipeline_backwards() -> None:
         _decide(new_signals=1).rank,  # type: ignore[attr-defined]
         _decide(scored=False).rank,  # type: ignore[attr-defined]
         _decide(failing_cases=1).rank,  # type: ignore[attr-defined]
+        _decide(retire_ready=1).rank,  # type: ignore[attr-defined]
         _decide().rank,  # type: ignore[attr-defined]
     ]
     assert ranks == sorted(ranks)

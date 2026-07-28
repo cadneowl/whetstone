@@ -15,7 +15,9 @@ silently convert every gate into a coin toss about which cases got drawn.
 **It is stratified.** Drawn uniformly, a sample of a corpus that is 90% `should_catch` will
 sometimes contain no `should_not_flag` cases at all — and a reviewer's false-positive rate over
 zero negative cases is a flattering zero. Proportional allocation per kind keeps the sample shaped
-like the corpus.
+like the corpus. Tier joins kind in the strata: `archive` cases draw at a fraction of their share
+(`SamplePolicy.archive_weight`), so retiring solved cases actually frees budget for the live edge
+instead of merely relabeling them.
 
 Targeted cases are exempt from all of it: a change asserting it fixes case X must be scored on case
 X, so `always_include` is added regardless of the draw.
@@ -81,7 +83,7 @@ def sample_cases(
 
     remaining = [c for c in cases if c.id not in forced_ids]
     drawn = (
-        _stratified(remaining, budget, policy.seed)
+        _stratified(remaining, budget, policy)
         if policy.stratify
         else _ordered(remaining, policy.seed)[:budget]
     )
@@ -95,35 +97,50 @@ def sample_cases(
     )
 
 
-def _stratified(cases: list[EvalCase], budget: int, seed: int) -> list[EvalCase]:
-    """Allocate the budget across `kind` proportionally, by largest remainder."""
-    groups: dict[str, list[EvalCase]] = defaultdict(list)
+def _stratified(cases: list[EvalCase], budget: int, policy: SamplePolicy) -> list[EvalCase]:
+    """Allocate the budget across `(kind, tier)` proportionally, by largest remainder.
+
+    Archive strata count at `policy.archive_weight` of their size, so a corpus that has retired
+    most of its history still spends most of a sampled run at the live edge — while the archive
+    keeps a small, deterministic presence as regression insurance. When every active stratum is
+    exhausted the leftover loop spills into the archive rather than returning fewer cases than
+    asked for: an operator's budget is spent, never silently trimmed.
+    """
+    groups: dict[tuple[str, str], list[EvalCase]] = defaultdict(list)
     for case in cases:
-        groups[str(case.kind)].append(case)
+        groups[(str(case.kind), str(case.tier))].append(case)
 
-    total = len(cases)
-    exact = {kind: budget * len(members) / total for kind, members in groups.items()}
-    allocation = {kind: min(int(value), len(groups[kind])) for kind, value in exact.items()}
+    weight = {
+        key: (policy.archive_weight if key[1] == "archive" else 1.0) * len(members)
+        for key, members in groups.items()
+    }
+    total = sum(weight.values())
+    if total <= 0:
+        # Every case is archived and the weight is zero — draw uniformly rather than nothing.
+        exact = {key: budget * len(members) / len(cases) for key, members in groups.items()}
+    else:
+        exact = {key: budget * weight[key] / total for key, members in groups.items()}
+    allocation = {key: min(int(value), len(groups[key])) for key, value in exact.items()}
 
-    # Hand out what rounding left over, biggest fractional part first. Ties break on the kind name
-    # so the allocation is a pure function of the input.
+    # Hand out what rounding left over, biggest fractional part first. Ties break on the stratum
+    # name so the allocation is a pure function of the input.
     leftover = budget - sum(allocation.values())
     order = sorted(groups, key=lambda k: (-(exact[k] - int(exact[k])), k))
     while leftover > 0:
         progressed = False
-        for kind in order:
+        for key in order:
             if leftover == 0:
                 break
-            if allocation[kind] < len(groups[kind]):
-                allocation[kind] += 1
+            if allocation[key] < len(groups[key]):
+                allocation[key] += 1
                 leftover -= 1
                 progressed = True
         if not progressed:
             break  # every stratum exhausted; the budget exceeds what is available
 
     drawn: list[EvalCase] = []
-    for kind, members in groups.items():
-        drawn.extend(_ordered(members, seed)[: allocation[kind]])
+    for key, members in groups.items():
+        drawn.extend(_ordered(members, policy.seed)[: allocation[key]])
     return drawn
 
 
