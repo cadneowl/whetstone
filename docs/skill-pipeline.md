@@ -102,11 +102,31 @@ inputs:
     max_pages: 4          # repo context per review, when the skill has a wiki/
     max_bytes: 24000
 
+judge:
+  escalate_below: 0.0     # 0 = off. >0 re-judges low-confidence verdicts grounded in the case diff
+  max_diff_bytes: 2000
+
 model:
   llm: ollama             # pin this skill to a backend; omit a key to inherit the command's
   model: qwen2.5-coder:7b
   effort: high
 ```
+
+### The judge cascade
+
+The judge decides whether a reviewer finding and an expectation describe the same underlying
+issue, and from two sentences alone that is often undecidable — the dangerous error being the
+spurious match, which silently turns a case into one that passes on anything. With
+`escalate_below` set, a verdict whose confidence falls under the threshold is re-judged with the
+case's own diff in the prompt: the code both sentences point at, frozen inside the case, so both
+gate sides still see identical context. The drill-down records both tiers ("tier 1 first said…"),
+and the cost banner's judge share doubles to stay an honest upper bound — real runs escalate only
+the unsure minority.
+
+Enabling, disabling, or re-tuning the cascade changes the measurement instrument, so it folds
+into the run's recorded judge identity: expect the score-history seam the console draws at any
+judge change. It deliberately does **not** enter `skill_hash` — steps configure how things run,
+not what the reviewer reads — so editing the threshold retracts no gate.
 
 The `model:` block is how a skill stays off a metered API by default. `eval run`, `eval gate` and
 `skills improve` all read it, and `--llm` / `--model` / `--base-url` / `--effort` override it per

@@ -30,10 +30,23 @@
 > - **Deferred from 1.1** (deliberately): editing JUDGE.md from the console via the
 >   GuidanceEditor/staging-branch machinery — display is read-only for now, edits happen in the
 >   file; and the meta-eval **gate** on doctrine changes, which is 1.3's ratchet.
-> - **Next up: Phase 1.2** — diff-grounded tier-2 judge + confidence cascade in
->   `core/matching.py` (`JudgeVerdictRecord.tier`, threshold in evaluate/step.yaml `judge:`
->   block, both verdicts recorded, cost banner updated), then 1.3 (judge-eval job + rising bar,
->   wiring `DisputeStore.meta_eval_cases()` + fixtures into `evaluate_judge`), then Phase 2.
+> - **1.2 — DONE** (this commit): diff-grounded cascade. `judge/cascade.py` (`GroundedJudge`
+>   with `GROUNDED_TEMPLATE` in llm_judge.py, `CascadeJudge` bound per case,
+>   `CascadingJudgeFactory` + `judge_for_case` seam in `core/harness.py`); `judge:` block in
+>   evaluate/step.yaml (`JudgePolicy` in steps.py: `escalate_below` default 0.0 = off,
+>   `max_diff_bytes`); `Match.tier`/`Match.prior` → `JudgeVerdictRecord.tier`/`prior` (one final
+>   verdict per finding, escalation trail nested so `matched` aggregation is unchanged);
+>   escalation triggers on low confidence in either direction; no-hunk escalation keeps the
+>   tier-1 verdict rather than paying for an ungrounded repeat. Cascade config folds into
+>   `judge_identity(escalate_below=…)` — different threshold, different instrument, visible
+>   seam. Cost banner doubles the judge share and says why (`plan_eval(judge_cascade=…)`).
+>   Drill-down shows a "grounded" chip + the tier-1 prior line. Scaffold + skill-pipeline.md
+>   document the block. Rollout default is OFF — enabling is a per-skill choice.
+> - **Next up: Phase 1.3** — judge-eval job + rising bar: `whetstone judge eval` CLI +
+>   `POST /api/jobs/judge-eval` plan/launch running the current judge (cascade included) over
+>   fixtures + `DisputeStore.meta_eval_cases()`, per-tier accuracy and missed/spurious split,
+>   ratchet stored per judge id (adoption requires ≥ max(floor, best − tolerance)), accuracy on
+>   the Judge page, inbox surfacing. Then Phase 2 (holdout split first).
 > - Phase H note: the health endpoint skeleton (`GET /api/skills/{id}/health`) has NOT been
 >   started; disputes-pending count now lives on `GET /api/judge` and belongs in the health
 >   payload's `judge` block when it lands.

@@ -360,6 +360,36 @@ def test_a_custom_judge_doctrine_is_run_and_attributed() -> None:
     assert seen and all(s == "Judge sternly." for s in seen)
 
 
+def test_an_enabled_cascade_escalates_and_is_attributed() -> None:
+    """With `judge:` enabling escalation in the step policy, a low-confidence verdict is re-judged
+    grounded in the case diff, the record shows both tiers, and `judge_hash` names the cascade."""
+    from whetstone.judge.llm_judge import JudgeVerdict, judge_identity
+    from whetstone.service import record_eval
+    from whetstone.steps import JudgePolicy
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        if schema is JudgeVerdict:
+            if "The code change both refer to" in user:
+                return JudgeVerdict(matched=True, confidence=0.9, reason="same defect in the code")
+            return JudgeVerdict(matched=True, confidence=0.3, reason="unsure")
+        return _flag_handler(flag_tests=False)(system, user, schema)
+
+    run = record_eval(
+        load_skill(SKILL_DIR),
+        FakeLLMClient(handler),
+        judge_policy=JudgePolicy(escalate_below=0.75),
+    )
+
+    verdicts = [
+        v for case in run.cases for t in case.trials for o in t.outcomes for v in o.verdicts
+    ]
+    escalated = [v for v in verdicts if v.tier == 2]
+    assert escalated, "the low-confidence verdict should have been re-judged"
+    assert escalated[0].prior is not None and escalated[0].prior.confidence == 0.3
+    assert run.judge_hash == judge_identity(escalate_below=0.75)
+    assert run.judge_hash != judge_identity()
+
+
 def test_a_gate_record_counts_what_it_spent() -> None:
     from whetstone.service import record_gate
 

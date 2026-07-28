@@ -2074,7 +2074,12 @@ export interface components {
         };
         /**
          * JudgeVerdictRecord
-         * @description One judge call: which finding was judged against an expectation, and what it decided.
+         * @description The judge's final word on one finding against one expectation.
+         *
+         *     `tier` is which cascade tier produced it (1 = pairwise, 2 = grounded in the case diff); when
+         *     tier 2 ran, `prior` holds what tier 1 said first. One record per finding either way — the
+         *     *final* verdict is what scoring reads, and the escalation trail hangs off it rather than
+         *     appearing as a second record that `matched` aggregation could misread.
          */
         JudgeVerdictRecord: {
             /** Confidence */
@@ -2083,8 +2088,14 @@ export interface components {
             finding_index: number;
             /** Matched */
             matched: boolean;
+            prior?: components["schemas"]["PriorVerdictRecord"] | null;
             /** Reason */
             reason: string;
+            /**
+             * Tier
+             * @default 1
+             */
+            tier: number;
         };
         /** JudgeView */
         JudgeView: {
@@ -2358,6 +2369,21 @@ export interface components {
             mode: "local" | "proxy" | "anonymous";
             /** Name */
             name: string;
+        };
+        /**
+         * PriorVerdictRecord
+         * @description The tier-1 verdict a cascade escalation replaced — kept so the escalation is auditable.
+         */
+        PriorVerdictRecord: {
+            /** Confidence */
+            confidence: number;
+            /** Matched */
+            matched: boolean;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
         };
         /**
          * PromoteFindingRequest

@@ -397,7 +397,10 @@ def eval_run(
     reviewer_effort = _effort_for(policy, effort)
     backend = _resolve(*pick)
     scored = min(drawn.max_cases or len(sk.eval_cases), len(sk.eval_cases)) if drawn else None
-    plan = plan_eval(sk, backend, trials=trials, cases=scored, wiki_limits=limits)
+    plan = plan_eval(
+        sk, backend, trials=trials, cases=scored, wiki_limits=limits,
+        judge_cascade=bool(policy and policy.judge.enabled),
+    )
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
 
@@ -416,6 +419,7 @@ def eval_run(
         sample=drawn,
         wiki_limits=limits,
         judge=load_judge(load_config().judge_dir),
+        judge_policy=policy.judge if policy else None,
     )
     if save:
         _store(runs_dir).save(record)
@@ -523,7 +527,7 @@ def eval_gate(
         scored = min(drawn.max_cases or union, union) if drawn else union
         plan = plan_eval(
             candidate_skill, backend, trials=gate_trials, cases=scored, action="eval gate",
-            wiki_limits=limits,
+            wiki_limits=limits, judge_cascade=bool(policy and policy.judge.enabled),
         )
         # Both sides are scored, so a gate costs twice what the same run would.
         if plan.estimate:
@@ -545,6 +549,7 @@ def eval_gate(
             sample=drawn,
             wiki_limits=limits,
             judge=load_judge(load_config().judge_dir),
+            judge_policy=policy.judge if policy else None,
         )
         if save:
             _gates(gates_dir).save(record)

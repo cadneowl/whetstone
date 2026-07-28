@@ -50,6 +50,17 @@ inputs:
     max_pages: 4
     max_bytes: 24000
 
+judge:
+  # Confidence under which a verdict is re-judged grounded in the case's own diff. The judge's
+  # question — "same underlying issue at this location?" — is often undecidable from two sentences
+  # alone, and the dangerous error is the spurious match that quietly makes a case pass on
+  # anything. 0 disables the cascade: no extra calls, and the judge behaves exactly as it always
+  # has. Enabling it changes the measurement instrument, so the run's judge identity records it —
+  # expect a visible re-baseline seam in score history when you turn it on.
+  escalate_below: 0.0
+  # Diff shown to the grounded judge, capped like every other per-call input.
+  max_diff_bytes: 2000
+
 model:
   # Pin this skill to a particular backend. Anything set here is the default; a flag on the command
   # line still wins. Omit a key to inherit whatever the command resolved (--llm / --model /

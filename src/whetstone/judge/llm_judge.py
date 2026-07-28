@@ -63,8 +63,26 @@ _USER_TEMPLATE = (
     "one-sentence reason."
 )
 
+# The tier-2 prompt: the same pair, grounded in the code both sentences point at. The diff is the
+# case's own frozen content — deterministic, versioned with the case — and deliberately NOT the
+# live wiki: the reviewer already reads the wiki, and an instrument that shares the subject's
+# inputs inherits the subject's bias. Lives here beside the other templates so `judge_identity`
+# can hash every prompt shape a verdict may have run under.
+GROUNDED_TEMPLATE = (
+    "Expected issue: {semantic}\n"
+    "Expected location: {where}\n\n"
+    "Reviewer finding: {message}\n"
+    "Reviewer location: {path} line {line}\n\n"
+    "The code change both refer to:\n"
+    "```\n{diff}\n```\n\n"
+    "Judging from the code itself: do the expected issue and the reviewer finding describe the "
+    "same underlying problem? Two comments about the same line are not the same issue unless "
+    "they concern the same defect. Return matched (bool), confidence 0-1, and a one-sentence "
+    "reason."
+)
 
-def judge_identity(system: str | None = None) -> str:
+
+def judge_identity(system: str | None = None, *, escalate_below: float = 0.0) -> str:
     """sha256 over everything that shapes a verdict besides the model itself.
 
     Recorded on every run (`RunRecord.judge_hash`) for the same reason `Backend` is: two runs judged
@@ -77,11 +95,21 @@ def judge_identity(system: str | None = None) -> str:
     re-baselines nothing unless the words changed. The user template is hashed alongside because
     it also reaches the model, and it stays code: it is plumbing for the pair's fields, not
     doctrine.
+
+    `escalate_below` > 0 means the cascade is on: low-confidence verdicts are re-judged grounded
+    in the case diff. That is a different instrument — different prompts can run, and the
+    threshold decides when — so both fold into the hash. A deployment that never enables the
+    cascade hashes exactly as it always has.
     """
     h = hashlib.sha256()
     h.update((system or DEFAULT_SYSTEM).encode("utf-8"))
     h.update(b"\0")
     h.update(_USER_TEMPLATE.encode("utf-8"))
+    if escalate_below > 0:
+        h.update(b"\0cascade\0")
+        h.update(f"{escalate_below}".encode())
+        h.update(b"\0")
+        h.update(GROUNDED_TEMPLATE.encode("utf-8"))
     return h.hexdigest()
 
 
