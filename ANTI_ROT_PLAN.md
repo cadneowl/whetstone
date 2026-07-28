@@ -42,11 +42,25 @@
 >   seam. Cost banner doubles the judge share and says why (`plan_eval(judge_cascade=…)`).
 >   Drill-down shows a "grounded" chip + the tier-1 prior line. Scaffold + skill-pipeline.md
 >   document the block. Rollout default is OFF — enabling is a per-skill choice.
-> - **Next up: Phase 1.3** — judge-eval job + rising bar: `whetstone judge eval` CLI +
->   `POST /api/jobs/judge-eval` plan/launch running the current judge (cascade included) over
->   fixtures + `DisputeStore.meta_eval_cases()`, per-tier accuracy and missed/spurious split,
->   ratchet stored per judge id (adoption requires ≥ max(floor, best − tolerance)), accuracy on
->   the Judge page, inbox surfacing. Then Phase 2 (holdout split first).
+> - **1.3 — DONE** (this commit): the rising bar. `MetaEvalReport` gains the missed/spurious
+>   split; `load_judge_corpus(meta_eval_dir)` = optional `fixtures.json` seed + all drill-down
+>   rulings. `meta_eval/ratchet.py`: `JudgeEvalRecord` (per-doctrine measurement, durable),
+>   `RatchetStore.bar()` = max(floor 0.8, best binding accuracy − 0.02), one-way by
+>   construction; a measurement under `MIN_PAIRS_FOR_BAR` (10) is reported but never binds — a
+>   bar set by three lucky pairs would punish every future judge for a coin flip. `whetstone
+>   judge eval` CLI (exit 1 below bar, CI-friendly) + `POST /api/jobs/judge-eval[/plan]` (empty
+>   corpus is a named 422, not a zero-call run; JobKind gained "judge-eval"). Judge page shows
+>   accuracy / missed-spurious / bar / clears-or-misses and launches the measurement
+>   (LaunchButton, cost-confirmed; `pairs_total` gates the button).
+> - **Deferred from 1.3** (deliberately): per-tier cascade accuracy — labeled pairs carry no
+>   case diff, so judge-eval measures the pairwise judge; capturing the diff into `Dispute` at
+>   mint time unlocks grounded-tier measurement later. A hard "adopt" gate on doctrine changes —
+>   currently the bar is enforced by exit code (CI) and visible verdicts (Judge page), not by
+>   blocking runs. Inbox surfacing of "rulings pile up unmeasured".
+> - **Next up: Phase 2.1 — the holdout split** in `sampling.py` (hash-partition, digest
+>   blindfold in `improve.py`, per-partition scores in gate output, targeted-must-be-train
+>   rule), then 2.2 tiers → 2.3 saturation probe → 2.4 dedup. Phase H health endpoint skeleton
+>   should land with 2.1 so the divergence number has somewhere to live.
 > - Phase H note: the health endpoint skeleton (`GET /api/skills/{id}/health`) has NOT been
 >   started; disputes-pending count now lives on `GET /api/judge` and belongs in the health
 >   payload's `judge` block when it lands.

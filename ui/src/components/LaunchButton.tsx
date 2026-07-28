@@ -458,6 +458,20 @@ function JobResult({ job }: { job: Job }) {
       </div>
     )
   }
+  if (job.kind === 'judge-eval') {
+    return (
+      <p className="mt-2 text-xs">
+        <span className={r.passed ? 'text-good' : 'text-bad'}>
+          accuracy <span className="tabular">{fmt(r.accuracy)}</span>{' '}
+          {r.passed ? 'clears' : 'misses'} the {fmt(r.bar)} bar
+        </span>{' '}
+        <span className="text-muted">
+          over {String(r.total)} pair(s) — missed {String(r.missed)}, spurious{' '}
+          {String(r.spurious)}
+        </span>
+      </p>
+    )
+  }
   if (job.kind === 'review') {
     const found = Number(r.findings ?? 0)
     return (

@@ -58,7 +58,8 @@ export type ProposeResponse = Schemas['ProposeResponse']
 export type DraftResponse = Schemas['DraftResponse']
 /** The union of every job kind's request body. Each route validates its own shape server-side. */
 export type JobRequest = {
-  skill_id: string
+  /** Absent only for judge-eval, which measures the deployment-wide judge rather than a skill. */
+  skill_id?: string
   trials?: number | null
   sample?: number | null
   /** eval only: what to score — the working tree, the guidance draft, or the promoted case batch. */

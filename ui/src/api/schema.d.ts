@@ -460,6 +460,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/judge-eval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Judge Eval
+         * @description Score the current judge over the labeled corpus and ratchet the accuracy bar.
+         *
+         *     This is what turns drill-down rulings into an enforced quality standard: the measurement is
+         *     stored per doctrine, and once a judge has demonstrated an accuracy over enough pairs, no
+         *     later doctrine clears meaningfully below it.
+         */
+        post: operations["launch_judge_eval_api_jobs_judge_eval_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/judge-eval/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Judge Eval Job */
+        post: operations["plan_judge_eval_job_api_jobs_judge_eval_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/review": {
         parameters: {
             query?: never;
@@ -2024,7 +2065,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -2073,6 +2114,43 @@ export interface components {
             total: number;
         };
         /**
+         * JudgeAccuracy
+         * @description The newest measurement of the *current* doctrine, judged against the ratcheting bar.
+         */
+        JudgeAccuracy: {
+            /** Accuracy */
+            accuracy: number;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Binding */
+            binding: boolean;
+            /** Missed */
+            missed: number;
+            /** Spurious */
+            spurious: number;
+            /** Total */
+            total: number;
+        };
+        /**
+         * JudgeEvalRequest
+         * @description Measure the judge against every labeled pair. No skill — the judge is deployment-wide.
+         */
+        JudgeEvalRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+        };
+        /**
          * JudgeVerdictRecord
          * @description The judge's final word on one finding against one expectation.
          *
@@ -2099,12 +2177,19 @@ export interface components {
         };
         /** JudgeView */
         JudgeView: {
+            /** Bar */
+            bar: number;
+            /** Best */
+            best?: number | null;
             /** Builtin */
             builtin: boolean;
             /** Hash */
             hash: string;
             /** Id */
             id: string;
+            measured?: components["schemas"]["JudgeAccuracy"] | null;
+            /** Pairs Total */
+            pairs_total: number;
             /** Path */
             path: string;
             /** Rulings Overruled */
@@ -4369,6 +4454,72 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_judge_eval_api_jobs_judge_eval_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeEvalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_judge_eval_job_api_jobs_judge_eval_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JudgeEvalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
                 };
             };
             /** @description Validation Error */
