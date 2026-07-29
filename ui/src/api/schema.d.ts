@@ -3006,6 +3006,11 @@ export interface components {
              * @default
              */
             branch: string;
+            /**
+             * Holdout
+             * @default false
+             */
+            holdout: boolean;
             /** Id */
             id: string;
             /**

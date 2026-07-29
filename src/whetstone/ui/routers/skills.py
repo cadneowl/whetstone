@@ -16,6 +16,7 @@ from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.gitio import Author, GitError, pending_batch, read_at
 from whetstone.naming import describe_unsafe, is_safe_segment
+from whetstone.sampling import partition_of
 from whetstone.service import (
     CaseDetail,
     PendingCase,
@@ -88,6 +89,11 @@ def _promoted_but_unmerged(
     if found is None:
         return []
 
+    # The same holdout fraction the eval and the gate will use, so the flag the workspace reads
+    # agrees with the partition the gate actually enforces. Best-effort: a missing or malformed
+    # evaluate step falls back to the default, never an error on a detail page.
+    fraction = _holdout_fraction(config, skill.id)
+
     on_disk = {case.id for case in skill.eval_cases}
     pending = []
     for case in found[0].eval_cases:
@@ -104,9 +110,21 @@ def _promoted_but_unmerged(
                 branch=batch.branch,
                 last_recall=run.confusion.recall if run else None,
                 last_fp_rate=run.confusion.fp_rate if run else None,
+                holdout=partition_of(case.id, fraction) == "holdout",
             )
         )
     return pending
+
+
+def _holdout_fraction(config: Config, skill_id: str) -> float:
+    """The evaluate step's holdout fraction, defaulting the way an unconfigured run does."""
+    from whetstone.steps import SamplePolicy, StepError, load_step
+
+    try:
+        spec = load_step(config.skills_root / skill_id, "evaluate", skill_id=skill_id)
+    except StepError:
+        spec = None
+    return spec.sample.holdout_fraction if spec else SamplePolicy().holdout_fraction
 
 
 @router.get("/{skill_id}/cases/{case_id}", response_model=CaseDetail)
