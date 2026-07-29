@@ -743,6 +743,10 @@ class PendingCase(BaseModel):
     branch: str = ""
     last_recall: float | None = None
     last_fp_rate: float | None = None
+    # In the holdout partition: scored on every run, but the improve loop never learns from it and a
+    # gate may not target it (a change cannot claim to fix a case it was never shown). The workspace
+    # marks these and keeps them out of the gate's targeted set, so the gate is never refused.
+    holdout: bool = False
 
 
 class RotStatus(BaseModel):

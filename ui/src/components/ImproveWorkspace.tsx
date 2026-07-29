@@ -59,6 +59,12 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       return next
     })
 
+  // Holdout cases are scored but can never be gate-targeted (a change may not claim to fix a case
+  // the improve loop never saw). Keep them out of the gate's targeted set so it is never refused,
+  // and say why rather than let the run fail after minutes of model calls.
+  const heldSelected = pending.filter((c) => selected.has(c.id) && c.holdout)
+  const targetable = pending.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
+
   return (
     <div className="max-w-3xl space-y-5">
       <BranchPanel
@@ -118,6 +124,14 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               </Badge>
               <span className="font-mono">{c.id}</span>
               <span className="font-mono text-xs text-muted">{c.path}</span>
+              {c.holdout && (
+                <Badge
+                  tone="neutral"
+                  title="Holdout — scored on every run, but the gate can't target it and the improve loop never learns from it"
+                >
+                  holdout
+                </Badge>
+              )}
               <span className="ml-auto">
                 <CaseStatus c={c} />
               </span>
@@ -215,10 +229,17 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
             When the selected cases pass and nothing regressed, prove it: the gate scores base vs the
             branch over the union, and the cases you selected must pass.
           </p>
+          {heldSelected.length > 0 && (
+            <p className="mb-2 text-xs text-muted">
+              {heldSelected.map((c) => c.id).join(', ')} {heldSelected.length === 1 ? 'is' : 'are'}{' '}
+              holdout — scored, but not gate-targeted (a change can&rsquo;t claim to fix a case the
+              improve loop never sees).
+            </p>
+          )}
           <div className="flex flex-wrap items-center gap-3">
             <LaunchButton
               kind="gate"
-              request={{ skill_id: skillId, targeted: [...selected] }}
+              request={{ skill_id: skillId, targeted: targetable }}
               label="Run the gate"
             />
             {proposal?.verdict.can_propose ? (
