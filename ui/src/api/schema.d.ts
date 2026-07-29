@@ -1130,6 +1130,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/improve/begin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Begin Improve
+         * @description Start improving a skill: materialise `whetstone/skill/<id>` so it can be checked out.
+         *
+         *     The branch is where both hands land — an operator editing the multi-file skill in their own
+         *     editor, and the LLM improve step staging its draft — so it has to exist before the workspace can
+         *     tell someone how to `git worktree add` it. Idempotent: an existing branch is left as it is.
+         */
+        post: operations["begin_improve_api_skills__skill_id__improve_begin_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills/{skill_id}/meta": {
         parameters: {
             query?: never;
@@ -1331,6 +1355,20 @@ export interface components {
              * @default []
              */
             skills: string[];
+        };
+        /**
+         * BeginImprove
+         * @description What starting an improvement leaves you with: a branch, and how to edit it locally.
+         */
+        BeginImprove: {
+            /** Branch */
+            branch: string;
+            /** Checkout Cmd */
+            checkout_cmd: string;
+            /** Created */
+            created: boolean;
+            /** Worktree Cmd */
+            worktree_cmd: string;
         };
         /**
          * CadenceClock
@@ -2529,6 +2567,8 @@ export interface components {
         };
         /** ImproveRequest */
         ImproveRequest: {
+            /** Cases */
+            cases?: string[];
             /**
              * Instruction
              * @default
@@ -3179,6 +3219,11 @@ export interface components {
             body: string;
             /** Branch */
             branch: string;
+            /**
+             * Branch Exists
+             * @default false
+             */
+            branch_exists: boolean;
             /** Commits */
             commits: number;
             /**
@@ -3193,6 +3238,11 @@ export interface components {
             guidance_hash: string;
             /** Head */
             head?: string | null;
+            /**
+             * Local Edit
+             * @default
+             */
+            local_edit: string;
             /**
              * Pages
              * @default {}
@@ -6558,6 +6608,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SkillHealth"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    begin_improve_api_skills__skill_id__improve_begin_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BeginImprove"];
                 };
             };
             /** @description Validation Error */
