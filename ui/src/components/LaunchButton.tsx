@@ -95,6 +95,16 @@ export function LaunchButton({
           plan.reset()
           launch.reset()
         }}
+        // Re-arm in place: clear the finished job and go straight back to the cost plan, keeping the
+        // per-run model choice. The two-click spend contract still holds — this only spares hunting
+        // for the launch button the result panel replaced, which is the whole iterate loop's tempo.
+        onRerun={() => {
+          setJobId(null)
+          setSeen(null)
+          plan.reset()
+          launch.reset()
+          setArmed(true)
+        }}
       />
     )
   }
@@ -299,10 +309,12 @@ function JobStatus({
   job,
   onCancel,
   onDismiss,
+  onRerun,
 }: {
   job: Job
   onCancel: () => void
   onDismiss: () => void
+  onRerun: () => void
 }) {
   const { completed, total, label } = job.progress
   const running = job.state === 'running'
@@ -322,13 +334,22 @@ function JobStatus({
             Cancel
           </button>
         ) : (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="ml-auto text-xs text-muted transition-colors hover:text-ink"
-          >
-            Dismiss
-          </button>
+          <div className="ml-auto flex items-center gap-3 text-xs">
+            <button
+              type="button"
+              onClick={onRerun}
+              className="text-muted transition-colors hover:text-accent"
+            >
+              Run again
+            </button>
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="text-muted transition-colors hover:text-ink"
+            >
+              Dismiss
+            </button>
+          </div>
         )}
       </div>
 
