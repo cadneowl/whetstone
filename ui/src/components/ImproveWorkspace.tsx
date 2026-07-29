@@ -313,7 +313,10 @@ function BranchPanel({
         <div className="space-y-2">
           <p className="font-mono text-xs text-muted">{branch}</p>
           <div>
-            <p className="mb-1 text-xs text-muted">Edit the files in your own editor:</p>
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <p className="text-xs text-muted">Edit the files in your own editor:</p>
+              <CopyButton text={localEdit} />
+            </div>
             <pre className="overflow-x-auto rounded border border-line bg-canvas px-2 py-1.5 font-mono text-xs">
               {localEdit}
             </pre>
@@ -419,4 +422,28 @@ function isFailing(c: PendingCase): boolean {
 
 function fmt(v: unknown): string {
   return typeof v === 'number' ? v.toFixed(2) : '—'
+}
+
+/** Copy a command to the clipboard, with a moment of confirmation. Localhost is a secure context,
+ *  so the Clipboard API is available; a blocked write degrades to no-op rather than throwing. */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      aria-label="Copy the checkout command"
+      onClick={() => {
+        void navigator.clipboard?.writeText(text).then(
+          () => {
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), 1500)
+          },
+          () => undefined,
+        )
+      }}
+      className="shrink-0 rounded border border-line px-2 py-0.5 text-xs text-muted transition-colors hover:border-accent/50 hover:text-accent"
+    >
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  )
 }
