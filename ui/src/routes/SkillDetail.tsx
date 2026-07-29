@@ -10,12 +10,13 @@ import {
 import { Guidance } from '@/components/Guidance'
 import { GuidanceEditor } from '@/components/GuidanceEditor'
 import { HealthPanel } from '@/components/HealthPanel'
+import { ImproveWorkspace } from '@/components/ImproveWorkspace'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 
 // The tab keys, in strip order. An unknown `?tab=` value coerces to the first — a blank content
 // pane under a full tab strip reads as a broken page, and a bad link should land somewhere real.
-const TAB_KEYS = ['guidance', 'edit', 'cases', 'runs', 'health', 'meta'] as const
+const TAB_KEYS = ['guidance', 'edit', 'improve', 'cases', 'runs', 'health', 'meta'] as const
 
 function activeTab(raw: string | null): string {
   return raw && (TAB_KEYS as readonly string[]).includes(raw) ? raw : 'guidance'
@@ -66,6 +67,7 @@ export function SkillDetail() {
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">
           <Trigger value="guidance">Guidance</Trigger>
           <Trigger value="edit">Edit</Trigger>
+          <Trigger value="improve">Improve</Trigger>
           <Trigger value="cases">Eval cases ({cases.length})</Trigger>
           {/* "History", not "Runs": the top nav already has a Runs, and two screens by that name —
               only one of which could start a run — is how someone ends up on the wrong one. */}
@@ -93,6 +95,15 @@ export function SkillDetail() {
           {/* Mounted only while selected, so the draft starts from what is on disk each time the
               tab is opened rather than from a stale copy taken at page load. */}
           <GuidanceEditor detail={data} />
+        </Tabs.Content>
+
+        <Tabs.Content value="improve">
+          <TabIntro>
+            The loop, in one place: score the skill against the cases you promoted from triage, draft
+            a change from the ones it misses (by hand on the branch, or with the LLM), re-score, then
+            gate and propose. Edits land on the skill's branch — never the working tree.
+          </TabIntro>
+          <ImproveWorkspace detail={data} />
         </Tabs.Content>
 
         <Tabs.Content value="cases">

@@ -90,6 +90,8 @@ export type JobRequest = {
   targeted?: string[]
   instruction?: string
   stale_ok?: boolean
+  /** improve only: draft from this run's failures (e.g. a batch score), not the newest run. */
+  run_id?: string | null
   repo?: string
   diff?: string
   /** review only: a merge-request URL (pasted from the browser) or a bare number. */
@@ -430,6 +432,18 @@ export function useProposal(skillId: string) {
   return useQuery({
     queryKey: keys.proposal(skillId),
     queryFn: () => get<Proposal>(`/api/skills/${encodeURIComponent(skillId)}/proposal`),
+  })
+}
+
+export type BeginImprove = Schemas['BeginImprove']
+
+/** Start improving a skill: materialise its branch so it can be checked out and edited locally. */
+export function useBeginImprove(skillId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      send<BeginImprove>('POST', `/api/skills/${encodeURIComponent(skillId)}/improve/begin`),
+    onSuccess: () => void client.invalidateQueries({ queryKey: keys.proposal(skillId) }),
   })
 }
 
