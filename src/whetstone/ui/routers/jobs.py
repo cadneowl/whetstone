@@ -123,6 +123,9 @@ class ImproveRequest(BaseModel):
     run_id: str | None = None
     instruction: str = ""
     stale_ok: bool = False
+    # Draft only from these case ids — the workspace's "improve from the cases I selected". Empty
+    # means every failure in the run, which is the plain `Draft a change` behaviour.
+    cases: list[str] = Field(default_factory=list)
     # Per-launch backend; see `EvalRequest.provider` and `_pick`.
     provider: str = ""
     model: str = ""
@@ -403,12 +406,17 @@ def plan_improve_job(
             billing="local",
             details=["this step runs your own program; Whetstone calls no model"],
         )
+    scope = (
+        f"drafting from {len(request.cases)} selected case(s)"
+        if request.cases
+        else f"digest: up to {spec.inputs.failures.max} clustered failure(s)"
+    )
     plan = plan_calls(
         "improve",
         _backend(selection, spec),
         calls=1,
         basis="one call: the guidance rewrite",
-        details=[f"digest: up to {spec.inputs.failures.max} clustered failure(s)"],
+        details=[scope],
     )
     _warn_if_nothing_to_learn(plan, store, skill, request)
     return plan
@@ -477,6 +485,7 @@ def launch_improve(
             ),
             effort=spec.model.effort or "high",
             instruction=request.instruction,
+            only=set(request.cases) or None,
         )
         handle.progress(1, 1, "done")
         return {
@@ -488,6 +497,9 @@ def launch_improve(
             "targeted_cases": result.proposal.targeted_cases,
             "unknown_cases": result.unknown_cases,
             "holdout_cases": result.holdout_cases,
+            # Selected cases the drafter never saw (unscored, passing, or holdout) — named so a
+            # narrowed improve never looks like it acted on cases it did not.
+            "selected_missing": result.selected_missing,
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
             "holdout_withheld": result.digest.holdout_withheld,

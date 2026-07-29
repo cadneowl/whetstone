@@ -191,6 +191,11 @@ class ProposalResult(BaseModel):
     # Targeted ids the model named that sit in the holdout partition — dropped, not honored, for
     # the reason `_failures` withholds those cases in the first place.
     holdout_cases: list[str] = Field(default_factory=list)
+    # Cases the caller asked to improve *from* that the drafter never saw — because the run did not
+    # score them, they passed, or they were withheld as holdout. Reported, never silent, for the
+    # same reason `unknown_cases` is: a narrowed improve that quietly dropped half its selection
+    # would look like it acted on the whole of it.
+    selected_missing: list[str] = Field(default_factory=list)
     llm_calls: int = 0
 
 
@@ -201,10 +206,16 @@ def build_digest(
     *,
     wiki_text: str = "",
     instruction: str = "",
+    only: set[str] | None = None,
 ) -> Digest:
-    """Assemble the bounded view of `record` that an improve step will be shown."""
+    """Assemble the bounded view of `record` that an improve step will be shown.
+
+    `only` narrows the failures the drafter sees to a chosen set of case ids — the workspace passes
+    the cases an operator triaged and selected, so "improve based on these" means exactly that
+    rather than "improve from whatever the last run happened to fail on". None keeps every failure.
+    """
     cases = {c.id: c for c in skill.eval_cases}
-    failures = [] if record is None else _failures(record, cases, inputs)
+    failures = [] if record is None else _failures(record, cases, inputs, only=only)
     clusters = _cluster(failures, inputs)
     return Digest(
         skill_id=skill.id,
@@ -223,16 +234,26 @@ def build_digest(
 
 
 def _failures(
-    record: RunRecord, cases: dict[str, EvalCase], inputs: FailureInputs
+    record: RunRecord,
+    cases: dict[str, EvalCase],
+    inputs: FailureInputs,
+    *,
+    only: set[str] | None = None,
 ) -> list[Failure]:
     """Train-partition failures only. The blindfold is unconditional and lives here — at digest
     assembly, the one door failures pass through to reach a prompt — because a drafter shown a
     holdout failure converts the overfitting alarm into part of the training set. The digest
     reports how many were withheld (`Digest.holdout_withheld`), so nothing is dropped silently.
+
+    `only`, when given, keeps just the named cases: the workspace's "improve from these" narrows the
+    drafter to the failures an operator selected. The holdout blindfold still applies on top — a
+    selected case that landed in holdout is withheld like any other, which is the point of it.
     """
     wanted = set(inputs.outcomes)
     out: list[Failure] = []
     for case_run in record.cases:
+        if only is not None and case_run.case_id not in only:
+            continue
         if case_run.partition == "holdout":
             continue
         trial = case_run.representative_trial
@@ -359,20 +380,32 @@ def propose(
     client: LLMClient | None = None,
     effort: Effort = "high",
     instruction: str = "",
+    only: set[str] | None = None,
 ) -> ProposalResult:
     """Run a skill's improve step and return the guidance change it proposes.
 
     `instruction` is a one-off steer for this run — "focus on false positives", "R3 is too broad".
     It reaches the prompt whether or not the template mentions `{{instruction}}`, because an
     operator who passed one and saw no effect would have no way to tell that it was ignored.
+
+    `only` narrows the drafter to a chosen set of case ids — the workspace's "improve from these".
+    Cases in `only` the drafter never gets to (unscored, passing, or holdout) come back in
+    `ProposalResult.selected_missing` rather than being dropped in silence.
     """
+    inputs = spec.inputs.failures
     digest = build_digest(
         skill,
         record,
-        spec.inputs.failures,
+        inputs,
         wiki_text=_wiki_for(skill, record, spec),
         instruction=instruction,
+        only=only,
     )
+    selected_missing: list[str] = []
+    if only is not None and record is not None:
+        cases_by_id = {c.id: c for c in skill.eval_cases}
+        drew_from = {f.case_id for f in _failures(record, cases_by_id, inputs, only=only)}
+        selected_missing = sorted(only - drew_from)
 
     if spec.is_subprocess:
         # No rendered prompt to compare against: a subprocess step is handed the digest as JSON, so
@@ -409,7 +442,7 @@ def propose(
     proposal.targeted_cases = [c for c in proposal.targeted_cases if c not in held]
     return ProposalResult(
         proposal=proposal, digest=digest, unknown_cases=unknown,
-        holdout_cases=holdout_named, llm_calls=calls,
+        holdout_cases=holdout_named, selected_missing=selected_missing, llm_calls=calls,
     )
 
 

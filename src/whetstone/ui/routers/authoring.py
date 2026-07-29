@@ -31,8 +31,10 @@ from whetstone.gates import GateStore, Verdict
 from whetstone.gitio import (
     Author,
     GitError,
+    ProtectedBranch,
     changed_paths,
     commits_ahead,
+    create_branch,
     current_head,
     diff_at,
     ref_exists,
@@ -47,7 +49,7 @@ from whetstone.ui.deps import (
     Writable,
     relative_skills_root,
 )
-from whetstone.ui.errors import Misconfigured, NotFound
+from whetstone.ui.errors import Misconfigured, NotFound, Unprocessable
 
 router = APIRouter(prefix="/skills", tags=["authoring"])
 
@@ -84,6 +86,13 @@ class Proposal(BaseModel):
     # working tree instead would show a saved edit as unsaved — the commit went to the branch, so
     # the file on disk never changes — and "discard" would silently revert to the merged version.
     body: str = ""
+    # Whether the skill's branch exists at all — distinct from `staged` (which also needs commits
+    # ahead of the base). The improve workspace can offer "check it out and edit locally" the moment
+    # the branch exists, before anything has been committed to it.
+    branch_exists: bool = False
+    # The command that checks the branch out into a sibling worktree, so the multi-file skill can be
+    # edited in a real editor. Rendered by the workspace; empty until the branch exists.
+    local_edit: str = ""
     verdict: Verdict
 
 
@@ -219,8 +228,59 @@ def get_proposal(skill_id: str, config: ConfigDep, gates: GatesDep) -> Proposal:
         guidance_hash=guidance_hash(staged),
         body=staged.body,
         pages={page.path: page.text for page in staged.pages},
+        branch_exists=exists,
+        local_edit=_worktree_cmd(skill_id, branch) if exists else "",
         verdict=verdict,
     )
+
+
+class BeginImprove(BaseModel):
+    """What starting an improvement leaves you with: a branch, and how to edit it locally."""
+
+    branch: str
+    # True when this call created the branch; False when it already existed (begin is idempotent).
+    created: bool
+    # The git commands to edit the skill's files in a real editor and to check the branch out.
+    worktree_cmd: str
+    checkout_cmd: str
+
+
+@router.post("/{skill_id}/improve/begin", response_model=BeginImprove, dependencies=[Writable])
+def begin_improve(skill_id: str, config: ConfigDep) -> BeginImprove:
+    """Start improving a skill: materialise `whetstone/skill/<id>` so it can be checked out.
+
+    The branch is where both hands land — an operator editing the multi-file skill in their own
+    editor, and the LLM improve step staging its draft — so it has to exist before the workspace can
+    tell someone how to `git worktree add` it. Idempotent: an existing branch is left as it is.
+    """
+    branch = _branch(config, skill_id)
+    existed = ref_exists(config.skills_repo, branch)
+    try:
+        create_branch(
+            config.skills_repo,
+            branch,
+            base=config.git.default_base,
+            prefix=config.git.branch_prefix,
+            protected=config.git.protected_branches,
+        )
+    except ProtectedBranch as exc:
+        raise Unprocessable(str(exc)) from exc
+    except GitError as exc:
+        raise Misconfigured(
+            f"could not create {branch!r} from {config.git.default_base!r}: {exc}. "
+            f"Check [git] default_base names this repo's trunk."
+        ) from exc
+    return BeginImprove(
+        branch=branch,
+        created=not existed,
+        worktree_cmd=_worktree_cmd(skill_id, branch),
+        checkout_cmd=f"git fetch && git checkout {branch}",
+    )
+
+
+def _worktree_cmd(skill_id: str, branch: str) -> str:
+    """Check the branch out into a sibling directory, leaving the main checkout on its branch."""
+    return f"git fetch && git worktree add ../{skill_id}-improve {branch}"
 
 
 def ungated_guidance(config: Config, gates: GateStore, branch: str) -> list[str]:
