@@ -265,6 +265,37 @@ def write_and_commit(
     return commit
 
 
+def create_branch(
+    repo: str | Path,
+    branch: str,
+    *,
+    base: str = "main",
+    prefix: str = DEFAULT_BRANCH_PREFIX,
+    protected: Sequence[str] = ("main", "master"),
+) -> str:
+    """Point `branch` at `base` if it does not exist yet, returning its head sha.
+
+    What lets an operator *check out and edit a skill locally* before there is anything to commit:
+    today `whetstone/skill/<id>` only springs into being on the first `write_and_commit`, so there
+    was no branch to `git worktree add` until the LLM had already staged something. This makes it
+    up front.
+
+    Idempotent — an existing branch is returned unchanged. Guarded exactly like `write_and_commit`
+    and `push`: it refuses a protected name or one outside the console's prefix, because a branch
+    made here is one the rest of the flow gates and publishes, so it must be one they may.
+    The working tree is never touched: this moves a ref, it checks nothing out.
+    """
+    check_publishable(branch, prefix=prefix, protected=protected)
+    ref = _full_ref(branch)
+    if ref_exists(repo, ref):
+        return _text(repo, "rev-parse", ref)
+    base_sha = _text(repo, "rev-parse", base)
+    # Old-value of the null sha means "create only if absent" — a racing creator loses atomically
+    # rather than one silently resetting the other's branch.
+    _git(repo, "update-ref", ref, base_sha, _NULL_SHA)
+    return base_sha
+
+
 def check_publishable(
     branch: str,
     *,

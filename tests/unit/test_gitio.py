@@ -10,6 +10,7 @@ from whetstone.gitio import (
     HeadMoved,
     ProtectedBranch,
     branch_name,
+    create_branch,
     current_head,
     pending_batch,
     push,
@@ -55,6 +56,35 @@ def test_status_detects_dirty_paths(repo: Path) -> None:
     st = status(repo)
     assert not st.clean
     assert st.dirty_paths == ["skills/SKILL.md"]
+
+
+def test_create_branch_points_at_base_and_leaves_the_worktree(repo: Path) -> None:
+    sha = create_branch(repo, "whetstone/skill/x", base="main")
+    assert sha == current_head(repo, "main")
+    assert ref_exists(repo, "whetstone/skill/x")
+    # No checkout happened: still on main, still clean.
+    st = status(repo)
+    assert st.branch == "main" and st.clean
+
+
+def test_create_branch_is_idempotent(repo: Path) -> None:
+    first = create_branch(repo, "whetstone/skill/x", base="main")
+    # Move the branch forward, then create again: an existing branch is returned unchanged.
+    moved = write_and_commit(
+        repo, {"skills/x.txt": "hi"}, "x", branch="whetstone/skill/x", base="main", author=AUTHOR
+    )
+    again = create_branch(repo, "whetstone/skill/x", base="main")
+    assert first != moved and again == moved
+
+
+def test_create_branch_refuses_a_protected_name(repo: Path) -> None:
+    with pytest.raises(ProtectedBranch):
+        create_branch(repo, "main", base="main")
+
+
+def test_create_branch_refuses_a_name_outside_the_prefix(repo: Path) -> None:
+    with pytest.raises(ProtectedBranch):
+        create_branch(repo, "feature/whatever", base="main")
 
 
 def test_commit_creates_branch_without_touching_working_tree(repo: Path) -> None:

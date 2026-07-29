@@ -15,7 +15,7 @@ from conftest import CASE_DIFF
 from whetstone.core.gate import GateConfig, GateResult
 from whetstone.domain.score import SkillScore
 from whetstone.gates import GateRecord, GateStore, new_gate_id
-from whetstone.gitio import read_at
+from whetstone.gitio import read_at, ref_exists
 
 AT = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
 SKILL = "rust-errors"
@@ -385,3 +385,39 @@ def test_the_guard_fails_closed_when_it_cannot_run(
     response = _propose(client, "whetstone/skill/rust-errors")
     assert response.status_code == 500
     assert "default_base" in response.json()["message"]
+
+
+# --- starting an improvement (materialising the branch) ---------------------------
+
+
+def test_begin_improve_creates_the_branch_and_offers_a_worktree(
+    client: TestClient, repo: Path
+) -> None:
+    """The branch has to exist before the workspace can tell someone to check it out — today it
+    only appears on the first commit."""
+    branch = "whetstone/skill/rust-errors"
+    assert not ref_exists(repo, branch)
+
+    first = client.post(f"/api/skills/{SKILL}/improve/begin")
+    assert first.status_code == 200
+    body = first.json()
+    assert body["created"] is True
+    assert body["branch"] == branch
+    assert "git worktree add" in body["worktree_cmd"] and branch in body["worktree_cmd"]
+    assert ref_exists(repo, branch)
+
+    # Idempotent: a second begin does not error and reports it already existed.
+    again = client.post(f"/api/skills/{SKILL}/improve/begin")
+    assert again.status_code == 200 and again.json()["created"] is False
+
+
+def test_proposal_reports_branch_existence_for_local_editing(
+    client: TestClient, repo: Path
+) -> None:
+    before = client.get(f"/api/skills/{SKILL}/proposal").json()
+    assert before["branch_exists"] is False and before["local_edit"] == ""
+
+    client.post(f"/api/skills/{SKILL}/improve/begin")
+    after = client.get(f"/api/skills/{SKILL}/proposal").json()
+    assert after["branch_exists"] is True
+    assert "git worktree add" in after["local_edit"]

@@ -167,6 +167,16 @@ def test_outcomes_filter_selects_which_failures_to_learn_from() -> None:
     assert digest.total_failures == 0
 
 
+def test_only_narrows_the_digest_to_the_selected_cases() -> None:
+    """The workspace's 'improve from these': one selected case, not every failure in the run."""
+    skill = _skill([_case("c1"), _case("c2")])
+    record = _record([_miss("c1"), _miss("c2")])
+    digest = build_digest(skill, record, FailureInputs(), only={"c1"})
+    assert digest.total_failures == 1
+    text = digest.render_failures()
+    assert "c1" in text and "c2" not in text
+
+
 def test_flaky_case_is_represented_by_its_failing_trial() -> None:
     passing = TrialRecord(
         index=0,
@@ -237,6 +247,20 @@ def test_proposal_reaches_the_model_and_comes_back(tmp_path: Path) -> None:
     assert result.proposal.body == "new rules"
     assert result.proposal.targeted_cases == ["c1"]
     assert result.llm_calls == 1
+
+
+def test_selected_missing_reports_cases_the_drafter_never_saw(tmp_path: Path) -> None:
+    """A narrowed improve must not look like it acted on cases it never got to."""
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body="new")
+
+    skill = _skill([_case("c1"), _case("c2")])
+    # c1 failed and is in the run; c2 was selected but the run never scored it.
+    result = propose(
+        _spec(tmp_path), skill, _record([_miss("c1")]),
+        client=FakeLLMClient(handler), only={"c1", "c2"},
+    )
+    assert result.selected_missing == ["c2"]
 
 
 def test_hallucinated_case_ids_are_dropped_and_reported(tmp_path: Path) -> None:
