@@ -11,7 +11,7 @@ import {
   type SkillDetail as Detail,
 } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
-import { Badge, Empty, ErrorNote, score } from '@/components/primitives'
+import { Badge, ErrorNote, score } from '@/components/primitives'
 
 /**
  * The improve workspace: one place to take a skill from "triage promoted some cases it fails on"
@@ -41,16 +41,6 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [notice, setNotice] = useState('')
 
-  if (pending.length === 0) {
-    return (
-      <Empty>
-        No cases waiting to work on. Promote some from <Link to="/triage">Triage</Link> first — the
-        loop is: triage cases the skill fails on, then sharpen the guidance here until it catches
-        them.
-      </Empty>
-    )
-  }
-
   const toggle = (id: string) =>
     setSelected((prev) => {
       const next = new Set(prev)
@@ -59,11 +49,62 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       return next
     })
 
+  // The batch is the pre-merge sharpening path: promote cases in triage, then close the gap here.
+  // Without one, the same loop still runs against the merged cases the last run failed — which is
+  // exactly the state the inbox's "improve" and "propose" actions send you here in. So the tab is a
+  // hub, not a dead end: branch, sharpen and gate are always present; only their fuel changes.
+  const hasBatch = pending.length > 0
+  const latestRunId = detail.runs[0]?.id ?? null
+
   // Holdout cases are scored but can never be gate-targeted (a change may not claim to fix a case
   // the improve loop never saw). Keep them out of the gate's targeted set so it is never refused,
   // and say why rather than let the run fail after minutes of model calls.
   const heldSelected = pending.filter((c) => selected.has(c.id) && c.holdout)
   const targetable = pending.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
+
+  const stageDraft = () =>
+    draft &&
+    save.mutate(
+      { skillId, edit: { body: draft.body, pages: draft.pages } },
+      {
+        onSuccess: () => {
+          setDraft(null)
+          setNotice('Staged onto the branch. Re-score to see if it caught them.')
+        },
+      },
+    )
+  const onDrafted = (job: { result?: unknown }) => {
+    const r = (job.result ?? {}) as Record<string, unknown>
+    const body = String(r.body ?? '')
+    const pages = (r.pages ?? {}) as Record<string, string>
+    if (!body && !Object.keys(pages).length) {
+      setNotice('The drafter proposed no change.')
+      return
+    }
+    setDraft({
+      body,
+      pages,
+      rationale: String(r.rationale ?? ''),
+      selectedMissing: (r.selected_missing ?? []) as string[],
+    })
+  }
+
+  const review = draft && (
+    <DraftReview
+      draft={draft}
+      staging={save.isPending}
+      readOnly={readOnly}
+      error={save.error}
+      onStage={stageDraft}
+      onDiscard={() => setDraft(null)}
+    />
+  )
+
+  // Step numbers depend on whether the batch-score step is present, so the sharpen and gate steps
+  // read as "1 · 2" without a batch and "1 · 2 · 3" with one.
+  const step = hasBatch
+    ? { sharpen: '2', gate: '3' }
+    : { sharpen: '1', gate: '2' }
 
   return (
     <div className="max-w-3xl space-y-5">
@@ -85,149 +126,157 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
         error={begin.error}
       />
 
-      <section className="rounded-lg border border-line bg-surface p-4">
-        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-          <h3 className="text-sm font-medium">
-            Proposed cases ({selected.size} of {pending.length} selected)
-          </h3>
-          <div className="flex gap-3 text-xs text-muted">
-            <button type="button" onClick={() => setSelected(new Set(pending.map((c) => c.id)))}>
-              all
-            </button>
-            <button
-              type="button"
-              onClick={() => setSelected(new Set(pending.filter(isFailing).map((c) => c.id)))}
-              title="Select only the cases the last score got wrong"
-            >
-              failing
-            </button>
-            <button type="button" onClick={() => setSelected(new Set())}>
-              none
-            </button>
+      {hasBatch && (
+        <section className="rounded-lg border border-line bg-surface p-4">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="text-sm font-medium">
+              Proposed cases ({selected.size} of {pending.length} selected)
+            </h3>
+            <div className="flex gap-3 text-xs text-muted">
+              <button type="button" onClick={() => setSelected(new Set(pending.map((c) => c.id)))}>
+                all
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelected(new Set(pending.filter(isFailing).map((c) => c.id)))}
+                title="Select only the cases the last score got wrong"
+              >
+                failing
+              </button>
+              <button type="button" onClick={() => setSelected(new Set())}>
+                none
+              </button>
+            </div>
           </div>
-        </div>
-        <p className="mb-3 text-xs text-muted">
-          Scoring, and the LLM improve, act on exactly these. Caught / missed is from the latest
-          score of this batch.
-        </p>
-        <ul className="space-y-1.5">
-          {pending.map((c) => (
-            <li key={c.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-              <input
-                type="checkbox"
-                checked={selected.has(c.id)}
-                onChange={() => toggle(c.id)}
-                aria-label={`select ${c.id}`}
-              />
-              <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
-                {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
-              </Badge>
-              <span className="font-mono">{c.id}</span>
-              <span className="font-mono text-xs text-muted">{c.path}</span>
-              {c.holdout && (
-                <Badge
-                  tone="neutral"
-                  title="Holdout — scored on every run, but the gate can't target it and the improve loop never learns from it"
-                >
-                  holdout
+          {/* Honest about scope: scoring runs the whole batch (regressions have to show), while the
+              LLM sharpen and the gate act on just the selected subset. The old copy said scoring
+              acted on "exactly these", which the batch scope does not. */}
+          <p className="mb-3 text-xs text-muted">
+            The checkboxes drive the LLM sharpen and the gate&rsquo;s targets. Scoring runs the whole
+            batch, so a regression elsewhere still shows. Caught / missed is from the latest score.
+          </p>
+          <ul className="space-y-1.5">
+            {pending.map((c) => (
+              <li key={c.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selected.has(c.id)}
+                  onChange={() => toggle(c.id)}
+                  aria-label={`select ${c.id}`}
+                />
+                <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
+                  {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
                 </Badge>
-              )}
-              <span className="ml-auto">
-                <CaseStatus c={c} />
-              </span>
-            </li>
-          ))}
-        </ul>
-      </section>
+                <span className="font-mono">{c.id}</span>
+                <span className="font-mono text-xs text-muted">{c.path}</span>
+                {c.holdout && (
+                  <Badge
+                    tone="neutral"
+                    title="Holdout — scored on every run, but the gate can't target it and the improve loop never learns from it"
+                  >
+                    holdout
+                  </Badge>
+                )}
+                <span className="ml-auto">
+                  <CaseStatus c={c} />
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="space-y-3 rounded-lg border border-line bg-surface p-4">
-        <div>
-          <h3 className="text-sm font-medium">1 · Score against these</h3>
-          <p className="mt-0.5 mb-2 text-xs text-muted">
-            Runs the branch's guidance over the proposed cases. Missed / falsely-flagged cases are
-            what to sharpen next; a merged case that regressed is what to protect.
-          </p>
-          <LaunchButton
-            kind="eval"
-            request={{ skill_id: skillId, scope: 'batch' }}
-            label="Score against these"
-            onDone={(job) => {
-              const r = job.result as Record<string, unknown>
-              setBatchRun(String(r.run_id ?? '') || null)
-              setNotice(
-                `Scored: recall ${fmt(r.recall)} · fp ${fmt(r.fp_rate)}` +
-                  (r.run_id ? ` — open the run to see each case.` : ''),
-              )
-            }}
-          />
-          {batchRun && (
-            <Link
-              to={`/runs/${encodeURIComponent(batchRun)}`}
-              className="ml-3 text-xs text-accent underline"
-            >
-              open the run →
-            </Link>
-          )}
-        </div>
-
-        <div className="border-t border-line pt-3">
-          <h3 className="text-sm font-medium">2 · Sharpen the guidance</h3>
-          <p className="mt-0.5 mb-2 text-xs text-muted">
-            By hand on the branch (the command above), or draft a change with the LLM from the cases
-            you selected. Either way it lands on the branch and is re-scored below.
-          </p>
-          <LaunchButton
-            kind="improve"
-            request={{ skill_id: skillId, run_id: batchRun, cases: [...selected] }}
-            label="Improve from selected"
-            onDone={(job) => {
-              const r = job.result as Record<string, unknown>
-              const body = String(r.body ?? '')
-              const pages = (r.pages ?? {}) as Record<string, string>
-              if (!body && !Object.keys(pages).length) {
-                setNotice('The drafter proposed no change.')
-                return
-              }
-              setDraft({
-                body,
-                pages,
-                rationale: String(r.rationale ?? ''),
-                selectedMissing: (r.selected_missing ?? []) as string[],
-              })
-            }}
-          >
-            <p className="text-xs text-muted">
-              Drafts from the {selected.size} selected case(s)
-              {batchRun ? '' : ' — score them first for the drafter to see what fails'}.
+        {hasBatch && (
+          <div>
+            <h3 className="text-sm font-medium">1 · Score the promoted batch</h3>
+            <p className="mt-0.5 mb-2 text-xs text-muted">
+              Runs the branch&rsquo;s guidance over every promoted case. Missed / falsely-flagged
+              cases are what to sharpen next; a merged case that regressed is what to protect.
             </p>
-          </LaunchButton>
-          {draft && (
-            <DraftReview
-              draft={draft}
-              staging={save.isPending}
-              readOnly={readOnly}
-              error={save.error}
-              onStage={() =>
-                save.mutate(
-                  { skillId, edit: { body: draft.body, pages: draft.pages } },
-                  {
-                    onSuccess: () => {
-                      setDraft(null)
-                      setNotice('Staged onto the branch. Re-score to see if it caught them.')
-                    },
-                  },
+            <LaunchButton
+              kind="eval"
+              request={{ skill_id: skillId, scope: 'batch' }}
+              label="Score the promoted batch"
+              onDone={(job) => {
+                const r = job.result as Record<string, unknown>
+                setBatchRun(String(r.run_id ?? '') || null)
+                setNotice(
+                  `Scored: recall ${fmt(r.recall)} · fp ${fmt(r.fp_rate)}` +
+                    (r.run_id ? ` — open the run to see each case.` : ''),
                 )
-              }
-              onDiscard={() => setDraft(null)}
+              }}
             />
+            {batchRun && (
+              <Link
+                to={`/runs/${encodeURIComponent(batchRun)}`}
+                className="ml-3 text-xs text-accent underline"
+              >
+                open the run →
+              </Link>
+            )}
+          </div>
+        )}
+
+        <div className={hasBatch ? 'border-t border-line pt-3' : undefined}>
+          <h3 className="text-sm font-medium">{step.sharpen} · Sharpen the guidance</h3>
+          {hasBatch ? (
+            <>
+              <p className="mt-0.5 mb-2 text-xs text-muted">
+                By hand on the branch (the command above), or draft a change with the LLM from the
+                cases you selected. Either way it lands on the branch and is re-scored above.
+              </p>
+              <LaunchButton
+                kind="improve"
+                request={{ skill_id: skillId, run_id: batchRun, cases: [...selected] }}
+                label="Improve from selected"
+                onDone={onDrafted}
+              >
+                <p className="text-xs text-muted">
+                  Drafts from the {selected.size} selected case(s)
+                  {batchRun ? '' : ' — score them first for the drafter to see what fails'}.
+                </p>
+              </LaunchButton>
+            </>
+          ) : (
+            <>
+              <p className="mt-0.5 mb-2 text-xs text-muted">
+                No promoted batch waiting — sharpening runs against the merged cases the last run
+                got wrong. Draft with the LLM here, or edit the files by hand on the branch (the
+                command above). To sharpen against fresh signal instead,{' '}
+                <Link to="/triage" className="underline">
+                  promote cases in Triage
+                </Link>
+                .
+              </p>
+              {latestRunId ? (
+                <LaunchButton
+                  kind="improve"
+                  request={{ skill_id: skillId, run_id: latestRunId }}
+                  label="Draft from the last run"
+                  onDone={onDrafted}
+                >
+                  <p className="text-xs text-muted">
+                    Drafts from every case the last run failed. For a finer, multi-file hand edit,
+                    the <em>Edit</em> tab has the full editor.
+                  </p>
+                </LaunchButton>
+              ) : (
+                <p className="text-xs text-muted italic">
+                  Never scored — run evals from the header first, so the drafter can see what the
+                  guidance currently gets wrong.
+                </p>
+              )}
+            </>
           )}
+          {review}
         </div>
 
         <div className="border-t border-line pt-3">
-          <h3 className="text-sm font-medium">3 · Gate &amp; propose</h3>
+          <h3 className="text-sm font-medium">{step.gate} · Gate &amp; propose</h3>
           <p className="mt-0.5 mb-2 text-xs text-muted">
-            When the selected cases pass and nothing regressed, prove it: the gate scores base vs the
-            branch over the union, and the cases you selected must pass.
+            When the cases pass and nothing regressed, prove it: the gate scores base vs the branch
+            over the union{hasBatch ? ', and the cases you selected must pass' : ''}.
           </p>
           {heldSelected.length > 0 && (
             <p className="mb-2 text-xs text-muted">
