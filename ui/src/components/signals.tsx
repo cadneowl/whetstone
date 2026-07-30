@@ -120,3 +120,66 @@ export function SignalBadge({ id, short }: { id: string | null | undefined; shor
     </Badge>
   )
 }
+
+type Provenance = { source?: string; ref?: string | null; human_signal?: string | null }
+
+/**
+ * Where a case came from — a merge request, a Jira defect, a live review — as a compact chip.
+ *
+ * The `human_signal` says what the evidence *claims* (SignalBadge); this says where it *came from*,
+ * which is the thing a person scanning the improve loop wants: proof the cases are real MR/Jira/
+ * review signal rather than a cryptic id. Reads the `ref` for the concrete reference (MR number,
+ * issue key) so the chip is a pointer, not just a category.
+ */
+export function SourceBadge({ provenance }: { provenance?: Provenance | null }) {
+  const s = sourceOf(provenance)
+  if (!s) return null
+  return (
+    <Badge tone={s.tone} title={s.title}>
+      {s.text}
+    </Badge>
+  )
+}
+
+function sourceOf(
+  p?: Provenance | null,
+): { text: string; tone: SignalMeta['tone']; title: string } | null {
+  if (!p) return null
+  const source = p.source ?? 'manual'
+  const ref = p.ref ?? ''
+  if (source.includes('issue')) {
+    const key = ref.match(/^[A-Z][A-Z0-9]+-\d+/)?.[0]
+    return {
+      text: key ?? 'defect',
+      tone: 'warn',
+      title: `Escaped defect${ref ? ` — ${ref}` : ''}. Review missed it and it shipped — the strongest recall evidence there is.`,
+    }
+  }
+  if (source === 'skill_review' || source === 'review_miss') {
+    return {
+      text: 'review',
+      tone: 'accent',
+      title: `From a live review${ref ? ` of ${ref}` : ''} — the skill's own output on a real change, ruled by a person.`,
+    }
+  }
+  if (source.startsWith('gitlab') || source === 'merge_request') {
+    const mr = ref.match(/![0-9]+/)?.[0]
+    return {
+      text: mr ? `MR ${mr}` : 'MR',
+      tone: 'accent',
+      title: `Mined from merge request${ref ? ` ${ref}` : ''}.`,
+    }
+  }
+  if (source.startsWith('synthetic')) {
+    return { text: 'synthetic', tone: 'neutral', title: 'Generated, not mined from review history.' }
+  }
+  if (source === 'manual') {
+    return {
+      text: 'manual',
+      tone: 'neutral',
+      title: 'Written by hand rather than derived from review history.',
+    }
+  }
+  // An unrecognized source shows raw, so a new signal kind never silently disappears from a row.
+  return { text: source, tone: 'neutral', title: ref || source }
+}

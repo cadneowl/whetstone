@@ -14,6 +14,7 @@ import { Guidance } from './Guidance'
 import { GuidanceDiff } from './GuidanceDiff'
 import { LaunchButton } from './LaunchButton'
 import { Badge, ErrorNote, Loading, when } from './primitives'
+import { SourceBadge } from './signals'
 
 /** The skill's entry point. Every other guidance file is addressed by its path within the folder. */
 const SKILL_FILE = 'SKILL.md'
@@ -750,6 +751,7 @@ function PinnedCases({
               {c.kind === 'should_catch' ? 'catch' : 'no flag'}
             </Badge>
             <span className="font-mono">{c.id}</span>
+            <SourceBadge provenance={c.provenance} />
             <span className="font-mono text-muted">{c.path}</span>
             {/* Without this the list is decoration: which of these the skill currently gets wrong
                 is the only thing that makes it worth reading while rewriting a rule. */}
@@ -782,6 +784,7 @@ function PinnedCases({
                   {c.kind === 'should_catch' ? 'catch' : 'no flag'}
                 </Badge>
                 <span className="font-mono">{c.id}</span>
+                <SourceBadge provenance={c.provenance} />
                 <span className="font-mono text-muted">{c.path}</span>
                 <span className="ml-auto">
                   <CaseVerdict c={c} />

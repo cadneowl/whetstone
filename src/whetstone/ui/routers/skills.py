@@ -100,6 +100,7 @@ def _promoted_but_unmerged(
                 id=case.id,
                 kind=case.kind,
                 path=case.change.files[0].path if case.change.files else "",
+                provenance=case.provenance,
                 last_recall=run.confusion.recall if run else None,
                 last_fp_rate=run.confusion.fp_rate if run else None,
                 holdout=partition_of(case.id, fraction) == "holdout",

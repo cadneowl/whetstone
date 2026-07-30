@@ -2993,6 +2993,13 @@ export interface components {
              * @default
              */
             path: string;
+            /**
+             * @default {
+             *       "semantic_drafted_by": "",
+             *       "source": "manual"
+             *     }
+             */
+            provenance: components["schemas"]["Provenance"];
         };
         /**
          * Plan

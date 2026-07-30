@@ -10,6 +10,7 @@ import {
 } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, ErrorNote, score } from '@/components/primitives'
+import { SourceBadge } from '@/components/signals'
 
 /**
  * The improve workspace: one place to take a skill from "triage promoted some cases it fails on"
@@ -152,7 +153,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                 <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
                   {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
                 </Badge>
-                <span className="font-mono">{c.id}</span>
+                <SourceBadge provenance={c.provenance} />
                 <span className="font-mono text-xs text-muted">{c.path}</span>
                 {c.holdout && (
                   <Badge

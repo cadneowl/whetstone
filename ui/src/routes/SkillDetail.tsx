@@ -13,6 +13,7 @@ import { HealthPanel } from '@/components/HealthPanel'
 import { ImproveWorkspace } from '@/components/ImproveWorkspace'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
+import { SourceBadge } from '@/components/signals'
 
 // The tab keys, in strip order. An unknown `?tab=` value coerces to the first — a blank content
 // pane under a full tab strip reads as a broken page, and a bad link should land somewhere real.
@@ -79,9 +80,9 @@ export function SkillDetail() {
 
         <Tabs.Content value="guidance">
           <TabIntro>
-            The rules as they stand on <code className="font-mono">main</code> — the exact prose the
-            reviewer is given, and the only thing the improve loop ever changes. Each rule shows the
-            merge requests that justified it.
+            The rules as they stand on disk — the exact prose the reviewer is given, and the only
+            thing the improve loop ever changes. Each rule shows the merge requests that justified
+            it.
           </TabIntro>
           <Guidance detail={data} />
         </Tabs.Content>
@@ -273,9 +274,9 @@ function EvalLauncher({ detail, activeTab }: { detail: Detail; activeTab: string
   if (merged > 0)
     scopes.push({
       id: 'working',
-      label: 'Working tree',
+      label: 'Eval corpus',
       count: merged,
-      hint: `${merged} merged case(s), scored as the guidance sits on disk.`,
+      hint: `${merged} case(s) in the eval corpus, scored against the guidance on disk.`,
     })
 
   const [scope, setScope] = useState<FrontScope>(scopes[0]?.id ?? 'working')
@@ -340,7 +341,7 @@ function PendingCaseList({ cases }: { cases: PendingCase[] }) {
             <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
               {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
             </Badge>
-            <span className="font-mono">{c.id}</span>
+            <SourceBadge provenance={c.provenance} />
             <span className="font-mono text-xs text-muted">{c.path}</span>
             <span className="ml-auto tabular text-muted">
               {c.kind === 'should_catch'
@@ -414,6 +415,7 @@ function CaseTable({ skillId, cases }: { skillId: string; cases: CaseSummary[] }
                 {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
               </Badge>
               <span className="font-mono">{c.id}</span>
+              <SourceBadge provenance={c.provenance} />
               {c.tier === 'archive' && (
                 <Badge tone="neutral" title="Retired: drawn at low weight as regression insurance">
                   archived
