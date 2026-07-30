@@ -118,7 +118,7 @@ def _attention(
     # between them.
     promoted = staging.promoted_skill(config, skill.id)
     under_test = skill if promoted is None else staging.merge_cases(skill, promoted)
-    # Compared against the batch-enriched skill, so a run that scored the promoted cases is not
+    # Compared against the skill enriched with its promoted cases, so a run that scored them is not
     # called stale for covering *more* than the working tree — which is the normal state right
     # after triage, and would otherwise answer "re-run the evals" to a run that just finished.
     stale = record is not None and record.skill_hash != skill_hash(under_test)
@@ -136,8 +136,8 @@ def _attention(
     saturated = discrimination(curated, probe).flagged if probe else []
     drift_report = drift.latest(skill.id)
     drift_uncovered = None if drift_report is None else drift_report.uncovered_fraction
-    # Anchor and clocks read the working-tree corpus — cases promoted to a batch branch are not
-    # published yet, and a clock that starts ticking on unmerged work would nag about a corpus
+    # Anchor and clocks read the working-tree corpus — cases still under `promoted_cases/` are not
+    # graduated yet, and a clock that starts ticking on ungraduated work would nag about a corpus
     # that does not exist. Same facts the health panel's cadence section reads.
     cadence_due = [
         c.label

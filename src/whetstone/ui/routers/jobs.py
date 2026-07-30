@@ -88,13 +88,13 @@ class EvalRequest(BaseModel):
     #
     #   working — the files on disk, which is what `eval run` has always meant.
     #   draft   — `whetstone/skill/<id>`: guidance edited but not merged.
-    #   batch   — `whetstone/cases/batch-N`: eval cases promoted from triage but not merged.
+    #   batch   — the promoted cases under `skills/<id>/promoted_cases/`, overlaid on the guidance.
     #
-    # `batch` is the one that was missing, and its absence made triage a dead end. Promoting writes
-    # cases to a branch and never to the working tree, so the cases an operator had just spent an
-    # afternoon curating were invisible to every way of running the skill — the only route to
-    # "does the reviewer actually catch these?" was to merge the merge request first and find out
-    # afterwards. That is precisely backwards: the point of promoting a case is to test against it.
+    # `batch` is the one that was missing, and its absence made triage a dead end. Before the
+    # promoted set was scorable, the cases an operator had just spent an afternoon curating were
+    # invisible to every way of running the skill — the only route to "does the reviewer actually
+    # catch these?" was to graduate and gate first and find out afterwards. That is precisely
+    # backwards: the point of promoting a case is to test against it.
     scope: EvalScope = "working"
     # The backend for this one launch. Empty is the console default — the header picker, or `[llm]`.
     # A provider here (one Whetstone knows) runs just this step on that model instead, so a single
@@ -1443,13 +1443,13 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
     The whole folder is loaded, not just `SKILL.md`: a branch may add or change eval cases too, and
     "run the full suite on my draft" means the suite that branch carries.
 
-    `batch` is the composition the loop turns on. Promoted cases and a staged draft live on two
-    different branches, and scoring either one alone answers the wrong question: the batch branch
-    carries the new cases but the *merged* guidance, so it re-measures a version nobody is working
-    on, while the skill branch carries the draft and none of the new cases — literally zero, which
+    `batch` is the composition the loop turns on. The promoted cases live under `promoted_cases/` on
+    disk while the draft guidance lives on the skill branch, and scoring either alone answers the
+    wrong question: the working-tree/merged guidance re-measures a version nobody is working on,
+    while the skill branch carries the draft and none of the promoted cases — literally zero, which
     is what the console offered to spend a model call on. So the guidance comes from wherever the
-    operator is editing and the cases come from the batch, which is the only pairing that answers
-    "does my rewrite handle the cases I just curated?".
+    operator is editing and the cases come from the promoted set overlaid onto it, which is the only
+    pairing that answers "does my rewrite handle the cases I just curated?".
     """
     if request.scope == "working":
         return _skill(root, request.skill_id), None

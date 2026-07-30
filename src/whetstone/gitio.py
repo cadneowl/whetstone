@@ -152,63 +152,6 @@ def branch_name(kind: str, slug: str, *, prefix: str = DEFAULT_BRANCH_PREFIX) ->
     return f"{prefix}{kind}/{_slugify(slug)}"
 
 
-class Batch(BaseModel):
-    """An accumulating branch of promoted cases, and whether it is still open."""
-
-    branch: str
-    exists: bool
-    proposed: bool  # has a remote-tracking ref — already pushed
-    commits: int  # commits ahead of the base branch
-
-
-def pending_batch(
-    repo: str | Path,
-    *,
-    kind: str = "cases",
-    base: str = "main",
-    prefix: str = DEFAULT_BRANCH_PREFIX,
-    remote: str = "origin",
-) -> Batch:
-    """The branch the next promotion should land on.
-
-    Promotions accumulate so a triage session produces one merge request rather than one per case.
-    Which batch is "open" is derived rather than stored: a branch that already has a
-    remote-tracking ref has been pushed, so the next promotion starts the following number. That
-    lookup is local — remote-tracking refs live in the repo — so this never touches the network.
-    """
-    # One `for-each-ref` rather than one `rev-parse` per batch: the number of batches grows without
-    # bound over a repo's life, and this runs on every triage page load.
-    stem = f"{prefix}{kind}/batch-"
-    existing = _batch_numbers(repo, f"refs/heads/{stem}*", len(f"refs/heads/{stem}"))
-    number = max(existing, default=0)
-
-    if number == 0:
-        return Batch(branch=f"{prefix}{kind}/batch-1", exists=False, proposed=False, commits=0)
-
-    branch = f"{prefix}{kind}/batch-{number}"
-    if ref_exists(repo, f"refs/remotes/{remote}/{branch}"):
-        nxt = f"{prefix}{kind}/batch-{number + 1}"
-        return Batch(branch=nxt, exists=False, proposed=False, commits=0)
-
-    return Batch(
-        branch=branch, exists=True, proposed=False, commits=commits_ahead(repo, base, branch)
-    )
-
-
-def _batch_numbers(repo: str | Path, pattern: str, offset: int) -> list[int]:
-    """The numeric suffixes of existing batch branches, ignoring anything unparseable."""
-    try:
-        out = _text(repo, "for-each-ref", "--format=%(refname)", pattern)
-    except GitError:
-        return []
-    numbers: list[int] = []
-    for line in out.splitlines():
-        suffix = line[offset:]
-        if suffix.isdigit():
-            numbers.append(int(suffix))
-    return numbers
-
-
 def commits_ahead(repo: str | Path, base: str, branch: str) -> int:
     """How many commits `branch` has that `base` does not. Zero for an unknown ref."""
     try:

@@ -222,7 +222,8 @@ def undo_verdict(
 
     A candidate somebody has already promoted or rejected is left alone: undoing a ruling is
     correcting a mistake here, not reaching into the queue to overrule a decision someone else made
-    there — and a promotion is already a commit on a branch, which this cannot revert anyway.
+    there — a promoted case is un-done from triage (which removes its `promoted_cases/` folder), not
+    by retracting the long-decided ruling that minted its candidate.
     """
     with reviews.lock:
         record = _load(reviews, review_id)

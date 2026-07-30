@@ -520,8 +520,9 @@ function FindingCard({
  *
  * The review screen can only rule on findings the skill *produced*; a false negative — the skill
  * staying silent where it should have spoken — has no finding to thumb-down. This is that path: pick
- * the file (and optionally the lines), describe what should have been caught, and it commits a
- * `should_catch` case straight onto the batch branch, exactly as promoting a confirmed finding does.
+ * the file (and optionally the lines), describe what should have been caught, and it writes a
+ * `should_catch` case straight to `promoted_cases/` on disk, exactly as promoting a confirmed
+ * finding does.
  */
 function MissedCasePanel({
   reviewId,
@@ -598,9 +599,10 @@ function MissedCasePanel({
         </button>
       </div>
       <p className="mt-1 text-xs text-muted">
-        The skill stayed silent where it should have spoken. This commits a{' '}
-        <span className="font-mono">should catch</span> case straight to the batch — there is no
-        finding to rule on, so your description is the ground truth it will be judged against.
+        The skill stayed silent where it should have spoken. This writes a{' '}
+        <span className="font-mono">should catch</span> case straight to{' '}
+        <span className="font-mono">promoted_cases/</span> — there is no finding to rule on, so your
+        description is the ground truth it will be judged against.
       </p>
 
       {committed ? (

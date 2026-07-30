@@ -826,11 +826,11 @@ class SkillDetail(BaseModel):
     # against the working tree while the textarea above it holds a staged branch, so a red MISSED
     # can sit directly under a change that already fixed it.
     scored_by: RunSummary | None = None
-    # Cases promoted from triage and sitting on the batch branch, not yet merged. Listed apart from
-    # `cases` because they are not on disk and nothing has scored them — but listed at all because
-    # they were invisible everywhere: an operator spent an afternoon curating cases, then opened the
-    # skill that is supposed to be constrained by them and saw only the three that were already
-    # there, with nothing on the screen admitting the others existed.
+    # Cases promoted from triage, waiting under `promoted_cases/` to be graduated. Listed apart from
+    # `cases` because they are not in the eval corpus yet and nothing may have scored them — but
+    # listed at all because they were invisible everywhere: an operator spent an afternoon curating
+    # cases, then opened the skill that is supposed to be constrained by them and saw only the three
+    # that were already there, with nothing on the screen admitting the others existed.
     pending_cases: list[PendingCase] = []
 
 

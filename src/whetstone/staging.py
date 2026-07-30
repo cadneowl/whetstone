@@ -32,8 +32,8 @@ from whetstone.gitio import Author, GitError, branch_name, read_at, ref_exists, 
 from whetstone.naming import describe_unsafe, is_safe_segment
 from whetstone.vcs import export_tree
 
-# One branch per skill, so a session of edits accumulates into a single proposal rather than one
-# branch per save. Matches how triage accumulates cases onto a batch branch.
+# One branch per skill, so a session of guidance edits accumulates into a single proposal rather
+# than one branch per save.
 BRANCH_KIND = "skill"
 
 
@@ -111,13 +111,14 @@ def with_promoted_cases(config: Config, skill: Skill) -> Skill:
     `skill_hash`, so a gate that scored one case set and a publish check that hashed another can
     never match, and *Propose* stays disabled forever with a passing gate on screen.
 
-    It exists because promoted cases live on `whetstone/cases/batch-N` while a guidance draft lives
-    on `whetstone/skill/<id>`, and neither branch has the other's work. Gating the skill branch
-    alone therefore compared two guidance versions over zero of the cases just curated — a
-    comparison that cost two model calls per case, of which there were none, and proved nothing.
+    It exists because promoted cases live under `skills/<id>/promoted_cases/` on disk while a
+    guidance draft lives on `whetstone/skill/<id>`, and neither carries the other's work. Gating the
+    skill branch alone therefore compared two guidance versions over zero of the cases just
+    curated — a comparison that cost two model calls per case, of which there were none, and
+    proved nothing.
 
-    Best-effort: no git, no batch, or a batch that does not carry this skill all mean "nothing to
-    add". Enriching is an improvement to the evidence, never a precondition for having any.
+    Best-effort: no promoted cases means "nothing to add". Enriching is an improvement to the
+    evidence, never a precondition for having any.
     """
     promoted = promoted_skill(config, skill.id)
     return skill if promoted is None else merge_cases(skill, promoted)
