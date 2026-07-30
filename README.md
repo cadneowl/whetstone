@@ -154,9 +154,9 @@ flowchart LR
 |---|---|---|
 | ① Production signal | GitLab MRs, shipped defects, dismissed findings | `corpus pull`, the `[watch]` connector |
 | ② Mine and Triage | a person promotes candidates to eval cases | `corpus/builder.py`, **Triage** screen |
-| ③ Eval Run | the reviewer scored against the corpus | `service.record_eval`, **Skill → Runs** |
-| ④ Improve | clustered failures → a drafted guidance change | `improve/` step, **Skill → Edit → Draft a change** |
-| ⑤ Gate | no regressions; targeted cases must pass | `service.record_gate`, **Skill → Edit → Run the gate** |
+| ③ Eval Run | the reviewer scored against the corpus | `service.record_eval`, **Skill → header → Run evals** |
+| ④ Improve | clustered failures → a drafted guidance change | `improve/` step, **Skill → Improve** (or Edit → Draft a change) |
+| ⑤ Gate | no regressions; targeted cases must pass | `service.record_gate`, **Skill → Improve / Edit → Run the gate** |
 | ⑥ Propose and Ship | the merged guidance | *Propose MR*, refused without a passing gate (C6) |
 
 ### Layer 1 — Measurement integrity (fix the instrument first)
@@ -1334,21 +1334,31 @@ whetstone corpus pull --base-url https://gitlab.acme.com --project acme/payments
 
 ### The screens
 
-The nav runs in loop order — what needs doing, the signal behind it, the skills it changes, the
-evidence it produced:
+**Status** leads — the fleet's state of affairs on top — then the nav runs in loop order: what
+needs doing, the signal behind it, the skills it changes, the evidence it produced:
 
 | Route | Screen |
 |---|---|
+| `/status` | **Status** — the fleet in one look: rot totals, judge accuracy, watch state, every skill worst-first |
 | `/` | **Inbox** — what wants attention across every skill, ranked (the landing screen) |
 | `/triage` | Candidate queue |
 | `/reviews` · `/reviews/<id>` | Live reviews, and the drill-down where findings are ruled on |
 | `/skills` | Skills index — **worst first**, with a rot strip per skill |
-| `/skills/<id>` | Skill detail — guidance, **edit**, cases, runs, **health**, metadata |
+| `/skills/<id>` | Skill detail — guidance, **edit**, **improve**, cases, history, **health**, metadata |
 | `/skills/<id>/cases/<case-id>` | Eval case — diff, expectations, history, baseline verdict |
 | `/runs` · `/runs/<run-id>` | Run history, and the drill-down: findings, judge verdicts, train/holdout, rulings |
 | `/judge` | The deployment judge — doctrine, identity, accuracy vs the bar |
 
 Every URL is deep-linkable. Paste a run link into a merge request and it opens where you left it.
+
+#### Status — the fleet in one look
+
+The deployment's state of affairs on top, rather than one skill at a time behind Skills → Health.
+It sums signals the rest of the product already computes: the **fleet** rot totals (how many skills
+are drifting, saturated, overdue a pass, or carrying a dead rule) and how many need a person; the
+**judge**'s accuracy against its bar; the **watch** state with a *Check now*; the model and git
+strip; and every skill **worst-first**, each row linking into its own Health tab. No number here is
+new — it is the scattered signals summed into one screen. Built entirely from existing endpoints.
 
 #### Skills index
 
@@ -1382,8 +1392,8 @@ exercising it, so they would pass whether or not the guidance works.
 **Eval cases** lists each case with its kind, the file it concerns, its provenance, and how it fared
 last run. A **flaky** badge means trials disagreed — unstable, as opposed to simply wrong.
 
-**Runs** is this skill's history, newest first. **Metadata** shows owner, declared rules, trigger
-labels, and references.
+**History** is this skill's runs, newest first (the tab is named History because the top nav already
+has a Runs). **Metadata** shows owner, declared rules, trigger labels, and references.
 
 #### Health — one skill's state of affairs on one surface
 
@@ -1397,11 +1407,12 @@ launch buttons; the **case index** and its staleness; the **judge** and its accu
 reads. A section whose measurement has not been run yet says so and offers the button to run it —
 a health surface that hid what it could not see would read as healthier than it is.
 
-#### Edit — changing what the reviewer does
+#### Edit — the raw guidance editor
 
-The only screen that changes a skill's behaviour. A markdown box beside a live preview, with the
-eval cases that constrain the rule pinned underneath — a rewrite is only as trustworthy as what
-tests it, and a skill with two cases has a gate that will pass on almost anything.
+A markdown box per guidance file beside a live preview, with the eval cases that constrain the rule
+pinned underneath — a rewrite is only as trustworthy as what tests it, and a skill with two cases
+has a gate that will pass on almost anything. This is the hand-editing surface; the **Improve** tab
+(below) wraps the same stage → gate → propose steps into a guided, case-driven loop.
 
 **Stage on branch** commits to `whetstone/skill/<id>` through git plumbing: the working tree is
 never touched, `main` is never written, and a `version` bump lands once per proposal rather than
@@ -1416,12 +1427,8 @@ Proposal   whetstone/skill/rust-errors   v3 · 1 commit ahead of main      [not 
 
   this guidance has never been gated — run one to see whether it is an improvement
 
-  The console cannot launch runs yet, so gate it from a terminal:
-    whetstone eval gate \
-      --repo . \
-      --skill-path skills/rust-errors \
-      --base-ref main \
-      --candidate-ref whetstone/skill/rust-errors
+  Did that help? The gate scores base vs the branch over the same cases.
+    [ Run the gate ]      or run it yourself ▸
 
   [ Propose MR ]   ← disabled
 ```
@@ -1438,6 +1445,21 @@ never hidden: the badge reads **gated, with a caveat** and the later failure is 
 The same check runs server-side at `POST /api/git/propose`, so a branch edited outside the console
 faces it too. A concurrent write is a `409`, shown as what the branch holds versus what this tab
 expected, with an explicit *load what is on the branch* — nothing is overwritten silently.
+
+#### Improve — the guided loop
+
+One surface that takes a skill from *"triage promoted cases it fails on"* to a gated, proposable
+change, so the loop is not spread across three screens. Top to bottom: the **branch** (with a
+`git worktree` command to check it out and hand-edit in your own editor); the **proposed cases**
+with checkboxes; then the numbered steps — **score the promoted batch**, **sharpen** (draft with
+the LLM from the selected cases, or by hand on the branch), **gate & propose**. The branch is the
+one artifact: hand edits and LLM drafts both commit to `whetstone/skill/<id>`, and the working tree
+is never touched.
+
+It is a hub, not a dead end. With no promoted batch — the state the inbox's *improve* and *propose*
+actions arrive in — the same loop runs against the merged cases the last run failed, and the branch,
+sharpen and gate/propose steps are still there. Holdout cases are scored but kept out of the gate's
+targeted set, since a change may not claim to fix a case the loop never saw.
 
 #### Case detail
 
@@ -1648,8 +1670,9 @@ suppresses them at the source.) The chips double as the legend.
 **Diff** highlights the current region. Drag across the **line numbers** to change it.
 
 **Expectation** is the form: what will actually be written. **As generated** keeps the builder's
-text beside the editable **semantic** field, which stays badged **unedited** until you change it —
-the job is to rewrite the signal, not to accept it. Promote/Validate/Reject stay pinned to the
+text beside the editable **Expected finding** field (the case's `semantic` — the ground truth every
+finding is judged against), which stays badged **unedited** until you change it — the job is to
+rewrite the signal, not to accept it. Promote/Validate/Reject stay pinned to the
 bottom of the pane; on a long form, having to scroll to say yes is how a queue stops getting worked.
 
 Each pane scrolls independently and the whole workspace is one viewport tall, so a hundred queued
@@ -1665,9 +1688,9 @@ candidates cannot push the diff below the fold.
    matched.
 4. **Fix the region.** Drag on the diff, or type the line numbers. Clear either end for "whole file".
    This is the field most likely to be wrong in an auto-generated candidate.
-5. **Rewrite the semantic.** Describe the issue as the judge should understand it — a standalone
-   sentence, not a reply to a thread. *"unwrap on the DB result can panic on a normal error path"*,
-   not *"nit: use `?` here"*.
+5. **Rewrite the expected finding.** Describe the issue as the judge should understand it — a
+   standalone sentence, not a reply to a thread. *"unwrap on the DB result can panic on a normal
+   error path"*, not *"nit: use `?` here"*.
 6. **Optionally set a severity floor**, if findings below it should not count.
 7. **Optionally cite a rule.** See below.
 8. **Validate** (optional) to check without writing, or **Promote** to commit.
@@ -1873,9 +1896,9 @@ The console launches everything the CLI does. Nothing in the loop requires a ter
 
 | Where | Does |
 |---|---|
-| **Skill → Runs** | *Run evals* — scores the skill, with live progress and cancellation |
-| **Skill → Edit** | *Draft a change* — improve step writes a proposal into the editor |
-| **Skill → Edit** | *Run the gate* — appears exactly where C6 blocks publishing, and clears it |
+| **Skill → header** | *Run evals* — scores the skill from any tab (working tree or promoted batch), with live progress and cancellation |
+| **Skill → Improve** | the loop, in one place: *Score the promoted batch*, *Improve from selected*, *Run the gate*, *Propose* |
+| **Skill → Edit** | *Draft a change* into the editor, and *Run the gate* — the same steps on the raw multi-file editor |
 | **Skill → Health** | *Baseline probe*, *Drift probe*, *Build/rebuild case index*, *Generate synthetic cases* |
 | **Judge** | *Measure the judge* against the labeled corpus and ratchet the bar |
 | API | `POST /api/jobs/{eval,gate,improve,update,review,baseline,drift,index,synthesize,judge-eval}` |
@@ -1936,9 +1959,11 @@ fp_tol = 0.0
 dir = ".whetstone/gates"           # stored gate records — what gate-before-propose reads
 ```
 
-> **`max_llm_calls_per_run` is declared but inert.** It is parsed and reported, and nothing enforces
-> it: the console cannot launch runs yet, and a CLI run's budget is the operator's own shell. It
-> becomes a real backstop in the phase that adds run orchestration.
+> **`max_llm_calls_per_run` is a preflight warning, not a hard cap.** The launch plan compares the
+> *estimated* call count against it and warns before anything spends — in both the CLI and the
+> console (`preflight.check_budget`) — so the operator confirms with the number in front of them.
+> It is a warning rather than a refusal because the estimate is an upper bound; nothing stops a run
+> mid-flight if the actual calls run over. A hard backstop comes with run-level metering later.
 
 Pointing at a separate company skills repo is `repo = "../company-skills"` — no code change.
 

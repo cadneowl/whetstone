@@ -485,7 +485,14 @@ CLI stay feature-equivalent.
 
 ## 10. The screens
 
-### 10.1 Skills index — the landing page
+> **Note (later phases).** This section records the phase-0 design. Two screens landed on top of it
+> since: the **Inbox** (`/`) is now the console's home — "the work queue is the landing page" below
+> describes the Skills index's sort order, not the entry route — and a top-level **Status** page
+> (`/status`) summarises the fleet's rot, judge accuracy and watch state. The skill-detail tabs also
+> gained **Improve**, the guided score → sharpen → gate → propose loop. See the README's
+> [The screens](../README.md#the-screens) for the current surface.
+
+### 10.1 Skills index — worst first
 
 Card per skill: id, name, owner, version, case split (`8 catch / 5 noflag`), latest recall / fp_rate,
 a recall sparkline over recent runs, and a badge when the last gate failed. Default sort is
