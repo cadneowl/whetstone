@@ -7,7 +7,6 @@ the same seam every other job test uses.
 
 from __future__ import annotations
 
-import subprocess
 import time
 from pathlib import Path
 
@@ -79,16 +78,14 @@ def test_counterfactuals_land_in_triage_and_round_trip_through_promote(
         "/api/candidates/syn-cf-unwrap-in-handler/promote", json={"edits": item["edits"]}
     )
     assert response.status_code == 200, response.text
-    promoted = response.json()
 
-    # The case on the batch branch keeps the synthetic provenance — the audit trail survives.
-    committed = subprocess.run(
-        ["git", "-C", str(repo), "show",
-         f"{promoted['branch']}:skills/rust-errors/eval_cases/syn-cf-unwrap-in-handler/case.yaml"],
-        check=True, capture_output=True, text=True,
-    ).stdout
-    assert "synthetic-counterfactual" in committed
-    assert "rust-errors/unwrap-in-handler" in committed
+    # The promoted case on disk keeps the synthetic provenance — the audit trail survives.
+    written = (
+        repo / "skills" / "rust-errors" / "promoted_cases"
+        / "syn-cf-unwrap-in-handler" / "case.yaml"
+    ).read_text(encoding="utf-8")
+    assert "synthetic-counterfactual" in written
+    assert "rust-errors/unwrap-in-handler" in written
 
 
 def test_rerunning_finds_the_earlier_output_instead_of_duplicating(client: TestClient) -> None:

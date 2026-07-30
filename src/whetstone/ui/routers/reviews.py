@@ -5,7 +5,7 @@ person marks each one right or wrong, and where that ruling turns into something
 enforce.
 
 A ruling mints a **candidate**, not an eval case. The candidate lands in the ordinary triage queue,
-which is where the `semantic` gets rewritten and `promote` renders a real case onto a batch branch.
+which is where the `semantic` gets rewritten and `promote` renders a real case onto disk.
 That extra hop is deliberate for confirmed findings: a case built straight from a finding asserts
 "the reviewer must say *this*", where *this* is the reviewer's own message — so without the rewrite
 it grades the reviewer against its own words and passes forever.
@@ -24,7 +24,6 @@ from whetstone.corpus.model import CandidateCase
 from whetstone.domain.enums import Severity
 from whetstone.domain.run import skill_hash
 from whetstone.domain.skill import Skill
-from whetstone.gitio import GitError
 from whetstone.naming import is_safe_segment
 from whetstone.promote import edits_from
 from whetstone.reviews import (
@@ -41,7 +40,6 @@ from whetstone.ui.errors import Conflict, NotFound, Unprocessable
 from whetstone.ui.routers.candidates import (
     PromoteResponse,
     commit_promotion,
-    get_batch,
     prepare_promotion,
 )
 
@@ -260,7 +258,7 @@ def promote_finding(
 ) -> PromoteResponse:
     """Commit the eval case a ruling minted, without the trip through the triage screen.
 
-    The ruling already wrote a candidate; this promotes it onto the batch branch. For a rejection,
+    The ruling already wrote a candidate; this promotes it onto disk. For a rejection,
     or a confirmation that carried a note, nothing more is needed. For a bare confirmation the
     expectation is still the reviewer's own message — `prepare_promotion` refuses that, and the 422
     it raises is the console's cue to ask for a description in `semantic`.
@@ -278,10 +276,7 @@ def promote_finding(
     except KeyError as exc:
         raise NotFound(str(exc)) from exc
     if entry.decision is not None and entry.decision.status == "promoted":
-        raise Conflict(
-            f"this finding was already promoted as {entry.decision.case_id!r} on "
-            f"{entry.decision.branch!r}."
-        )
+        raise Conflict(f"this finding was already promoted as {entry.decision.case_id!r}.")
 
     edits = edits_from(entry, skill_id=entry.candidate.suggested_skill or record.skill_id)
     if request.semantic.strip():
@@ -294,22 +289,11 @@ def promote_finding(
     if request.severity_min:
         edits.severity_min = _severity(request.severity_min)
 
-    batch = get_batch(config)
     try:
-        prepared = prepare_promotion(config, entry, edits, batch.branch)
-    except (SkillLoadError, GitError) as exc:
+        prepared = prepare_promotion(config, entry, edits)
+    except SkillLoadError as exc:
         raise Unprocessable(str(exc)) from exc
-    return commit_promotion(
-        config,
-        principal,
-        candidate_id=entry.id,
-        prepared=prepared,
-        message=(
-            f"eval case: {prepared.case_id} ({prepared.skill_id})\n\n"
-            f"Promoted from review {review_id}, finding {index}."
-        ),
-        batch=batch,
-    )
+    return commit_promotion(config, principal, candidate_id=entry.id, prepared=prepared)
 
 
 @router.post("/{review_id}/missed", response_model=PromoteResponse, dependencies=[Writable])
@@ -325,7 +309,7 @@ def promote_missed(
     The other half of teaching from a review: ruling handles what the skill *said*, this handles
     what it *should* have said. A candidate is minted from the reviewed change and the human's
     description, written into the queue for traceability, then promoted on the same path a ruling
-    takes — so a missed case and a confirmed one land identically on the batch branch.
+    takes — so a missed case and a confirmed one land identically under `promoted_cases/`.
     """
     if not request.semantic.strip():
         raise Unprocessable(
@@ -365,10 +349,9 @@ def promote_missed(
 
     entry = CandidateEntry(candidate=candidate, diff=candidate.change.to_unified_diff())
     edits = edits_from(entry, skill_id=skill.id)
-    batch = get_batch(config)
     try:
-        prepared = prepare_promotion(config, entry, edits, batch.branch)
-    except (SkillLoadError, GitError) as exc:
+        prepared = prepare_promotion(config, entry, edits)
+    except SkillLoadError as exc:
         # Validated before anything is written, so a bad region (a line the diff never touches)
         # leaves no half-formed candidate littering the triage queue.
         raise Unprocessable(str(exc)) from exc
@@ -380,17 +363,7 @@ def promote_missed(
     (directory / "candidate.json").write_text(
         candidate.model_dump_json(indent=2), encoding="utf-8"
     )
-    return commit_promotion(
-        config,
-        principal,
-        candidate_id=candidate_id,
-        prepared=prepared,
-        message=(
-            f"eval case: {prepared.case_id} ({prepared.skill_id})\n\n"
-            f"Added from review {review_id}: a case the skill missed."
-        ),
-        batch=batch,
-    )
+    return commit_promotion(config, principal, candidate_id=candidate_id, prepared=prepared)
 
 
 def _line_range(

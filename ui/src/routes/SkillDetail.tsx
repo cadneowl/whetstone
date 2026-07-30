@@ -313,21 +313,22 @@ function EvalLauncher({ detail, activeTab }: { detail: Detail; activeTab: string
 }
 
 /**
- * The cases promoted from triage that do not yet live on disk.
+ * The cases promoted from triage, waiting under `promoted_cases/` to be graduated.
  *
- * Rendered flat, not as links: a pending case lives on the batch branch, and the case-detail route
- * loads from the checked-out folder — so a link would 404 until the branch merges.
+ * Rendered flat, not as links: the case-detail route loads from the eval corpus, and a promoted
+ * case is not there yet — so a link would 404 until it is graduated.
  */
 function PendingCaseList({ cases }: { cases: PendingCase[] }) {
   return (
     <div className="mt-5">
       <h3 className="mb-1 text-xs tracking-wide text-muted uppercase">
-        Promoted from triage, not merged yet ({cases.length})
+        Promoted from triage, not graduated yet ({cases.length})
       </h3>
       <p className="mb-2 max-w-3xl text-sm text-muted">
-        On <code className="font-mono">{cases[0]!.branch}</code>. They begin gating changes to this
-        guidance when that branch merges — until then, score them with <em>Promoted cases</em> in
-        the header, then draft a change from that run in the <em>Edit</em> tab.
+        Waiting under <code className="font-mono">promoted_cases/</code>. They begin gating changes
+        to this guidance once graduated into the eval corpus — until then, score them with{' '}
+        <em>Promoted cases</em> in the header, then graduate the ones that earn it on the{' '}
+        <em>Improve</em> tab.
       </p>
       <ul className="space-y-1.5">
         {cases.map((c) => (

@@ -52,6 +52,7 @@ export type FindingVerdict = Schemas['FindingVerdict']
 export type PreparedCase = Schemas['PreparedCase']
 export type PromoteResponse = Schemas['PromoteResponse']
 export type Batch = Schemas['BatchView']
+export type GraduateResult = Schemas['GraduateResult']
 export type EvalKind = CaseEdits['kind']
 export type SkillEdit = Schemas['SkillEdit']
 export type PreparedSkill = Schemas['PreparedSkill']
@@ -294,6 +295,25 @@ export function useSetTier(skillId: string) {
       void client.invalidateQueries({ queryKey: keys.health(skillId) })
       void client.invalidateQueries({ queryKey: keys.skill(skillId) })
       void client.invalidateQueries({ queryKey: keys.proposal(skillId) })
+      void client.invalidateQueries({ queryKey: keys.inbox })
+    },
+  })
+}
+
+/** Graduate a promoted case into the eval corpus (promoted_cases/ → eval_cases/ on disk). */
+export function useGraduate(skillId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (caseId: string) =>
+      send<GraduateResult>(
+        'POST',
+        `/api/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(caseId)}/graduate`,
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.skill(skillId) })
+      void client.invalidateQueries({ queryKey: keys.health(skillId) })
+      void client.invalidateQueries({ queryKey: keys.proposal(skillId) })
+      void client.invalidateQueries({ queryKey: keys.batch })
       void client.invalidateQueries({ queryKey: keys.inbox })
     },
   })

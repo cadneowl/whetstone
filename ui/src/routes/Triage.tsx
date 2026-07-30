@@ -7,7 +7,6 @@ import {
   useDraftSemantic,
   usePreview,
   usePromote,
-  usePropose,
   useQueue,
   useReject,
   useSkills,
@@ -39,8 +38,9 @@ const TRIAGE_INTRO = (
   <>
     Signal mined from merge requests, waiting to become eval cases. For each one: check the evidence
     in the middle, fix the fields on the right — <em>rewrite the expected finding</em>, which arrives
-    as the raw review comment — then Promote. Promoted cases land on a batch branch: score the skill
-    against them to see what it misses before you propose them as one MR. Reject anything the miner
+    as the raw review comment — then Promote. Promoted cases land under{' '}
+    <code className="font-mono">promoted_cases/</code>: score the skill against them to see what it
+    misses, then graduate the ones that earn a place in the eval corpus. Reject anything the miner
     guessed wrong.
   </>
 )
@@ -89,7 +89,6 @@ export function Triage() {
   const preview = usePreview()
   const promote = usePromote()
   const reject = useReject()
-  const propose = usePropose()
 
   // Reset the form whenever the selected candidate changes — keyed on its *content*, not its id.
   //
@@ -135,8 +134,8 @@ export function Triage() {
           onSuccess: (result) => {
             setNotice({
               text:
-                `${result.prepared.case_id} → ${result.branch} (${result.batch_commits} queued)` +
-                (tier === 'archive' ? ' — archived: counted at low weight' : ''),
+                `${result.prepared.case_id} promoted — ${result.promoted} waiting to graduate` +
+                (tier === 'archive' ? ' (archived: counted at low weight)' : ''),
             })
             setIndex((i) => Math.min(i, Math.max(0, items.length - 2)))
           },
@@ -203,34 +202,20 @@ export function Triage() {
             {queue.counts.pending} pending · {queue.counts.promoted} promoted ·{' '}
             {queue.counts.rejected} rejected
           </span>
-          {batch && (
+          {batch && batch.count > 0 && (
             <span className="ml-auto flex items-center gap-3 text-sm">
-              <span className="font-mono text-xs text-muted">{batch.branch}</span>
-              {/* Promoting writes cases to this branch and never to the working tree, so until
-                  this existed the cases just curated were invisible to every way of running the
-                  skill — the only route to "does the reviewer catch these?" was to merge the merge
-                  request and find out afterwards. Which is backwards: testing against a case is
-                  the reason to promote it. */}
-              {batch.commits > 0 && skillOnBatch && (
+              {/* Promoting writes cases to `promoted_cases/` on disk. Score them here to see what
+                  the skill misses before graduating the ones that earn a place in the eval corpus —
+                  testing against a case is the reason to promote it. */}
+              <span className="text-xs text-muted">
+                {batch.count} promoted · waiting to graduate
+              </span>
+              {skillOnBatch && (
                 <LaunchButton
                   kind="eval"
                   request={{ skill_id: skillOnBatch, scope: 'batch' }}
-                  label="Score these cases"
+                  label="Score promoted cases"
                 />
-              )}
-              {batch.commits > 0 && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    propose.mutate(batch.branch, {
-                      onSuccess: (r) => setNotice({ text: r.message, url: r.merge_request_url }),
-                    })
-                  }
-                  disabled={config?.read_only || propose.isPending}
-                  className="rounded-lg border border-accent/50 px-3 py-1 text-accent transition-colors hover:bg-accent/10 disabled:opacity-40"
-                >
-                  Propose {batch.commits} case{batch.commits === 1 ? '' : 's'}
-                </button>
               )}
             </span>
           )}
@@ -261,7 +246,6 @@ export function Triage() {
           )}
         </p>
       )}
-      {propose.error && <ErrorNote error={propose.error} />}
 
       {all.length === 0 ? (
         <Empty>Queue is clear — every candidate has been decided.</Empty>

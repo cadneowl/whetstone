@@ -22,7 +22,7 @@ import yaml
 from pydantic import BaseModel
 
 from whetstone.candidates import CandidateEntry
-from whetstone.core.loader import SkillLoadError, load_skill
+from whetstone.core.loader import PROMOTED_CASES_DIR, SkillLoadError, load_skill
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import CaseTier, EvalCase, EvalKind, Provenance
 from whetstone.naming import describe_unsafe, is_safe_segment
@@ -268,8 +268,10 @@ def prepare(
     case_yaml = render_case_yaml(entry, edits)
     case = _validate(case_yaml, diff, edits)
 
+    # Promotion writes to `promoted_cases/`, not the eval corpus: a promoted case is a candidate for
+    # the corpus, graduated into `eval_cases/` only once a person is satisfied it earns its place.
     skill_dir = Path(skills_root) / edits.skill_id
-    base = skill_dir / "eval_cases" / edits.case_id
+    base = skill_dir / PROMOTED_CASES_DIR / edits.case_id
     files = {
         (base / CASE_FILE).as_posix(): case_yaml,
         (base / DIFF_FILE).as_posix(): diff,

@@ -726,21 +726,16 @@ class CaseSummary(BaseModel):
 
 
 class PendingCase(BaseModel):
-    """An eval case promoted from triage, still on its batch branch.
+    """An eval case promoted from triage and waiting under `promoted_cases/` to be graduated.
 
-    Carries outcomes like `CaseSummary` does. It did not at first, on the reasoning that nothing had
-    ever been scored against a case that is not on disk — true until the console grew a button to
-    score the batch, which is the whole point of promoting cases before merging them. Leaving the
-    fields off then meant the one screen showing these cases could not show what the run had just
-    said about them, which is the only reason to look.
-
-    `None` still means genuinely unscored, and is the state a freshly promoted case starts in.
+    Carries outcomes like `CaseSummary` does, because the console can score the promoted set before
+    graduating it — the whole point of promoting before it counts. `None` means genuinely unscored,
+    the state a freshly promoted case starts in.
     """
 
     id: str
     kind: EvalKind
     path: str = ""
-    branch: str = ""
     last_recall: float | None = None
     last_fp_rate: float | None = None
     # In the holdout partition: scored on every run, but the improve loop never learns from it and a

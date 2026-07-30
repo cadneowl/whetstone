@@ -40,7 +40,7 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
 from whetstone.drift import DriftError, compute_drift, drift_inputs
-from whetstone.gitio import GitError, pending_batch
+from whetstone.gitio import GitError
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.judge.spec import load_judge
@@ -1464,26 +1464,19 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
             )
         return found[0], branch
 
-    batch = pending_batch(
-        config.skills_repo,
-        base=config.git.default_base,
-        prefix=config.git.branch_prefix,
-        remote=config.git.push_remote,
-    )
-    # Read as *cases*, not by reconstructing a skill from the batch ref: the batch is cut from the
-    # base and carries no `SKILL.md`, so a skill authored in the working tree but not yet on the
-    # base branch has promoted cases here but no body to reconstruct — and the old `skill_at` read
-    # that as "no promoted cases". The body comes from the working tree / staged draft instead.
+    # The promoted set is a folder on disk (`promoted_cases/`), read as cases and overlaid onto the
+    # working-tree / staged body — no branch, no reconstruction, so a skill authored in the working
+    # tree scores exactly like a committed one.
     cases = staging.promoted_cases(config, request.skill_id)
     if not cases:
         raise Unprocessable(
-            f"no promoted cases for {request.skill_id!r} on {batch.branch} — promote something "
-            f"from triage first, or score the working tree instead."
+            f"no promoted cases for {request.skill_id!r} — promote some from triage first, "
+            f"or score the working tree instead."
         )
     # The same overlay the gate uses, so a run reporting recall 1.00 and the gate that confirms it
-    # are talking about the same content.
+    # are talking about the same content. No git ref: the promoted cases are uncommitted on disk.
     editing = _skill_being_edited(config, root, request.skill_id)
-    return staging.overlay_cases(editing, cases), batch.branch
+    return staging.overlay_cases(editing, cases), None
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:

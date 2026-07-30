@@ -571,14 +571,8 @@ def test_a_minted_candidate_shows_up_in_triage(
 # --- committing a case straight from the review ----------------------------------
 
 
-def _branch_has(config: Config, branch: str, path: str) -> bool:
-    from whetstone.gitio import read_at
-
-    try:
-        read_at(config.skills_repo, branch, path)
-        return True
-    except Exception:
-        return False
+def _on_disk(config: Config, path: str) -> bool:
+    return (config.skills_repo / path).is_file()
 
 
 def test_a_rejected_finding_is_committed_in_one_click(
@@ -593,9 +587,8 @@ def test_a_rejected_finding_is_committed_in_one_click(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["prepared"]["case"]["kind"] == "should_not_flag"
-    branch = body["branch"]
     case_id = body["prepared"]["case_id"]
-    assert _branch_has(config, branch, f"skills/rust-errors/eval_cases/{case_id}/case.yaml")
+    assert _on_disk(config, f"skills/rust-errors/promoted_cases/{case_id}/case.yaml")
 
 
 def test_a_confirmed_finding_with_a_note_promotes_in_one_click(
@@ -683,7 +676,7 @@ def test_a_missed_case_is_committed_as_should_catch(
     assert body["prepared"]["case"]["kind"] == "should_catch"
     assert body["prepared"]["case"]["provenance"]["human_signal"] == "finding missed"
     case_id = body["prepared"]["case_id"]
-    assert _branch_has(config, body["branch"], f"skills/rust-errors/eval_cases/{case_id}/case.yaml")
+    assert _on_disk(config, f"skills/rust-errors/promoted_cases/{case_id}/case.yaml")
 
 
 def test_a_missed_case_covering_the_whole_file_needs_no_line_range(

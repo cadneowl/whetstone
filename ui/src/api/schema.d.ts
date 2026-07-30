@@ -30,7 +30,7 @@ export interface paths {
         };
         /**
          * Get Batch
-         * @description Which branch the next promotion lands on, what is queued there, and for which skills.
+         * @description The cases promoted and waiting on disk, and for which skills.
          */
         get: operations["get_batch_api_candidates_batch_get"];
         put?: never;
@@ -70,8 +70,12 @@ export interface paths {
         post?: never;
         /**
          * Undo
-         * @description Return a candidate to the queue. Undoing a promotion does not revert its commit — the branch
-         *     is the record of what was proposed, and rewriting it silently would be worse than a duplicate.
+         * @description Return a candidate to the queue, removing the promoted case it wrote.
+         *
+         *     A promotion is now a file under `promoted_cases/`, so undoing one deletes that folder — the case
+         *     was never committed and never graduated, so nothing downstream depended on it. A graduated case
+         *     (already moved to `eval_cases/`) is out of scope: it is part of the corpus and is un-done by
+         *     archiving or editing it, not by returning its long-decided candidate to the queue.
          */
         delete: operations["undo_api_candidates__candidate_id__decision_delete"];
         options?: never;
@@ -825,7 +829,7 @@ export interface paths {
          * Promote Finding
          * @description Commit the eval case a ruling minted, without the trip through the triage screen.
          *
-         *     The ruling already wrote a candidate; this promotes it onto the batch branch. For a rejection,
+         *     The ruling already wrote a candidate; this promotes it onto disk. For a rejection,
          *     or a confirmation that carried a note, nothing more is needed. For a bare confirmation the
          *     expectation is still the reviewer's own message — `prepare_promotion` refuses that, and the 422
          *     it raises is the console's cue to ask for a description in `semantic`.
@@ -881,7 +885,7 @@ export interface paths {
          *     The other half of teaching from a review: ruling handles what the skill *said*, this handles
          *     what it *should* have said. A candidate is minted from the reviewed change and the human's
          *     description, written into the queue for traceability, then promoted on the same path a ruling
-         *     takes — so a missed case and a confirmed one land identically on the batch branch.
+         *     takes — so a missed case and a confirmed one land identically under `promoted_cases/`.
          */
         post: operations["promote_missed_api_reviews__review_id__missed_post"];
         delete?: never;
@@ -1042,6 +1046,32 @@ export interface paths {
         get: operations["get_case_api_skills__skill_id__cases__case_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/cases/{case_id}/graduate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Graduate Case
+         * @description Move a promoted case into the eval corpus: `promoted_cases/<id>` → `eval_cases/<id>` on disk.
+         *
+         *     Graduation is the human's decision that a promoted candidate has earned a place in the corpus
+         *     the skill is scored and gated against. It changes `eval_cases/`, so `skill_hash` changes and C6
+         *     asks for a fresh passing gate before the changed corpus can be proposed — the same discipline
+         *     every corpus change gets. A promoted case that never earns it is left in place, or its candidate
+         *     rejected; only some become test cases.
+         */
+        post: operations["graduate_case_api_skills__skill_id__cases__case_id__graduate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1335,21 +1365,18 @@ export interface components {
         };
         /**
          * BatchView
-         * @description The batch, plus the skills whose cases are on it.
+         * @description The cases promoted from triage and waiting on disk, and the skills they belong to.
          *
-         *     Needed so the console can offer to *score* a batch. Promoted cases go to the branch and never
-         *     to the working tree, so nothing on disk says which skills they belong to — and without that
-         *     the only honest thing the triage screen could do with a batch was push it somewhere else.
+         *     Promotion writes each case to `skills/<id>/promoted_cases/` on disk, so this is a folder scan,
+         *     not a branch. The console reads it to offer scoring the promoted set and to point graduation at
+         *     the skills that have something to graduate.
          */
         BatchView: {
-            /** Branch */
-            branch: string;
-            /** Commits */
-            commits: number;
-            /** Exists */
-            exists: boolean;
-            /** Proposed */
-            proposed: boolean;
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
             /**
              * Skills
              * @default []
@@ -2498,6 +2525,15 @@ export interface components {
             message: string;
             status?: components["schemas"]["RepoStatus"] | null;
         };
+        /** GraduateResult */
+        GraduateResult: {
+            /** Case Id */
+            case_id: string;
+            /** Graduated */
+            graduated: boolean;
+            /** Skill Id */
+            skill_id: string;
+        };
         /**
          * GuidancePage
          * @description A markdown file beside `SKILL.md` that is part of the guidance.
@@ -2990,22 +3026,13 @@ export interface components {
         };
         /**
          * PendingCase
-         * @description An eval case promoted from triage, still on its batch branch.
+         * @description An eval case promoted from triage and waiting under `promoted_cases/` to be graduated.
          *
-         *     Carries outcomes like `CaseSummary` does. It did not at first, on the reasoning that nothing had
-         *     ever been scored against a case that is not on disk — true until the console grew a button to
-         *     score the batch, which is the whole point of promoting cases before merging them. Leaving the
-         *     fields off then meant the one screen showing these cases could not show what the run had just
-         *     said about them, which is the only reason to look.
-         *
-         *     `None` still means genuinely unscored, and is the state a freshly promoted case starts in.
+         *     Carries outcomes like `CaseSummary` does, because the console can score the promoted set before
+         *     graduating it — the whole point of promoting before it counts. `None` means genuinely unscored,
+         *     the state a freshly promoted case starts in.
          */
         PendingCase: {
-            /**
-             * Branch
-             * @default
-             */
-            branch: string;
             /**
              * Holdout
              * @default false
@@ -3200,15 +3227,14 @@ export interface components {
         };
         /** PromoteResponse */
         PromoteResponse: {
-            /** Batch Commits */
-            batch_commits: number;
-            /** Branch */
-            branch: string;
             /** Candidate Id */
             candidate_id: string;
-            /** Commit */
-            commit: string;
             prepared: components["schemas"]["PreparedCase"];
+            /**
+             * Promoted
+             * @default 0
+             */
+            promoted: number;
         };
         /**
          * Proposal
@@ -6476,6 +6502,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CaseDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    graduate_case_api_skills__skill_id__cases__case_id__graduate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraduateResult"];
                 };
             };
             /** @description Validation Error */

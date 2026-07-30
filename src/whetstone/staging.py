@@ -25,7 +25,7 @@ from pathlib import Path
 
 from whetstone.authoring import SKILL_FILE, frontmatter_version
 from whetstone.config import Config
-from whetstone.core.loader import load_eval_cases, load_skill
+from whetstone.core.loader import PROMOTED_CASES_DIR, load_eval_cases, load_skill
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.skill import Skill
 from whetstone.gitio import Author, GitError, branch_name, read_at, ref_exists, write_and_commit
@@ -124,36 +124,20 @@ def with_promoted_cases(config: Config, skill: Skill) -> Skill:
 
 
 def promoted_cases(config: Config, skill_id: str) -> list[EvalCase]:
-    """The eval cases promoted onto the triage batch, read as *cases* — no `SKILL.md` required.
+    """The cases promoted from triage, waiting to be graduated into the eval corpus.
 
-    A case tests a skill; it is not part of the skill. So reading the promoted set must not depend
-    on the skill's body existing at the batch ref — and that dependency is exactly what broke
-    scoring a skill authored in the working tree but not yet on the base branch. The batch is cut
-    from the base, so it carries the promoted `case.yaml` files but no `SKILL.md`; reconstructing a
-    whole skill from it (`skill_at`) therefore returned nothing, and every consumer read that as "no
-    promoted cases". Here we export only the `eval_cases/` subtree and load the case files directly.
+    On disk under `skills/<id>/promoted_cases/`, written by promotion. They are the *candidates* for
+    the eval set — scored and inspected while a person decides which earn a place — kept separate
+    from `eval_cases/` so an unvetted case never silently joins the corpus a gate is measured
+    against. Reading them is a folder read, independent of any git state — which is what makes a
+    skill authored in the working tree but not yet committed work exactly like a committed one.
 
-    Best-effort: no git, no batch, or a batch not carrying this skill's cases all mean "none".
+    Best-effort: no folder means no promoted cases.
     """
-    from whetstone.gitio import pending_batch
-
-    try:
-        batch = pending_batch(
-            config.skills_repo,
-            base=config.git.default_base,
-            prefix=config.git.branch_prefix,
-            remote=config.git.push_remote,
-        )
-        if not batch.exists or batch.commits == 0:
-            return []
-        relative = f"{skill_path(config, skill_id)}/eval_cases"
-        root = export_tree(config.skills_repo, batch.branch, relative)
-    except (StagingError, GitError, OSError, subprocess.CalledProcessError):
+    directory = config.skills_root / skill_id / PROMOTED_CASES_DIR
+    if not directory.is_dir():
         return []
-    try:
-        return load_eval_cases(Path(root) / relative, skill_id)
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    return load_eval_cases(directory, skill_id)
 
 
 def promoted_skill(config: Config, skill_id: str) -> Skill | None:

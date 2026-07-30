@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  useBatch,
   useBeginImprove,
   useConsoleConfig,
+  useGraduate,
   useProposal,
   usePropose,
   useSaveGuidance,
@@ -28,10 +28,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const pending = detail.pending_cases
   const { data: config } = useConsoleConfig()
   const { data: proposal } = useProposal(skillId)
-  const { data: batch } = useBatch()
   const begin = useBeginImprove(skillId)
   const save = useSaveGuidance()
   const propose = usePropose()
+  const graduate = useGraduate(skillId)
   const readOnly = Boolean(config?.read_only)
 
   const [selected, setSelected] = useState<ReadonlySet<string>>(
@@ -110,7 +110,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     <div className="max-w-3xl space-y-5">
       <BranchPanel
         skillId={skillId}
-        branch={proposal?.branch ?? batch?.branch ?? ''}
+        branch={proposal?.branch ?? ''}
         branchExists={proposal?.branch_exists ?? false}
         localEdit={proposal?.local_edit ?? ''}
         onBegin={() =>
@@ -154,6 +154,8 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           <p className="mb-3 text-xs text-muted">
             The checkboxes drive the LLM sharpen and the gate&rsquo;s targets. Scoring runs the whole
             batch, so a regression elsewhere still shows. Caught / missed is from the latest score.
+            <strong> Graduate</strong> a case once you&rsquo;re satisfied it belongs — that moves it
+            into the eval corpus (only some earn it), which needs a fresh gate before you propose.
           </p>
           <ul className="space-y-1.5">
             {pending.map((c) => (
@@ -177,12 +179,29 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                     holdout
                   </Badge>
                 )}
-                <span className="ml-auto">
+                <span className="ml-auto flex items-center gap-2">
                   <CaseStatus c={c} />
+                  <button
+                    type="button"
+                    disabled={readOnly || graduate.isPending}
+                    onClick={() =>
+                      graduate.mutate(c.id, {
+                        onSuccess: () =>
+                          setNotice(
+                            `Graduated ${c.id} into the eval corpus — re-gate before proposing.`,
+                          ),
+                      })
+                    }
+                    title="Move this case from promoted_cases/ into the eval corpus. Changes skill_hash, so a fresh gate is needed before propose."
+                    className="rounded border border-good/50 px-2 py-0.5 text-xs text-good transition-colors hover:bg-good/10 disabled:opacity-40"
+                  >
+                    Graduate
+                  </button>
                 </span>
               </li>
             ))}
           </ul>
+          {graduate.error != null && <ErrorNote error={graduate.error} />}
         </section>
       )}
 

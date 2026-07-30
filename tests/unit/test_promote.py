@@ -147,10 +147,10 @@ def test_prepared_files_are_repo_relative(tmp_path: Path) -> None:
     entry = _entry()
     prepared = prepare(entry, edits_from(entry), skills_root="skills")
     assert set(prepared.files) == {
-        "skills/rust-errors/eval_cases/812-t0/case.yaml",
-        "skills/rust-errors/eval_cases/812-t0/change.diff",
+        "skills/rust-errors/promoted_cases/812-t0/case.yaml",
+        "skills/rust-errors/promoted_cases/812-t0/change.diff",
     }
-    assert prepared.files["skills/rust-errors/eval_cases/812-t0/change.diff"] == DIFF
+    assert prepared.files["skills/rust-errors/promoted_cases/812-t0/change.diff"] == DIFF
 
 
 # --- rule provenance ------------------------------------------------------------

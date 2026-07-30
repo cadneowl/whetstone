@@ -852,9 +852,9 @@ function PinnedCases({
       {pending.length > 0 && (
         <div className="mt-3 space-y-1">
           <p className="text-xs text-muted">
-            Promoted from triage, not merged yet — on{' '}
-            <code className="font-mono">{pending[0]!.branch}</code>. They start gating changes to
-            this guidance when that branch merges; until then, score them here.{' '}
+            Promoted from triage, waiting under <code className="font-mono">promoted_cases/</code>.
+            They start gating changes to this guidance once graduated into the eval corpus; until
+            then, score them here.{' '}
             {staged && <>This scores what you have staged, not {base}.</>}
           </p>
           <ul className="space-y-1">
