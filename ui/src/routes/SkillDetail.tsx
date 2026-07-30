@@ -240,7 +240,7 @@ export function SkillDetail() {
 /** What the front-door "Run evals" control can be pointed at. Draft scoring lives in the Edit tab,
  *  where the unmerged rewrite it measures is on screen; the two front-door scopes answer "how does
  *  this skill do", not "did my edit help". */
-type FrontScope = 'working' | 'batch'
+type FrontScope = 'working' | 'promoted'
 
 /**
  * Score this skill from its header — and choose what gets scored.
@@ -251,7 +251,7 @@ type FrontScope = 'working' | 'batch'
  * landed on a skill page with no way to run them. This offers the promoted set as a first-class scope
  * and makes it the default whenever cases are waiting, so the thing you just did is what the button does.
  *
- * On the Improve tab the batch scope is dropped: that tab has its own "Score the promoted batch"
+ * On the Improve tab the promoted scope is dropped: that tab has its own "Score the promoted batch"
  * step, and two identical score buttons on one screen is the duplication to avoid. The header keeps
  * the working-tree scope there — "how does this skill do on disk" is a different question from "did
  * my staged change help", which the tab answers.
@@ -262,11 +262,11 @@ function EvalLauncher({ detail, activeTab }: { detail: Detail; activeTab: string
   const onImproveTab = activeTab === 'improve'
 
   const scopes: { id: FrontScope; label: string; count: number; hint: string }[] = []
-  // Batch first, so it is the default: a page with pending cases is a page reached straight from
-  // promoting them. Suppressed on the Improve tab, which owns batch scoring.
+  // Promoted first, so it is the default: a page with pending cases is a page reached straight from
+  // promoting them. Suppressed on the Improve tab, which owns promoted-case scoring.
   if (pending > 0 && !onImproveTab)
     scopes.push({
-      id: 'batch',
+      id: 'promoted',
       label: 'Promoted cases',
       count: pending,
       hint: `${pending} case(s) promoted from triage, waiting under promoted_cases/. Scores this skill against the set you just curated — the run the improve step then learns from.`,

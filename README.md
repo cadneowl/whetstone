@@ -1760,6 +1760,15 @@ Only some promoted cases graduate; the rest are left to keep testing against, or
 rejected. Graduating changes `skill_hash`, so C6 asks for a fresh passing gate before the changed
 corpus can be proposed — the same discipline every corpus change gets.
 
+**Publishing the two travel different roads, by design.** A *guidance* change is dangerous — it can
+make the reviewer worse — so it goes through the console's gated flow: staged on
+`whetstone/skill/<id>`, gated, then **Propose**d as a reviewed branch. *Cases* cannot make the
+reviewer worse (adding one only tests it harder — the C6 exemption), so they need no gate and no
+special flow: graduated `eval_cases/` are ordinary files in your skills repo that you commit and
+push with normal `git add` / `commit` / `push`. The console does not commit or push them for you,
+and the guidance **Propose** button carries only the guidance branch — not the cases sitting in your
+working tree.
+
 #### What triage never does
 
 - Never touches the **guidance**, and never switches your branch. A promotion writes only under the

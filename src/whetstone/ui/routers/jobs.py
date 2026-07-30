@@ -76,7 +76,7 @@ from whetstone.update import refresh_wiki
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
-EvalScope = Literal["working", "draft", "batch"]
+EvalScope = Literal["working", "draft", "promoted"]
 
 
 class EvalRequest(BaseModel):
@@ -86,11 +86,11 @@ class EvalRequest(BaseModel):
     # What to score. A closed set of names the server resolves to branches itself, never a
     # caller-supplied ref: the console scores its own branches or the working tree, nothing else.
     #
-    #   working — the files on disk, which is what `eval run` has always meant.
-    #   draft   — `whetstone/skill/<id>`: guidance edited but not merged.
-    #   batch   — the promoted cases under `skills/<id>/promoted_cases/`, overlaid on the guidance.
+    #   working  — the files on disk, which is what `eval run` has always meant.
+    #   draft    — `whetstone/skill/<id>`: guidance edited but not merged.
+    #   promoted — the cases under `skills/<id>/promoted_cases/`, overlaid on the guidance.
     #
-    # `batch` is the one that was missing, and its absence made triage a dead end. Before the
+    # `promoted` is the one that was missing, and its absence made triage a dead end. Before the
     # promoted set was scorable, the cases an operator had just spent an afternoon curating were
     # invisible to every way of running the skill — the only route to "does the reviewer actually
     # catch these?" was to graduate and gate first and find out afterwards. That is precisely
@@ -1443,7 +1443,7 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
     The whole folder is loaded, not just `SKILL.md`: a branch may add or change eval cases too, and
     "run the full suite on my draft" means the suite that branch carries.
 
-    `batch` is the composition the loop turns on. The promoted cases live under `promoted_cases/` on
+    `promoted` is the composition the loop turns on. The cases live under `promoted_cases/` on
     disk while the draft guidance lives on the skill branch, and scoring either alone answers the
     wrong question: the working-tree/merged guidance re-measures a version nobody is working on,
     while the skill branch carries the draft and none of the promoted cases — literally zero, which

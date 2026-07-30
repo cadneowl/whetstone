@@ -2189,7 +2189,7 @@ export interface components {
              * @default working
              * @enum {string}
              */
-            scope: "working" | "draft" | "batch";
+            scope: "working" | "draft" | "promoted";
             /** Skill Id */
             skill_id: string;
             /** Trials */

@@ -213,7 +213,7 @@ export function Triage() {
               {skillOnBatch && (
                 <LaunchButton
                   kind="eval"
-                  request={{ skill_id: skillOnBatch, scope: 'batch' }}
+                  request={{ skill_id: skillOnBatch, scope: 'promoted' }}
                   label="Score promoted cases"
                 />
               )}

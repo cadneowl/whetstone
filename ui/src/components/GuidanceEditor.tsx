@@ -690,7 +690,7 @@ function ScoreTheDraft({
     <div className="space-y-1">
       <LaunchButton
         kind="eval"
-        request={{ skill_id: skillId, scope: viaBatch ? 'batch' : 'draft' }}
+        request={{ skill_id: skillId, scope: viaBatch ? 'promoted' : 'draft' }}
         label="Score the draft"
       />
       {note && <p className="text-[11px] text-muted">{note}</p>}
@@ -881,12 +881,12 @@ function PinnedCases({
   )
 }
 
-/** Score the skill against the cases waiting on the triage batch. */
+/** Score the skill against the promoted cases waiting under `promoted_cases/`. */
 function ScoreTheBatch({ skillId }: { skillId: string }) {
   return (
     <LaunchButton
       kind="eval"
-      request={{ skill_id: skillId, scope: 'batch' }}
+      request={{ skill_id: skillId, scope: 'promoted' }}
       label="Score these pending cases"
     />
   )

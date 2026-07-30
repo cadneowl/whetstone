@@ -215,7 +215,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
             </p>
             <LaunchButton
               kind="eval"
-              request={{ skill_id: skillId, scope: 'batch' }}
+              request={{ skill_id: skillId, scope: 'promoted' }}
               label="Score the promoted batch"
               onDone={(job) => {
                 const r = job.result as Record<string, unknown>
@@ -331,6 +331,14 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
             )}
           </div>
           {propose.error && <ErrorNote error={propose.error} />}
+          {/* Guidance and cases publish by different roads: Propose carries only the gated guidance
+              branch. Graduated cases are ordinary files — adding a case needs no gate (it can only
+              test the reviewer harder), so you commit eval_cases/ with normal git, not this button. */}
+          <p className="mt-2 text-xs text-muted">
+            <strong>Propose</strong> ships the guidance branch only. Graduated{' '}
+            <code className="font-mono">eval_cases/</code> are committed with normal{' '}
+            <code className="font-mono">git</code> — adding a case needs no gate.
+          </p>
         </div>
       </section>
 

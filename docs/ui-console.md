@@ -587,12 +587,14 @@ Design decisions that matter:
 - **An optional rule citation.** Setting *Evidence for rule* files the source MR under that rule id
   in the skill's `meta.yaml`, committed alongside the case. That block is the only record of why a
   piece of guidance exists and it feeds `rule_ids` / `untested_rules`; leaving it to a follow-up
-  commit meant it drifted from the cases it was supposed to explain. The metadata is read from the
-  batch branch, so consecutive promotions in one session accumulate rather than overwrite.
-- **Batch mode** for the `should_not_flag` clean-merge candidates, which arrive at confidence 0.3
-  and are largely uniform. They are also sampled — `max_clean_files`, default 5 per MR — so one
-  large comment-free merge cannot bury the high-signal candidates above them.
-- Promotions accumulate on one branch; **Propose N cases** opens a single MR.
+  commit meant it drifted from the cases it was supposed to explain. The metadata is read from disk
+  (the working tree), so consecutive promotions in one session accumulate rather than overwrite.
+- **Clean-merge sampling** for the `should_not_flag` candidates, which arrive at confidence 0.3 and
+  are largely uniform. They are sampled — `max_clean_files`, default 5 per MR — so one large
+  comment-free merge cannot bury the high-signal candidates above them.
+- Each promotion writes a case to `skills/<id>/promoted_cases/` **on disk**; a human then
+  **graduates** the ones that earn it into `eval_cases/`. See the README's
+  [Promoting, scoring, graduating](../README.md#promoting-scoring-graduating).
 
 ### 10.3b Live review — ruling on the skill's own output
 
@@ -855,7 +857,8 @@ palette was being emitted unconditionally and light mode never rendered.
 3. ✅ Drag-to-select on the diff gutter, producing a range in new-file coordinates.
 4. ✅ Triage screen (§10.3): three panes, `j`/`k`/`a`/`x`/`Enter`, raw comment beside the editable
    semantic with an **unedited** badge until it is rewritten.
-5. ✅ Batch branches (`whetstone/cases/batch-N`) + **Propose N cases**.
+5. ✅ Promotion writes cases to `skills/<id>/promoted_cases/` on disk (originally batch branches
+   `whetstone/cases/batch-N` + **Propose N cases**, retired for the disk / graduate model).
 6. ✅ *(follow-up)* The review conversation, signal badges, and a signal filter — see §10.3. The
    first cut showed the diff and the builder's verdict but not the evidence between them, which is
    how a screen for learning from review ends up looking like a list of unexplained code changes.
@@ -929,9 +932,9 @@ most direct link. Everything else infers the label; this asks for it.
    path and not the other.
 
 **Deliberately reusing rather than extending:** a ruling writes into the *existing* candidates
-directory, so promote, batch branches and C6 apply unchanged. The one new field on `CandidateCase`
-is `suggested_rule_id`, which carries the rule that fired into *Evidence for rule* — so a promoted
-case files its own provenance instead of relying on somebody remembering to.
+directory, so promote (to `promoted_cases/` on disk) and C6 apply unchanged. The one new field on
+`CandidateCase` is `suggested_rule_id`, which carries the rule that fired into *Evidence for rule* —
+so a promoted case files its own provenance instead of relying on somebody remembering to.
 
 **Not built:** launching a review from the console. That needs Phase 4's job orchestration, which is
 why the screen begins with a record the CLI produced.

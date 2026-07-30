@@ -457,7 +457,7 @@ def test_the_promoted_case_batch_can_be_scored(client: TestClient) -> None:
     assert {c.id for c in staging.promoted_cases(config, "rust-errors")} - on_disk
 
     batch_plan = client.post(
-        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "batch"}
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "promoted"}
     )
     working = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"})
     assert batch_plan.status_code == 200, batch_plan.text
@@ -471,10 +471,10 @@ def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
 ) -> None:
     """The step the loop turns on, and the one that was missing.
 
-    The draft and the promoted cases live on two different branches. Scoring the batch branch alone
-    re-measures the *merged* rules — a version nobody is working on — while scoring the skill branch
-    alone covers none of the new cases. Only the pairing answers "does my rewrite handle the cases I
-    just curated?".
+    The draft guidance lives on the skill branch; the promoted cases live under `promoted_cases/`
+    on disk. Scoring the merged/working guidance alone re-measures a version nobody is working on,
+    while scoring the skill branch alone covers none of the new cases. Only the pairing answers
+    "does my rewrite handle the cases I just curated?".
     """
     from whetstone.ui.routers.jobs import EvalRequest, _skill_to_score
 
@@ -483,11 +483,12 @@ def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
 
     config = client.app.state.config
     scored, _ = _skill_to_score(
-        config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="batch")
+        config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="promoted")
     )
 
     assert "R9" in scored.body, "the guidance must come from the draft"
-    assert "812-t0" in {c.id for c in scored.eval_cases}, "the cases must come from the batch"
+    ids = {c.id for c in scored.eval_cases}
+    assert "812-t0" in ids, "the cases must come from the promoted set"
 
 
 def test_the_gate_covers_the_promoted_cases_on_both_sides(client: TestClient) -> None:
@@ -546,7 +547,7 @@ def _stage_a_draft(client: TestClient, body: str = DRAFT_BODY) -> None:
 
 def test_scoring_a_batch_with_nothing_promoted_says_so(client: TestClient) -> None:
     response = client.post(
-        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "batch"}
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "promoted"}
     )
     assert response.status_code == 422
     assert "promote some from triage first" in response.json()["message"]

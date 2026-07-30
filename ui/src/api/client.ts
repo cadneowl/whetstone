@@ -79,8 +79,8 @@ export type JobRequest = {
   skill_id?: string
   trials?: number | null
   sample?: number | null
-  /** eval only: what to score — the working tree, the guidance draft, or the promoted case batch. */
-  scope?: 'working' | 'draft' | 'batch'
+  /** eval only: what to score — the working tree, the guidance draft, or the promoted cases. */
+  scope?: 'working' | 'draft' | 'promoted'
   /**
    * Backend for this one launch, overriding the console default. Empty/absent = the header pick.
    * A known provider only (never a base URL); the server resolves and validates it. Applies to
