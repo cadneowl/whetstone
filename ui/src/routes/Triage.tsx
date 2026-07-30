@@ -450,12 +450,12 @@ function overlaysFor(edits: CaseEdits): Overlay[] {
 function DraftButton({
   candidateId,
   skillId,
-  disabled,
+  readOnly,
   onDrafted,
 }: {
   candidateId: string
   skillId: string
-  disabled?: boolean
+  readOnly?: boolean
   onDrafted: (semantic: string, by: string) => void
 }) {
   const plan = useDraftPlan()
@@ -510,16 +510,22 @@ function DraftButton({
     )
   }
 
+  // Why the button is greyed, phrased as what to do about it — and carried on the wrapping span,
+  // because browsers suppress the `title` tooltip on a `disabled` button itself, so a reason set
+  // there would never show at exactly the moment it is needed.
+  const reason = readOnly
+    ? 'The console is running read-only, so nothing can be drafted here. Restart without ' +
+      '--read-only (or set [ui] read_only = false in whetstone.toml) to enable drafting.'
+    : !skillId
+      ? 'Choose a target skill first, in the Skill field above — the triage step that writes this ' +
+        'draft lives in the skill folder, so it cannot run until it knows which skill.'
+      : 'Rewrite this from the review evidence. The drafter is not shown the guidance.'
+
   return (
-    <span className="ml-auto normal-case">
+    <span className="ml-auto normal-case" title={reason}>
       <button
         type="button"
-        disabled={disabled || plan.isPending || !skillId}
-        title={
-          skillId
-            ? 'Rewrite this from the review evidence. The drafter is not shown the guidance.'
-            : 'Choose a target skill first — the triage step lives in the skill folder.'
-        }
+        disabled={readOnly || plan.isPending || !skillId}
         onClick={() => plan.mutate({ id: candidateId, skillId })}
         className="text-[11px] text-muted transition-colors hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
       >
@@ -815,7 +821,7 @@ function FormPane({
               key={candidate.id}
               candidateId={candidate.id}
               skillId={edits.skill_id}
-              disabled={readOnly}
+              readOnly={readOnly}
               onDrafted={(semantic, by) =>
                 onChange({ ...edits, semantic, semantic_drafted_by: by })
               }
