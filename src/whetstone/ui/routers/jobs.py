@@ -57,7 +57,7 @@ from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
 from whetstone.preflight import Estimate, Plan, check_budget, plan_calls, plan_eval
 from whetstone.providers.base import ConnectorError
 from whetstone.sampling import sample_cases
-from whetstone.service import record_eval, record_gate, record_review
+from whetstone.service import record_eval, record_gate, record_review, strip_guidance
 from whetstone.steps import StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
@@ -1520,19 +1520,21 @@ def _gate_sides(config: Config, skill_id: str) -> tuple[Skill, Skill]:
             f"nothing staged for {skill_id!r} — {branch} does not exist or does not carry it. "
             f"Edit the guidance, or draft a change with improve, before gating."
         )
+    # A brand-new skill is not on the base branch, so there is no prior guidance to regress from.
+    # The meaningful baseline is then the *naked* model — the candidate with its guidance stripped —
+    # which asks the right question of a new skill: does its guidance catch what no guidance would?
+    # (Before, the gate refused outright and told the operator to "publish as is", which left a new
+    # skill unprovable — the one thing C6 exists to prevent.)
     base = staging.skill_at(config, config.git.default_base, skill_id)
-    if base is None:
-        raise Unprocessable(
-            f"{skill_id!r} does not exist on {config.git.default_base}, so there is no baseline to "
-            f"gate against. A new skill has nothing to regress from and may be published as is."
-        )
-    # Looked up once and merged into both sides. `with_promoted_cases` would re-read the batch per
-    # call, and the two sides must carry the *same* cases anyway — reading it twice is both slower
-    # and, if a promotion lands between the two calls, wrong.
-    promoted = staging.promoted_skill(config, skill_id)
-    if promoted is None:
-        return base[0], candidate[0]
-    return staging.merge_cases(base[0], promoted), staging.merge_cases(candidate[0], promoted)
+    base_skill = base[0] if base is not None else strip_guidance(candidate[0])
+    # Read once and overlaid into both sides. The two sides must carry the *same* cases — a gate is
+    # a controlled comparison — so reading the promoted set twice is both slower and, if a promotion
+    # lands between the two calls, wrong.
+    promoted = staging.promoted_cases(config, skill_id)
+    return (
+        staging.overlay_cases(base_skill, promoted),
+        staging.overlay_cases(candidate[0], promoted),
+    )
 
 
 def _step(root: Path, skill: Skill, kind: Any) -> StepSpec | None:
