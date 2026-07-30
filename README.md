@@ -1965,6 +1965,27 @@ dir = ".whetstone/gates"           # stored gate records — what gate-before-pr
 > It is a warning rather than a refusal because the estimate is an upper bound; nothing stops a run
 > mid-flight if the actual calls run over. A hard backstop comes with run-level metering later.
 
+**Pinning the default model (`[llm]`).** Empty by default, which means "resolve the way the CLI
+does" — the `WHETSTONE_LLM*` environment, then the built-in Anthropic model. Set it to pin a default
+that does not depend on which shell started the server; it is also what the console's **model
+picker** shows and lets an operator change while it runs (a change there lasts the server's
+lifetime — this block is the default it starts from). A value here wins over a skill step's own
+`model:` block and over the environment.
+
+```toml
+[llm]
+provider = "ollama"          # anthropic · openai · ollama · lmstudio · vllm · llamacpp · custom
+model = "qwen3-coder:30b"    # required for local / OpenAI-compatible backends
+base_url = ""                # a custom OpenAI-compatible gateway — NOT changeable from the browser
+```
+
+`base_url` is deliberately not settable from the console: an operator picks among known providers
+whose hosts are fixed, but the browser can never redirect model traffic to an arbitrary URL.
+
+**Relocating the stores.** Each store has its own block with a `dir`. `[reviews]`, `[meta_eval]`,
+`[drift]` and `[cadence]` all default under `.whetstone/`; `[judge] dir` defaults to `judges/default`
+(where `JUDGE.md` lives). Each block's note in `config.py` says what losing that directory costs.
+
 Pointing at a separate company skills repo is `repo = "../company-skills"` — no code change.
 
 ---
