@@ -38,8 +38,8 @@ import { SIGNALS, SignalBadge, signalMeta } from '@/components/signals'
 const TRIAGE_INTRO = (
   <>
     Signal mined from merge requests, waiting to become eval cases. For each one: check the evidence
-    in the middle, fix the fields on the right — <em>rewrite the semantic</em>, it arrives as the
-    raw review comment — then Promote. Promoted cases land on a batch branch: score the skill
+    in the middle, fix the fields on the right — <em>rewrite the expected finding</em>, which arrives
+    as the raw review comment — then Promote. Promoted cases land on a batch branch: score the skill
     against them to see what it misses before you propose them as one MR. Reject anything the miner
     guessed wrong.
   </>
@@ -785,7 +785,12 @@ function FormPane({
 
         <div>
           <p className="mb-1 flex items-center gap-2 text-[11px] tracking-wide text-muted uppercase">
-            Semantic
+            {/* "Semantic" is the term the CLI and docs use, but on its own it told an operator
+                nothing about what to type. The plain-language name goes on the label; the term of
+                art moves to the tooltip so the two stay connected. */}
+            <span title="The 'semantic' in the CLI and docs — the standalone statement of the problem that the judge scores every finding against.">
+              Expected finding
+            </span>
             {edits.semantic_drafted_by ? (
               <Badge
                 tone="accent"
@@ -825,17 +830,53 @@ function FormPane({
           <p className="mb-1.5 text-xs text-muted">
             {edits.kind === 'should_catch' ? (
               <>
-                What every finding is judged against: a standalone description of the problem here —
-                not the reviewer's words, not the fix.
+                Write the problem as a standalone statement — the issue a correct reviewer would
+                flag, in your own words. Not the raw comment, not the fix.
               </>
             ) : (
               <>
-                What every finding is judged against: a standalone description of what is{' '}
-                <em>correct</em> here, so a reviewer that complains can be recognised as wrong.
+                Write what is <em>correct</em> here as a standalone statement, so a reviewer that
+                complains about it can be recognised as wrong.
               </>
             )}{' '}
-            Someone who never saw this merge request has to be able to check it.
+            Every finding is judged against this, so someone who never saw this merge request has to
+            be able to check it.
           </p>
+          {/* A worked before/after, collapsed by default so it is there for the first-timer and out
+              of the way for everyone else. Adapts to `kind`, because the transformation it teaches
+              is the opposite one for a should-not-flag case. */}
+          <details className="mb-1.5 text-xs text-muted">
+            <summary className="cursor-pointer hover:text-ink">Example</summary>
+            {edits.kind === 'should_catch' ? (
+              <dl className="mt-1 space-y-1 border-l-2 border-line pl-3">
+                <div>
+                  <dt className="text-[11px] tracking-wide uppercase">As generated</dt>
+                  <dd className="italic">nit: don&rsquo;t expect here</dd>
+                </div>
+                <div>
+                  <dt className="text-[11px] tracking-wide uppercase">Expected finding</dt>
+                  <dd>
+                    .expect() on the store.fetch() result panics when the row is missing — the
+                    lookup must handle the not-found case instead of unwrapping.
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <dl className="mt-1 space-y-1 border-l-2 border-line pl-3">
+                <div>
+                  <dt className="text-[11px] tracking-wide uppercase">As generated</dt>
+                  <dd className="italic">avoid unwrap()</dd>
+                </div>
+                <div>
+                  <dt className="text-[11px] tracking-wide uppercase">Expected finding</dt>
+                  <dd>
+                    The unwrap() is safe here: the key was inserted just above, so the lookup can
+                    never be None — flagging it would be a false positive.
+                  </dd>
+                </div>
+              </dl>
+            )}
+          </details>
           <textarea
             value={edits.semantic}
             onChange={(e) => onChange({ ...edits, semantic: e.target.value })}
