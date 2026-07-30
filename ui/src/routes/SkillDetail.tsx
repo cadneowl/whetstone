@@ -100,9 +100,10 @@ export function SkillDetail() {
 
         <Tabs.Content value="improve">
           <TabIntro>
-            The loop, in one place: score the skill against the cases you promoted from triage, draft
-            a change from the ones it misses (by hand on the branch, or with the LLM), re-score, then
-            gate and propose. Edits land on the skill's branch — never the working tree.
+            The loop, in one place: score the skill against the cases you promoted from triage,{' '}
+            <em>graduate</em> the ones that earn a place in the eval corpus, sharpen the guidance
+            against the ones it still misses (by hand on the branch, or with the LLM), re-score, then
+            gate and propose. Guidance edits land on the skill's branch — never the working tree.
           </TabIntro>
           <ImproveWorkspace detail={data} />
         </Tabs.Content>
@@ -116,16 +117,16 @@ export function SkillDetail() {
           </TabIntro>
           {/* The empty-state is suppressed when a batch is pending: "No eval cases. Nothing gates a
               change" printed directly above a list of six is the self-contradiction to avoid — the
-              pending section below states the true position, that they gate once the branch merges. */}
+              pending section below states the true position, that they gate once graduated. */}
           {cases.length > 0 ? (
             <CaseTable skillId={skill.id} cases={cases} />
           ) : data.pending_cases.length === 0 ? (
             <Empty>No eval cases. Nothing gates a change to this skill's guidance.</Empty>
           ) : null}
-          {/* Promoting writes cases to a batch branch, never to disk, so a skill an operator had
-              just curated a set for showed none of them here. They do not gate anything until the
-              branch merges, but they are scorable now — via "Promoted cases" in the header — and a
-              cases tab that omits them is naming strictly less than what the skill is held to. */}
+          {/* Promoting writes cases to `promoted_cases/` on disk, separate from the eval corpus, so a
+              skill an operator had just curated a set for showed none of them here. They do not gate
+              anything until graduated, but they are scorable now — via "Promoted cases" in the
+              header — and a cases tab that omits them names strictly less than the skill is held to. */}
           {data.pending_cases.length > 0 && <PendingCaseList cases={data.pending_cases} />}
         </Tabs.Content>
 
@@ -142,8 +143,9 @@ export function SkillDetail() {
           )}
           {cases.length === 0 && data.pending_cases.length > 0 && (
             <p className="mb-4 text-sm text-muted italic">
-              No merged cases yet, but {data.pending_cases.length} promoted case(s) are waiting on
-              the triage batch — score them with <em>Promoted cases</em> in the header.
+              No graduated cases yet, but {data.pending_cases.length} promoted case(s) are waiting
+              under <code className="font-mono">promoted_cases/</code> — score them with{' '}
+              <em>Promoted cases</em> in the header.
             </p>
           )}
 
@@ -238,18 +240,18 @@ export function SkillDetail() {
 /** What the front-door "Run evals" control can be pointed at. Draft scoring lives in the Edit tab,
  *  where the unmerged rewrite it measures is on screen; the two front-door scopes answer "how does
  *  this skill do", not "did my edit help". */
-type FrontScope = 'working' | 'batch'
+type FrontScope = 'working' | 'promoted'
 
 /**
  * Score this skill from its header — and choose what gets scored.
  *
- * The old control fired one working-tree run and hid even that whenever the skill had no *merged*
- * cases. But "no merged cases" is the ordinary state right after triage: promoting writes cases to a
- * batch branch and never to disk, so an operator who had just curated a set landed on a skill page
- * with no way to run them. This offers the promoted batch as a first-class scope and makes it the
- * default whenever cases are waiting, so the thing you just did is the thing the button does.
+ * The old control fired one working-tree run and hid even that whenever the skill had no *graduated*
+ * cases. But "no graduated cases" is the ordinary state right after triage: promoting writes cases to
+ * `promoted_cases/` on disk, not into the eval corpus, so an operator who had just curated a set
+ * landed on a skill page with no way to run them. This offers the promoted set as a first-class scope
+ * and makes it the default whenever cases are waiting, so the thing you just did is what the button does.
  *
- * On the Improve tab the batch scope is dropped: that tab has its own "Score the promoted batch"
+ * On the Improve tab the promoted scope is dropped: that tab has its own "Score the promoted batch"
  * step, and two identical score buttons on one screen is the duplication to avoid. The header keeps
  * the working-tree scope there — "how does this skill do on disk" is a different question from "did
  * my staged change help", which the tab answers.
@@ -260,14 +262,14 @@ function EvalLauncher({ detail, activeTab }: { detail: Detail; activeTab: string
   const onImproveTab = activeTab === 'improve'
 
   const scopes: { id: FrontScope; label: string; count: number; hint: string }[] = []
-  // Batch first, so it is the default: a page with pending cases is a page reached straight from
-  // promoting them. Suppressed on the Improve tab, which owns batch scoring.
+  // Promoted first, so it is the default: a page with pending cases is a page reached straight from
+  // promoting them. Suppressed on the Improve tab, which owns promoted-case scoring.
   if (pending > 0 && !onImproveTab)
     scopes.push({
-      id: 'batch',
+      id: 'promoted',
       label: 'Promoted cases',
       count: pending,
-      hint: `${pending} case(s) promoted from triage, waiting on the batch branch. Scores this skill against the set you just curated — the run the improve step then learns from.`,
+      hint: `${pending} case(s) promoted from triage, waiting under promoted_cases/. Scores this skill against the set you just curated — the run the improve step then learns from.`,
     })
   if (merged > 0)
     scopes.push({
@@ -313,21 +315,22 @@ function EvalLauncher({ detail, activeTab }: { detail: Detail; activeTab: string
 }
 
 /**
- * The cases promoted from triage that do not yet live on disk.
+ * The cases promoted from triage, waiting under `promoted_cases/` to be graduated.
  *
- * Rendered flat, not as links: a pending case lives on the batch branch, and the case-detail route
- * loads from the checked-out folder — so a link would 404 until the branch merges.
+ * Rendered flat, not as links: the case-detail route loads from the eval corpus, and a promoted
+ * case is not there yet — so a link would 404 until it is graduated.
  */
 function PendingCaseList({ cases }: { cases: PendingCase[] }) {
   return (
     <div className="mt-5">
       <h3 className="mb-1 text-xs tracking-wide text-muted uppercase">
-        Promoted from triage, not merged yet ({cases.length})
+        Promoted from triage, not graduated yet ({cases.length})
       </h3>
       <p className="mb-2 max-w-3xl text-sm text-muted">
-        On <code className="font-mono">{cases[0]!.branch}</code>. They begin gating changes to this
-        guidance when that branch merges — until then, score them with <em>Promoted cases</em> in
-        the header, then draft a change from that run in the <em>Edit</em> tab.
+        Waiting under <code className="font-mono">promoted_cases/</code>. They begin gating changes
+        to this guidance once graduated into the eval corpus — until then, score them with{' '}
+        <em>Promoted cases</em> in the header, then graduate the ones that earn it on the{' '}
+        <em>Improve</em> tab.
       </p>
       <ul className="space-y-1.5">
         {cases.map((c) => (

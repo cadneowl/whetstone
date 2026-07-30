@@ -12,7 +12,6 @@ from whetstone.gitio import (
     branch_name,
     create_branch,
     current_head,
-    pending_batch,
     push,
     read_at,
     ref_exists,
@@ -223,43 +222,6 @@ def test_content_is_byte_exact(repo: Path) -> None:
 def test_branch_name_slugifies() -> None:
     assert branch_name("case", "Unwrap In Handler!") == "whetstone/case/unwrap-in-handler"
     assert branch_name("skill", "rust/errors") == "whetstone/skill/rust-errors"
-
-
-def test_first_batch_is_batch_1(repo: Path) -> None:
-    batch = pending_batch(repo, base="main")
-    assert batch.branch == "whetstone/cases/batch-1"
-    assert not batch.exists
-    assert batch.commits == 0
-
-
-def test_promotions_accumulate_on_one_batch(repo: Path) -> None:
-    first = pending_batch(repo, base="main")
-    write_and_commit(repo, {"a.txt": "1"}, "case a", branch=first.branch, author=AUTHOR)
-    write_and_commit(repo, {"b.txt": "2"}, "case b", branch=first.branch, author=AUTHOR)
-
-    batch = pending_batch(repo, base="main")
-    # Still the same branch: a triage session should produce one merge request, not one per case.
-    assert batch.branch == "whetstone/cases/batch-1"
-    assert batch.exists
-    assert batch.commits == 2
-
-
-def test_pushed_batch_is_closed_and_the_next_one_opens(repo: Path) -> None:
-    batch = pending_batch(repo, base="main")
-    write_and_commit(repo, {"a.txt": "1"}, "case a", branch=batch.branch, author=AUTHOR)
-    # Simulate a push by creating the remote-tracking ref the way a push would.
-    _git(repo, "update-ref", "refs/remotes/origin/whetstone/cases/batch-1",
-         _git(repo, "rev-parse", "whetstone/cases/batch-1"))
-
-    nxt = pending_batch(repo, base="main")
-    assert nxt.branch == "whetstone/cases/batch-2"
-    assert not nxt.exists
-
-
-def test_batch_detection_never_touches_the_network(repo: Path) -> None:
-    # No remote is configured at all; resolution must still work, since it reads local refs only.
-    assert status(repo).remote is None
-    assert pending_batch(repo, base="main").branch == "whetstone/cases/batch-1"
 
 
 # --- pushing ------------------------------------------------------------------

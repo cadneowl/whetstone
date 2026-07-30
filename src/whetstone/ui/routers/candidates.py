@@ -1,12 +1,13 @@
-"""Triage: reviewing candidate eval cases and promoting the good ones onto a branch.
+"""Triage: reviewing candidate eval cases and promoting the good ones onto disk.
 
-Every promotion is validated before it is written and lands as a commit on an accumulating batch
-branch — never in the working tree, never on the default branch. Rejections are recorded with a
-reason rather than discarded.
+Every promotion is validated before it is written and lands as a file under the skill's
+`promoted_cases/` folder — additive test data, never the guidance and never a branch, waiting to be
+graduated into the eval corpus. Rejections are recorded with a reason rather than discarded.
 """
 
 from __future__ import annotations
 
+import shutil
 from typing import Annotated
 
 from fastapi import APIRouter, Query
@@ -15,21 +16,13 @@ from pydantic import BaseModel, StringConstraints
 from whetstone import drafting, staging
 from whetstone.candidates import CandidateEntry, CandidateStore, Decision, new_decision
 from whetstone.config import Config
-from whetstone.core.loader import SkillLoadError, load_skill
+from whetstone.core.loader import PROMOTED_CASES_DIR, SkillLoadError, load_skill
 from whetstone.curation import SimilarCase, similar_cases
 from whetstone.domain.skill import Skill
 from whetstone.drafting import SemanticDraft
-from whetstone.gitio import (
-    Author,
-    Batch,
-    GitError,
-    pending_batch,
-    read_at,
-    ref_exists,
-    write_and_commit,
-)
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import Backend, ModelSelection, build_llm_client, resolve_backend
+from whetstone.naming import is_safe_segment
 from whetstone.preflight import Plan, plan_calls
 from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
 from whetstone.steps import StepError, StepSpec, load_step
@@ -71,9 +64,9 @@ class PromoteRequest(BaseModel):
 class PromoteResponse(BaseModel):
     candidate_id: str
     prepared: PreparedCase
-    branch: str
-    commit: str
-    batch_commits: int
+    # How many cases are now promoted for this skill — on disk under `promoted_cases/`, waiting
+    # to be graduated into the eval corpus.
+    promoted: int = 0
 
 
 class RejectRequest(BaseModel):
@@ -108,10 +101,9 @@ def list_candidates(
 class _CorpusCache:
     """The case corpus each candidate is compared against, loaded once per request.
 
-    Per skill: the working tree *plus* whatever the triage batch already carries — the batch is
-    where this session's promotions live, and the commonest duplicate in a queue mined from
-    overlapping windows is the candidate you promoted an hour ago. Best-effort throughout: a
-    malformed skill or a missing batch means no similars for it, never a queue that fails to load.
+    Per skill: the eval corpus *plus* the promoted cases waiting on disk — the commonest duplicate
+    in a queue mined from overlapping windows is the candidate you promoted an hour ago. Best-effort
+    throughout: a malformed skill means no similars for it, never a queue that fails to load.
     """
 
     def __init__(self, config: Config) -> None:
@@ -139,42 +131,40 @@ class _CorpusCache:
             skill = load_skill(directory)
         except SkillLoadError:
             return None
-        promoted = staging.promoted_skill(self.config, skill_id)
-        return skill if promoted is None else staging.merge_cases(skill, promoted)
+        return staging.overlay_cases(skill, staging.promoted_cases(self.config, skill_id))
 
 
-class BatchView(Batch):
-    """The batch, plus the skills whose cases are on it.
+class BatchView(BaseModel):
+    """The cases promoted from triage and waiting on disk, and the skills they belong to.
 
-    Needed so the console can offer to *score* a batch. Promoted cases go to the branch and never
-    to the working tree, so nothing on disk says which skills they belong to — and without that
-    the only honest thing the triage screen could do with a batch was push it somewhere else.
+    Promotion writes each case to `skills/<id>/promoted_cases/` on disk, so this is a folder scan,
+    not a branch. The console reads it to offer scoring the promoted set and to point graduation at
+    the skills that have something to graduate.
     """
 
+    count: int = 0
     skills: list[str] = []
 
 
 @router.get("/batch", response_model=BatchView)
 def get_batch(config: ConfigDep) -> BatchView:
-    """Which branch the next promotion lands on, what is queued there, and for which skills."""
-    batch = pending_batch(
-        config.skills_repo,
-        base=config.git.default_base,
-        prefix=config.git.branch_prefix,
-        remote=config.git.push_remote,
-    )
-    store = _store(config)
-    on_branch = sorted(
-        {
-            entry.decision.skill_id
-            for entry in store.list(include_decided=True)
-            if entry.decision is not None
-            and entry.decision.status == "promoted"
-            and entry.decision.branch == batch.branch
-            and entry.decision.skill_id
-        }
-    )
-    return BatchView(**batch.model_dump(), skills=on_branch)
+    """The cases promoted and waiting on disk, and for which skills."""
+    skills = _skills_with_promoted(config)
+    count = sum(len(staging.promoted_cases(config, skill_id)) for skill_id in skills)
+    return BatchView(count=count, skills=skills)
+
+
+def _skills_with_promoted(config: Config) -> list[str]:
+    """Skill ids with at least one case waiting under `promoted_cases/`."""
+    root = config.skills_root
+    if not root.is_dir():
+        return []
+    found = []
+    for child in sorted(root.iterdir()):
+        promoted = child / PROMOTED_CASES_DIR
+        if promoted.is_dir() and any(promoted.iterdir()):
+            found.append(child.name)
+    return found
 
 
 @router.get("/{candidate_id}", response_model=QueueItem)
@@ -295,7 +285,7 @@ def preview_promotion(
     is still editing, instead of after the commit.
     """
     entry = _load(config, candidate_id)
-    return prepare_promotion(config, entry, request.edits, get_batch(config).branch)
+    return prepare_promotion(config, entry, request.edits)
 
 
 @router.post("/{candidate_id}/promote", response_model=PromoteResponse, dependencies=[Writable])
@@ -306,22 +296,8 @@ def promote(
     principal: PrincipalDep,
 ) -> PromoteResponse:
     entry = _load(config, candidate_id)
-    batch = get_batch(config)
-    prepared = prepare_promotion(config, entry, request.edits, batch.branch)
-    return commit_promotion(
-        config,
-        principal,
-        candidate_id=candidate_id,
-        prepared=prepared,
-        message=(
-            f"eval case: {prepared.case_id} ({prepared.skill_id})\n\n"
-            f"Promoted from candidate {candidate_id}.\n"
-            f"Signal: {entry.candidate.provenance.human_signal or 'n/a'} "
-            f"({entry.candidate.provenance.ref or 'no ref'}), "
-            f"builder confidence {entry.candidate.confidence:.2f}."
-        ),
-        batch=batch,
-    )
+    prepared = prepare_promotion(config, entry, request.edits)
+    return commit_promotion(config, principal, candidate_id=candidate_id, prepared=prepared)
 
 
 def commit_promotion(
@@ -330,39 +306,28 @@ def commit_promotion(
     *,
     candidate_id: str,
     prepared: PreparedCase,
-    message: str,
-    batch: BatchView | None = None,
 ) -> PromoteResponse:
-    """Commit a prepared case onto the batch branch and record the promotion decision.
+    """Write a prepared case to `promoted_cases/` on disk and record the promotion decision.
 
-    The one write path every promotion takes — the triage screen, and now a ruling or a missed-case
-    added from a review — so the commit, the decision record and the batch bookkeeping cannot drift
-    between them. `batch` is passed in when the caller already read it, so a promotion does not read
-    the branch twice and cannot straddle another promotion landing in between.
+    The one write path every promotion takes — the triage screen, and a ruling or missed-case added
+    from a review — so the files written and the decision record cannot drift apart. Additive test
+    data in its own folder: never the guidance, never the working tree's tracked skill body, and
+    never a branch, so a person editing the skill is undisturbed. A promotion is now a file write
+    rather than a commit — `principal` no longer attributes anything, but stays for the decision
+    record's authorship.
     """
-    batch = batch or get_batch(config)
-    commit = write_and_commit(
-        config.skills_repo,
-        prepared.files,
-        message,
-        branch=batch.branch,
-        base=config.git.default_base,
-        author=_author(config, principal),
-        protected=config.git.protected_branches,
-    )
-    store = _store(config)
+    for rel, content in prepared.files.items():
+        dest = config.skills_repo / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
     decision = new_decision("promoted", principal=principal.label)
     decision.skill_id = prepared.skill_id
     decision.case_id = prepared.case_id
-    decision.branch = batch.branch
-    decision.commit = commit
-    store.decide(candidate_id, decision)
+    _store(config).decide(candidate_id, decision)
     return PromoteResponse(
         candidate_id=candidate_id,
         prepared=prepared,
-        branch=batch.branch,
-        commit=commit,
-        batch_commits=batch.commits + 1,
+        promoted=len(staging.promoted_cases(config, prepared.skill_id)),
     )
 
 
@@ -381,11 +346,23 @@ def reject(
 
 @router.delete("/{candidate_id}/decision", dependencies=[Writable], response_model=QueueItem)
 def undo(candidate_id: str, config: ConfigDep) -> QueueItem:
-    """Return a candidate to the queue. Undoing a promotion does not revert its commit — the branch
-    is the record of what was proposed, and rewriting it silently would be worse than a duplicate.
+    """Return a candidate to the queue, removing the promoted case it wrote.
+
+    A promotion is now a file under `promoted_cases/`, so undoing one deletes that folder — the case
+    was never committed and never graduated, so nothing downstream depended on it. A graduated case
+    (already moved to `eval_cases/`) is out of scope: it is part of the corpus and is un-done by
+    archiving or editing it, not by returning its long-decided candidate to the queue.
     """
     store = _store(config)
     _load(config, candidate_id)
+    decided = store.load(candidate_id)
+    if decided.decision is not None and decided.decision.status == "promoted":
+        case_id = decided.decision.case_id
+        skill_id = decided.decision.skill_id
+        if case_id and skill_id and is_safe_segment(case_id) and is_safe_segment(skill_id):
+            promoted = config.skills_root / skill_id / PROMOTED_CASES_DIR / case_id
+            if promoted.is_dir():
+                shutil.rmtree(promoted, ignore_errors=True)
     store.clear_decision(candidate_id)
     entry = store.load(candidate_id)
     return QueueItem(
@@ -395,47 +372,20 @@ def undo(candidate_id: str, config: ConfigDep) -> QueueItem:
     )
 
 
-def prepare_promotion(
-    config: Config, entry: CandidateEntry, edits: CaseEdits, branch: str
-) -> PreparedCase:
-    """Validate the edits against the state the commit would actually land on."""
-    meta = (
-        _meta_yaml(config, edits.skill_id, branch)
-        if edits.rule_id and edits.skill_id
-        else None
-    )
+def prepare_promotion(config: Config, entry: CandidateEntry, edits: CaseEdits) -> PreparedCase:
+    """Validate the edits against the skill's current metadata on disk."""
+    meta = _meta_yaml(config, edits.skill_id) if edits.rule_id and edits.skill_id else None
     return prepare(entry, edits, skills_root=relative_skills_root(config), meta_yaml=meta)
 
 
-def _meta_yaml(config: Config, skill_id: str, branch: str) -> str | None:
-    """The skill's `meta.yaml` as it stands on the batch branch, falling back to the working tree.
+def _meta_yaml(config: Config, skill_id: str) -> str | None:
+    """The skill's `meta.yaml` as it stands in the working tree.
 
-    Reading the branch is what makes a second promotion in one session additive: the provenance the
-    first one recorded exists only there, and starting from the working-tree copy would drop it.
+    A second promotion in one session is additive because the first wrote its provenance straight to
+    disk, so reading disk here already carries it — no branch to consult.
     """
-    if ref_exists(config.skills_repo, branch):
-        relative = f"{relative_skills_root(config)}/{skill_id}/{META_FILE}"
-        try:
-            return read_at(config.skills_repo, branch, relative)
-        except GitError:
-            return None  # the branch exists but this skill has no metadata yet
     path = config.skills_root / skill_id / META_FILE
     return path.read_text(encoding="utf-8") if path.is_file() else None
-
-
-def _author(config: Config, principal: Principal) -> Author | None:
-    """Who the commit is attributed to, per `[git] author`.
-
-    `None` lets `write_and_commit` fall back to the repo's own identity. An anonymous principal
-    falls back too rather than committing as `<>`: an empty email is accepted by git and produces
-    history nobody can trace or filter.
-    """
-    if config.git.author == "console" or not (principal.name or principal.email):
-        return None
-    return Author(
-        name=principal.name or principal.email,
-        email=principal.email or "whetstone@localhost",
-    )
 
 
 def _store(config: Config) -> CandidateStore:

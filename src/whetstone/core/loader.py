@@ -30,9 +30,15 @@ def load_skills(root: str | Path) -> list[Skill]:
 
 SKILL_FILE_NAME = "SKILL.md"
 
+# The two case folders under a skill. `eval_cases/` is the corpus that scores and gates the skill;
+# `promoted_cases/` holds cases promoted from triage and waiting to be graduated into it — the test
+# suite in two lifecycle states, both cases, neither the skill.
+EVAL_CASES_DIR = "eval_cases"
+PROMOTED_CASES_DIR = "promoted_cases"
+
 # Folders under a skill that hold something other than guidance. Everything else is guidance and is
 # sent to the reviewer, so this list is the whole contract — see `GuidancePage`.
-_NOT_GUIDANCE = {"eval_cases", WIKI_DIR, INDEX_DIR, *STEP_KINDS}
+_NOT_GUIDANCE = {EVAL_CASES_DIR, PROMOTED_CASES_DIR, WIKI_DIR, INDEX_DIR, *STEP_KINDS}
 
 
 def _is_markdown(name: str) -> bool:
@@ -118,7 +124,7 @@ def load_skill(path: str | Path) -> Skill:
     except (TypeError, ValueError) as e:
         raise SkillLoadError(f"{path}: 'version' must be an integer, got {raw_version!r}") from e
 
-    eval_cases = _load_eval_cases(path / "eval_cases", skill_id)
+    eval_cases = _load_eval_cases(path / EVAL_CASES_DIR, skill_id)
     try:
         wiki = load_wiki(path / WIKI_DIR)
     except WikiError as e:
@@ -169,6 +175,17 @@ def _load_provenance(raw: Any) -> dict[str, list[Provenance]]:
             if isinstance(e, dict)
         ]
     return out
+
+
+def load_eval_cases(cases_dir: Path, skill_id: str) -> list[EvalCase]:
+    """Load a `<case>/case.yaml` folder as eval cases, independent of any `SKILL.md`.
+
+    Cases are the test suite *for* a skill, not part of the skill, so reading them must never
+    require the skill's body to be present. Staging reads promoted cases from a batch ref this way,
+    which is what lets a skill authored in the working tree — not yet committed to the base branch —
+    still surface and score its promoted set.
+    """
+    return _load_eval_cases(cases_dir, skill_id)
 
 
 def _load_eval_cases(cases_dir: Path, skill_id: str) -> list[EvalCase]:

@@ -1592,7 +1592,7 @@ letting you spend attention on a version nobody runs.
 
 ### Triage: the full workflow
 
-![Growing the corpus: production signal and synthetic generators feed the candidate queue; a person triages each one (rewrite, route, set region, dedup) and promotes it to a batch branch; the batch is scored, gated, and proposed as one merge request.](docs/assets/triage-to-propose.png)
+![Growing the corpus: production signal and synthetic generators feed the candidate queue; a person triages each one (rewrite, route, set region, dedup) and promotes it to promoted_cases/ on disk; the promoted cases are scored, then the ones that earn it are graduated into the eval corpus and gated.](docs/assets/triage-to-propose.png)
 
 `corpus pull` proposes candidate eval cases; a person decides which are real. This is the screen
 that exists because the CLI genuinely could not do the job.
@@ -1708,7 +1708,7 @@ nobody makes. Leave it empty when a case tests the skill without justifying any 
 common and perfectly fine.
 
 Re-promoting two cases out of one MR won't cite it twice, and a second promotion in the same session
-builds on the first — the metadata is read from the batch branch, not the working tree, so nothing
+builds on the first — the metadata is read from disk, where the first promotion wrote it, so nothing
 is dropped.
 
 #### Keyboard
@@ -1743,35 +1743,38 @@ Rejections **require a reason** and are kept in `decision.json` beside the candi
 builder assigns confidence by signal strength and nothing currently tells it whether those guesses
 were any good — the noes are that evidence. A bare "no" teaches it nothing.
 
-Both decisions are reversible: reopening a candidate is a `DELETE` on its decision. Undoing a
-promotion does **not** revert its commit — the branch is the record of what was proposed, and
-rewriting it silently would be worse than a duplicate.
+Both decisions are reversible: reopening a candidate is a `DELETE` on its decision, which also
+removes the `promoted_cases/` folder the promotion wrote — the case was never graduated, so nothing
+downstream depended on it.
 
-#### Batches and proposing
+#### Promoting, scoring, graduating
 
-Promotions accumulate on **one branch** — `whetstone/cases/batch-N` — so a triage session produces
-one merge request rather than one per case. The header shows the current branch and a **Propose N
-cases** button.
+A promotion writes the edited case to `skills/<id>/promoted_cases/` on disk — additive test data in
+its own folder, never the guidance and never a branch. Promoted cases are *candidates* for the eval
+corpus, not part of it yet: score the skill against them (**Score promoted cases** in triage, or the
+**Improve** tab) to see what it currently misses.
 
-Which batch is open is derived from git, never stored: a branch that already has a remote-tracking
-ref has been pushed, so the next promotion starts the following number. That lookup is local, so it
-never touches the network.
+**Graduate** the ones that earn a place: the button on the Improve tab moves a case from
+`promoted_cases/` into `eval_cases/` — the corpus the skill is actually scored and gated against.
+Only some promoted cases graduate; the rest are left to keep testing against, or their candidate
+rejected. Graduating changes `skill_hash`, so C6 asks for a fresh passing gate before the changed
+corpus can be proposed — the same discipline every corpus change gets.
 
-**Propose** pushes the branch. It does **not** open the merge request — that needs a provider
-implementing `WriteConnector`, which Milestone 1 defines but does not implement. The response says
-where the branch went rather than pretending. Without a remote configured it refuses and tells you
-the work is safe locally.
+**Publishing the two travel different roads, by design.** A *guidance* change is dangerous — it can
+make the reviewer worse — so it goes through the console's gated flow: staged on
+`whetstone/skill/<id>`, gated, then **Propose**d as a reviewed branch. *Cases* cannot make the
+reviewer worse (adding one only tests it harder — the C6 exemption), so they need no gate and no
+special flow: graduated `eval_cases/` are ordinary files in your skills repo that you commit and
+push with normal `git add` / `commit` / `push`. The console does not commit or push them for you,
+and the guidance **Propose** button carries only the guidance branch — not the cases sitting in your
+working tree.
 
 #### What triage never does
 
-- Never touches your working tree or switches your branch. Commits are built with git plumbing
-  against a temporary index.
-- Never commits to `main`/`master`, or any branch in `[git] protected_branches`.
-- Never pushes implicitly, and never pushes a branch it did not create. `Propose` refuses anything
-  protected or outside `[git] branch_prefix`, so a stray request cannot publish whatever happens to
-  be sitting on your local `main`.
-- Refuses to write when the working tree is dirty in the paths it would touch — otherwise your
-  uncommitted local edits would be swept into a console commit and attributed to you.
+- Never touches the **guidance**, and never switches your branch. A promotion writes only under the
+  skill's `promoted_cases/` folder — additive test data, isolated from the rules a reviewer reads.
+- Never commits and never pushes. Promoted cases live uncommitted on disk until you commit the skill
+  folder yourself; graduating and gating happen before anything is proposed to `main`.
 
 ---
 
@@ -1827,12 +1830,13 @@ models the CLI uses.
 | `GET` | `/api/runs/{id}` | Full record — findings and verdicts |
 | `GET` | `/api/runs/{id}/report` | Standalone HTML report |
 | `GET` | `/api/candidates` | Triage queue + counts |
-| `GET` | `/api/candidates/batch` | The branch the next promotion lands on |
+| `GET` | `/api/candidates/batch` | The promoted cases waiting on disk, and for which skills |
 | `GET` | `/api/candidates/{id}` | One candidate + its pre-filled edit form |
 | `POST` | `/api/candidates/{id}/preview` | Validate edits, write nothing |
-| `POST` | `/api/candidates/{id}/promote` | Commit the edited case to the batch branch |
+| `POST` | `/api/candidates/{id}/promote` | Write the edited case to `promoted_cases/` on disk |
 | `POST` | `/api/candidates/{id}/reject` | Record a reasoned rejection |
-| `DELETE` | `/api/candidates/{id}/decision` | Return a candidate to the queue |
+| `DELETE` | `/api/candidates/{id}/decision` | Return a candidate to the queue (removes its promoted case) |
+| `POST` | `/api/skills/{id}/cases/{case}/graduate` | Move a promoted case into the eval corpus |
 
 Errors are `{"message": …, "path": …}`. `422` is a validation failure with `path` naming the field;
 `404` is a missing resource; `409` is a concurrent-write conflict; `403` is read-only mode; `500` is

@@ -1,7 +1,8 @@
-"""Skill registry: the index, one skill's detail, one eval case — and the case-tier flip."""
+"""Skill registry: the index, one skill's detail, one eval case, the tier flip, and graduation."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -9,12 +10,17 @@ from pydantic import BaseModel
 
 from whetstone import staging
 from whetstone.config import Config
-from whetstone.core.loader import load_skill, load_skills
+from whetstone.core.loader import (
+    EVAL_CASES_DIR,
+    PROMOTED_CASES_DIR,
+    load_skill,
+    load_skills,
+)
 from whetstone.curation import CurationError, retier_yaml
 from whetstone.domain.eval_model import CaseTier
 from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
-from whetstone.gitio import Author, GitError, pending_batch, read_at
+from whetstone.gitio import Author, GitError, read_at
 from whetstone.naming import describe_unsafe, is_safe_segment
 from whetstone.sampling import partition_of
 from whetstone.service import (
@@ -65,28 +71,19 @@ def get_skill(
 def _promoted_but_unmerged(
     config: Config, skill: Skill, latest: RunRecord | None = None
 ) -> list[PendingCase]:
-    """Cases sitting on the triage batch branch that the working tree does not have yet.
+    """Cases promoted from triage and waiting under `promoted_cases/` to be graduated.
 
-    Promoting writes to `whetstone/cases/batch-N` and never to disk, so without this the skill an
-    operator had just spent an afternoon adding cases to showed none of them — the screen headed
-    "what constrains this guidance" listing strictly less than what constrains it.
+    Promotion writes to `promoted_cases/` on disk, separate from the `eval_cases/` corpus, so this
+    lists what a person has curated but not yet graduated — the screen headed "what constrains this
+    guidance" would otherwise list strictly less than what the operator is working towards.
 
-    Read-only and best-effort: no git, no branch, or a branch that does not carry this skill all
-    mean "nothing pending", never an error. A skill page must not fail because a batch is odd.
+    Read-only and best-effort: a missing or malformed folder means "nothing pending", not an error.
     """
     try:
-        batch = pending_batch(
-            config.skills_repo,
-            base=config.git.default_base,
-            prefix=config.git.branch_prefix,
-            remote=config.git.push_remote,
-        )
-        if not batch.exists or batch.commits == 0:
-            return []
-        found = staging.skill_at(config, batch.branch, skill.id)
-    except (staging.StagingError, GitError, OSError):
+        promoted = staging.promoted_cases(config, skill.id)
+    except (staging.StagingError, OSError):
         return []
-    if found is None:
+    if not promoted:
         return []
 
     # The same holdout fraction the eval and the gate will use, so the flag the workspace reads
@@ -94,20 +91,18 @@ def _promoted_but_unmerged(
     # evaluate step falls back to the default, never an error on a detail page.
     fraction = _holdout_fraction(config, skill.id)
 
-    on_disk = {case.id for case in skill.eval_cases}
+    graduated = {case.id for case in skill.eval_cases}
     pending = []
-    for case in found[0].eval_cases:
-        if case.id in on_disk:
+    for case in promoted:
+        if case.id in graduated:
             continue
-        # A batch scored before this case was promoted simply has no row for it, which is exactly
-        # the unscored state — no special casing needed.
+        # A run recorded before this case was promoted has no row for it — the unscored state.
         run = latest.case(case.id) if latest else None
         pending.append(
             PendingCase(
                 id=case.id,
                 kind=case.kind,
                 path=case.change.files[0].path if case.change.files else "",
-                branch=batch.branch,
                 last_recall=run.confusion.recall if run else None,
                 last_fp_rate=run.confusion.fp_rate if run else None,
                 holdout=partition_of(case.id, fraction) == "holdout",
@@ -198,6 +193,43 @@ def set_case_tier(
     return TierResult(
         skill_id=skill_id, case_id=case_id, tier=request.tier, branch=branch, commit=commit
     )
+
+
+class GraduateResult(BaseModel):
+    skill_id: str
+    case_id: str
+    graduated: bool
+
+
+@router.post(
+    "/{skill_id}/cases/{case_id}/graduate",
+    response_model=GraduateResult,
+    dependencies=[Writable],
+)
+def graduate_case(skill_id: str, case_id: str, config: ConfigDep) -> GraduateResult:
+    """Move a promoted case into the eval corpus: `promoted_cases/<id>` → `eval_cases/<id>` on disk.
+
+    Graduation is the human's decision that a promoted candidate has earned a place in the corpus
+    the skill is scored and gated against. It changes `eval_cases/`, so `skill_hash` changes and C6
+    asks for a fresh passing gate before the changed corpus can be proposed — the same discipline
+    every corpus change gets. A promoted case that never earns it is left in place, or its candidate
+    rejected; only some become test cases.
+    """
+    if not is_safe_segment(skill_id):
+        raise NotFound(describe_unsafe(skill_id, "skill id"))
+    if not is_safe_segment(case_id):
+        raise NotFound(describe_unsafe(case_id, "case id"))
+    src = config.skills_root / skill_id / PROMOTED_CASES_DIR / case_id
+    dst = config.skills_root / skill_id / EVAL_CASES_DIR / case_id
+    if not src.is_dir():
+        raise NotFound(f"no promoted case {case_id!r} waiting in skill {skill_id!r}")
+    if dst.exists():
+        raise Unprocessable(
+            f"skill {skill_id!r} already has an eval case {case_id!r}; graduating would clobber it"
+        )
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    return GraduateResult(skill_id=skill_id, case_id=case_id, graduated=True)
 
 
 def _case_yaml_source(config: Config, branch: str, case_path: str) -> str | None:

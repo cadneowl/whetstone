@@ -218,9 +218,9 @@ def _cadence_section(
 ) -> CadenceSection:
     """The four clocks from their stores — the same facts the inbox's cadence action reads.
 
-    The anchor is judged against the working-tree corpus, not the staged one: cases promoted to a
-    batch branch are not published yet, and a clock that starts ticking on unmerged work would
-    call for re-anchoring a corpus that does not exist.
+    The anchor is judged against the working-tree corpus, not the promoted one: cases still under
+    `promoted_cases/` are not graduated yet, and a clock that starts ticking on ungraduated work
+    would call for re-anchoring a corpus that does not exist.
     """
     probe = probe or store.latest_baseline(skill.id)
     report = drift.latest(skill.id)

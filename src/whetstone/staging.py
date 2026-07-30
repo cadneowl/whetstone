@@ -25,14 +25,15 @@ from pathlib import Path
 
 from whetstone.authoring import SKILL_FILE, frontmatter_version
 from whetstone.config import Config
-from whetstone.core.loader import load_skill
+from whetstone.core.loader import PROMOTED_CASES_DIR, load_eval_cases, load_skill
+from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.skill import Skill
 from whetstone.gitio import Author, GitError, branch_name, read_at, ref_exists, write_and_commit
 from whetstone.naming import describe_unsafe, is_safe_segment
 from whetstone.vcs import export_tree
 
-# One branch per skill, so a session of edits accumulates into a single proposal rather than one
-# branch per save. Matches how triage accumulates cases onto a batch branch.
+# One branch per skill, so a session of guidance edits accumulates into a single proposal rather
+# than one branch per save.
 BRANCH_KIND = "skill"
 
 
@@ -110,61 +111,73 @@ def with_promoted_cases(config: Config, skill: Skill) -> Skill:
     `skill_hash`, so a gate that scored one case set and a publish check that hashed another can
     never match, and *Propose* stays disabled forever with a passing gate on screen.
 
-    It exists because promoted cases live on `whetstone/cases/batch-N` while a guidance draft lives
-    on `whetstone/skill/<id>`, and neither branch has the other's work. Gating the skill branch
-    alone therefore compared two guidance versions over zero of the cases just curated — a
-    comparison that cost two model calls per case, of which there were none, and proved nothing.
+    It exists because promoted cases live under `skills/<id>/promoted_cases/` on disk while a
+    guidance draft lives on `whetstone/skill/<id>`, and neither carries the other's work. Gating the
+    skill branch alone therefore compared two guidance versions over zero of the cases just
+    curated — a comparison that cost two model calls per case, of which there were none, and
+    proved nothing.
 
-    Best-effort: no git, no batch, or a batch that does not carry this skill all mean "nothing to
-    add". Enriching is an improvement to the evidence, never a precondition for having any.
+    Best-effort: no promoted cases means "nothing to add". Enriching is an improvement to the
+    evidence, never a precondition for having any.
     """
     promoted = promoted_skill(config, skill.id)
     return skill if promoted is None else merge_cases(skill, promoted)
 
 
-def promoted_skill(config: Config, skill_id: str) -> Skill | None:
-    """This skill as it stands on the triage batch, or None when there is nothing to read.
+def promoted_cases(config: Config, skill_id: str) -> list[EvalCase]:
+    """The cases promoted from triage, waiting to be graduated into the eval corpus.
 
-    Separate from `with_promoted_cases` because a caller often needs to merge the same batch into
-    two skills — the inbox into the working tree *and* the staged draft, the gate into base *and*
-    candidate. Reading it once and merging twice halves the git calls and, more importantly, makes
-    the two results describe the same batch even if a promotion lands mid-request.
+    On disk under `skills/<id>/promoted_cases/`, written by promotion. They are the *candidates* for
+    the eval set — scored and inspected while a person decides which earn a place — kept separate
+    from `eval_cases/` so an unvetted case never silently joins the corpus a gate is measured
+    against. Reading them is a folder read, independent of any git state — which is what makes a
+    skill authored in the working tree but not yet committed work exactly like a committed one.
 
-    Best-effort: no git, no batch, or a batch that does not carry this skill all mean "nothing to
-    add". Enriching is an improvement to the evidence, never a precondition for having any.
+    Best-effort: no folder means no promoted cases.
     """
-    from whetstone.gitio import pending_batch
+    directory = config.skills_root / skill_id / PROMOTED_CASES_DIR
+    if not directory.is_dir():
+        return []
+    return load_eval_cases(directory, skill_id)
 
+
+def promoted_skill(config: Config, skill_id: str) -> Skill | None:
+    """A skill carrying the promoted cases, or None when there are none to add.
+
+    Kept as a convenience for callers that then `merge_cases` it into two skills (the gate into base
+    *and* candidate; the inbox into the working tree *and* the staged draft): reading the promoted
+    set once keeps the two sides describing the same batch even if a promotion lands mid-request.
+
+    The body comes from `source` (the working tree or a staged branch) and is irrelevant — callers
+    take only `.eval_cases` from the result — but it makes a valid Skill to carry them. Because the
+    cases come from `promoted_cases`, a skill absent from the base branch still surfaces its set.
+    """
+    cases = promoted_cases(config, skill_id)
+    if not cases:
+        return None
     try:
-        batch = pending_batch(
-            config.skills_repo,
-            base=config.git.default_base,
-            prefix=config.git.branch_prefix,
-            remote=config.git.push_remote,
-        )
-        if not batch.exists or batch.commits == 0:
-            return None
-        found = skill_at(config, batch.branch, skill_id)
+        skill, _ = source(config, skill_id)
     except (StagingError, NoSuchSkill, GitError, OSError):
         return None
-    return found[0] if found else None
+    return skill.model_copy(update={"eval_cases": cases})
 
 
-def merge_cases(skill: Skill, promoted: Skill) -> Skill:
-    """`skill` with the promoted skill's eval cases folded in — the guidance from one, cases from
-    both.
+def overlay_cases(skill: Skill, cases: list[EvalCase]) -> Skill:
+    """`skill` with `cases` folded into its eval cases by id — the incoming winning.
 
-    Pure, and shared by everything that scores a batch: the console's eval, the gate, and the C6
-    check that reads the gate's verdict all have their own reasons to fail when a batch is missing,
-    but none of them may disagree about what "with the promoted cases" *means*. Two copies of this
-    merge is exactly how a run and the gate come to score different content while reporting the
-    same name for it.
+    The single definition of "with these cases", shared by everything that scores a batch: the
+    console's eval, the gate, and the C6 check that reads the gate's verdict all have their own
+    reasons to fail when a batch is missing, but none of them may disagree about what "with the
+    promoted cases" *means*. Two copies of this merge is exactly how a run and the gate come to
+    score different content while reporting the same name for it.
     """
-    # By id, the batch winning: it is cut from the base, so it already carries every merged case,
-    # and where both sides have one the batch's is the newer text.
-    cases = {case.id: case for case in skill.eval_cases}
-    cases.update({case.id: case for case in promoted.eval_cases})
-    merged = sorted(cases.values(), key=lambda c: c.id)
+    if not cases:
+        return skill
+    # By id, the incoming winning: the batch is cut from the base, so it already carries every
+    # merged case, and where both sides have one the batch's is the newer text.
+    merged_by_id = {case.id: case for case in skill.eval_cases}
+    merged_by_id.update({case.id: case for case in cases})
+    merged = sorted(merged_by_id.values(), key=lambda c: c.id)
     # Compared by content, not by count. A batch that *rewrites* a case it already had leaves the
     # count untouched, so a length check reads that as "nothing new" and quietly scores the old
     # text. `skill_hash` sorts cases itself, so returning the skill unchanged here is about avoiding
@@ -172,6 +185,12 @@ def merge_cases(skill: Skill, promoted: Skill) -> Skill:
     if merged == sorted(skill.eval_cases, key=lambda c: c.id):
         return skill
     return skill.model_copy(update={"eval_cases": merged})
+
+
+def merge_cases(skill: Skill, promoted: Skill) -> Skill:
+    """`skill` with the promoted skill's eval cases folded in — a thin `overlay_cases` for callers
+    that already hold the promoted set as a Skill (via `promoted_skill`)."""
+    return overlay_cases(skill, promoted.eval_cases)
 
 
 def base_version(config: Config, skill_id: str) -> int | None:

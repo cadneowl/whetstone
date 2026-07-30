@@ -15,8 +15,8 @@ import {
 import { DiffView, type Overlay } from '@/components/diff/DiffView'
 import { Badge, Empty, ErrorNote, Loading, severityName, when } from '@/components/primitives'
 
-/** A committed eval case, as the card/panel remembers it after a successful promote. */
-type Committed = { caseId: string; branch: string }
+/** A promoted eval case, as the card/panel remembers it after a successful promote. */
+type Committed = { caseId: string }
 
 function apiMessage(error: unknown): string {
   return error instanceof ApiError ? error.problem.message : String(error)
@@ -310,7 +310,7 @@ function FindingCard({
     setMakeError('')
     try {
       const res = await onMakeCase(semantic)
-      setCommitted({ caseId: res.prepared.case_id, branch: res.branch })
+      setCommitted({ caseId: res.prepared.case_id })
       setNeedsDescription(false)
     } catch (error) {
       const message = apiMessage(error)
@@ -357,16 +357,15 @@ function FindingCard({
 
           {committed ? (
             <p className="text-good">
-              ✓ Committed as{' '}
+              ✓ Promoted as{' '}
               <Link
                 to={`/skills/${encodeURIComponent(skillId)}`}
                 className="font-mono underline decoration-dotted hover:text-accent"
                 onClick={(e) => e.stopPropagation()}
               >
                 {committed.caseId}
-              </Link>{' '}
-              on <span className="font-mono">{committed.branch}</span>. Score the batch on the skill
-              page, then gate it.
+              </Link>
+              . Score it on the skill page, then graduate and gate it.
             </p>
           ) : (
             <>
@@ -521,8 +520,9 @@ function FindingCard({
  *
  * The review screen can only rule on findings the skill *produced*; a false negative — the skill
  * staying silent where it should have spoken — has no finding to thumb-down. This is that path: pick
- * the file (and optionally the lines), describe what should have been caught, and it commits a
- * `should_catch` case straight onto the batch branch, exactly as promoting a confirmed finding does.
+ * the file (and optionally the lines), describe what should have been caught, and it writes a
+ * `should_catch` case straight to `promoted_cases/` on disk, exactly as promoting a confirmed
+ * finding does.
  */
 function MissedCasePanel({
   reviewId,
@@ -562,7 +562,7 @@ function MissedCasePanel({
         rule_id: ruleId.trim(),
         severity_min: severity || null,
       })
-      setCommitted({ caseId: res.prepared.case_id, branch: res.branch })
+      setCommitted({ caseId: res.prepared.case_id })
       setSemantic('')
       setLineStart('')
       setLineEnd('')
@@ -599,21 +599,22 @@ function MissedCasePanel({
         </button>
       </div>
       <p className="mt-1 text-xs text-muted">
-        The skill stayed silent where it should have spoken. This commits a{' '}
-        <span className="font-mono">should catch</span> case straight to the batch — there is no
-        finding to rule on, so your description is the ground truth it will be judged against.
+        The skill stayed silent where it should have spoken. This writes a{' '}
+        <span className="font-mono">should catch</span> case straight to{' '}
+        <span className="font-mono">promoted_cases/</span> — there is no finding to rule on, so your
+        description is the ground truth it will be judged against.
       </p>
 
       {committed ? (
         <p className="mt-3 text-sm text-good">
-          ✓ Committed as{' '}
+          ✓ Promoted as{' '}
           <Link
             to={`/skills/${encodeURIComponent(skillId)}`}
             className="font-mono underline decoration-dotted hover:text-accent"
           >
             {committed.caseId}
-          </Link>{' '}
-          on <span className="font-mono">{committed.branch}</span>.{' '}
+          </Link>
+          .{' '}
           <button
             type="button"
             className="underline hover:text-ink"

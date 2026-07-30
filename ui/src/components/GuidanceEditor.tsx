@@ -690,7 +690,7 @@ function ScoreTheDraft({
     <div className="space-y-1">
       <LaunchButton
         kind="eval"
-        request={{ skill_id: skillId, scope: viaBatch ? 'batch' : 'draft' }}
+        request={{ skill_id: skillId, scope: viaBatch ? 'promoted' : 'draft' }}
         label="Score the draft"
       />
       {note && <p className="text-[11px] text-muted">{note}</p>}
@@ -801,9 +801,9 @@ function PinnedCases({
   base: string
   skillId: string
 }) {
-  // Both, not just what is on disk. A skill whose cases are all still on the batch branch is the
-  // normal state right after triage — telling that operator to "promote some candidates" is telling
-  // them to redo the thing they just did.
+  // Both the graduated cases and the promoted set waiting under `promoted_cases/`. A skill whose
+  // cases are all still promoted-but-ungraduated is the normal state right after triage — telling
+  // that operator to "promote some candidates" is telling them to redo the thing they just did.
   if (cases.length === 0 && pending.length === 0) {
     return (
       <p className="rounded-lg border border-warn/40 bg-warn/5 px-4 py-3 text-sm text-warn">
@@ -844,17 +844,17 @@ function PinnedCases({
           </li>
         ))}
       </ul>
-      {/* Promoting writes cases to a batch branch and never to disk, so a skill an operator had
-          just spent an afternoon adding cases to showed none of them — a list headed "what
-          constrains this guidance" naming strictly less than what constrains it. Kept visually
-          separate because they do not gate anything until the branch merges, but scored the same:
+      {/* Promoting writes cases to `promoted_cases/` on disk, separate from the eval corpus, so a
+          skill an operator had just spent an afternoon adding cases to showed none of them — a list
+          headed "what constrains this guidance" naming strictly less than what constrains it. Kept
+          visually separate because they do not gate anything until graduated, but scored the same:
           the button below is what makes them worth listing rather than merely acknowledging. */}
       {pending.length > 0 && (
         <div className="mt-3 space-y-1">
           <p className="text-xs text-muted">
-            Promoted from triage, not merged yet — on{' '}
-            <code className="font-mono">{pending[0]!.branch}</code>. They start gating changes to
-            this guidance when that branch merges; until then, score them here.{' '}
+            Promoted from triage, waiting under <code className="font-mono">promoted_cases/</code>.
+            They start gating changes to this guidance once graduated into the eval corpus; until
+            then, score them here.{' '}
             {staged && <>This scores what you have staged, not {base}.</>}
           </p>
           <ul className="space-y-1">
@@ -881,12 +881,12 @@ function PinnedCases({
   )
 }
 
-/** Score the skill against the cases waiting on the triage batch. */
+/** Score the skill against the promoted cases waiting under `promoted_cases/`. */
 function ScoreTheBatch({ skillId }: { skillId: string }) {
   return (
     <LaunchButton
       kind="eval"
-      request={{ skill_id: skillId, scope: 'batch' }}
+      request={{ skill_id: skillId, scope: 'promoted' }}
       label="Score these pending cases"
     />
   )

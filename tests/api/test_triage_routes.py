@@ -15,7 +15,6 @@ from whetstone.corpus.model import CandidateCase
 from whetstone.domain.change import AddedLine, CodeChange, FileChange
 from whetstone.domain.eval_model import Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
-from whetstone.gitio import ref_exists
 from whetstone.runs import RunStore
 from whetstone.ui.app import create_app
 
@@ -87,6 +86,13 @@ def _edits(client: TestClient, candidate_id: str, **overrides: object) -> dict[s
     return edits
 
 
+def _promoted_case(repo: Path, skill_id: str, case_id: str, name: str = "case.yaml") -> str:
+    """A promoted case file as it now lands: on disk under `promoted_cases/`, not on a branch."""
+    return (
+        repo / "skills" / skill_id / "promoted_cases" / case_id / name
+    ).read_text(encoding="utf-8")
+
+
 # --- the queue ----------------------------------------------------------------
 
 
@@ -139,8 +145,8 @@ def test_the_queue_surfaces_similar_existing_cases(client: TestClient) -> None:
 def test_a_promotion_on_the_batch_counts_as_existing_coverage(
     client: TestClient, repo: Path
 ) -> None:
-    """The commonest duplicate is the candidate you promoted an hour ago — it lives on the batch
-    branch, not the working tree, and the door must see it there."""
+    """The commonest duplicate is the candidate you promoted an hour ago — it lives under
+    `promoted_cases/`, and the door must see it there."""
     edits = _edits(client, "812-t0", semantic="unwrap on the handler row can panic")
     client.post("/api/candidates/812-t0/promote", json={"edits": edits})
 
@@ -157,10 +163,9 @@ def test_promoting_straight_to_archive_round_trips(client: TestClient, repo: Pat
         semantic="unwrap can panic on a normal error path",
         tier="archive",
     )
-    body = client.post("/api/candidates/812-t0/promote", json={"edits": edits}).json()
+    client.post("/api/candidates/812-t0/promote", json={"edits": edits})
 
-    case_path = "skills/rust-errors/eval_cases/812-t0/case.yaml"
-    payload = yaml.safe_load(_git(repo, "show", f"{body['branch']}:{case_path}"))
+    payload = yaml.safe_load(_promoted_case(repo, "rust-errors", "812-t0"))
     assert payload["tier"] == "archive"
     assert payload["provenance"]["ref"] == "acme/payments!812"  # the evidence chain survives
 
@@ -174,10 +179,12 @@ def test_preview_shows_exactly_what_would_be_committed(client: TestClient) -> No
     prepared = client.post("/api/candidates/812-t0/preview", json={"edits": edits}).json()
 
     assert set(prepared["files"]) == {
-        "skills/rust-errors/eval_cases/812-t0/case.yaml",
-        "skills/rust-errors/eval_cases/812-t0/change.diff",
+        "skills/rust-errors/promoted_cases/812-t0/case.yaml",
+        "skills/rust-errors/promoted_cases/812-t0/change.diff",
     }
-    payload = yaml.safe_load(prepared["files"]["skills/rust-errors/eval_cases/812-t0/case.yaml"])
+    payload = yaml.safe_load(
+        prepared["files"]["skills/rust-errors/promoted_cases/812-t0/case.yaml"]
+    )
     assert payload["expect"][0]["semantic"] == "unwrap can panic on a normal error path"
     assert payload["expect"][0]["where"]["line_range"] == [40, 45]
 
@@ -210,15 +217,13 @@ def test_promotion_without_a_target_skill_is_rejected(client: TestClient) -> Non
 # --- promotion ----------------------------------------------------------------
 
 
-def test_promotion_commits_to_a_batch_branch(client: TestClient, repo: Path) -> None:
+def test_promotion_writes_the_case_to_disk(client: TestClient, repo: Path) -> None:
     edits = _edits(client, "812-t0", semantic="unwrap can panic on a normal error path")
     body = client.post("/api/candidates/812-t0/promote", json={"edits": edits}).json()
 
-    assert body["branch"] == "whetstone/cases/batch-1"
-    assert body["batch_commits"] == 1
-    case_path = "skills/rust-errors/eval_cases/812-t0/case.yaml"
-    committed = _git(repo, "show", f"{body['branch']}:{case_path}")
-    assert "unwrap can panic on a normal error path" in committed
+    assert body["promoted"] == 1  # one case now waiting under promoted_cases/
+    on_disk = _promoted_case(repo, "rust-errors", "812-t0")
+    assert "unwrap can panic on a normal error path" in on_disk
 
 
 def test_promotion_leaves_the_working_tree_alone(client: TestClient, repo: Path) -> None:
@@ -231,15 +236,14 @@ def test_promotion_leaves_the_working_tree_alone(client: TestClient, repo: Path)
     assert _git(repo, "status", "--porcelain", "--untracked-files=no") == ""
 
 
-def test_promotions_accumulate_into_one_branch(client: TestClient, repo: Path) -> None:
+def test_promotions_accumulate_on_disk(client: TestClient, repo: Path) -> None:
     for candidate_id in ("812-t0", "813-t1"):
         edits = _edits(client, candidate_id)
-        body = client.post(f"/api/candidates/{candidate_id}/promote", json={"edits": edits}).json()
-        assert body["branch"] == "whetstone/cases/batch-1"
+        client.post(f"/api/candidates/{candidate_id}/promote", json={"edits": edits})
 
-    # One branch, one merge request, two cases.
-    assert _git(repo, "rev-list", "--count", "main..whetstone/cases/batch-1") == "2"
-    assert client.get("/api/candidates/batch").json()["commits"] == 2
+    batch = client.get("/api/candidates/batch").json()
+    assert batch["count"] == 2
+    assert batch["skills"] == ["rust-errors"]
 
 
 def test_promotion_records_the_decision_and_leaves_the_queue(client: TestClient) -> None:
@@ -253,8 +257,6 @@ def test_promotion_records_the_decision_and_leaves_the_queue(client: TestClient)
     decided = client.get("/api/candidates/812-t0").json()["entry"]["decision"]
     assert decided["status"] == "promoted"
     assert decided["case_id"] == "812-t0"
-    assert decided["branch"] == "whetstone/cases/batch-1"
-    assert decided["commit"]
 
 
 def test_promotion_without_a_rule_id_does_not_touch_metadata(
@@ -274,9 +276,9 @@ def test_promotion_with_a_rule_id_records_the_evidence_for_that_rule(
     reported on a rule set that drifted from the evidence behind it.
     """
     edits = _edits(client, "812-t0", rule_id="R2")
-    body = client.post("/api/candidates/812-t0/promote", json={"edits": edits}).json()
+    client.post("/api/candidates/812-t0/promote", json={"edits": edits})
 
-    meta = yaml.safe_load(_git(repo, "show", f"{body['branch']}:skills/rust-errors/meta.yaml"))
+    meta = yaml.safe_load((repo / "skills/rust-errors/meta.yaml").read_text(encoding="utf-8"))
     assert meta["provenance"]["R2"] == [
         {"source": "gitlab_mr", "ref": "acme/payments!812", "human_signal": "suggestion applied"}
     ]
@@ -289,14 +291,12 @@ def test_promotion_with_a_rule_id_records_the_evidence_for_that_rule(
 def test_a_second_promotion_builds_on_the_first_ones_metadata(
     client: TestClient, repo: Path
 ) -> None:
-    """The second commit must start from the branch, not the working tree, or it drops the first."""
+    """The second promotion must read the meta the first wrote to disk, or it drops the first."""
     for candidate_id, rule in (("812-t0", "R1"), ("813-t1", "R2")):
         edits = _edits(client, candidate_id, rule_id=rule)
-        body = client.post(
-            f"/api/candidates/{candidate_id}/promote", json={"edits": edits}
-        ).json()
+        client.post(f"/api/candidates/{candidate_id}/promote", json={"edits": edits})
 
-    meta = yaml.safe_load(_git(repo, "show", f"{body['branch']}:skills/rust-errors/meta.yaml"))
+    meta = yaml.safe_load((repo / "skills/rust-errors/meta.yaml").read_text(encoding="utf-8"))
     assert {"R1", "R2"} <= set(meta["provenance"])
     assert len(meta["provenance"]["R1"]) == 2  # the seeded citation plus the new one
 
@@ -308,29 +308,13 @@ def test_a_malformed_rule_id_is_rejected_before_anything_is_written(
     response = client.post("/api/candidates/812-t0/promote", json={"edits": edits})
     assert response.status_code == 422
     assert "rule id" in response.json()["message"]
-    assert not ref_exists(repo, "whetstone/cases/batch-1")
+    assert not (repo / "skills" / "rust-errors" / "promoted_cases" / "812-t0").exists()
 
 
 def test_preview_shows_the_metadata_change_too(client: TestClient) -> None:
     edits = _edits(client, "812-t0", rule_id="R2")
     body = client.post("/api/candidates/812-t0/preview", json={"edits": edits}).json()
     assert "skills/rust-errors/meta.yaml" in body["files"]
-
-
-def test_commit_message_carries_the_provenance(client: TestClient, repo: Path) -> None:
-    edits = _edits(client, "812-t0")
-    client.post("/api/candidates/812-t0/promote", json={"edits": edits})
-    message = _git(repo, "log", "-1", "--format=%B", "whetstone/cases/batch-1")
-    assert "812-t0" in message
-    assert "acme/payments!812" in message
-    assert "suggestion applied" in message
-    assert "confidence 0.90" in message
-
-
-def test_promotion_is_authored_by_the_principal(client: TestClient, repo: Path) -> None:
-    edits = _edits(client, "812-t0")
-    client.post("/api/candidates/812-t0/promote", json={"edits": edits})
-    assert _git(repo, "log", "-1", "--format=%an", "whetstone/cases/batch-1") == "Tester"
 
 
 # --- rejection ----------------------------------------------------------------
@@ -389,16 +373,6 @@ def test_read_only_blocks_every_mutation(
 # --- proposing ----------------------------------------------------------------
 
 
-def test_propose_without_a_remote_explains_itself(client: TestClient) -> None:
-    edits = _edits(client, "812-t0")
-    client.post("/api/candidates/812-t0/promote", json={"edits": edits})
-    response = client.post("/api/git/propose", json={"branch": "whetstone/cases/batch-1"})
-    assert response.status_code == 400
-    # The work isn't lost — say where it is rather than just failing.
-    assert "no git remote" in response.json()["message"]
-    assert "exists locally" in response.json()["message"]
-
-
 @pytest.mark.parametrize("branch", ["main", "master", "feature/someone-elses-work"])
 def test_propose_refuses_a_branch_the_console_did_not_create(
     client: TestClient, repo: Path, branch: str
@@ -415,58 +389,13 @@ def test_propose_refuses_a_branch_the_console_did_not_create(
     assert "refusing to push" in response.json()["message"]
 
 
-def test_promotion_is_attributed_to_the_principal(client: TestClient, repo: Path) -> None:
+def test_batch_route_reports_the_promoted_set(client: TestClient, repo: Path) -> None:
+    empty = client.get("/api/candidates/batch").json()
+    assert empty == {"count": 0, "skills": []}
+
     client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
-    author = subprocess.run(
-        ["git", "-C", str(repo), "log", "-1", "--format=%an <%ae>", "whetstone/cases/batch-1"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    assert author == "Tester <tester@example.com>"
-
-
-def test_console_authored_commits_use_the_repo_identity(
-    config: Config, store: RunStore, candidates_dir: Path, repo: Path
-) -> None:
-    """`[git] author = "console"` keeps a proxy-supplied name out of permanent history."""
-    config.candidates.dir = candidates_dir
-    config.git.author = "console"
-    config.ui.trust_proxy_headers = True
-    with TestClient(create_app(config, store=store)) as client:
-        headers = {"X-Forwarded-User": "dana", "X-Forwarded-Email": "dana@example.com"}
-        edits = client.get("/api/candidates/812-t0", headers=headers).json()["edits"]
-        response = client.post(
-            "/api/candidates/812-t0/promote", json={"edits": edits}, headers=headers
-        )
-    assert response.status_code == 200
-    author = subprocess.run(
-        ["git", "-C", str(repo), "log", "-1", "--format=%an", "whetstone/cases/batch-1"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    assert author == "Tester"  # the repo's identity, not "dana"
-
-
-def test_anonymous_principal_does_not_commit_an_empty_email(
-    config: Config, store: RunStore, candidates_dir: Path, repo: Path
-) -> None:
-    # git accepts `Name <>` without complaint, and the result is history nobody can filter on.
-    config.candidates.dir = candidates_dir
-    config.ui.trust_proxy_headers = True  # trusted, but no headers arrive → anonymous
-    with TestClient(create_app(config, store=store)) as client:
-        edits = client.get("/api/candidates/812-t0").json()["edits"]
-        response = client.post("/api/candidates/812-t0/promote", json={"edits": edits})
-    assert response.status_code == 200
-    email = subprocess.run(
-        ["git", "-C", str(repo), "log", "-1", "--format=%ae", "whetstone/cases/batch-1"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    assert email == "tester@example.com"
-
-
-def test_batch_route_reports_the_next_branch(client: TestClient) -> None:
     batch = client.get("/api/candidates/batch").json()
-    assert batch["branch"] == "whetstone/cases/batch-1"
-    assert batch["exists"] is False
-    assert batch["commits"] == 0
+    assert batch == {"count": 1, "skills": ["rust-errors"]}
 
 
 def test_traversal_in_edits_is_422_not_500(client: TestClient) -> None:
@@ -504,58 +433,15 @@ def test_skills_outside_the_repo_are_a_server_error_not_a_404(
     assert "not inside the git repo" in response.json()["message"]
 
 
-def _pushable(monkeypatch: pytest.MonkeyPatch, offered: str) -> None:
-    """A repo with a remote, and a forge that answers the push with `offered`."""
-    from whetstone.gitio import RepoStatus
-
-    monkeypatch.setattr(
-        "whetstone.ui.routers.meta.git_status",
-        lambda *a, **k: RepoStatus(branch="main", head="a" * 40, clean=True, remote="origin"),
-    )
-    monkeypatch.setattr("whetstone.ui.routers.meta.push", lambda *a, **k: offered)
-
-
-def test_propose_hands_back_the_link_the_forge_offered(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """GitLab and GitHub both answer a push of a new branch with the address of their own
-    open-a-merge-request page, and git prints it on stderr — which was captured and discarded.
-
-    So the console said "open the merge request in your git host" while holding the URL of the page
-    that opens it.
-    """
-    url = "https://gitlab.example/acme/payments/-/merge_requests/new?source=batch-1"
-    _pushable(monkeypatch, url)
-    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
-
-    body = client.post("/api/git/propose", json={"branch": "whetstone/cases/batch-1"}).json()
-    assert body["merge_request_url"] == url
-    assert "WriteConnector" not in body["message"], "no need to explain a gap that is not showing"
-
-
-def test_propose_says_what_to_do_when_the_remote_offers_no_link(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A plain git server, or a branch that already has an open request."""
-    _pushable(monkeypatch, "")
-    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
-
-    body = client.post("/api/git/propose", json={"branch": "whetstone/cases/batch-1"}).json()
-    assert body["merge_request_url"] is None
-    assert "open one from the branch" in body["message"]
-    assert "WriteConnector" in body["message"], "say why it was not created for you"
-
-
 # --- scoring what triage produced ---------------------------------------------
 
 
 def test_the_promoted_case_batch_can_be_scored(client: TestClient) -> None:
     """The hole that made triage a dead end.
 
-    Promoting writes cases to `whetstone/cases/batch-N` and never to the working tree, so the cases
-    an operator had just curated were invisible to every way of running the skill: the only route
-    to "does the reviewer actually catch these?" was to merge the merge request and find out
-    afterwards. Which is backwards — testing against a case is the reason to promote it.
+    Promoting writes cases to `promoted_cases/` on disk, separate from the eval corpus, so the cases
+    an operator just curated are scorable immediately — the whole point of promoting before they
+    count. Testing against a case is the reason to promote it.
     """
     from whetstone import staging
     from whetstone.core.loader import load_skill
@@ -564,16 +450,14 @@ def test_the_promoted_case_batch_can_be_scored(client: TestClient) -> None:
         "/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")}
     )
     assert promoted.status_code == 200, promoted.text
-    branch = promoted.json()["branch"]
+    assert promoted.json()["promoted"] == 1
 
     config = client.app.state.config
     on_disk = {c.id for c in load_skill(config.skills_root / "rust-errors").eval_cases}
-    on_branch = staging.skill_at(config, branch, "rust-errors")
-    assert on_branch is not None
-    assert {c.id for c in on_branch[0].eval_cases} - on_disk, "the promotion added a case"
+    assert {c.id for c in staging.promoted_cases(config, "rust-errors")} - on_disk
 
     batch_plan = client.post(
-        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "batch"}
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "promoted"}
     )
     working = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"})
     assert batch_plan.status_code == 200, batch_plan.text
@@ -587,10 +471,10 @@ def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
 ) -> None:
     """The step the loop turns on, and the one that was missing.
 
-    The draft and the promoted cases live on two different branches. Scoring the batch branch alone
-    re-measures the *merged* rules — a version nobody is working on — while scoring the skill branch
-    alone covers none of the new cases. Only the pairing answers "does my rewrite handle the cases I
-    just curated?".
+    The draft guidance lives on the skill branch; the promoted cases live under `promoted_cases/`
+    on disk. Scoring the merged/working guidance alone re-measures a version nobody is working on,
+    while scoring the skill branch alone covers none of the new cases. Only the pairing answers
+    "does my rewrite handle the cases I just curated?".
     """
     from whetstone.ui.routers.jobs import EvalRequest, _skill_to_score
 
@@ -599,11 +483,12 @@ def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
 
     config = client.app.state.config
     scored, _ = _skill_to_score(
-        config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="batch")
+        config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="promoted")
     )
 
     assert "R9" in scored.body, "the guidance must come from the draft"
-    assert "812-t0" in {c.id for c in scored.eval_cases}, "the cases must come from the batch"
+    ids = {c.id for c in scored.eval_cases}
+    assert "812-t0" in ids, "the cases must come from the promoted set"
 
 
 def test_the_gate_covers_the_promoted_cases_on_both_sides(client: TestClient) -> None:
@@ -662,10 +547,10 @@ def _stage_a_draft(client: TestClient, body: str = DRAFT_BODY) -> None:
 
 def test_scoring_a_batch_with_nothing_promoted_says_so(client: TestClient) -> None:
     response = client.post(
-        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "batch"}
+        "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "promoted"}
     )
     assert response.status_code == 422
-    assert "promote something from triage first" in response.json()["message"]
+    assert "promote some from triage first" in response.json()["message"]
 
 
 def test_the_batch_names_the_skills_its_cases_belong_to(client: TestClient) -> None:
@@ -676,11 +561,10 @@ def test_the_batch_names_the_skills_its_cases_belong_to(client: TestClient) -> N
 
 
 def test_a_promoted_case_shows_on_the_skill_it_constrains(client: TestClient) -> None:
-    """Promoting writes to the batch branch and never to disk.
+    """A promoted case waits under `promoted_cases/`, apart from the eval corpus.
 
-    So the skill an operator had just spent an afternoon adding cases to showed none of them: a
-    panel headed "what constrains this guidance" naming strictly less than what constrains it, with
-    nothing on the screen admitting the others existed.
+    So the skill panel headed "what constrains this guidance" must list it too — the operator just
+    curated it — while keeping it separate from the graduated cases the score is computed over.
     """
     before = client.get("/api/skills/rust-errors").json()
     assert before["pending_cases"] == []
@@ -692,9 +576,48 @@ def test_a_promoted_case_shows_on_the_skill_it_constrains(client: TestClient) ->
     pending = detail["pending_cases"]
     assert len(pending) == 1, pending
     assert pending[0]["id"] == edits["case_id"]
-    assert pending[0]["branch"] == "whetstone/cases/batch-1"
-    # Listed apart from the scored ones: nothing on disk has ever been run against it.
+    # Listed apart from the graduated ones: it is not yet in the eval corpus.
     assert pending[0]["id"] not in {c["id"] for c in detail["cases"]}
+
+
+# --- graduation ---------------------------------------------------------------
+
+
+def test_graduate_moves_a_promoted_case_into_the_eval_corpus(
+    client: TestClient, repo: Path
+) -> None:
+    """The lifecycle's last step: only the promoted cases that earn it become eval cases."""
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+
+    before = client.get("/api/skills/rust-errors").json()
+    assert "812-t0" in {c["id"] for c in before["pending_cases"]}
+    assert "812-t0" not in {c["id"] for c in before["cases"]}
+
+    result = client.post("/api/skills/rust-errors/cases/812-t0/graduate")
+    assert result.status_code == 200, result.text
+    assert result.json()["graduated"] is True
+
+    after = client.get("/api/skills/rust-errors").json()
+    assert "812-t0" in {c["id"] for c in after["cases"]}  # now in the corpus that scores and gates
+    assert "812-t0" not in {c["id"] for c in after["pending_cases"]}
+    # The folder actually moved on disk.
+    assert (repo / "skills/rust-errors/eval_cases/812-t0/case.yaml").is_file()
+    assert not (repo / "skills/rust-errors/promoted_cases/812-t0").exists()
+
+
+def test_graduating_a_case_that_is_not_promoted_is_404(client: TestClient) -> None:
+    assert client.post("/api/skills/rust-errors/cases/nope/graduate").status_code == 404
+
+
+def test_graduating_over_an_existing_eval_case_is_refused(client: TestClient) -> None:
+    """`unwrap-in-handler` is already in the corpus, so graduating that id would clobber it."""
+    (
+        client.app.state.config.skills_root
+        / "rust-errors" / "promoted_cases" / "unwrap-in-handler"
+    ).mkdir(parents=True)
+    response = client.post("/api/skills/rust-errors/cases/unwrap-in-handler/graduate")
+    assert response.status_code == 422
+    assert "already has an eval case" in response.json()["message"]
 
 
 def test_a_skill_page_survives_a_repo_with_no_batch(client: TestClient) -> None:

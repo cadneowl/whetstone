@@ -726,21 +726,16 @@ class CaseSummary(BaseModel):
 
 
 class PendingCase(BaseModel):
-    """An eval case promoted from triage, still on its batch branch.
+    """An eval case promoted from triage and waiting under `promoted_cases/` to be graduated.
 
-    Carries outcomes like `CaseSummary` does. It did not at first, on the reasoning that nothing had
-    ever been scored against a case that is not on disk — true until the console grew a button to
-    score the batch, which is the whole point of promoting cases before merging them. Leaving the
-    fields off then meant the one screen showing these cases could not show what the run had just
-    said about them, which is the only reason to look.
-
-    `None` still means genuinely unscored, and is the state a freshly promoted case starts in.
+    Carries outcomes like `CaseSummary` does, because the console can score the promoted set before
+    graduating it — the whole point of promoting before it counts. `None` means genuinely unscored,
+    the state a freshly promoted case starts in.
     """
 
     id: str
     kind: EvalKind
     path: str = ""
-    branch: str = ""
     last_recall: float | None = None
     last_fp_rate: float | None = None
     # In the holdout partition: scored on every run, but the improve loop never learns from it and a
@@ -831,11 +826,11 @@ class SkillDetail(BaseModel):
     # against the working tree while the textarea above it holds a staged branch, so a red MISSED
     # can sit directly under a change that already fixed it.
     scored_by: RunSummary | None = None
-    # Cases promoted from triage and sitting on the batch branch, not yet merged. Listed apart from
-    # `cases` because they are not on disk and nothing has scored them — but listed at all because
-    # they were invisible everywhere: an operator spent an afternoon curating cases, then opened the
-    # skill that is supposed to be constrained by them and saw only the three that were already
-    # there, with nothing on the screen admitting the others existed.
+    # Cases promoted from triage, waiting under `promoted_cases/` to be graduated. Listed apart from
+    # `cases` because they are not in the eval corpus yet and nothing may have scored them — but
+    # listed at all because they were invisible everywhere: an operator spent an afternoon curating
+    # cases, then opened the skill that is supposed to be constrained by them and saw only the three
+    # that were already there, with nothing on the screen admitting the others existed.
     pending_cases: list[PendingCase] = []
 
 

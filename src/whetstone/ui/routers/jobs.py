@@ -40,7 +40,7 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
 from whetstone.drift import DriftError, compute_drift, drift_inputs
-from whetstone.gitio import GitError, pending_batch
+from whetstone.gitio import GitError
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.judge.spec import load_judge
@@ -57,7 +57,7 @@ from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
 from whetstone.preflight import Estimate, Plan, check_budget, plan_calls, plan_eval
 from whetstone.providers.base import ConnectorError
 from whetstone.sampling import sample_cases
-from whetstone.service import record_eval, record_gate, record_review
+from whetstone.service import record_eval, record_gate, record_review, strip_guidance
 from whetstone.steps import StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
@@ -76,7 +76,7 @@ from whetstone.update import refresh_wiki
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
-EvalScope = Literal["working", "draft", "batch"]
+EvalScope = Literal["working", "draft", "promoted"]
 
 
 class EvalRequest(BaseModel):
@@ -86,15 +86,15 @@ class EvalRequest(BaseModel):
     # What to score. A closed set of names the server resolves to branches itself, never a
     # caller-supplied ref: the console scores its own branches or the working tree, nothing else.
     #
-    #   working — the files on disk, which is what `eval run` has always meant.
-    #   draft   — `whetstone/skill/<id>`: guidance edited but not merged.
-    #   batch   — `whetstone/cases/batch-N`: eval cases promoted from triage but not merged.
+    #   working  — the files on disk, which is what `eval run` has always meant.
+    #   draft    — `whetstone/skill/<id>`: guidance edited but not merged.
+    #   promoted — the cases under `skills/<id>/promoted_cases/`, overlaid on the guidance.
     #
-    # `batch` is the one that was missing, and its absence made triage a dead end. Promoting writes
-    # cases to a branch and never to the working tree, so the cases an operator had just spent an
-    # afternoon curating were invisible to every way of running the skill — the only route to
-    # "does the reviewer actually catch these?" was to merge the merge request first and find out
-    # afterwards. That is precisely backwards: the point of promoting a case is to test against it.
+    # `promoted` is the one that was missing, and its absence made triage a dead end. Before the
+    # promoted set was scorable, the cases an operator had just spent an afternoon curating were
+    # invisible to every way of running the skill — the only route to "does the reviewer actually
+    # catch these?" was to graduate and gate first and find out afterwards. That is precisely
+    # backwards: the point of promoting a case is to test against it.
     scope: EvalScope = "working"
     # The backend for this one launch. Empty is the console default — the header picker, or `[llm]`.
     # A provider here (one Whetstone knows) runs just this step on that model instead, so a single
@@ -1443,13 +1443,13 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
     The whole folder is loaded, not just `SKILL.md`: a branch may add or change eval cases too, and
     "run the full suite on my draft" means the suite that branch carries.
 
-    `batch` is the composition the loop turns on. Promoted cases and a staged draft live on two
-    different branches, and scoring either one alone answers the wrong question: the batch branch
-    carries the new cases but the *merged* guidance, so it re-measures a version nobody is working
-    on, while the skill branch carries the draft and none of the new cases — literally zero, which
+    `promoted` is the composition the loop turns on. The cases live under `promoted_cases/` on
+    disk while the draft guidance lives on the skill branch, and scoring either alone answers the
+    wrong question: the working-tree/merged guidance re-measures a version nobody is working on,
+    while the skill branch carries the draft and none of the promoted cases — literally zero, which
     is what the console offered to spend a model call on. So the guidance comes from wherever the
-    operator is editing and the cases come from the batch, which is the only pairing that answers
-    "does my rewrite handle the cases I just curated?".
+    operator is editing and the cases come from the promoted set overlaid onto it, which is the only
+    pairing that answers "does my rewrite handle the cases I just curated?".
     """
     if request.scope == "working":
         return _skill(root, request.skill_id), None
@@ -1464,22 +1464,19 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
             )
         return found[0], branch
 
-    batch = pending_batch(
-        config.skills_repo,
-        base=config.git.default_base,
-        prefix=config.git.branch_prefix,
-        remote=config.git.push_remote,
-    )
-    promoted = staging.skill_at(config, batch.branch, request.skill_id)
-    if promoted is None:
+    # The promoted set is a folder on disk (`promoted_cases/`), read as cases and overlaid onto the
+    # working-tree / staged body — no branch, no reconstruction, so a skill authored in the working
+    # tree scores exactly like a committed one.
+    cases = staging.promoted_cases(config, request.skill_id)
+    if not cases:
         raise Unprocessable(
-            f"no promoted cases for {request.skill_id!r} on {batch.branch} — promote something "
-            f"from triage first, or score the working tree instead."
+            f"no promoted cases for {request.skill_id!r} — promote some from triage first, "
+            f"or score the working tree instead."
         )
-    # The same merge the gate uses, so a run reporting recall 1.00 and the gate that has to confirm
-    # it are talking about the same content.
+    # The same overlay the gate uses, so a run reporting recall 1.00 and the gate that confirms it
+    # are talking about the same content. No git ref: the promoted cases are uncommitted on disk.
     editing = _skill_being_edited(config, root, request.skill_id)
-    return staging.merge_cases(editing, promoted[0]), batch.branch
+    return staging.overlay_cases(editing, cases), None
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:
@@ -1516,19 +1513,21 @@ def _gate_sides(config: Config, skill_id: str) -> tuple[Skill, Skill]:
             f"nothing staged for {skill_id!r} — {branch} does not exist or does not carry it. "
             f"Edit the guidance, or draft a change with improve, before gating."
         )
+    # A brand-new skill is not on the base branch, so there is no prior guidance to regress from.
+    # The meaningful baseline is then the *naked* model — the candidate with its guidance stripped —
+    # which asks the right question of a new skill: does its guidance catch what no guidance would?
+    # (Before, the gate refused outright and told the operator to "publish as is", which left a new
+    # skill unprovable — the one thing C6 exists to prevent.)
     base = staging.skill_at(config, config.git.default_base, skill_id)
-    if base is None:
-        raise Unprocessable(
-            f"{skill_id!r} does not exist on {config.git.default_base}, so there is no baseline to "
-            f"gate against. A new skill has nothing to regress from and may be published as is."
-        )
-    # Looked up once and merged into both sides. `with_promoted_cases` would re-read the batch per
-    # call, and the two sides must carry the *same* cases anyway — reading it twice is both slower
-    # and, if a promotion lands between the two calls, wrong.
-    promoted = staging.promoted_skill(config, skill_id)
-    if promoted is None:
-        return base[0], candidate[0]
-    return staging.merge_cases(base[0], promoted), staging.merge_cases(candidate[0], promoted)
+    base_skill = base[0] if base is not None else strip_guidance(candidate[0])
+    # Read once and overlaid into both sides. The two sides must carry the *same* cases — a gate is
+    # a controlled comparison — so reading the promoted set twice is both slower and, if a promotion
+    # lands between the two calls, wrong.
+    promoted = staging.promoted_cases(config, skill_id)
+    return (
+        staging.overlay_cases(base_skill, promoted),
+        staging.overlay_cases(candidate[0], promoted),
+    )
 
 
 def _step(root: Path, skill: Skill, kind: Any) -> StepSpec | None:
