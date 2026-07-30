@@ -11,7 +11,6 @@ from helpers import make_record
 from whetstone.core.gate import GateConfig, GateResult
 from whetstone.domain.score import CaseScore, Confusion, SkillScore
 from whetstone.gates import GateRecord, GateStore, new_gate_id
-from whetstone.gitio import read_at
 from whetstone.runs import RunStore
 
 AT = datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
@@ -131,38 +130,37 @@ def test_retirements_reach_the_inbox_with_their_evidence(
 # --- the tier flip ---------------------------------------------------------------
 
 
-def test_flipping_a_tier_stages_a_commit_and_leaves_the_working_tree_alone(
-    client: TestClient, repo: Path, skills_root: Path
+def _case_on_disk(skills_root: Path) -> str:
+    return (skills_root / "rust-errors/eval_cases/unwrap-in-handler/case.yaml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_flipping_a_tier_writes_the_case_in_place(
+    client: TestClient, skills_root: Path
 ) -> None:
     response = client.post(
         "/api/skills/rust-errors/cases/unwrap-in-handler/tier", json={"tier": "archive"}
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["commit"]
-    assert body["branch"] == BRANCH
-
-    staged = read_at(repo, BRANCH, CASE_PATH)
-    assert staged.endswith("tier: archive\n")
-    # The flip is a commit, never a disk write — the operator's checkout is untouched.
-    on_disk = (skills_root / "rust-errors/eval_cases/unwrap-in-handler/case.yaml").read_text(
-        encoding="utf-8"
-    )
-    assert "tier:" not in on_disk
+    # Written in place on disk — the case file changes where it lives, no branch, no commit.
+    assert body["written"] == CASE_PATH
+    assert _case_on_disk(skills_root).endswith("tier: archive\n")
 
 
-def test_a_second_flip_builds_on_the_first(client: TestClient, repo: Path) -> None:
+def test_a_second_flip_builds_on_the_first(client: TestClient, skills_root: Path) -> None:
     url = "/api/skills/rust-errors/cases/unwrap-in-handler/tier"
-    assert client.post(url, json={"tier": "archive"}).json()["commit"]
+    assert client.post(url, json={"tier": "archive"}).json()["written"] == CASE_PATH
 
-    # Same tier again: nothing to change, and no empty commit minted to say so.
-    assert client.post(url, json={"tier": "archive"}).json()["commit"] == ""
+    # Same tier again: nothing to change, and nothing written to say so.
+    assert client.post(url, json={"tier": "archive"}).json()["written"] == ""
 
-    # Restoring edits the branch's copy — one tier line, flipped in place, not appended twice.
-    assert client.post(url, json={"tier": "active"}).json()["commit"]
-    staged = read_at(repo, BRANCH, CASE_PATH)
-    assert staged.count("tier:") == 1
-    assert staged.endswith("tier: active\n")
+    # Restoring edits the case on disk — one tier line, flipped in place, not appended twice.
+    assert client.post(url, json={"tier": "active"}).json()["written"] == CASE_PATH
+    on_disk = _case_on_disk(skills_root)
+    assert on_disk.count("tier:") == 1
+    assert on_disk.endswith("tier: active\n")
 
 
 def test_a_staged_flip_stops_the_proposal_from_nagging(

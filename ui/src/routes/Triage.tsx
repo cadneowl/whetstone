@@ -206,16 +206,26 @@ export function Triage() {
             <span className="ml-auto flex items-center gap-3 text-sm">
               {/* Promoting writes cases to `promoted_cases/` on disk. Score them here to see what
                   the skill misses before graduating the ones that earn a place in the eval corpus —
-                  testing against a case is the reason to promote it. */}
+                  testing against a case is the reason to promote it. This scores the whole set; to
+                  pick specific cases, the skill's Improve tab lists them with checkboxes that scope
+                  the score. */}
               <span className="text-xs text-muted">
                 {batch.count} promoted · waiting to graduate
               </span>
               {skillOnBatch && (
-                <LaunchButton
-                  kind="eval"
-                  request={{ skill_id: skillOnBatch, scope: 'promoted' }}
-                  label="Score promoted cases"
-                />
+                <span className="flex items-center gap-2">
+                  <LaunchButton
+                    kind="eval"
+                    request={{ skill_id: skillOnBatch, scope: 'promoted' }}
+                    label="Score all promoted"
+                  />
+                  <Link
+                    to={`/skills/${encodeURIComponent(skillOnBatch)}?tab=improve`}
+                    className="text-xs text-accent underline"
+                  >
+                    pick cases →
+                  </Link>
+                </span>
               )}
             </span>
           )}

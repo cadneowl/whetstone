@@ -227,35 +227,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/git/propose": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Propose
-         * @description Publish a branch.
-         *
-         *     Pushing is never implicit — this route exists so that it is always a deliberate action. Opening
-         *     the merge request itself needs a provider implementing `WriteConnector`, which Milestone 1
-         *     defines but does not implement; until one is registered this pushes the branch and says so
-         *     rather than pretending a merge request was created.
-         *
-         *     A branch carrying a guidance change is refused unless a passing gate covers the exact content
-         *     it would publish (C6). This is the choke point rather than the editor, because the editor is
-         *     not the only way commits reach a branch.
-         */
-        post: operations["propose_api_git_propose_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/git/status": {
         parameters: {
             query?: never;
@@ -459,7 +430,7 @@ export interface paths {
         put?: never;
         /**
          * Launch Gate
-         * @description Gate the skill's staged branch against the base — the evidence C6 requires to publish.
+         * @description Gate the on-disk guidance against the last committed version — the C6 evidence (advisory).
          */
         post: operations["launch_gate_api_jobs_gate_post"];
         delete?: never;
@@ -533,10 +504,11 @@ export interface paths {
         put?: never;
         /**
          * Stage Proposal
-         * @description Put a drafted guidance change onto the skill's branch, through the path the editor uses.
+         * @description Write a drafted guidance change into the skill folder on disk, the path the editor uses.
          *
-         *     Separate from the job so the operator reads the proposal before any of it is committed — the
-         *     whole value of the draft is that a person decides whether it is an improvement.
+         *     Separate from the job so the operator reads the proposal before any of it is written — the whole
+         *     value of the draft is that a person decides whether it is an improvement. Writes in place; git
+         *     is the operator's to manage.
          */
         post: operations["stage_proposal_api_jobs_improve_stage_post"];
         delete?: never;
@@ -861,7 +833,8 @@ export interface paths {
          *
          *     A candidate somebody has already promoted or rejected is left alone: undoing a ruling is
          *     correcting a mistake here, not reaching into the queue to overrule a decision someone else made
-         *     there — and a promotion is already a commit on a branch, which this cannot revert anyway.
+         *     there — a promoted case is un-done from triage (which removes its `promoted_cases/` folder), not
+         *     by retracting the long-decided ruling that minted its candidate.
          */
         delete: operations["undo_verdict_api_reviews__review_id__findings__index__verdict_delete"];
         options?: never;
@@ -1089,12 +1062,12 @@ export interface paths {
         put?: never;
         /**
          * Set Case Tier
-         * @description Flip one eval case between `active` and `archive` — as a commit, never a disk write.
+         * @description Flip one eval case between `active` and `archive`, written in place on disk.
          *
-         *     The flip lands on the skill's staging branch like a guidance edit, because it is the same kind
-         *     of thing: a change to what the skill's score measures. A rewritten case changes `skill_hash`,
-         *     so C6 requires a fresh passing gate before the archived corpus can be proposed — de-weighting
-         *     a case can move the score, and a moved score gets re-proven, not waved through.
+         *     A change to what the skill's score measures, so it is written where the skill lives, like a
+         *     guidance edit. A rewritten case changes `skill_hash`, so the gate verdict is retracted until a
+         *     fresh gate covers the archived corpus — de-weighting a case can move the score. Committing the
+         *     change is the operator's own git.
          */
         post: operations["set_case_tier_api_skills__skill_id__cases__case_id__tier_post"];
         delete?: never;
@@ -1113,7 +1086,11 @@ export interface paths {
         get?: never;
         /**
          * Put Guidance
-         * @description Stage a guidance edit on the skill's branch.
+         * @description Write a guidance edit into the skill folder on disk, in place.
+         *
+         *     No branch, no commit: the file changes where it lives, and someone editing it in an editor sees
+         *     the change at once. It needs a fresh gate before it should be committed — `proposal.verdict`
+         *     says whether one exists — but committing it is the operator's own git.
          */
         put: operations["put_guidance_api_skills__skill_id__guidance_put"];
         post?: never;
@@ -1134,7 +1111,7 @@ export interface paths {
         put?: never;
         /**
          * Preview Guidance
-         * @description Validate an edit and return exactly what would be committed. Writes nothing.
+         * @description Validate an edit and return exactly what would be written. Writes nothing.
          */
         post: operations["preview_guidance_api_skills__skill_id__guidance_preview_post"];
         delete?: never;
@@ -1160,30 +1137,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/skills/{skill_id}/improve/begin": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Begin Improve
-         * @description Start improving a skill: materialise `whetstone/skill/<id>` so it can be checked out.
-         *
-         *     The branch is where both hands land — an operator editing the multi-file skill in their own
-         *     editor, and the LLM improve step staging its draft — so it has to exist before the workspace can
-         *     tell someone how to `git worktree add` it. Idempotent: an existing branch is left as it is.
-         */
-        post: operations["begin_improve_api_skills__skill_id__improve_begin_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/skills/{skill_id}/meta": {
         parameters: {
             query?: never;
@@ -1194,10 +1147,9 @@ export interface paths {
         get?: never;
         /**
          * Put Meta
-         * @description Stage a `meta.yaml` edit — owner, references, and rule provenance.
+         * @description Write a `meta.yaml` edit — owner, references, rule provenance — to disk, in place.
          *
-         *     Lands on the same branch as a guidance edit, so metadata and the rules it documents travel
-         *     together. Never affects the C6 verdict: nothing in this file reaches the reviewer.
+         *     Never affects the gate verdict: nothing in this file reaches the reviewer.
          */
         put: operations["put_meta_api_skills__skill_id__meta_put"];
         post?: never;
@@ -1216,7 +1168,10 @@ export interface paths {
         };
         /**
          * Get Proposal
-         * @description What is staged for this skill, and whether it may be published (C6).
+         * @description The on-disk guidance for this skill, and whether a passing gate covers it (C6).
+         *
+         *     Hashed as the gate scores it — with the promoted cases folded in — or the verdict could never be
+         *     found. See `staging.with_promoted_cases`.
          */
         get: operations["get_proposal_api_skills__skill_id__proposal_get"];
         put?: never;
@@ -1382,20 +1337,6 @@ export interface components {
              * @default []
              */
             skills: string[];
-        };
-        /**
-         * BeginImprove
-         * @description What starting an improvement leaves you with: a branch, and how to edit it locally.
-         */
-        BeginImprove: {
-            /** Branch */
-            branch: string;
-            /** Checkout Cmd */
-            checkout_cmd: string;
-            /** Created */
-            created: boolean;
-            /** Worktree Cmd */
-            worktree_cmd: string;
         };
         /**
          * CadenceClock
@@ -2172,6 +2113,8 @@ export interface components {
         };
         /** EvalRequest */
         EvalRequest: {
+            /** Cases */
+            cases?: string[];
             /**
              * Model
              * @default
@@ -2460,8 +2403,8 @@ export interface components {
         };
         /**
          * GateRequest
-         * @description Gate the skill's staged branch against the base. The console never gates arbitrary folders —
-         *     the thing it needs a verdict about is always what `whetstone/skill/<id>` holds.
+         * @description Gate the skill's on-disk guidance against the last committed version. The console never gates
+         *     arbitrary folders — the thing it needs a verdict about is always what is in the working tree.
          */
         GateRequest: {
             /**
@@ -2563,8 +2506,6 @@ export interface components {
         /** GuidanceRequest */
         GuidanceRequest: {
             edit: components["schemas"]["SkillEdit"];
-            /** Expect Head */
-            expect_head?: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -2920,8 +2861,6 @@ export interface components {
         };
         /** MetaRequest */
         MetaRequest: {
-            /** Expect Head */
-            expect_head?: string | null;
             /** Meta Yaml */
             meta_yaml: string;
         };
@@ -3054,6 +2993,13 @@ export interface components {
              * @default
              */
             path: string;
+            /**
+             * @default {
+             *       "semantic_drafted_by": "",
+             *       "source": "manual"
+             *     }
+             */
+            provenance: components["schemas"]["Provenance"];
         };
         /**
          * Plan
@@ -3238,7 +3184,7 @@ export interface components {
         };
         /**
          * Proposal
-         * @description The state of a skill's pending guidance change, and whether it may be published.
+         * @description The state of a skill's on-disk guidance, and whether a passing gate covers it.
          */
         Proposal: {
             /** Base */
@@ -3248,32 +3194,11 @@ export interface components {
              * @default
              */
             body: string;
-            /** Branch */
-            branch: string;
-            /**
-             * Branch Exists
-             * @default false
-             */
-            branch_exists: boolean;
-            /** Commits */
-            commits: number;
-            /**
-             * Diff
-             * @default
-             */
-            diff: string;
             /**
              * Guidance Hash
              * @default
              */
             guidance_hash: string;
-            /** Head */
-            head?: string | null;
-            /**
-             * Local Edit
-             * @default
-             */
-            local_edit: string;
             /**
              * Pages
              * @default {}
@@ -3287,32 +3212,9 @@ export interface components {
             skill_hash: string;
             /** Skill Id */
             skill_id: string;
-            /** Staged */
-            staged: boolean;
             verdict: components["schemas"]["Verdict"];
             /** Version */
             version: number;
-        };
-        /** ProposeRequest */
-        ProposeRequest: {
-            /** Branch */
-            branch: string;
-        };
-        /** ProposeResponse */
-        ProposeResponse: {
-            /** Branch */
-            branch: string;
-            /** Merge Request Url */
-            merge_request_url?: string | null;
-            /**
-             * Message
-             * @default
-             */
-            message: string;
-            /** Pushed */
-            pushed: boolean;
-            /** Remote */
-            remote: string;
         };
         /**
          * Provenance
@@ -4015,6 +3917,19 @@ export interface components {
             evidence: string;
         };
         /**
+         * SavedSkill
+         * @description What a save wrote to disk, plus the gate state it left behind.
+         *
+         *     `paths` are the working-tree files just written. The proposal rides along so the editor can flag
+         *     that the on-disk guidance now needs a (re-)gate in the same round trip that saved the edit.
+         */
+        SavedSkill: {
+            /** Paths */
+            paths: string[];
+            prepared: components["schemas"]["PreparedSkill"];
+            proposal: components["schemas"]["Proposal"];
+        };
+        /**
          * ScoreNow
          * @description The latest run's answer to "how good is it?", per partition where the run recorded one.
          */
@@ -4469,21 +4384,6 @@ export interface components {
             skill_id: string;
         };
         /**
-         * StagedSkill
-         * @description What a save produced, plus the proposal state it left behind.
-         *
-         *     The proposal is included so the editor can grey out *Propose* in the same round trip that saved
-         *     the edit — the moment when it is most important to say that the guidance now needs a gate.
-         */
-        StagedSkill: {
-            /** Branch */
-            branch: string;
-            /** Commit */
-            commit: string;
-            prepared: components["schemas"]["PreparedSkill"];
-            proposal: components["schemas"]["Proposal"];
-        };
-        /**
          * Sweep
          * @description One poll of every configured project.
          */
@@ -4561,18 +4461,8 @@ export interface components {
         };
         /** TierResult */
         TierResult: {
-            /**
-             * Branch
-             * @default
-             */
-            branch: string;
             /** Case Id */
             case_id: string;
-            /**
-             * Commit
-             * @default
-             */
-            commit: string;
             /** Skill Id */
             skill_id: string;
             /**
@@ -4580,6 +4470,11 @@ export interface components {
              * @enum {string}
              */
             tier: "active" | "archive";
+            /**
+             * Written
+             * @default
+             */
+            written: string;
         };
         /**
          * TrialRecord
@@ -5136,39 +5031,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelChoice"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    propose_api_git_propose_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ProposeRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProposeResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6604,7 +6466,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["StagedSkill"];
+                    "application/json": components["schemas"]["SavedSkill"];
                 };
             };
             /** @description Validation Error */
@@ -6684,37 +6546,6 @@ export interface operations {
             };
         };
     };
-    begin_improve_api_skills__skill_id__improve_begin_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                skill_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BeginImprove"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     put_meta_api_skills__skill_id__meta_put: {
         parameters: {
             query?: never;
@@ -6736,7 +6567,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["StagedSkill"];
+                    "application/json": components["schemas"]["SavedSkill"];
                 };
             };
             /** @description Validation Error */

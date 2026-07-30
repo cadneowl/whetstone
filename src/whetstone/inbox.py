@@ -170,12 +170,16 @@ def decide(
     second opinion that can disagree with them.
     """
     if staged and can_propose:
-        return _action("propose", "Propose MR", "a passing gate is waiting — this can ship now")
+        return _action(
+            "propose",
+            "Ready to commit",
+            "a gate-proven change is on disk — commit and push it with your git",
+        )
     if staged:
         return _action(
             "gate",
             "Run the gate",
-            blocked_reason or "a change is staged but unproven, so it cannot be published",
+            blocked_reason or "an uncommitted change is on disk but unproven — gate it first",
         )
     if new_signals:
         return _action(

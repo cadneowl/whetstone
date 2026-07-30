@@ -736,6 +736,9 @@ class PendingCase(BaseModel):
     id: str
     kind: EvalKind
     path: str = ""
+    # Where the case came from — a merge request, a Jira defect, a live review — so the improve
+    # screen can show at a glance that the loop is fed by real signal, not just a cryptic id.
+    provenance: Provenance = Provenance()
     last_recall: float | None = None
     last_fp_rate: float | None = None
     # In the holdout partition: scored on every run, but the improve loop never learns from it and a

@@ -115,10 +115,11 @@ def test_gate_plan_doubles_the_estimate(client: TestClient, steps: Path, repo: P
     assert any("doubled" in d for d in both["details"])
 
 
-def test_gate_plan_refuses_when_nothing_is_staged(client: TestClient, steps: Path) -> None:
+def test_gate_plan_works_against_the_on_disk_guidance(client: TestClient, steps: Path) -> None:
+    """In-place: the gate always has a candidate — the working tree — so the plan never refuses."""
     response = client.post("/api/jobs/gate/plan", json={"skill_id": "rust-errors"})
-    assert response.status_code == 422
-    assert "nothing staged" in response.json()["message"]
+    assert response.status_code == 200, response.text
+    assert response.json()["action"] == "gate"
 
 
 # --- eval ------------------------------------------------------------------------
@@ -238,35 +239,35 @@ def test_a_passing_gate_unlocks_propose(
 # --- improve ---------------------------------------------------------------------
 
 
-def test_improve_job_returns_a_proposal_without_staging_it(
+def test_improve_job_returns_a_proposal_without_writing_it(
     client: TestClient, steps: Path, repo: Path
 ) -> None:
     """A person decides whether a draft is an improvement — that is the whole value of it."""
+    before = client.get("/api/skills/rust-errors/proposal").json()["body"]
     _score(client)
     job = _improve(client)
 
     assert job["state"] == "done", job
     assert "R1" in job["result"]["body"]
     assert job["result"]["rationale"] == "because"
-    # Nothing was committed: the proposal branch does not exist yet.
-    assert client.get("/api/skills/rust-errors/proposal").json()["staged"] is False
+    # Nothing was written: the draft is in the job result, not on disk.
+    assert client.get("/api/skills/rust-errors/proposal").json()["body"] == before
 
 
-def test_a_drafted_proposal_can_then_be_staged(
+def test_a_drafted_proposal_can_then_be_applied(
     client: TestClient, steps: Path, repo: Path
 ) -> None:
     _score(client)
     job = _improve(client)
 
-    staged = client.post(
+    applied = client.post(
         "/api/jobs/improve/stage",
         json={"skill_id": "rust-errors", "body": job["result"]["body"]},
     )
-    assert staged.status_code == 200, staged.text
+    assert applied.status_code == 200, applied.text
     proposal = client.get("/api/skills/rust-errors/proposal").json()
-    assert proposal["staged"] is True
-    assert "R1" in proposal["body"]
-    assert proposal["version"] == 3  # the fixture skill is v2; one bump per proposal
+    assert "R1" in proposal["body"]  # written to disk
+    assert proposal["version"] == 3  # the fixture skill is v2; one bump per edit
 
 
 def test_improve_refuses_a_stale_run(client: TestClient, steps: Path, repo: Path) -> None:
@@ -330,22 +331,21 @@ def test_improve_scores_the_draft_and_says_so_before_the_click(
     assert any("different guidance" in w for w in plan["warnings"]), plan["warnings"]
 
 
-def test_improve_accepts_a_run_of_the_staged_draft(
+def test_improve_accepts_a_run_of_the_on_disk_draft(
     client: TestClient, steps: Path, repo: Path
 ) -> None:
     """The loop this exists for: score the draft, then improve from what the draft got wrong.
 
-    Before `staged`, improve read the working tree, so a run of the draft was rejected as describing
-    different content and a run of the working tree had nothing to say about the draft. There was no
-    run that satisfied it, which is what made a failing gate a dead end.
+    The console edits in place, so scoring the on-disk guidance and then improving from that run are
+    talking about the same content — no branch, and no "run describes different content" refusal.
     """
-    _stage_guidance(client, "# Rewritten\n\n- **R9 — something only the branch has.**\n")
+    _stage_guidance(client, "# Rewritten\n\n- **R9 — an edit written to disk.**\n")
     launched = client.post(
         "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "draft"}
     ).json()
     job = _await(client, launched["id"])
     assert job["state"] == "done", job
-    assert job["result"]["scored"] == "whetstone/skill/rust-errors"
+    assert job["result"]["scored"] == "working tree"
 
     plan = client.post("/api/jobs/improve/plan", json={"skill_id": "rust-errors"}).json()
     assert not any("different version" in w for w in plan["warnings"]), plan["warnings"]

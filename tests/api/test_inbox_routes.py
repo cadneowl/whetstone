@@ -162,18 +162,18 @@ def test_a_passing_gate_makes_the_inbox_offer_to_propose(client: TestClient) -> 
     promoted = client.post("/api/candidates/mr-812-unwrap/promote", json={"edits": edits})
     assert promoted.status_code == 200, promoted.text
 
-    base, current = staging.source(config, "rust-errors")
+    base, current = staging.working_skill(config, "rust-errors")
     prepared = prepare_guidance(
         base,
         current,
-        SkillEdit(body="# Rust errors\n\n- **R9 — a staged rule.**\n"),
+        SkillEdit(body="# Rust errors\n\n- **R9 — an edit on disk.**\n"),
         skills_root=staging.relative_skills_root(config),
         base_version=staging.base_version(config, "rust-errors"),
     )
-    staging.stage(config, "rust-errors", prepared.files, "guidance: staged for this test")
+    staging.write_in_place(config, prepared.files)
 
-    staged, _ = staging.source(config, "rust-errors")
-    under_test = staging.with_promoted_cases(config, staged)
+    on_disk, _ = staging.working_skill(config, "rust-errors")
+    under_test = staging.with_promoted_cases(config, on_disk)
     at = datetime(2026, 7, 27, tzinfo=UTC)
     candidate_hash = skill_hash(under_test)
     score = SkillScore(skill_id="rust-errors", version=1, k=1, cases=[])

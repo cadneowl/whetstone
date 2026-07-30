@@ -1,20 +1,19 @@
-"""Where a proposed change to a skill goes: one branch per skill, shared by the console and the CLI.
+"""Where a change to a skill goes, and how a gate reads what is there.
 
-Every write in Whetstone lands on `whetstone/skill/<id>` — never the working tree, never the default
-branch — and `authoring.ungated_guidance` refuses to publish that branch without a passing gate for
-its exact content. That rule only holds if *everything* writing a skill change uses the same branch
-and the same notion of what is currently staged.
+The console edits skills **in place, on disk** (`write_in_place`): what is in the working tree *is*
+the change, and git is the operator's to manage. The CLI keeps an opt-in git flow (`--apply`), where
+a change is staged onto `whetstone/skill/<id>` via `stage()` and `source()` reads that branch. Both
+paths share the reads that matter: `working_skill` (the on-disk skill, the console's source of
+truth), `committed_skill` (the last committed version, the gate's read-only baseline), and the
+promoted-case overlay (`with_promoted_cases`) that keeps the gate and the C6 verdict hashing the
+same content.
 
-This module exists because it briefly did not. The console staged guidance edits here while
+This module also carries a scar. The console once staged guidance edits onto a branch while
 `whetstone skills improve` handed the operator a markdown file to copy somewhere by hand, and the
-gate they then ran recorded evidence under whatever id the copied folder happened to have. The
-result looked like success from every angle and was silently useless: a passing gate record C6 could
-never match, because it was filed against a skill that does not exist.
-
-So the staging primitives live here, and both callers use them. The important one is `source()`:
-reads the branch when something is staged and the working tree otherwise, which is what makes a
-second edit additive rather than a rewrite of the first, and what makes the resulting `skill_hash`
-describe content that could actually be published.
+gate they then ran recorded evidence under whatever id the copied folder happened to have — a
+passing gate record C6 could never match, because it was filed against a skill that did not exist.
+Keeping
+the read/write primitives here, used by both callers, is what stops the two ends drifting apart.
 """
 
 from __future__ import annotations
@@ -86,8 +85,26 @@ def skill_at(config: Config, ref: str, skill_id: str) -> tuple[Skill, str] | Non
         shutil.rmtree(root, ignore_errors=True)
 
 
+def working_skill(config: Config, skill_id: str) -> tuple[Skill, str]:
+    """The on-disk skill — the console's source of truth. Reads the working tree, never a branch.
+
+    The console edits in place, so what is on disk *is* the edit; there is no staged branch to
+    prefer. (The CLI's opt-in `--apply` git flow still uses `source`, which reads a branch.)
+    """
+    if not is_safe_segment(skill_id):
+        raise StagingError(describe_unsafe(skill_id, "skill id"))
+    directory = config.skills_root / skill_id
+    if not (directory / SKILL_FILE).is_file():
+        raise NoSuchSkill(f"no skill {skill_id!r} under {config.skills_root}")
+    return load_skill(directory), (directory / SKILL_FILE).read_text(encoding="utf-8")
+
+
 def source(config: Config, skill_id: str) -> tuple[Skill, str]:
-    """The skill an edit starts from: the branch if one is staged, else the working tree."""
+    """The skill an edit starts from: the branch if one is staged, else the working tree.
+
+    Used by the CLI's `--apply` git flow. The console reads `working_skill` instead — on disk is its
+    source of truth.
+    """
     if not is_safe_segment(skill_id):
         raise StagingError(describe_unsafe(skill_id, "skill id"))
 
@@ -206,6 +223,33 @@ def base_version(config: Config, skill_id: str) -> int | None:
         return None
 
 
+def write_in_place(config: Config, files: dict[str, str]) -> list[str]:
+    """Write repo-relative `files` straight into the working tree, returning the paths written.
+
+    The console's disk-first model: guidance, metadata, tier flips and generated wiki/index all land
+    here, exactly as promoted cases already do — so the on-disk skill is the single source of truth
+    and git is the operator's to manage, not the console's. It creates no branch, no commit and no
+    push; someone editing the same files in an editor sees the change immediately, and compares it
+    against whatever they last committed with their own git.
+    """
+    written: list[str] = []
+    for rel, content in sorted(files.items()):
+        dest = config.skills_repo / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+        written.append(rel)
+    return written
+
+
+def committed_skill(config: Config, skill_id: str) -> tuple[Skill, str] | None:
+    """The skill as last committed at the default base — the read-only baseline a gate compares to.
+
+    None when the skill is not committed there yet (a brand-new skill on disk), which is the signal
+    to fall back to the naked baseline. Reads git; never writes it.
+    """
+    return skill_at(config, config.git.default_base, skill_id)
+
+
 def stage(
     config: Config,
     skill_id: str,
@@ -215,7 +259,8 @@ def stage(
     author: Author | None = None,
     expect_head: str | None = None,
 ) -> str:
-    """Commit `files` onto this skill's branch, returning the new sha.
+    """Commit `files` onto this skill's branch, returning the new sha. Used by the CLI's opt-in
+    `--apply` git flow; the console writes in place with `write_in_place` instead.
 
     The working tree is untouched — the commit is assembled in a temporary index. That is what lets
     an operator run this while the repo is open in an editor without anything being switched out

@@ -1,36 +1,32 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  useBeginImprove,
   useConsoleConfig,
   useGraduate,
   useProposal,
-  usePropose,
   useSaveGuidance,
   type PendingCase,
   type SkillDetail as Detail,
 } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, ErrorNote, score } from '@/components/primitives'
+import { SourceBadge } from '@/components/signals'
 
 /**
  * The improve workspace: one place to take a skill from "triage promoted some cases it fails on"
- * to a gated, proposable guidance change.
+ * to a gate-proven guidance change, ready for you to commit.
  *
- * The loop the console was missing. Editing happened in a cramped box, and the LLM improve drafted
- * from whatever the last run happened to fail on rather than from the cases you just curated. Here
- * the branch is the artifact — edited by hand in your own editor (a shown `git worktree` command) or
- * by the LLM improve step, both committing to the same `whetstone/skill/<id>` — and every action is
- * scoped to the proposed cases you select.
+ * The console edits in place: the skill files on disk are the artifact — edited by hand in your own
+ * editor, or by the LLM sharpen below, both writing straight to `skills/<id>/`. It never touches
+ * git; you commit, branch and push the result yourself. Every action is scoped to the promoted cases
+ * you select.
  */
 export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const skillId = detail.skill.id
   const pending = detail.pending_cases
   const { data: config } = useConsoleConfig()
   const { data: proposal } = useProposal(skillId)
-  const begin = useBeginImprove(skillId)
   const save = useSaveGuidance()
-  const propose = usePropose()
   const graduate = useGraduate(skillId)
   const readOnly = Boolean(config?.read_only)
 
@@ -49,10 +45,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       return next
     })
 
-  // The batch is the pre-merge sharpening path: promote cases in triage, then close the gap here.
-  // Without one, the same loop still runs against the merged cases the last run failed — which is
-  // exactly the state the inbox's "improve" and "propose" actions send you here in. So the tab is a
-  // hub, not a dead end: branch, sharpen and gate are always present; only their fuel changes.
+  // The batch is the pre-commit sharpening path: promote cases in triage, then close the gap here.
+  // Without one, the same loop still runs against the corpus cases the last run failed — which is
+  // exactly the state the inbox's "improve" action sends you here in. So the tab is a hub, not a
+  // dead end: sharpen and gate are always present; only their fuel changes.
   const hasBatch = pending.length > 0
   const latestRunId = detail.runs[0]?.id ?? null
 
@@ -62,14 +58,20 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const heldSelected = pending.filter((c) => selected.has(c.id) && c.holdout)
   const targetable = pending.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
 
-  const stageDraft = () =>
+  // A strict subset scores just those cases — the cheap, targeted check. All (or none) selected
+  // scores the whole promoted set, so a regression on a case you did not pick still shows.
+  // `scoreKey` resets the launch button's cost plan whenever the selection changes.
+  const scoreSubset = selected.size > 0 && selected.size < pending.length
+  const scoreKey = scoreSubset ? [...selected].sort().join(',') : 'all'
+
+  const applyDraft = () =>
     draft &&
     save.mutate(
       { skillId, edit: { body: draft.body, pages: draft.pages } },
       {
         onSuccess: () => {
           setDraft(null)
-          setNotice('Staged onto the branch. Re-score to see if it caught them.')
+          setNotice('Applied to the skill files on disk. Re-score to see if it caught them.')
         },
       },
     )
@@ -92,39 +94,21 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const review = draft && (
     <DraftReview
       draft={draft}
-      staging={save.isPending}
+      applying={save.isPending}
       readOnly={readOnly}
       error={save.error}
-      onStage={stageDraft}
+      onApply={applyDraft}
       onDiscard={() => setDraft(null)}
     />
   )
 
   // Step numbers depend on whether the batch-score step is present, so the sharpen and gate steps
   // read as "1 · 2" without a batch and "1 · 2 · 3" with one.
-  const step = hasBatch
-    ? { sharpen: '2', gate: '3' }
-    : { sharpen: '1', gate: '2' }
+  const step = hasBatch ? { sharpen: '2', gate: '3' } : { sharpen: '1', gate: '2' }
 
   return (
     <div className="max-w-3xl space-y-5">
-      <BranchPanel
-        skillId={skillId}
-        branch={proposal?.branch ?? ''}
-        branchExists={proposal?.branch_exists ?? false}
-        localEdit={proposal?.local_edit ?? ''}
-        onBegin={() =>
-          begin.mutate(undefined, {
-            onSuccess: (r) =>
-              setNotice(
-                r.created ? `Created ${r.branch}.` : `${r.branch} already existed.`,
-              ),
-          })
-        }
-        beginning={begin.isPending}
-        readOnly={readOnly}
-        error={begin.error}
-      />
+      <InPlaceNotice skillId={skillId} />
 
       {hasBatch && (
         <section className="rounded-lg border border-line bg-surface p-4">
@@ -148,14 +132,14 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               </button>
             </div>
           </div>
-          {/* Honest about scope: scoring runs the whole batch (regressions have to show), while the
-              LLM sharpen and the gate act on just the selected subset. The old copy said scoring
-              acted on "exactly these", which the batch scope does not. */}
+          {/* The checkboxes drive the score (a strict subset scores just those, all-or-none scores
+              the whole batch so regressions still show), the LLM sharpen, and the gate's targets. */}
           <p className="mb-3 text-xs text-muted">
-            The checkboxes drive the LLM sharpen and the gate&rsquo;s targets. Scoring runs the whole
-            batch, so a regression elsewhere still shows. Caught / missed is from the latest score.
+            The checkboxes drive what gets scored, sharpened and gate-targeted. Tick a few to score
+            just those; leave all (or none) ticked to score the whole batch, so a regression
+            elsewhere still shows. Caught / missed is from the latest score.
             <strong> Graduate</strong> a case once you&rsquo;re satisfied it belongs — that moves it
-            into the eval corpus (only some earn it), which needs a fresh gate before you propose.
+            into the eval corpus (only some earn it), which needs a fresh gate afterwards.
           </p>
           <ul className="space-y-1.5">
             {pending.map((c) => (
@@ -169,7 +153,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                 <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
                   {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
                 </Badge>
-                <span className="font-mono">{c.id}</span>
+                <SourceBadge provenance={c.provenance} />
                 <span className="font-mono text-xs text-muted">{c.path}</span>
                 {c.holdout && (
                   <Badge
@@ -188,11 +172,11 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                       graduate.mutate(c.id, {
                         onSuccess: () =>
                           setNotice(
-                            `Graduated ${c.id} into the eval corpus — re-gate before proposing.`,
+                            `Graduated ${c.id} into the eval corpus — re-gate before you commit.`,
                           ),
                       })
                     }
-                    title="Move this case from promoted_cases/ into the eval corpus. Changes skill_hash, so a fresh gate is needed before propose."
+                    title="Move this case from promoted_cases/ into the eval corpus. Changes skill_hash, so a fresh gate is needed."
                     className="rounded border border-good/50 px-2 py-0.5 text-xs text-good transition-colors hover:bg-good/10 disabled:opacity-40"
                   >
                     Graduate
@@ -210,13 +194,21 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           <div>
             <h3 className="text-sm font-medium">1 · Score the promoted batch</h3>
             <p className="mt-0.5 mb-2 text-xs text-muted">
-              Runs the branch&rsquo;s guidance over every promoted case. Missed / falsely-flagged
-              cases are what to sharpen next; a merged case that regressed is what to protect.
+              {scoreSubset
+                ? `Runs the on-disk guidance over the ${selected.size} case(s) you ticked above.`
+                : 'Runs the on-disk guidance over every promoted case.'}{' '}
+              Missed / falsely-flagged cases are what to sharpen next; a regressed case is what to
+              protect.
             </p>
             <LaunchButton
+              key={scoreKey}
               kind="eval"
-              request={{ skill_id: skillId, scope: 'promoted' }}
-              label="Score the promoted batch"
+              request={{
+                skill_id: skillId,
+                scope: 'promoted',
+                ...(scoreSubset ? { cases: [...selected] } : {}),
+              }}
+              label={scoreSubset ? `Score ${selected.size} selected` : 'Score the promoted batch'}
               onDone={(job) => {
                 const r = job.result as Record<string, unknown>
                 setBatchRun(String(r.run_id ?? '') || null)
@@ -242,8 +234,8 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           {hasBatch ? (
             <>
               <p className="mt-0.5 mb-2 text-xs text-muted">
-                By hand on the branch (the command above), or draft a change with the LLM from the
-                cases you selected. Either way it lands on the branch and is re-scored above.
+                Edit the skill files on disk by hand, or draft a change with the LLM from the cases
+                you selected. Either way it lands on disk and is re-scored above.
               </p>
               <LaunchButton
                 kind="improve"
@@ -260,9 +252,9 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           ) : (
             <>
               <p className="mt-0.5 mb-2 text-xs text-muted">
-                No promoted batch waiting — sharpening runs against the merged cases the last run
-                got wrong. Draft with the LLM here, or edit the files by hand on the branch (the
-                command above). To sharpen against fresh signal instead,{' '}
+                No promoted batch waiting — sharpening runs against the corpus cases the last run got
+                wrong. Draft with the LLM here, or edit the files on disk by hand. To sharpen against
+                fresh signal instead,{' '}
                 <Link to="/triage" className="underline">
                   promote cases in Triage
                 </Link>
@@ -292,10 +284,12 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
         </div>
 
         <div className="border-t border-line pt-3">
-          <h3 className="text-sm font-medium">{step.gate} · Gate &amp; propose</h3>
+          <h3 className="text-sm font-medium">{step.gate} · Gate &amp; commit</h3>
           <p className="mt-0.5 mb-2 text-xs text-muted">
-            When the cases pass and nothing regressed, prove it: the gate scores base vs the branch
-            over the union{hasBatch ? ', and the cases you selected must pass' : ''}.
+            When the cases pass and nothing regressed, prove it: the gate scores your last commit
+            against what&rsquo;s on disk over the union
+            {hasBatch ? ', and the cases you selected must pass' : ''}. A brand-new skill (nothing
+            committed yet) is scored against the naked model instead.
           </p>
           {heldSelected.length > 0 && (
             <p className="mb-2 text-xs text-muted">
@@ -311,33 +305,23 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               label="Run the gate"
             />
             {proposal?.verdict.can_propose ? (
-              <button
-                type="button"
-                disabled={readOnly || propose.isPending}
-                onClick={() =>
-                  propose.mutate(proposal.branch, {
-                    onSuccess: (r) =>
-                      setNotice(r.message + (r.merge_request_url ? ` — ${r.merge_request_url}` : '')),
-                  })
-                }
-                className="rounded-lg border border-good/50 px-3 py-1.5 text-sm text-good transition-colors hover:bg-good/10 disabled:opacity-40"
-              >
-                Propose
-              </button>
+              <Badge tone="good" title="A passing gate covers the exact guidance on disk.">
+                gate-proven ✓
+              </Badge>
             ) : (
               <Badge tone="warn" title={proposal?.verdict.reason}>
                 not gated yet
               </Badge>
             )}
           </div>
-          {propose.error && <ErrorNote error={propose.error} />}
-          {/* Guidance and cases publish by different roads: Propose carries only the gated guidance
-              branch. Graduated cases are ordinary files — adding a case needs no gate (it can only
-              test the reviewer harder), so you commit eval_cases/ with normal git, not this button. */}
+          {/* The console never commits or pushes. Guidance and cases both ship through your own git:
+              a guidance change should carry a passing gate; adding cases needs no gate (it can only
+              test the reviewer harder). */}
           <p className="mt-2 text-xs text-muted">
-            <strong>Propose</strong> ships the guidance branch only. Graduated{' '}
-            <code className="font-mono">eval_cases/</code> are committed with normal{' '}
-            <code className="font-mono">git</code> — adding a case needs no gate.
+            The console never touches git. When it&rsquo;s gate-proven,{' '}
+            <strong>commit and push it yourself</strong> — guidance carrying the passing gate,
+            graduated <code className="font-mono">eval_cases/</code> alongside (adding a case needs
+            no gate).
           </p>
         </div>
       </section>
@@ -358,90 +342,41 @@ type Draft = {
   selectedMissing: string[]
 }
 
-function BranchPanel({
-  skillId,
-  branch,
-  branchExists,
-  localEdit,
-  onBegin,
-  beginning,
-  readOnly,
-  error,
-}: {
-  skillId: string
-  branch: string
-  branchExists: boolean
-  localEdit: string
-  onBegin: () => void
-  beginning: boolean
-  readOnly: boolean
-  error: unknown
-}) {
+function InPlaceNotice({ skillId }: { skillId: string }) {
   return (
-    <section className="rounded-lg border border-line bg-surface p-4">
-      <h3 className="text-sm font-medium">Branch</h3>
-      <p className="mt-0.5 mb-2 text-xs text-muted">
-        Every change to <span className="font-mono">{skillId}</span> — yours by hand and the LLM's —
-        lands on one branch, and is gated before it can be proposed. The working tree is never
-        touched.
+    <section className="rounded-lg border border-warn/40 bg-warn/5 p-4">
+      <h3 className="text-sm font-medium">Edits happen in place</h3>
+      <p className="mt-0.5 text-xs text-muted">
+        Everything here — your hand edits and the LLM&rsquo;s drafts — writes straight to{' '}
+        <span className="font-mono">skills/{skillId}/</span> on disk. The console never creates a
+        branch, commits, or pushes: when a change is gate-proven, commit and push it with your own
+        git. Compare against your last commit with <code className="font-mono">git diff</code>, or
+        gate it below.
       </p>
-      {branchExists ? (
-        <div className="space-y-2">
-          <p className="font-mono text-xs text-muted">{branch}</p>
-          <div>
-            <div className="mb-1 flex items-baseline justify-between gap-2">
-              <p className="text-xs text-muted">Edit the files in your own editor:</p>
-              <CopyButton text={localEdit} />
-            </div>
-            <pre className="overflow-x-auto rounded border border-line bg-canvas px-2 py-1.5 font-mono text-xs">
-              {localEdit}
-            </pre>
-            <p className="mt-1 text-xs text-muted">
-              Commit there; the LLM improve below also commits here, so <code>git pull</code> in the
-              worktree shows its draft.
-            </p>
-          </div>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          <p className="text-sm text-muted italic">
-            Not started. Create the branch to check it out and edit locally.
-          </p>
-          <button
-            type="button"
-            onClick={onBegin}
-            disabled={readOnly || beginning}
-            className="rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10 disabled:opacity-40"
-          >
-            {beginning ? 'Starting…' : 'Start improving'}
-          </button>
-        </div>
-      )}
-      {error != null && <ErrorNote error={error} />}
     </section>
   )
 }
 
 function DraftReview({
   draft,
-  staging,
+  applying,
   readOnly,
   error,
-  onStage,
+  onApply,
   onDiscard,
 }: {
   draft: Draft
-  staging: boolean
+  applying: boolean
   readOnly: boolean
   error: unknown
-  onStage: () => void
+  onApply: () => void
   onDiscard: () => void
 }) {
   const touched = Object.keys(draft.pages)
   return (
     <div className="mt-3 space-y-2 rounded-lg border border-accent/40 bg-accent/5 p-3">
       <p className="text-xs text-muted">
-        Drafted{touched.length ? `, rewriting ${touched.join(', ')}` : ''}. Read it before staging —
+        Drafted{touched.length ? `, rewriting ${touched.join(', ')}` : ''}. Read it before applying —
         the drafter is not the reviewer.
       </p>
       {draft.rationale && <p className="text-sm">{draft.rationale}</p>}
@@ -457,11 +392,11 @@ function DraftReview({
       <div className="flex gap-2">
         <button
           type="button"
-          onClick={onStage}
-          disabled={readOnly || staging}
+          onClick={onApply}
+          disabled={readOnly || applying}
           className="rounded border border-good/50 px-3 py-1 text-sm text-good hover:bg-good/10 disabled:opacity-40"
         >
-          {staging ? 'Staging…' : 'Stage onto branch'}
+          {applying ? 'Applying…' : 'Apply to disk'}
         </button>
         <button type="button" onClick={onDiscard} className="px-2 py-1 text-sm text-muted">
           Discard
@@ -498,28 +433,4 @@ function isFailing(c: PendingCase): boolean {
 
 function fmt(v: unknown): string {
   return typeof v === 'number' ? v.toFixed(2) : '—'
-}
-
-/** Copy a command to the clipboard, with a moment of confirmation. Localhost is a secure context,
- *  so the Clipboard API is available; a blocked write degrades to no-op rather than throwing. */
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      type="button"
-      aria-label="Copy the checkout command"
-      onClick={() => {
-        void navigator.clipboard?.writeText(text).then(
-          () => {
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1500)
-          },
-          () => undefined,
-        )
-      }}
-      className="shrink-0 rounded border border-line px-2 py-0.5 text-xs text-muted transition-colors hover:border-accent/50 hover:text-accent"
-    >
-      {copied ? 'Copied' : 'Copy'}
-    </button>
-  )
 }

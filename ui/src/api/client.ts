@@ -56,7 +56,7 @@ export type GraduateResult = Schemas['GraduateResult']
 export type EvalKind = CaseEdits['kind']
 export type SkillEdit = Schemas['SkillEdit']
 export type PreparedSkill = Schemas['PreparedSkill']
-export type StagedSkill = Schemas['StagedSkill']
+export type SavedSkill = Schemas['SavedSkill']
 export type Proposal = Schemas['Proposal']
 export type Verdict = Schemas['Verdict']
 export type GateRecord = Schemas['GateRecord']
@@ -71,7 +71,6 @@ export type ActionKind = NextAction['kind']
 export type Signal = Schemas['Signal']
 export type WatchState = Schemas['WatchState']
 export type Sweep = Schemas['Sweep']
-export type ProposeResponse = Schemas['ProposeResponse']
 export type DraftResponse = Schemas['DraftResponse']
 /** The union of every job kind's request body. Each route validates its own shape server-side. */
 export type JobRequest = {
@@ -100,6 +99,11 @@ export type JobRequest = {
   project?: string
   /** synthesize only: which generator, and optionally which parent cases. */
   mode?: 'counterfactual' | 'mutation'
+  /**
+   * A case-id subset. improve: draft from just these. eval + `scope: 'promoted'`: score just
+   * these promoted cases instead of the whole set. synthesize: which parent cases to mutate.
+   * Empty/absent means the step's default (for eval, every promoted case).
+   */
   cases?: string[]
 }
 
@@ -423,21 +427,6 @@ export function useUndoDecision() {
   })
 }
 
-export function usePropose() {
-  const client = useQueryClient()
-  return useMutation({
-    mutationFn: (branch: string) =>
-      // The generated type, not a hand-written subset: `merge_request_url` existed on the wire
-      // for months while this inline shape hid it from every caller.
-      send<ProposeResponse>('POST', '/api/git/propose', { branch }),
-    onSuccess: () => {
-      invalidateTriage(client)
-      // A guidance branch can be pushed from here too, and its proposal state changes.
-      void client.invalidateQueries({ queryKey: ['proposal'] })
-    },
-  })
-}
-
 function invalidateTriage(client: ReturnType<typeof useQueryClient>) {
   void client.invalidateQueries({ queryKey: keys.candidates })
   void client.invalidateQueries({ queryKey: keys.batch })
@@ -447,23 +436,11 @@ function invalidateTriage(client: ReturnType<typeof useQueryClient>) {
 
 // --- authoring ------------------------------------------------------------------
 
-/** What is staged for a skill, and whether C6 will let it be published. */
+/** The on-disk guidance for a skill, and whether a passing gate covers it (advisory C6). */
 export function useProposal(skillId: string) {
   return useQuery({
     queryKey: keys.proposal(skillId),
     queryFn: () => get<Proposal>(`/api/skills/${encodeURIComponent(skillId)}/proposal`),
-  })
-}
-
-export type BeginImprove = Schemas['BeginImprove']
-
-/** Start improving a skill: materialise its branch so it can be checked out and edited locally. */
-export function useBeginImprove(skillId: string) {
-  const client = useQueryClient()
-  return useMutation({
-    mutationFn: () =>
-      send<BeginImprove>('POST', `/api/skills/${encodeURIComponent(skillId)}/improve/begin`),
-    onSuccess: () => void client.invalidateQueries({ queryKey: keys.proposal(skillId) }),
   })
 }
 
@@ -480,40 +457,20 @@ export function usePreviewGuidance() {
 export function useSaveGuidance() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: ({
-      skillId,
-      edit,
-      expectHead,
-    }: {
-      skillId: string
-      edit: SkillEdit
-      expectHead?: string | null
-    }) =>
-      send<StagedSkill>('PUT', `/api/skills/${encodeURIComponent(skillId)}/guidance`, {
-        edit,
-        expect_head: expectHead ?? null,
-      }),
-    onSuccess: (staged) => invalidateSkill(client, staged.prepared.skill_id),
+    mutationFn: ({ skillId, edit }: { skillId: string; edit: SkillEdit }) =>
+      send<SavedSkill>('PUT', `/api/skills/${encodeURIComponent(skillId)}/guidance`, { edit }),
+    onSuccess: (saved) => invalidateSkill(client, saved.prepared.skill_id),
   })
 }
 
 export function useSaveMeta() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: ({
-      skillId,
-      metaYaml,
-      expectHead,
-    }: {
-      skillId: string
-      metaYaml: string
-      expectHead?: string | null
-    }) =>
-      send<StagedSkill>('PUT', `/api/skills/${encodeURIComponent(skillId)}/meta`, {
+    mutationFn: ({ skillId, metaYaml }: { skillId: string; metaYaml: string }) =>
+      send<SavedSkill>('PUT', `/api/skills/${encodeURIComponent(skillId)}/meta`, {
         meta_yaml: metaYaml,
-        expect_head: expectHead ?? null,
       }),
-    onSuccess: (staged) => invalidateSkill(client, staged.prepared.skill_id),
+    onSuccess: (saved) => invalidateSkill(client, saved.prepared.skill_id),
   })
 }
 
