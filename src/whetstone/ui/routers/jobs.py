@@ -40,7 +40,6 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
 from whetstone.drift import DriftError, compute_drift, drift_inputs
-from whetstone.gitio import GitError
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.judge.spec import load_judge
@@ -83,11 +82,11 @@ class EvalRequest(BaseModel):
     skill_id: str
     trials: int | None = None
     sample: int | None = None
-    # What to score. A closed set of names the server resolves to branches itself, never a
-    # caller-supplied ref: the console scores its own branches or the working tree, nothing else.
+    # What to score. A closed set of names the server resolves itself, never a caller-supplied ref:
     #
-    #   working  — the files on disk, which is what `eval run` has always meant.
-    #   draft    — `whetstone/skill/<id>`: guidance edited but not merged.
+    #   working  — the guidance on disk, which is what `eval run` has always meant.
+    #   draft    — also the on-disk guidance: the console edits in place, so "the draft" is what is
+    #              on disk. Kept as a name for the editor's "Score the draft" button.
     #   promoted — the cases under `skills/<id>/promoted_cases/`, overlaid on the guidance.
     #
     # `promoted` is the one that was missing, and its absence made triage a dead end. Before the
@@ -112,8 +111,8 @@ class EvalRequest(BaseModel):
 
 
 class GateRequest(BaseModel):
-    """Gate the skill's staged branch against the base. The console never gates arbitrary folders —
-    the thing it needs a verdict about is always what `whetstone/skill/<id>` holds."""
+    """Gate the skill's on-disk guidance against the last committed version. The console never gates
+    arbitrary folders — the thing it needs a verdict about is always what is in the working tree."""
 
     skill_id: str
     trials: int | None = None
@@ -296,7 +295,7 @@ def plan_gate_job(
     request: GateRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
 ) -> Plan:
     selection = _pick(request.provider, request.model, selection)
-    _, candidate = _gate_sides(config, request.skill_id)
+    _, candidate = _gate_sides(config, root, request.skill_id)
     plan = _eval_plan(
         config, selection, candidate, EvalRequest(**request.model_dump(exclude={"targeted"}))
     )
@@ -316,9 +315,9 @@ def launch_gate(
     jobs: JobsDep,
     selection: SelectionDep,
 ) -> Job:
-    """Gate the skill's staged branch against the base — the evidence C6 requires to publish."""
+    """Gate the on-disk guidance against the last committed version — the C6 evidence (advisory)."""
     selection = _pick(request.provider, request.model, selection)
-    base, candidate = _gate_sides(config, request.skill_id)
+    base, candidate = _gate_sides(config, root, request.skill_id)
     plan = plan_gate_job(request, config, root, selection)
     spec = _step(root, candidate, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)
@@ -328,7 +327,8 @@ def launch_gate(
         fp_tol=config.gate.fp_tol,
         targeted_cases=list(request.targeted),
     )
-    branch = staging.skill_branch(config, request.skill_id)
+    # The candidate is the working tree, not a ref; label it so for the transcript and the record.
+    candidate_ref = "working tree"
 
     def work(handle: JobHandle) -> dict[str, Any]:
         # The two sides are scored in sequence with no combined counter, so the bar cannot move
@@ -362,7 +362,7 @@ def launch_gate(
                 cfg=cfg,
                 trials=trials,
                 base_ref=config.git.default_base,
-                candidate_ref=branch,
+                candidate_ref=candidate_ref,
                 backend=backend.name,
                 model=backend.model,
                 sample=_sample(spec, request.sample),
@@ -371,7 +371,7 @@ def launch_gate(
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
                 on_base=side("base", config.git.default_base),
-                on_candidate=side("cand", branch),
+                on_candidate=side("cand", candidate_ref),
                 cancel=handle.cancel_event,
             )
         except RunCancelled as exc:
@@ -527,16 +527,17 @@ class StageProposalRequest(BaseModel):
 def stage_proposal(
     request: StageProposalRequest, config: ConfigDep, root: SkillsRootDep
 ) -> dict[str, str]:
-    """Put a drafted guidance change onto the skill's branch, through the path the editor uses.
+    """Write a drafted guidance change into the skill folder on disk, the path the editor uses.
 
-    Separate from the job so the operator reads the proposal before any of it is committed — the
-    whole value of the draft is that a person decides whether it is an improvement.
+    Separate from the job so the operator reads the proposal before any of it is written — the whole
+    value of the draft is that a person decides whether it is an improvement. Writes in place; git
+    is the operator's to manage.
     """
     if not request.skill_id or not (request.body.strip() or request.pages):
         raise Unprocessable("skill_id and a non-empty body (or at least one page) are required")
     skill = _skill(root, request.skill_id)
     try:
-        base, current = staging.source(config, skill.id)
+        base, current = staging.working_skill(config, skill.id)
         prepared = prepare_guidance(
             base,
             current,
@@ -544,19 +545,12 @@ def stage_proposal(
             skills_root=staging.relative_skills_root(config),
             base_version=staging.base_version(config, skill.id),
         )
-        commit = staging.stage(
-            config,
-            skill.id,
-            prepared.files,
-            f"guidance: {skill.id} v{prepared.version}\n\n"
-            f"Drafted by the improve step, staged from the console. Needs a passing gate.",
-        )
-    except (SkillLoadError, staging.StagingError, GitError) as exc:
+        paths = staging.write_in_place(config, prepared.files)
+    except (SkillLoadError, staging.StagingError) as exc:
         raise Unprocessable(str(exc)) from exc
     except staging.NoSuchSkill as exc:
         raise NotFound(str(exc)) from exc
-    return {"commit": commit, "branch": staging.skill_branch(config, skill.id),
-            "version": str(prepared.version)}
+    return {"paths": ", ".join(paths), "version": str(prepared.version)}
 
 
 # --- review ----------------------------------------------------------------------
@@ -1171,26 +1165,19 @@ def launch_index(
             for relative, content in render_index(index).items()
         }
         try:
-            commit = staging.stage(
-                config,
-                skill.id,
-                files,
-                f"index: {skill.id}\n\nRebuilt the case index ({len(index.cases)} case(s), "
-                f"{backend.model}). Changes what the reviewer sees, so this needs a fresh gate.",
-            )
-        except (staging.StagingError, GitError) as exc:
+            paths = staging.write_in_place(config, files)
+        except (staging.StagingError, OSError) as exc:
             raise Unprocessable(str(exc)) from exc
         handle.log(
             LogLine(
                 text=f"  indexed {len(index.cases)} case(s) with {backend.model}", tone="ok"
             )
         )
-        handle.progress(1, 1, "staged")
+        handle.progress(1, 1, "written")
         return {
             "cases": len(index.cases),
             "model": backend.model,
-            "branch": staging.skill_branch(config, skill.id),
-            "commit": commit,
+            "paths": ", ".join(paths),
         }
 
     return _launch(jobs, "index", skill.id, work, plan)
@@ -1305,18 +1292,12 @@ def launch_update(
         if not result.changed:
             handle.progress(1, 1, "unchanged")
             return {"changed": False, "pages": result.pages, "note": result.note}
-        commit = staging.stage(
-            config,
-            skill.id,
-            result.files,
-            f"wiki: {skill.id}\n\nRegenerated from the console. Needs a fresh gate.",
-        )
-        handle.progress(1, 1, "staged")
+        paths = staging.write_in_place(config, result.files)
+        handle.progress(1, 1, "written")
         return {
             "changed": True,
             "pages": result.pages,
-            "commit": commit,
-            "branch": staging.skill_branch(config, skill.id),
+            "paths": ", ".join(paths),
             "note": result.note,
         }
 
@@ -1461,14 +1442,10 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
         return _skill(root, request.skill_id), None
 
     if request.scope == "draft":
-        branch = staging.skill_branch(config, request.skill_id)
-        found = staging.skill_at(config, branch, request.skill_id)
-        if found is None:
-            raise Unprocessable(
-                f"nothing is staged on {branch} for {request.skill_id!r} — edit the guidance and "
-                f"press Stage on branch first, or score the working tree instead."
-            )
-        return found[0], branch
+        # The on-disk guidance is the draft now — edits land in the working tree, not a branch — so
+        # `draft` and `working` resolve to the same skill. The name is kept for the editor's
+        # "Score the draft" button, which asks "how does the guidance I am editing do?".
+        return _skill(root, request.skill_id), None
 
     # The promoted set is a folder on disk (`promoted_cases/`), read as cases and overlaid onto the
     # working-tree / staged body — no branch, no reconstruction, so a skill authored in the working
@@ -1505,53 +1482,36 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:
-    """The skill the console's improve step works on: the staged draft if there is one.
+    """The skill the console's improve step works on: the on-disk guidance.
 
-    Resolved exactly as the editor resolves what it shows, so "fix these failures" acts on the
-    version the operator is looking at. Without this, improving a staged draft was impossible: the
-    step read the working tree, so a run that scored the draft was rejected as describing different
-    content, and a run of the working tree had nothing to learn from once the draft had moved on.
-
-    `NoSuchSkill` is in the fallback list because it is a `LookupError`, not a `StagingError`, and
-    leaving it out broke a case the loader documents as supported: `staging.source` addresses a
-    skill by folder name, while `_load_one` also finds one whose `SKILL.md` declares an `id` that
-    differs from its folder. For those, this raised past every handler and the console answered 500.
+    The console edits in place, so what is on disk *is* the draft — "fix these failures" acts on the
+    version the operator is looking at, which is the working tree. `_load_one` addresses a skill by
+    folder name and also finds one whose `SKILL.md` declares an `id` that differs from its folder.
     """
-    try:
-        return staging.source(config, skill_id)[0]
-    except (staging.StagingError, staging.NoSuchSkill, GitError, OSError):
-        return _skill(root, skill_id)
+    return _skill(root, skill_id)
 
 
-def _gate_sides(config: Config, skill_id: str) -> tuple[Skill, Skill]:
-    """The base and candidate a console gate compares: the default branch and the skill's branch.
+def _gate_sides(config: Config, root: Path, skill_id: str) -> tuple[Skill, Skill]:
+    """The base and candidate a console gate compares: the committed version, and what is on disk.
+
+    The candidate is the working tree — the on-disk guidance the operator is editing. The baseline
+    is the same skill as last committed at the default base (read only; never written). A
+    brand-new skill is not committed there, so there is no prior guidance to regress from — the
+    baseline is then the *naked* model (the candidate with its guidance stripped), which asks the
+    right question of a new skill: does its guidance catch what no guidance would?
 
     Both sides get the promoted cases, and both sides get the same ones — a gate is a controlled
-    comparison, so the case set is exactly what must not differ between them. Without this the gate
-    ran over whatever the two branches happened to carry, which for a skill mid-loop is none of the
-    cases the guidance was just rewritten to handle.
+    comparison, so the case set is exactly what must not differ between them.
     """
-    branch = staging.skill_branch(config, skill_id)
-    candidate = staging.skill_at(config, branch, skill_id)
-    if candidate is None:
-        raise Unprocessable(
-            f"nothing staged for {skill_id!r} — {branch} does not exist or does not carry it. "
-            f"Edit the guidance, or draft a change with improve, before gating."
-        )
-    # A brand-new skill is not on the base branch, so there is no prior guidance to regress from.
-    # The meaningful baseline is then the *naked* model — the candidate with its guidance stripped —
-    # which asks the right question of a new skill: does its guidance catch what no guidance would?
-    # (Before, the gate refused outright and told the operator to "publish as is", which left a new
-    # skill unprovable — the one thing C6 exists to prevent.)
-    base = staging.skill_at(config, config.git.default_base, skill_id)
-    base_skill = base[0] if base is not None else strip_guidance(candidate[0])
-    # Read once and overlaid into both sides. The two sides must carry the *same* cases — a gate is
-    # a controlled comparison — so reading the promoted set twice is both slower and, if a promotion
-    # lands between the two calls, wrong.
+    candidate = _skill(root, skill_id)
+    committed = staging.committed_skill(config, skill_id)
+    base_skill = committed[0] if committed is not None else strip_guidance(candidate)
+    # Read once and overlaid into both sides, so a promotion landing mid-gate cannot make the two
+    # sides carry different cases.
     promoted = staging.promoted_cases(config, skill_id)
     return (
         staging.overlay_cases(base_skill, promoted),
-        staging.overlay_cases(candidate[0], promoted),
+        staging.overlay_cases(candidate, promoted),
     )
 
 
@@ -1672,44 +1632,7 @@ def _eval_plan(
             f"({spec.judge.tier1.model or spec.judge.tier1.llm}) — the distilled-judge seam; "
             "the reviewer and grounded tier 2 stay on the backend above"
         )
-    if request.scope == "working":
-        _warn_if_a_change_is_staged(plan, config, skill)
     return plan
-
-
-def _warn_if_a_change_is_staged(plan: Plan, config: Config, skill: Skill) -> None:
-    """Say, before the spend, that this run will not measure the change you just staged.
-
-    Staging deliberately never touches the working tree, and an eval reads the working tree. So an
-    operator who drafts a change, stages it, and then scores the skill gets the *old* guidance's
-    number back — identical to the baseline — and the obvious reading of that is "my edit did
-    nothing". It did; this run simply did not look at it.
-
-    This used to name the gate as the only answer, on the reasoning that one number about a
-    candidate settles nothing because "did that help?" is a comparison. That was true and
-    incomplete. The other question an operator asks — *what is still wrong with my draft?* — is not
-    a comparison, and only a run can answer it: a gate reports a difference and writes no run
-    record, so a failing gate left nothing behind for the improve step to read. So the warning now
-    names both, and scoring the draft is a request this route accepts rather than advice to go and
-    do something by hand.
-    """
-    from whetstone.domain.run import guidance_hash
-
-    try:
-        branch = staging.skill_branch(config, skill.id)
-        staged = staging.skill_at(config, branch, skill.id)
-    except (staging.StagingError, GitError, OSError):
-        return  # no git, no branch, nothing to warn about
-    # The warning is about a staged *rule change* this run will not measure. A skill branch that
-    # differs only in which cases it carries is not that, and saying so sends the reader looking for
-    # an edit they never made.
-    if staged is None or guidance_hash(staged[0]) == guidance_hash(skill):
-        return
-    plan.warnings.append(
-        f"{branch} holds a staged change that this run will NOT measure — this scores the working "
-        f"tree. Score the draft instead to get its per-case outcomes, or run the gate to compare "
-        f"the two."
-    )
 
 
 def _run_for(store: Any, skill: Skill, request: ImproveRequest) -> Any:

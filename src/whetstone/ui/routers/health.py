@@ -27,7 +27,6 @@ from whetstone.domain.run import RunRecord
 from whetstone.domain.score import HoldoutReport
 from whetstone.domain.skill import Skill
 from whetstone.drift import DRIFT_ALARM, DriftPoint, DriftReport, DriftStore, trend_point
-from whetstone.gitio import GitError
 from whetstone.inbox import Retirement
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
@@ -289,11 +288,12 @@ def _drift_section(drift: DriftStore, skill_id: str) -> DriftSection | None:
 
 
 def _staged_or(config: Config, skill: Skill) -> Skill:
-    """The skill as a curation edit would see it: the staging branch when one exists, else as
-    given. Best-effort — no git means no branch, never an error on a health page."""
+    """The skill as a curation edit sees it: the on-disk guidance. The console edits in place, so
+    what is on disk *is* the edit. Best-effort — a bad read falls back to the skill as given, never
+    an error on a health page."""
     try:
-        return staging.source(config, skill.id)[0]
-    except (staging.StagingError, staging.NoSuchSkill, GitError, OSError):
+        return staging.working_skill(config, skill.id)[0]
+    except (staging.StagingError, staging.NoSuchSkill, OSError):
         return skill
 
 

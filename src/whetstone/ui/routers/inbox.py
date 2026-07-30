@@ -230,29 +230,22 @@ def _failing(record: RunRecord) -> int:
 def _proposal_state(
     config: Config, skill_id: str, promoted: Skill | None = None
 ) -> tuple[bool, bool, str, Skill | None]:
-    """Whether a change is staged for this skill, whether it may be published — and the staged
-    skill itself, so callers that need the branch's content do not pay for a second git export.
+    """Whether the on-disk guidance differs from what was last committed, whether a passing gate
+    covers it — and the on-disk skill itself, so callers do not pay for a second read.
 
-    Degrades rather than raises: a repo without the branch, or without git at all, means nothing is
-    staged — which is true, and far better than an inbox that fails to load because one skill's
-    branch is missing.
+    In-place model: there is no branch. A change is 'pending' until the operator commits it with
+    their own git; the verdict says whether a gate proves what is on disk. Degrades rather than
+    raises: a bad read means nothing pending, never an inbox that fails to load.
     """
-    from whetstone.gitio import GitError, commits_ahead, ref_exists
-
     try:
-        branch = staging.skill_branch(config, skill_id)
-        if not ref_exists(config.skills_repo, branch):
-            return False, False, "", None
-        if commits_ahead(config.skills_repo, config.git.default_base, branch) == 0:
-            return False, False, "", None
-        staged = staging.skill_at(config, branch, skill_id)
-        if staged is None:
-            return False, False, "", None
-        # Hashed as the gate scores it — with the promoted cases folded in. The third and last of
-        # the C6 read sites; missing it here left the inbox looking a passing gate up under a hash
-        # nothing ever records, so it went on saying "run the gate" after every run of the gate.
-        under_test = staged[0] if promoted is None else staging.merge_cases(staged[0], promoted)
-        verdict = GateStore(config.gates_dir).verdict_for(skill_id, skill_hash(under_test))
-        return True, verdict.can_propose, verdict.reason, staged[0]
-    except (GitError, staging.StagingError, OSError):
+        on_disk = staging.working_skill(config, skill_id)[0]
+    except (staging.StagingError, staging.NoSuchSkill, OSError):
         return False, False, "", None
+    committed = staging.committed_skill(config, skill_id)
+    pending = committed is None or skill_hash(committed[0]) != skill_hash(on_disk)
+    # Hashed as the gate scores it — with the promoted cases folded in. The C6 read site; missing it
+    # left the inbox looking a passing gate up under a hash nothing ever records, so it went on
+    # saying "run the gate" after every run of the gate.
+    under_test = on_disk if promoted is None else staging.merge_cases(on_disk, promoted)
+    verdict = GateStore(config.gates_dir).verdict_for(skill_id, skill_hash(under_test))
+    return pending, verdict.can_propose, verdict.reason, on_disk

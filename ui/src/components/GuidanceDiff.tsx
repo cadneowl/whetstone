@@ -15,11 +15,9 @@ import { useMemo } from 'react'
 export function GuidanceDiff({
   before,
   after,
-  staged = false,
 }: {
   before: string
   after: string
-  staged?: boolean
 }) {
   const rows = useMemo(() => diffLines(before, after), [before, after])
   const added = rows.filter((r) => r.kind === 'add').length
@@ -32,9 +30,7 @@ export function GuidanceDiff({
     // people looking for a change the console was holding all along.
     return (
       <p className="px-3 py-2 text-sm text-muted italic">
-        {staged
-          ? 'No unsaved edits — your change is already on the branch. What it would publish is under Proposal below.'
-          : 'Identical to what is on the base branch — nothing to stage yet.'}
+        No unsaved edits — this matches the guidance on disk. Gate status is under the panel below.
       </p>
     )
   }

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -72,8 +71,8 @@ def test_the_plan_refuses_without_an_embedding_model(client: TestClient) -> None
     assert "embedding model" in response.json()["message"]
 
 
-def test_a_rebuild_stages_the_index_and_retracts_the_right_to_propose(
-    client: TestClient, fake_embedder: None, repo: Path
+def test_a_rebuild_writes_the_index_in_place_and_retracts_the_right_to_propose(
+    client: TestClient, fake_embedder: None, skills_root: Path
 ) -> None:
     job = _await(
         client, client.post("/api/jobs/index", json={"skill_id": "rust-errors"}).json()["id"]
@@ -82,20 +81,17 @@ def test_a_rebuild_stages_the_index_and_retracts_the_right_to_propose(
     result = job["result"]
     assert result["cases"] == 2
     assert result["model"] == "fake-embed"
-    assert result["branch"] == "whetstone/skill/rust-errors"
+    assert "skills/rust-errors/index/manifest.yaml" in result["paths"]
 
-    # The manifest is a commit on the skill's branch — never a working-tree write.
-    manifest = subprocess.run(
-        ["git", "-C", str(repo), "show",
-         f"{result['branch']}:skills/rust-errors/index/manifest.yaml"],
-        check=True, capture_output=True, text=True,
-    ).stdout
+    # The manifest is written in place on disk — no branch, no commit.
+    manifest = (skills_root / "rust-errors" / "index" / "manifest.yaml").read_text(
+        encoding="utf-8"
+    )
     assert "fake-embed" in manifest
     assert "unwrap-in-handler" in manifest
-    assert not (repo / "skills" / "rust-errors" / "index").exists()
 
-    # C6: the staged content's hash includes the index and no gate has scored it, so the skill
-    # may not be proposed — the inbox says gate, exactly as after a wiki refresh.
+    # C6: the on-disk content's hash includes the index and no gate has scored it, so the skill is
+    # not gate-proven — the inbox says gate, exactly as after a wiki refresh.
     row = client.get("/api/inbox").json()["inbox"]["attention"][0]
     assert row["staged"] is True
     assert row["can_propose"] is False

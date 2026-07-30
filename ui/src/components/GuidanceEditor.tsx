@@ -1,11 +1,7 @@
-import { useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  ApiError,
-  keys,
   useConsoleConfig,
-  usePropose,
   useProposal,
   useSaveGuidance,
   type CaseSummary,
@@ -30,9 +26,9 @@ const SKILL_FILE = 'SKILL.md'
  * than a click away because "will this rewrite still catch the unwrap case?" is the question the
  * editor exists to keep in front of you.
  *
- * Below that sits the C6 panel. *Propose* is disabled until a passing gate exists for the exact
- * staged content, and the reason is always stated — a blocked action with no explanation reads as
- * a bug, and this one is the whole point of the project.
+ * Below that sits the gate-status panel (C6). It says whether a passing gate covers the exact
+ * on-disk content, and when it does not, the reason is always stated — a change you should not
+ * commit yet with no explanation reads as a bug, and this check is the whole point of the project.
  */
 export function GuidanceEditor({ detail }: { detail: SkillDetail }) {
   const { data: config } = useConsoleConfig()
@@ -95,7 +91,6 @@ function Editor({
     (p) => (drafts[p] ?? '').trim() !== stagedFiles[p]!.trim(),
   )
   const dirty = edited.length > 0
-  const conflict = save.error instanceof ApiError && save.error.status === 409
 
   /**
    * Whether the case outcomes on this screen describe the guidance in the textarea.
@@ -122,20 +117,12 @@ function Editor({
     !!scoredBy.guidance_hash &&
     scoredBy.guidance_hash !== proposal.guidance_hash
 
-  // A save answers with the branch's new head, and this component only remounts once the proposal
-  // refetch lands. Without preferring the response, a second save in that window sends a head the
-  // first save has already superseded and gets a 409 that is not a conflict with anyone.
-  const expectHead = save.data?.proposal.head ?? proposal.head
-
   return (
     <div className="space-y-5">
-      {proposal.staged && (
-        <p className="text-xs text-muted">
-          Editing what is staged on <code className="font-mono">{proposal.branch}</code>, not the
-          merged version. The <em>Guidance</em> tab still shows what is on{' '}
-          <code className="font-mono">{proposal.base}</code>.
-        </p>
-      )}
+      <p className="text-xs text-muted">
+        Edits here write straight to <code className="font-mono">skills/{skillId}/</code> on disk —
+        no branch, no commit. Commit and push with your own git when a change is gate-proven.
+      </p>
 
       {/* Pending cases count here too. They are what the last run scored in the flow this panel
           exists for, so leaving them out made it announce "never scored, run the evals first"
@@ -154,7 +141,7 @@ function Editor({
           if (!changedBody && firstPage) setActive(firstPage)
         }}
         stale={outcomesAreStale}
-        staged={proposal.staged}
+        staged={false}
         base={proposal.base}
         viaBatch={detail.pending_cases.length > 0}
       />
@@ -221,7 +208,6 @@ function Editor({
               <GuidanceDiff
                 before={stagedFiles[active] ?? ''}
                 after={draft}
-                staged={proposal.staged}
               />
             ) : (
               // Previews the one file being edited, so `pages` is emptied: the panel renders the
@@ -249,12 +235,11 @@ function Editor({
                   Object.entries(drafts).filter(([path]) => path !== SKILL_FILE),
                 ),
               },
-              expectHead,
             })
           }
           className="rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:bg-transparent"
         >
-          {save.isPending ? 'Staging…' : 'Stage on branch'}
+          {save.isPending ? 'Applying…' : 'Apply to disk'}
         </button>
         <button
           type="button"
@@ -265,13 +250,12 @@ function Editor({
           Discard changes
         </button>
         <span className="text-xs text-muted">
-          Commits to <code className="font-mono">{proposal.branch}</code> — never the working tree,
-          never <code className="font-mono">{proposal.base}</code>.
+          Writes to <code className="font-mono">skills/{skillId}/</code> on disk — commit with your
+          own git.
         </span>
       </div>
 
-      {conflict ? <Conflict skillId={skillId} error={save.error} /> : null}
-      {save.error && !conflict && <ErrorNote error={save.error} />}
+      {save.error && <ErrorNote error={save.error} />}
 
       <ProposalPanel proposal={proposal} repo={repo} pendingEdit={dirty} />
       <PinnedCases
@@ -279,7 +263,7 @@ function Editor({
         cases={detail.cases}
         scoredBy={scoredBy}
         stale={outcomesAreStale}
-        staged={proposal.staged}
+        staged={false}
         base={proposal.base}
         skillId={skillId}
       />
@@ -364,39 +348,12 @@ function FileTabs({
  * What matters now is that the console never silently wins: the write was refused, the branch has
  * something this tab has not seen, and taking it is a deliberate act that discards the draft.
  */
-function Conflict({ skillId, error }: { skillId: string; error: unknown }) {
-  const client = useQueryClient()
-  const problem = (error as ApiError).problem as { expected?: string; actual?: string }
-
-  return (
-    <div className="rounded-lg border border-warn/40 bg-warn/5 px-4 py-3 text-sm">
-      <p className="text-warn">The branch moved since this tab read it, so nothing was written.</p>
-      {problem.expected && problem.actual && (
-        <p className="mt-1 font-mono text-xs text-muted">
-          expected {problem.expected.slice(0, 8)} · found {problem.actual.slice(0, 8)}
-        </p>
-      )}
-      <p className="mt-2 text-muted">
-        Another tab, or a commit made by hand, staged an edit first. Loading it replaces the text
-        above and discards this draft — copy anything you want to keep before pressing it.
-      </p>
-      <button
-        type="button"
-        onClick={() => void client.invalidateQueries({ queryKey: keys.proposal(skillId) })}
-        className="mt-2 rounded-lg border border-line px-3 py-1 text-sm transition-colors hover:border-accent/50"
-      >
-        Load what is on the branch
-      </button>
-    </div>
-  )
-}
-
 /**
  * Drafting a guidance change from what the last run got wrong.
  *
- * The proposal lands in the editor above rather than being committed: a draft is a suggestion, and
+ * The proposal lands in the editor above rather than being applied: a draft is a suggestion, and
  * the person reading it is the one who decides whether it is an improvement. From there it takes
- * the ordinary path — stage, gate, propose — so nothing about a machine-written rule can skip a
+ * the ordinary path — apply to disk, gate — so nothing about a machine-written rule can skip a
  * step a hand-written one has to pass.
  */
 function ImprovePanel({
@@ -460,7 +417,7 @@ function ImprovePanel({
           <ScoreTheDraft
             skillId={skillId}
             viaBatch={viaBatch}
-            note="Your draft is on the branch; the header's Run evals would score the working tree."
+            note="Not scored yet — score the guidance on disk to see how the edit does."
           />
         </div>
       )}
@@ -513,7 +470,7 @@ function ImprovePanel({
   )
 }
 
-/** C6, made visible: what is staged, whether it may be published, and what would clear the block. */
+/** Gate status, made visible: whether a passing gate covers the on-disk guidance, and how to get one. */
 function ProposalPanel({
   proposal,
   repo,
@@ -523,43 +480,38 @@ function ProposalPanel({
   repo: string
   pendingEdit: boolean
 }) {
-  const propose = usePropose()
   const { verdict } = proposal
   const evidence = verdict.evidence
   const skillId = proposal.skill_id
-  // An unsaved draft is not what the branch holds, so a gate covering the branch says nothing
-  // about what is on screen. Publishing now would push the *previous* text, which is the one
-  // surprise this panel must never spring on anyone.
-  const blocked = !verdict.can_propose || pendingEdit
+  // Unsaved edits above are not on disk yet, so a gate would measure the old text. Say "apply
+  // first" rather than let someone gate a version the file does not hold.
   const reason = pendingEdit
-    ? 'there are unsaved changes above — stage them, then gate the result'
+    ? 'there are unsaved changes above — apply them to disk, then gate the result'
     : verdict.reason
 
   return (
     <section className="rounded-lg border border-line bg-surface p-4">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-        <h3 className="text-sm font-semibold">Proposal</h3>
-        <span className="font-mono text-xs text-muted">{proposal.branch}</span>
+        <h3 className="text-sm font-semibold">Gate status</h3>
         <span className="text-xs text-muted">
-          v{proposal.version} · {proposal.commits} commit{proposal.commits === 1 ? '' : 's'} ahead
-          of {proposal.base}
+          v{proposal.version} · on disk, vs last committed at {proposal.base}
         </span>
         <span className="ml-auto">
           {!verdict.can_propose ? (
             <Badge tone="warn">not gated</Badge>
           ) : verdict.caveat ? (
             <Badge tone="warn" title={verdict.caveat}>
-              gated, with a caveat
+              gate-proven, with a caveat
             </Badge>
           ) : (
-            <Badge tone="accent">gated</Badge>
+            <Badge tone="accent">gate-proven</Badge>
           )}
         </span>
       </div>
 
       {/* Both metrics, always. Reporting recall alone made a change that fixed a false positive —
           fp 1.00 → 0.00, the whole point of it — read as "recall 1.00 → 1.00", which is a line
-          saying this accomplished nothing directly above the button that ships it. */}
+          saying this accomplished nothing. */}
       {evidence && (
         <p className="mt-2 text-xs text-muted">
           Cleared by gate <code className="font-mono">{evidence.id}</code> ·{' '}
@@ -571,75 +523,46 @@ function ProposalPanel({
         </p>
       )}
 
-      {blocked && <p className="mt-2 text-sm text-warn">{reason}</p>}
-
-      {/* What this branch would actually publish, against the base — the one question *Propose MR*
-          asks you to answer, and the console was computing this diff server-side and discarding it.
-          The pane above compares the textarea to the branch, so it is empty precisely when there is
-          something to publish; this is the diff that is never empty when the button is live. */}
-      {proposal.staged && proposal.diff && (
-        <details className="mt-3">
-          <summary className="cursor-pointer text-xs text-muted hover:text-ink">
-            What this would publish — {proposal.branch} vs {proposal.base}
-          </summary>
-          <pre className="mt-1 max-h-64 overflow-auto rounded border border-line bg-bg p-2 font-mono text-xs">
-            {proposal.diff}
-          </pre>
-        </details>
-      )}
-
-      {/* Shown even when the proposal is permitted: a green badge over a history that disagrees
-          with itself is the one thing this panel must not do. */}
+      {/* Shown even when gate-proven: a green badge over a history that disagrees with itself is the
+          one thing this panel must not do. */}
       {verdict.caveat && (
         <p className="mt-2 rounded border border-warn/40 bg-warn/5 px-2.5 py-1.5 text-sm text-warn">
           {verdict.caveat}
         </p>
       )}
 
-      {/* The gate runs here. Until it did, this panel stated the rule that blocks publishing and
-          then sent you to a terminal to satisfy it — which made C6 read as an obstacle rather than
-          as the step it is. */}
-      {proposal.staged && !verdict.can_propose && !pendingEdit && (
+      {/* The gate runs here. It scores the on-disk guidance against the last committed version (or
+          the naked model for a skill not committed yet) over the same cases, and reports the
+          difference — the "did that help?" the editor actually wants. */}
+      {!verdict.can_propose && (
         <div className="mt-3">
-          {/* Named as the question it answers. "Run the gate" is the mechanism; "did that help?"
-              is what the person who just staged a change actually wants to know — and the gate is
-              the only thing that answers it, because a single score on the new guidance has no
-              baseline to be better than. Scoring the skill here would read the working tree, which
-              still holds the old text, and report that nothing changed. */}
-          <p className="mb-2 text-xs text-muted">
-            Did that help? Scoring this skill would measure the working tree, which still holds the
-            old guidance. The gate scores both versions over the same cases and reports the
-            difference — which is also the evidence needed to publish.
-          </p>
-          <LaunchButton kind="gate" request={{ skill_id: skillId }} label="Run the gate" />
-          <details className="mt-2">
-            <summary className="cursor-pointer text-xs text-muted hover:text-ink">
-              or run it yourself
-            </summary>
-            <pre className="mt-1 overflow-x-auto rounded border border-line bg-bg p-2 font-mono text-xs">
-              {gateCommand(proposal, repo)}
-            </pre>
-          </details>
+          {pendingEdit ? (
+            <p className="mb-2 text-sm text-warn">{reason}</p>
+          ) : (
+            <>
+              <p className="mb-2 text-xs text-muted">
+                Did that help? The gate scores your last commit against what&rsquo;s on disk over the
+                same cases and reports the difference — which is also the evidence to commit with
+                confidence.
+              </p>
+              <LaunchButton kind="gate" request={{ skill_id: skillId }} label="Run the gate" />
+              <details className="mt-2">
+                <summary className="cursor-pointer text-xs text-muted hover:text-ink">
+                  or run it yourself
+                </summary>
+                <pre className="mt-1 overflow-x-auto rounded border border-line bg-bg p-2 font-mono text-xs">
+                  {gateCommand(proposal, repo)}
+                </pre>
+              </details>
+            </>
+          )}
         </div>
       )}
 
-      <div className="mt-3 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          disabled={blocked || propose.isPending}
-          title={blocked ? reason : undefined}
-          onClick={() => propose.mutate(proposal.branch)}
-          className="rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:bg-transparent"
-        >
-          {propose.isPending ? 'Pushing…' : 'Propose MR'}
-        </button>
-        {propose.data && <span className="text-sm text-muted">{propose.data.message}</span>}
-      </div>
-      {propose.error && (
-        <div className="mt-3">
-          <ErrorNote error={propose.error} />
-        </div>
-      )}
+      <p className="mt-3 text-xs text-muted">
+        The console never commits or pushes. When it&rsquo;s gate-proven,{' '}
+        <strong>commit and push with your own git</strong>.
+      </p>
     </section>
   )
 }
@@ -650,7 +573,6 @@ function gateCommand(proposal: Proposal, repo: string): string {
     `  --repo ${repo}`,
     `  --skill-path ${proposal.path}`,
     `  --base-ref ${proposal.base}`,
-    `  --candidate-ref ${proposal.branch}`,
   ].join(' \\\n')
 }
 
@@ -662,19 +584,12 @@ function gateCommand(proposal: Proposal, repo: string): string {
  */
 /** How this case went last time it was scored, or that it never was. */
 /**
- * Score what is on the skill's branch.
+ * Score the on-disk guidance against the cases that actually exist.
  *
- * Offered anywhere the screen has just admitted that its numbers do not describe the draft. Telling
- * someone their outcomes are about the wrong version and leaving them to find the remedy is half a
- * feature; before this the remedy was checking out the branch and running the CLI by hand.
- */
-/**
- * Score the staged draft against the cases that actually exist.
- *
- * `draft` scores the skill branch, which carries the rewrite and only the cases already merged.
- * When the cases live on a triage batch that is nearly all of them — often every one — and the
- * console cheerfully offered to spend a model call on a run of zero cases. `batch` scores the same
- * draft against the promoted set, so the button means what its label says at every point in the
+ * `draft` scores what is on disk — the guidance being edited, plus its graduated cases. When the
+ * cases still live on the triage batch (nearly all of them — often every one), that is a run of
+ * zero cases the console once offered to spend a model call on. `promoted` scores the same on-disk
+ * guidance against the promoted set, so the button means what its label says at every point in the
  * loop.
  */
 function ScoreTheDraft({

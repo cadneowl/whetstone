@@ -11,7 +11,6 @@ from pathlib import Path
 
 from whetstone import staging
 from whetstone.config import Config
-from whetstone.gitio import write_and_commit
 from whetstone.ui.routers.jobs import EvalRequest, _gate_sides, _skill_to_score
 
 ARCHITECT_SKILL_MD = """---
@@ -93,33 +92,18 @@ def test_batch_scope_scores_a_skill_authored_in_the_working_tree(
     assert [c.id for c in skill.eval_cases] == ["arch-1"]
 
 
-def _stage_guidance_on_the_skill_branch(repo: Path) -> None:
-    """Stage the new skill's guidance on its own branch, as the improve/edit flow does."""
-    write_and_commit(
-        repo,
-        {
-            "skills/architect/SKILL.md": ARCHITECT_SKILL_MD,
-            "skills/architect/meta.yaml": ARCHITECT_META_YAML,
-        },
-        "stage architect guidance",
-        branch="whetstone/skill/architect",
-        base="main",
-    )
-
-
 def test_gate_uses_a_naked_baseline_for_a_skill_absent_from_main(
     config: Config, repo: Path
 ) -> None:
     """A brand-new skill has no prior guidance on `main` to regress from, so the gate compares its
-    guidance against the *naked* model — not a refusal, which left a new skill unprovable."""
+    on-disk guidance against the *naked* model — not a refusal, which left it unprovable."""
     _author_a_new_skill_on_disk(config.skills_root)
     _promote_a_case_to_disk(config.skills_root)
-    _stage_guidance_on_the_skill_branch(repo)
 
-    base, candidate = _gate_sides(config, "architect")
+    base, candidate = _gate_sides(config, config.skills_root, "architect")
 
     assert base.body == ""  # naked baseline: guidance stripped
-    assert candidate.body != ""  # the staged guidance under test
+    assert candidate.body != ""  # the on-disk guidance under test
     # Both sides carry the same promoted case — a controlled comparison.
     assert [c.id for c in base.eval_cases] == ["arch-1"]
     assert [c.id for c in candidate.eval_cases] == ["arch-1"]

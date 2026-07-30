@@ -20,7 +20,6 @@ from whetstone.curation import CurationError, retier_yaml
 from whetstone.domain.eval_model import CaseTier
 from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
-from whetstone.gitio import Author, GitError, read_at
 from whetstone.naming import describe_unsafe, is_safe_segment
 from whetstone.sampling import partition_of
 from whetstone.service import (
@@ -36,8 +35,6 @@ from whetstone.ui.deps import (
     CadenceDep,
     ConfigDep,
     DriftDep,
-    Principal,
-    PrincipalDep,
     SkillsRootDep,
     StoreDep,
     Writable,
@@ -139,9 +136,8 @@ class TierResult(BaseModel):
     skill_id: str
     case_id: str
     tier: CaseTier
-    branch: str = ""
-    # Empty when nothing needed to change — the case was already at the requested tier.
-    commit: str = ""
+    # The file rewritten on disk, or empty when nothing changed (already at the requested tier).
+    written: str = ""
 
 
 @router.post(
@@ -152,14 +148,13 @@ def set_case_tier(
     case_id: str,
     request: TierRequest,
     config: ConfigDep,
-    principal: PrincipalDep,
 ) -> TierResult:
-    """Flip one eval case between `active` and `archive` — as a commit, never a disk write.
+    """Flip one eval case between `active` and `archive`, written in place on disk.
 
-    The flip lands on the skill's staging branch like a guidance edit, because it is the same kind
-    of thing: a change to what the skill's score measures. A rewritten case changes `skill_hash`,
-    so C6 requires a fresh passing gate before the archived corpus can be proposed — de-weighting
-    a case can move the score, and a moved score gets re-proven, not waved through.
+    A change to what the skill's score measures, so it is written where the skill lives, like a
+    guidance edit. A rewritten case changes `skill_hash`, so the gate verdict is retracted until a
+    fresh gate covers the archived corpus — de-weighting a case can move the score. Committing the
+    change is the operator's own git.
     """
     if not is_safe_segment(case_id):
         raise NotFound(describe_unsafe(case_id, "case id"))
@@ -168,31 +163,20 @@ def set_case_tier(
     except staging.StagingError as exc:
         raise Unprocessable(str(exc)) from exc
 
-    branch = staging.skill_branch(config, skill_id)
-    text = _case_yaml_source(config, branch, case_path)
-    if text is None:
+    on_disk = config.skills_repo / case_path
+    if not on_disk.is_file():
         raise NotFound(f"no eval case {case_id!r} in skill {skill_id!r}")
+    text = on_disk.read_text(encoding="utf-8")
 
     try:
         edited = retier_yaml(text, request.tier)
     except CurationError as exc:
         raise Unprocessable(str(exc)) from exc
     if edited == text:
-        return TierResult(skill_id=skill_id, case_id=case_id, tier=request.tier, branch=branch)
+        return TierResult(skill_id=skill_id, case_id=case_id, tier=request.tier)
 
-    verb = "archive" if request.tier == "archive" else "restore"
-    commit = staging.stage(
-        config,
-        skill_id,
-        {case_path: edited},
-        f"curate: {verb} eval case {case_id}\n\n"
-        f"Tier flipped in the console. A rewritten case changes skill_hash, so this needs a "
-        f"passing gate before it can be proposed.",
-        author=_author(config, principal),
-    )
-    return TierResult(
-        skill_id=skill_id, case_id=case_id, tier=request.tier, branch=branch, commit=commit
-    )
+    staging.write_in_place(config, {case_path: edited})
+    return TierResult(skill_id=skill_id, case_id=case_id, tier=request.tier, written=case_path)
 
 
 class GraduateResult(BaseModel):
@@ -230,35 +214,6 @@ def graduate_case(skill_id: str, case_id: str, config: ConfigDep) -> GraduateRes
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
     return GraduateResult(skill_id=skill_id, case_id=case_id, graduated=True)
-
-
-def _case_yaml_source(config: Config, branch: str, case_path: str) -> str | None:
-    """The `case.yaml` a tier flip edits: the staging branch's copy when one exists, else disk.
-
-    The branch wins for the same reason `staging.source` reads it first — a second flip must build
-    on the first, not silently revert it by starting from the working tree again.
-    """
-    from whetstone.gitio import ref_exists
-
-    try:
-        if ref_exists(config.skills_repo, branch):
-            return read_at(config.skills_repo, branch, case_path)
-    except GitError:
-        pass  # the branch does not carry this file (or there is no git) — fall through to disk
-    on_disk = config.skills_repo / case_path
-    if not on_disk.is_file():
-        return None
-    return on_disk.read_text(encoding="utf-8")
-
-
-def _author(config: Config, principal: Principal) -> Author | None:
-    """Who the commit is attributed to, per `[git] author` — same rule as guidance edits."""
-    if config.git.author == "console" or not (principal.name or principal.email):
-        return None
-    return Author(
-        name=principal.name or principal.email,
-        email=principal.email or "whetstone@localhost",
-    )
 
 
 def _load_all(root: Path) -> list[Skill]:

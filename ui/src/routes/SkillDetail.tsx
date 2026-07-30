@@ -89,9 +89,8 @@ export function SkillDetail() {
         <Tabs.Content value="edit">
           <TabIntro>
             Change the rules. Draft one from the last run's failures or write it yourself, read the
-            diff, then Stage on branch — never the working tree, never{' '}
-            <code className="font-mono">main</code>. Staged guidance cannot be proposed until a gate
-            proves it broke nothing.
+            diff, then Apply to disk — edits write straight to the skill folder in place. A change
+            should carry a passing gate before you commit it, but committing is your own git.
           </TabIntro>
           {/* Mounted only while selected, so the draft starts from what is on disk each time the
               tab is opened rather than from a stale copy taken at page load. */}
@@ -102,8 +101,8 @@ export function SkillDetail() {
           <TabIntro>
             The loop, in one place: score the skill against the cases you promoted from triage,{' '}
             <em>graduate</em> the ones that earn a place in the eval corpus, sharpen the guidance
-            against the ones it still misses (by hand on the branch, or with the LLM), re-score, then
-            gate and propose. Guidance edits land on the skill's branch — never the working tree.
+            against the ones it still misses (by hand or with the LLM), re-score, then gate. Edits
+            write to the skill files on disk in place; you commit and push with your own git.
           </TabIntro>
           <ImproveWorkspace detail={data} />
         </Tabs.Content>
