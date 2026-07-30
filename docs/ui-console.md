@@ -489,8 +489,15 @@ CLI stay feature-equivalent.
 > since: the **Inbox** (`/`) is now the console's home — "the work queue is the landing page" below
 > describes the Skills index's sort order, not the entry route — and a top-level **Status** page
 > (`/status`) summarises the fleet's rot, judge accuracy and watch state. The skill-detail tabs also
-> gained **Improve**, the guided score → sharpen → gate → propose loop. See the README's
-> [The screens](../README.md#the-screens) for the current surface.
+> gained **Improve**, the guided score → sharpen → gate → propose loop.
+>
+> **The case model changed too.** Triage no longer promotes onto a `whetstone/cases/batch-N`
+> branch. A promotion now writes the case to `skills/<id>/promoted_cases/` **on disk**, and a human
+> **graduates** the ones that earn it into `eval_cases/` (the corpus that scores and gates). So every
+> "batch branch" / "Propose N cases" reference below is retired — see the README's
+> [Promoting, scoring, graduating](../README.md#promoting-scoring-graduating). Cases are the test
+> suite *for* a skill, read as folders, independent of git; the [screens](../README.md#the-screens)
+> section of the README is the current surface.
 
 ### 10.1 Skills index — worst first
 
