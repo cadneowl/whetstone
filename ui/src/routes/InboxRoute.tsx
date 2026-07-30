@@ -266,11 +266,12 @@ function Action({ row }: { row: Attention }) {
     return <LaunchButton kind="gate" request={{ skill_id: row.skill_id }} label={label} />
   }
   if (kind === 'improve') {
-    // Drafting is a judgement call about text, so it belongs beside the editor and the diff
-    // rather than behind a button on a summary screen.
+    // The Improve tab is the loop: score the failing cases, draft a change (by hand on the branch
+    // or with the LLM), re-score, gate, propose. Drafting is a judgement call about text, and that
+    // is where the text, the diff and the cases sit together.
     return (
       <Link
-        to={`/skills/${encodeURIComponent(row.skill_id)}?tab=edit`}
+        to={`/skills/${encodeURIComponent(row.skill_id)}?tab=improve`}
         className="inline-block rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10"
       >
         {label} →
@@ -278,9 +279,10 @@ function Action({ row }: { row: Attention }) {
     )
   }
   if (kind === 'propose') {
+    // Straight to the gate-and-propose step of the same loop.
     return (
       <Link
-        to={`/skills/${encodeURIComponent(row.skill_id)}?tab=edit`}
+        to={`/skills/${encodeURIComponent(row.skill_id)}?tab=improve`}
         className="inline-block rounded-lg border border-good/50 px-3 py-1.5 text-sm text-good transition-colors hover:bg-good/10"
       >
         {label} →

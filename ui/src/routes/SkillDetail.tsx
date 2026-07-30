@@ -32,6 +32,7 @@ export function SkillDetail() {
   if (!data) return <Empty>Not found.</Empty>
 
   const { skill, cases, runs } = data
+  const tab = activeTab(params.get('tab'))
 
   return (
     <div>
@@ -53,7 +54,7 @@ export function SkillDetail() {
             whole loop — you re-run it after every guidance edit — and it used to live behind the
             History tab, which is named for the records it produces rather than the thing it does.
             Here it is reachable from whichever tab you are on, Edit above all. */}
-        <EvalLauncher detail={data} />
+        <EvalLauncher detail={data} activeTab={tab} />
       </header>
 
       {/* The tab lives in the URL so the inbox can send you straight to the step it named, and
@@ -61,8 +62,8 @@ export function SkillDetail() {
           a stale bookmark, or `?tab=history` when the key is `runs` — falls back to Guidance
           rather than rendering a blank pane under the tab strip. */}
       <Tabs.Root
-        value={activeTab(params.get('tab'))}
-        onValueChange={(tab) => setParams(tab === 'guidance' ? {} : { tab }, { replace: true })}
+        value={tab}
+        onValueChange={(next) => setParams(next === 'guidance' ? {} : { tab: next }, { replace: true })}
       >
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">
           <Trigger value="guidance">Guidance</Trigger>
@@ -247,15 +248,21 @@ type FrontScope = 'working' | 'batch'
  * batch branch and never to disk, so an operator who had just curated a set landed on a skill page
  * with no way to run them. This offers the promoted batch as a first-class scope and makes it the
  * default whenever cases are waiting, so the thing you just did is the thing the button does.
+ *
+ * On the Improve tab the batch scope is dropped: that tab has its own "Score the promoted batch"
+ * step, and two identical score buttons on one screen is the duplication to avoid. The header keeps
+ * the working-tree scope there — "how does this skill do on disk" is a different question from "did
+ * my staged change help", which the tab answers.
  */
-function EvalLauncher({ detail }: { detail: Detail }) {
+function EvalLauncher({ detail, activeTab }: { detail: Detail; activeTab: string }) {
   const pending = detail.pending_cases.length
   const merged = detail.cases.length
+  const onImproveTab = activeTab === 'improve'
 
   const scopes: { id: FrontScope; label: string; count: number; hint: string }[] = []
   // Batch first, so it is the default: a page with pending cases is a page reached straight from
-  // promoting them.
-  if (pending > 0)
+  // promoting them. Suppressed on the Improve tab, which owns batch scoring.
+  if (pending > 0 && !onImproveTab)
     scopes.push({
       id: 'batch',
       label: 'Promoted cases',
