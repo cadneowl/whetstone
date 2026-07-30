@@ -1470,16 +1470,20 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
         prefix=config.git.branch_prefix,
         remote=config.git.push_remote,
     )
-    promoted = staging.skill_at(config, batch.branch, request.skill_id)
-    if promoted is None:
+    # Read as *cases*, not by reconstructing a skill from the batch ref: the batch is cut from the
+    # base and carries no `SKILL.md`, so a skill authored in the working tree but not yet on the
+    # base branch has promoted cases here but no body to reconstruct — and the old `skill_at` read
+    # that as "no promoted cases". The body comes from the working tree / staged draft instead.
+    cases = staging.promoted_cases(config, request.skill_id)
+    if not cases:
         raise Unprocessable(
             f"no promoted cases for {request.skill_id!r} on {batch.branch} — promote something "
             f"from triage first, or score the working tree instead."
         )
-    # The same merge the gate uses, so a run reporting recall 1.00 and the gate that has to confirm
-    # it are talking about the same content.
+    # The same overlay the gate uses, so a run reporting recall 1.00 and the gate that confirms it
+    # are talking about the same content.
     editing = _skill_being_edited(config, root, request.skill_id)
-    return staging.merge_cases(editing, promoted[0]), batch.branch
+    return staging.overlay_cases(editing, cases), batch.branch
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:

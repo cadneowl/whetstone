@@ -171,6 +171,17 @@ def _load_provenance(raw: Any) -> dict[str, list[Provenance]]:
     return out
 
 
+def load_eval_cases(cases_dir: Path, skill_id: str) -> list[EvalCase]:
+    """Load a `<case>/case.yaml` folder as eval cases, independent of any `SKILL.md`.
+
+    Cases are the test suite *for* a skill, not part of the skill, so reading them must never
+    require the skill's body to be present. Staging reads promoted cases from a batch ref this way,
+    which is what lets a skill authored in the working tree — not yet committed to the base branch —
+    still surface and score its promoted set.
+    """
+    return _load_eval_cases(cases_dir, skill_id)
+
+
 def _load_eval_cases(cases_dir: Path, skill_id: str) -> list[EvalCase]:
     if not cases_dir.is_dir():
         return []

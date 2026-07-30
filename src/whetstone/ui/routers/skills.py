@@ -83,10 +83,13 @@ def _promoted_but_unmerged(
         )
         if not batch.exists or batch.commits == 0:
             return []
-        found = staging.skill_at(config, batch.branch, skill.id)
+        # Read as cases, not a reconstructed skill, so a skill authored in the working tree but not
+        # yet on the base branch still lists its promoted cases here (its `SKILL.md` is absent from
+        # the batch ref, which `skill_at` would have read as "nothing promoted").
+        promoted = staging.promoted_cases(config, skill.id)
     except (staging.StagingError, GitError, OSError):
         return []
-    if found is None:
+    if not promoted:
         return []
 
     # The same holdout fraction the eval and the gate will use, so the flag the workspace reads
@@ -96,7 +99,7 @@ def _promoted_but_unmerged(
 
     on_disk = {case.id for case in skill.eval_cases}
     pending = []
-    for case in found[0].eval_cases:
+    for case in promoted:
         if case.id in on_disk:
             continue
         # A batch scored before this case was promoted simply has no row for it, which is exactly
