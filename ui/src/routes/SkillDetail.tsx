@@ -100,9 +100,10 @@ export function SkillDetail() {
 
         <Tabs.Content value="improve">
           <TabIntro>
-            The loop, in one place: score the skill against the cases you promoted from triage, draft
-            a change from the ones it misses (by hand on the branch, or with the LLM), re-score, then
-            gate and propose. Edits land on the skill's branch — never the working tree.
+            The loop, in one place: score the skill against the cases you promoted from triage,{' '}
+            <em>graduate</em> the ones that earn a place in the eval corpus, sharpen the guidance
+            against the ones it still misses (by hand on the branch, or with the LLM), re-score, then
+            gate and propose. Guidance edits land on the skill's branch — never the working tree.
           </TabIntro>
           <ImproveWorkspace detail={data} />
         </Tabs.Content>
