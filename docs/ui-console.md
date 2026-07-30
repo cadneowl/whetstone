@@ -282,7 +282,7 @@ trust_proxy_headers = false      # D2: must be explicitly enabled to deploy for 
 
 [runs]
 dir = ".whetstone/runs"
-max_llm_calls_per_run = 2000     # runaway backstop (reserved until Phase 4 runs exist)
+max_llm_calls_per_run = 2000     # preflight warning when the estimate exceeds it (preflight.check_budget)
 
 [gate]
 recall_tol = 0.0

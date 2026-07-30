@@ -59,8 +59,9 @@ class UIConfig(BaseModel):
 
 class RunsConfig(BaseModel):
     dir: Path = Path(".whetstone/runs")
-    # Reserved: parsed and reported, but nothing enforces it yet. It becomes a real backstop when
-    # the console can launch runs itself (the CLI's budget is the operator's own shell).
+    # A preflight warning, not a hard cap. `preflight.check_budget` compares the *estimated* call
+    # count against this and warns before anything spends — in both the CLI and the console — but
+    # nothing stops a run mid-flight if the actual calls run over. A hard backstop comes later.
     max_llm_calls_per_run: int = 2000
     # Write every prompt and reply to disk, for answering "why did the model say that?".
     #

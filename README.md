@@ -1951,7 +1951,7 @@ protected_branches = ["main", "master"]
 
 [runs]
 dir = ".whetstone/runs"
-max_llm_calls_per_run = 2000       # reserved; see the note below
+max_llm_calls_per_run = 2000       # preflight warning; see the note below
 
 [gate]                             # defaults for `whetstone eval gate`; --recall-tol overrides
 recall_tol = 0.0
@@ -2632,6 +2632,8 @@ Two things worth knowing, both about values being read back exactly as written:
 | `WHETSTONE_CANDIDATES_DIR` | `config` | Where the triage queue is read from. |
 | `WHETSTONE_GATES_DIR` | `config` | Where gate records are stored — what gate-before-propose reads. |
 | `WHETSTONE_REVIEWS_DIR` | `config` | Where live-review records and their rulings are stored. |
+| `WHETSTONE_META_EVAL_DIR` | `config` | Where labeled judge pairs (the meta-eval corpus) are stored. |
+| `WHETSTONE_JUDGE_DIR` | `config` | Where the deployment judge doctrine (`JUDGE.md`) lives. |
 | `WHETSTONE_UI_HOST` / `WHETSTONE_UI_PORT` | `config` | Console bind address and port. |
 | `WHETSTONE_READ_ONLY` / `WHETSTONE_PRACTICE_MODE` | `config` | Console modes. An *empty* value counts as unset, so a shell-quoting accident cannot switch read-only off. |
 
