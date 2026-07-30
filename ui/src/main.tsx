@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
+import { StatusPage } from './routes/StatusPage'
 import { InboxRoute } from './routes/InboxRoute'
 import { SkillsIndex } from './routes/SkillsIndex'
 import { SkillDetail } from './routes/SkillDetail'
@@ -22,6 +23,8 @@ const router = createBrowserRouter([
     children: [
       // The inbox is home: the console opens on what needs doing, not on a list of what exists.
       { index: true, element: <InboxRoute /> },
+      // The fleet's state of affairs on top, rather than one skill at a time behind Skills → Health.
+      { path: 'status', element: <StatusPage /> },
       { path: 'skills', element: <SkillsIndex /> },
       { path: 'skills/:skillId', element: <SkillDetail /> },
       { path: 'skills/:skillId/cases/:caseId', element: <CaseDetail /> },

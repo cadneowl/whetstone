@@ -39,9 +39,10 @@ export function AppShell() {
           <NavLink to="/" className="text-[15px] font-semibold">
             Whetstone
           </NavLink>
-          {/* Ordered as the loop runs: what needs doing, the signal behind it, the skills it
-              changes, and the evidence it produced. */}
+          {/* Status leads: the fleet's state of affairs on top. Then the loop as it runs — what
+              needs doing, the signal behind it, the skills it changes, and the evidence it made. */}
           <nav className="flex gap-4 text-sm">
+            <Tab to="/status">Status</Tab>
             <Tab to="/" end>
               Inbox
             </Tab>
