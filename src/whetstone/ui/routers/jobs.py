@@ -96,6 +96,12 @@ class EvalRequest(BaseModel):
     # catch these?" was to graduate and gate first and find out afterwards. That is precisely
     # backwards: the point of promoting a case is to test against it.
     scope: EvalScope = "working"
+    # `promoted` scope only: score just these case ids instead of the whole promoted set. Empty is
+    # the default — every promoted case. A strict subset is the cheap, targeted check of the cases
+    # you are unsure about, without spending a model call on the ones you already trust. It never
+    # weakens the safety net: the gate always scores the whole union, so a regression on a case you
+    # skipped here still blocks the propose.
+    cases: list[str] = Field(default_factory=list)
     # The backend for this one launch. Empty is the console default — the header picker, or `[llm]`.
     # A provider here (one Whetstone knows) runs just this step on that model instead, so a single
     # step can go to the cloud while everything else stays on the local box, or the reverse, without
@@ -1473,10 +1479,29 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
             f"no promoted cases for {request.skill_id!r} — promote some from triage first, "
             f"or score the working tree instead."
         )
+    if request.cases:
+        # A targeted subset: score only the promoted cases the operator selected. Filter here, so
+        # both the cost plan and the run (which share this resolver) count exactly what was picked.
+        wanted = set(request.cases)
+        cases = [c for c in cases if c.id in wanted]
+        if not cases:
+            raise Unprocessable(
+                f"none of the selected case(s) are promoted for {request.skill_id!r} — they may "
+                f"have been graduated or undone since. Reload the skill and pick again."
+            )
     # The same overlay the gate uses, so a run reporting recall 1.00 and the gate that confirms it
     # are talking about the same content. No git ref: the promoted cases are uncommitted on disk.
     editing = _skill_being_edited(config, root, request.skill_id)
-    return staging.overlay_cases(editing, cases), None
+    scored = staging.overlay_cases(editing, cases)
+    if request.cases:
+        # Score *exactly* the selected cases — not the graduated corpus the overlay also carries.
+        # A subset run is an explicit "just check these"; the whole-corpus regression view is what
+        # the unfiltered score (and the gate) are for.
+        keep = {c.id for c in cases}
+        scored = scored.model_copy(
+            update={"eval_cases": [c for c in scored.eval_cases if c.id in keep]}
+        )
+    return scored, None
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:

@@ -62,6 +62,12 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const heldSelected = pending.filter((c) => selected.has(c.id) && c.holdout)
   const targetable = pending.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
 
+  // A strict subset scores just those cases — the cheap, targeted check. All (or none) selected
+  // scores the whole promoted set, so a regression on a case you did not pick still shows.
+  // `scoreKey` resets the launch button's cost plan whenever the selection changes.
+  const scoreSubset = selected.size > 0 && selected.size < pending.length
+  const scoreKey = scoreSubset ? [...selected].sort().join(',') : 'all'
+
   const stageDraft = () =>
     draft &&
     save.mutate(
@@ -148,12 +154,13 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               </button>
             </div>
           </div>
-          {/* Honest about scope: scoring runs the whole batch (regressions have to show), while the
-              LLM sharpen and the gate act on just the selected subset. The old copy said scoring
-              acted on "exactly these", which the batch scope does not. */}
+          {/* The checkboxes now drive the score as well: a strict subset scores just those cases,
+              all-or-none scores the whole batch (so regressions still show). They also scope the
+              LLM sharpen and the gate's targets. */}
           <p className="mb-3 text-xs text-muted">
-            The checkboxes drive the LLM sharpen and the gate&rsquo;s targets. Scoring runs the whole
-            batch, so a regression elsewhere still shows. Caught / missed is from the latest score.
+            The checkboxes drive what gets scored, sharpened and gate-targeted. Tick a few to score
+            just those; leave all (or none) ticked to score the whole batch, so a regression
+            elsewhere still shows. Caught / missed is from the latest score.
             <strong> Graduate</strong> a case once you&rsquo;re satisfied it belongs — that moves it
             into the eval corpus (only some earn it), which needs a fresh gate before you propose.
           </p>
@@ -210,13 +217,21 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           <div>
             <h3 className="text-sm font-medium">1 · Score the promoted batch</h3>
             <p className="mt-0.5 mb-2 text-xs text-muted">
-              Runs the branch&rsquo;s guidance over every promoted case. Missed / falsely-flagged
-              cases are what to sharpen next; a merged case that regressed is what to protect.
+              {scoreSubset
+                ? `Runs the branch's guidance over the ${selected.size} case(s) you ticked above.`
+                : "Runs the branch's guidance over every promoted case."}{' '}
+              Missed / falsely-flagged cases are what to sharpen next; a regressed case is what to
+              protect.
             </p>
             <LaunchButton
+              key={scoreKey}
               kind="eval"
-              request={{ skill_id: skillId, scope: 'promoted' }}
-              label="Score the promoted batch"
+              request={{
+                skill_id: skillId,
+                scope: 'promoted',
+                ...(scoreSubset ? { cases: [...selected] } : {}),
+              }}
+              label={scoreSubset ? `Score ${selected.size} selected` : 'Score the promoted batch'}
               onDone={(job) => {
                 const r = job.result as Record<string, unknown>
                 setBatchRun(String(r.run_id ?? '') || null)

@@ -491,6 +491,39 @@ def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
     assert "812-t0" in ids, "the cases must come from the promoted set"
 
 
+def test_scoring_a_promoted_subset_covers_only_the_picked_case(client: TestClient) -> None:
+    """Ticking one promoted case scores exactly it — not the rest of the promoted set, and not the
+    graduated corpus the whole-set score otherwise carries for regression cover."""
+    from whetstone.ui.routers.jobs import EvalRequest, _skill_to_score
+
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+
+    config = client.app.state.config
+    whole, _ = _skill_to_score(
+        config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="promoted")
+    )
+    subset, _ = _skill_to_score(
+        config,
+        config.skills_root,
+        EvalRequest(skill_id="rust-errors", scope="promoted", cases=["812-t0"]),
+    )
+
+    assert {c.id for c in subset.eval_cases} == {"812-t0"}, "only the picked case is scored"
+    assert {c.id for c in whole.eval_cases} >= {"812-t0"}
+    assert len(whole.eval_cases) >= len(subset.eval_cases)
+
+
+def test_scoring_a_promoted_subset_of_unknown_ids_is_rejected(client: TestClient) -> None:
+    """A stale pick (graduated or undone since) fails fast, not after minutes of model calls."""
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    response = client.post(
+        "/api/jobs/eval/plan",
+        json={"skill_id": "rust-errors", "scope": "promoted", "cases": ["not-a-case"]},
+    )
+    assert response.status_code == 422
+    assert "none of the selected" in response.json()["message"]
+
+
 def test_the_gate_covers_the_promoted_cases_on_both_sides(client: TestClient) -> None:
     """A gate is a controlled comparison, so the case set is what must not differ between sides.
 

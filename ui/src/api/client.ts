@@ -100,6 +100,11 @@ export type JobRequest = {
   project?: string
   /** synthesize only: which generator, and optionally which parent cases. */
   mode?: 'counterfactual' | 'mutation'
+  /**
+   * A case-id subset. improve: draft from just these. eval + `scope: 'promoted'`: score just
+   * these promoted cases instead of the whole set. synthesize: which parent cases to mutate.
+   * Empty/absent means the step's default (for eval, every promoted case).
+   */
   cases?: string[]
 }
 

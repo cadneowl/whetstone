@@ -861,7 +861,8 @@ export interface paths {
          *
          *     A candidate somebody has already promoted or rejected is left alone: undoing a ruling is
          *     correcting a mistake here, not reaching into the queue to overrule a decision someone else made
-         *     there — and a promotion is already a commit on a branch, which this cannot revert anyway.
+         *     there — a promoted case is un-done from triage (which removes its `promoted_cases/` folder), not
+         *     by retracting the long-decided ruling that minted its candidate.
          */
         delete: operations["undo_verdict_api_reviews__review_id__findings__index__verdict_delete"];
         options?: never;
@@ -2172,6 +2173,8 @@ export interface components {
         };
         /** EvalRequest */
         EvalRequest: {
+            /** Cases */
+            cases?: string[];
             /**
              * Model
              * @default
