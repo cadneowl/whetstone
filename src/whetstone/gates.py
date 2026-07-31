@@ -21,8 +21,9 @@ import uuid
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from whetstone.core.gate import GateConfig, GateResult
 from whetstone.domain.score import HoldoutReport, SkillScore
@@ -52,6 +53,13 @@ class GateRecord(BaseModel):
 
     backend: str = ""
     model: str = ""
+    # The instrument the comparison was made with: "" for the built-in reviewer, else the skill's
+    # own program and the redacted context it read (see `domain.run.RunRecord.reviewer`). This is
+    # the record C6 publishes on, so "what measured this?" has to be answerable from it alone —
+    # and with a source-aware reviewer the backend/model above describe only the judge.
+    reviewer: str = ""
+    reviewer_context: dict[str, Any] = Field(default_factory=dict)
+    reviewer_context_digest: str = ""
     # Identity of the judge both sides' verdicts came from (`judge.llm_judge.judge_identity`).
     # One judge serves the whole gate, so the base/candidate comparison is internally valid
     # regardless — this exists so two *gates* judged differently are never read as one series.

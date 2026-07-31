@@ -2398,6 +2398,20 @@ export interface components {
              */
             principal: string;
             result: components["schemas"]["GateResult"];
+            /**
+             * Reviewer
+             * @default
+             */
+            reviewer: string;
+            /** Reviewer Context */
+            reviewer_context?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Reviewer Context Digest
+             * @default
+             */
+            reviewer_context_digest: string;
             /** Skill Id */
             skill_id: string;
         };
@@ -3439,6 +3453,20 @@ export interface components {
             /** Rejected */
             readonly rejected: number;
             /**
+             * Reviewer
+             * @default
+             */
+            reviewer: string;
+            /** Reviewer Context */
+            reviewer_context?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Reviewer Context Digest
+             * @default
+             */
+            reviewer_context_digest: string;
+            /**
              * Reviewer Effort
              * @default high
              */
@@ -3809,6 +3837,20 @@ export interface components {
              * @default
              */
             principal: string;
+            /**
+             * Reviewer
+             * @default
+             */
+            reviewer: string;
+            /** Reviewer Context */
+            reviewer_context?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Reviewer Context Digest
+             * @default
+             */
+            reviewer_context_digest: string;
             /**
              * Reviewer Effort
              * @default high

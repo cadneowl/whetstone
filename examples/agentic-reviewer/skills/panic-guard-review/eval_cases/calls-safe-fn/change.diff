@@ -1,0 +1,7 @@
+diff --git a/app/lookup.py b/app/lookup.py
+--- a/app/lookup.py
++++ b/app/lookup.py
+@@ -1,2 +1,3 @@
+ def start():
++    value = safe_get("k")
+     return value

@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 import string
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -187,6 +187,11 @@ class StepSpec(BaseModel):
     sample: SamplePolicy = SamplePolicy()
     judge: JudgePolicy = JudgePolicy()
     trials: int = Field(default=1, ge=1, le=20)
+    # `evaluate` only: the open-ended inputs a custom reviewer program (`run:`) needs — a source
+    # location, a schema path, whatever. Free-form on purpose; the host resolves the value forms
+    # (`context.resolve_context`) and forwards the bag without interpreting the keys. Empty for the
+    # built-in reviewer, which takes no extra inputs.
+    context: dict[str, Any] = Field(default_factory=dict)
     # Exactly one of these is set for a model step; `run` alone for a subprocess step.
     prompt: str | None = None
     run: list[str] = Field(default_factory=list)
@@ -199,7 +204,7 @@ class StepSpec(BaseModel):
     # A key whose every sub-line is commented out parses as None, which is an easy thing to do
     # while editing a scaffold and produces a baffling "should be a valid dictionary" otherwise.
     # An empty block plainly means "defaults", so read it that way.
-    @field_validator("model", "inputs", "sample", "judge", mode="before")
+    @field_validator("model", "inputs", "sample", "judge", "context", mode="before")
     @classmethod
     def _empty_block_is_default(cls, value: object) -> object:
         return {} if value is None else value
@@ -332,10 +337,19 @@ def _validate(spec: StepSpec, path: Path) -> None:
             f"{path}: 'index' describes where a generated wiki's pages belong, so it only means "
             f"something on an update step"
         )
-    if spec.kind == "evaluate" and (spec.prompt is not None or spec.run):
+    if spec.kind == "evaluate" and spec.prompt is not None:
         raise StepError(
-            f"{path}: an evaluate step is configuration, not a program — it declares 'sample', "
-            f"'trials', 'model' and 'inputs.wiki', and the eval harness does the scoring"
+            f"{path}: an evaluate step has no prompt of its own — the reviewer prompt is the "
+            f"harness's. To plug in your own reviewer, set 'run:' instead: it receives the "
+            f"guidance, the diff and the resolved context on stdin and returns findings on stdout."
+        )
+    # `context:` feeds a custom reviewer program. Declared without one, it would be resolved (a
+    # secret read, a file loaded) and then silently dropped, because the built-in reviewer takes no
+    # extra inputs — so refuse it rather than let it read as configured-but-ignored.
+    if spec.context and not (spec.kind == "evaluate" and spec.run):
+        raise StepError(
+            f"{path}: 'context:' only feeds a reviewer program — it has no effect without 'run:' "
+            f"on an evaluate step (the built-in reviewer takes no extra inputs)"
         )
 
 

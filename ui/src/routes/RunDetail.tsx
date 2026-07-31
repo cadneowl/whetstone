@@ -141,11 +141,22 @@ function Header({ run }: { run: RunRecord }) {
 
       <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
         <li>{when(run.created_at)}</li>
-        <li>
-          backend <code className="font-mono">{run.backend || '—'}</code>
+        <li
+          title={
+            run.reviewer
+              ? 'The backend and model below are the judge’s. This run’s findings came from your own reviewer program, which runs a model Whetstone never sees.'
+              : 'The built-in reviewer, running on the backend and model below.'
+          }
+        >
+          reviewer <code className="font-mono">{run.reviewer || 'built-in'}</code>
         </li>
         <li>
-          model <code className="font-mono">{run.model || '—'}</code>
+          {run.reviewer ? 'judge backend' : 'backend'}{' '}
+          <code className="font-mono">{run.backend || '—'}</code>
+        </li>
+        <li>
+          {run.reviewer ? 'judge model' : 'model'}{' '}
+          <code className="font-mono">{run.model || '—'}</code>
         </li>
         <li>k={run.k}</li>
         <li>
@@ -162,6 +173,15 @@ function Header({ run }: { run: RunRecord }) {
             {run.judge_hash ? run.judge_hash.slice(0, 12) : 'pre-attribution'}
           </code>
         </li>
+        {run.reviewer_context_digest && (
+          <li
+            title={`Inputs the reviewer program was given — ${Object.entries(run.reviewer_context ?? {})
+              .map(([k, v]) => `${k}=${String(v)}`)
+              .join(', ')}. An environment value shows as its source, never its contents. The hash covers only the inputs that identify what the reviewer read (literals, file contents, pinned refs), so it is stable across machines.`}
+          >
+            context <code className="font-mono">{run.reviewer_context_digest.slice(0, 12)}</code>
+          </li>
+        )}
         {run.principal && <li>by {run.principal}</li>}
       </ul>
     </header>

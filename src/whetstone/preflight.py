@@ -95,6 +95,7 @@ def plan_eval(
     action: str = "eval run",
     wiki_limits: WikiLimits | None = None,
     judge_cascade: bool = False,
+    host_reviews: bool = True,
 ) -> Plan:
     """The plan for scoring `skill`. `cases` overrides the count when a sample will be used.
 
@@ -102,6 +103,11 @@ def plan_eval(
     judged pair may be re-judged grounded in the case diff. Real runs escalate only the
     low-confidence minority, but an estimate that hides the possibility is the kind of guess
     that costs money.
+
+    `host_reviews=False` when the skill names its own reviewer program: Whetstone then makes no
+    review calls at all, only judge calls. Counting reviews it will never make would inflate the
+    number the operator confirms against — and could trip the budget warning on spend that cannot
+    happen. The program's own spend is real but unknowable here; the caller names its volume.
     """
     total = len(skill.eval_cases) if cases is None else cases
     expectations = sum(len(c.expect) for c in skill.eval_cases)
@@ -109,7 +115,11 @@ def plan_eval(
     judge_factor = 2 if judge_cascade else 1
     # One review per case-trial, plus at most one judge call per expectation on it (two with the
     # cascade: the pairwise verdict, then the grounded re-judge on low confidence).
-    calls = int(round(total * trials * (1 + per_case_expectations * judge_factor)))
+    reviews_per_case = 1 if host_reviews else 0
+    calls = int(
+        round(total * trials * (reviews_per_case + per_case_expectations * judge_factor))
+    )
+    review_term = "1 review + " if host_reviews else ""
     plan = Plan(
         action=action,
         backend=backend.name,
@@ -120,7 +130,7 @@ def plan_eval(
             calls=calls,
             basis=(
                 f"{total} case(s) x {trials} trial(s) x "
-                f"(1 review + up to {per_case_expectations * judge_factor:.1f} judge calls); "
+                f"({review_term}up to {per_case_expectations * judge_factor:.1f} judge calls); "
                 "judging stops at the first match, so real runs usually cost less"
             ),
         ),

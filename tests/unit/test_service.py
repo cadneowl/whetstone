@@ -7,7 +7,12 @@ from pydantic import BaseModel
 
 from whetstone.core.gate import GateConfig, gate
 from whetstone.core.loader import load_skill
-from whetstone.domain.change import CodeChange, FileChange, parse_hunk_added_lines
+from whetstone.domain.change import (
+    CodeChange,
+    FileChange,
+    parse_hunk_added_lines,
+    parse_unified_diff,
+)
 from whetstone.domain.eval_model import EvalCase, Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
 from whetstone.domain.review import (
@@ -27,6 +32,8 @@ from whetstone.service import (
     gate_skills,
     precision_evidence,
     pull_corpus,
+    record_eval,
+    record_review,
     run_eval,
     union_cases,
 )
@@ -76,6 +83,49 @@ def test_run_eval_scores_skill() -> None:
     score = run_eval(load_skill(SKILL_DIR), FakeLLMClient(_flag_handler(flag_tests=False)))
     assert score.recall == 1.0
     assert score.fp_rate == 0.0
+
+
+def test_record_eval_uses_and_names_a_custom_reviewer() -> None:
+    """A supplied reviewer replaces the built-in one; the record names what made the findings."""
+
+    class _SilentReviewer:
+        identity = "subprocess: fake reviewer"
+
+        def review(self, skill: object, change: object) -> list:  # noqa: ARG002
+            return []
+
+    record = record_eval(
+        load_skill(SKILL_DIR),
+        FakeLLMClient(_flag_handler(flag_tests=False)),
+        reviewer=_SilentReviewer(),
+    )
+    assert record.reviewer == "subprocess: fake reviewer"
+    # Proof the custom reviewer actually ran: the built-in LLM reviewer would have caught the real
+    # defects (recall 1.0 above); the silent one catches nothing.
+    assert record.score.recall == 0.0
+
+
+def test_record_review_uses_and_names_a_custom_reviewer() -> None:
+    """The live-review path honours a custom reviewer and records what produced its findings."""
+
+    class _SilentReviewer:
+        identity = "subprocess: fake reviewer"
+
+        def review(self, skill: object, change: object) -> list:  # noqa: ARG002
+            return []
+
+    diff = (
+        "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1 +1,2 @@\n fn f() {}\n+let x = 1;\n"
+    )
+    change = parse_unified_diff(diff, FAKE_REPO)
+    record = record_review(
+        load_skill(SKILL_DIR),
+        change,
+        FakeLLMClient(_flag_handler(flag_tests=False)),
+        reviewer=_SilentReviewer(),
+    )
+    assert record.reviewer == "subprocess: fake reviewer"
+    assert record.findings == []
 
 
 def test_gate_passes_when_candidate_fixes_false_positive() -> None:

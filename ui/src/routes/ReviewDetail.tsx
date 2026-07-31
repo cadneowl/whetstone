@@ -210,7 +210,21 @@ function Header({ record, stale }: { record: ReviewRecord; stale: boolean }) {
           {record.skill_id}
         </Link>
         <span>v{record.skill_version}</span>
-        {record.model && <span>{record.model}</span>}
+        {record.reviewer ? (
+          <span
+            title={`These findings came from your own reviewer program, not Whetstone's built-in reviewer${
+              record.reviewer_context_digest
+                ? ` — given ${Object.entries(record.reviewer_context ?? {})
+                    .map(([k, v]) => `${k}=${String(v)}`)
+                    .join(', ')}`
+                : ''
+            }.`}
+          >
+            {record.reviewer}
+          </span>
+        ) : (
+          record.model && <span>{record.model}</span>
+        )}
         {record.head_ref && (
           <span title="the commit these findings are about">@{record.head_ref.slice(0, 8)}</span>
         )}

@@ -59,6 +59,7 @@ from whetstone.llm.counting import CountingClient
 from whetstone.llm.embedding import Embedder, build_embedder
 from whetstone.llm.factory import build_llm_client, resolve_backend
 from whetstone.providers.base import IssueConnector, ReviewConnector
+from whetstone.reviewer.base import Reviewer, provenance_of
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
@@ -88,8 +89,9 @@ def run_eval(
     judge_policy: JudgePolicy | None = None,
     on_event: EventSink | None = None,
     cancel: threading.Event | None = None,
+    reviewer: Reviewer | None = None,
 ) -> SkillScore:
-    """Score a skill by running its eval set through an LLM reviewer + judge."""
+    """Score a skill by running its eval set through a reviewer + judge."""
     return record_eval(
         skill,
         client,
@@ -104,6 +106,7 @@ def run_eval(
         judge_policy=judge_policy,
         on_event=on_event,
         cancel=cancel,
+        reviewer=reviewer,
     ).score
 
 
@@ -130,6 +133,7 @@ def record_eval(
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     baseline: bool = False,
+    reviewer: Reviewer | None = None,
 ) -> RunRecord:
     """Score a skill and return the full run record — every finding and every judge verdict.
 
@@ -149,7 +153,11 @@ def record_eval(
     judge_system = judge.system if judge else None
     cascade = judge_policy if judge_policy is not None and judge_policy.enabled else None
     counted = CountingClient(client)
-    reviewer = LLMReviewer(
+    # A caller may supply the reviewer — the skill's own `run:` program, resolved by
+    # `reviewer.factory` — in which case the LLM reviewer is not built and the run's client is used
+    # only for the judge. None (the default) keeps every existing caller on the built-in reviewer.
+    prov = provenance_of(reviewer)
+    active_reviewer: Reviewer = reviewer or LLMReviewer(
         counted,
         effort=reviewer_effort,
         wiki_limits=wiki_limits,
@@ -195,7 +203,7 @@ def record_eval(
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
     score, cases = run_skill_recorded(
-        scored, reviewer, llm_judge,
+        scored, active_reviewer, llm_judge,
         k=trials, on_event=on_event, max_workers=max_workers, cancel=cancel,
     )
     duration = time.perf_counter() - clock
@@ -217,6 +225,12 @@ def record_eval(
         guidance_hash=guidance_hash(skill),
         backend=backend,
         model=model,
+        # Empty for the built-in reviewer; a custom reviewer program names itself and reports the
+        # inputs it was given, so the run says what produced its findings and what shaped them (a
+        # score whose instrument is unnamed is what makes a history lie).
+        reviewer=prov.identity,
+        reviewer_context=prov.context,
+        reviewer_context_digest=prov.context_digest,
         reviewer_effort=reviewer_effort,
         judge_effort=judge_effort,
         # The judge these verdicts came from. Computed from the same text and cascade policy the
@@ -291,6 +305,7 @@ def record_baseline(
     now: datetime | None = None,
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
+    reviewer: Reviewer | None = None,
 ) -> RunRecord:
     """Score the skill's active cases with the guidance stripped — the saturation probe.
 
@@ -320,6 +335,7 @@ def record_baseline(
         judge=judge,
         judge_policy=judge_policy,
         baseline=True,
+        reviewer=reviewer,
     )
 
 
@@ -338,6 +354,7 @@ def record_review(
     practice_mode: bool = False,
     principal: str = "",
     now: datetime | None = None,
+    reviewer: Reviewer | None = None,
 ) -> ReviewRecord:
     """Run a skill over a change that is not an eval case, and record what it said.
 
@@ -347,13 +364,20 @@ def record_review(
 
     `skill_hash` is stored so a ruling can be tied to the guidance that produced it. Findings from
     guidance that has since been rewritten describe a reviewer that no longer exists.
+
+    `reviewer` is the skill's own reviewer program when its `evaluate` step names one — reviewing a
+    live change against the real source is where a source-aware reviewer most earns its keep. None
+    (the default) keeps the built-in LLM reviewer.
     """
     counted = CountingClient(client)
-    reviewer = LLMReviewer(counted, effort=reviewer_effort, embedder=_embedder_for(skill))
+    prov = provenance_of(reviewer)
+    active_reviewer: Reviewer = reviewer or LLMReviewer(
+        counted, effort=reviewer_effort, embedder=_embedder_for(skill)
+    )
 
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
-    findings = reviewer.review(skill, change)
+    findings = active_reviewer.review(skill, change)
     duration = time.perf_counter() - clock
 
     return ReviewRecord(
@@ -371,6 +395,9 @@ def record_review(
         head_ref=change.head_ref,
         backend=backend,
         model=model,
+        reviewer=prov.identity,
+        reviewer_context=prov.context,
+        reviewer_context_digest=prov.context_digest,
         reviewer_effort=reviewer_effort,
         practice_mode=practice_mode,
         duration_s=duration,
@@ -378,8 +405,8 @@ def record_review(
         change=change,
         findings=findings,
         # Which corpus cases shaped this review — what makes a finding explainable as "flagged
-        # like case-X was". Empty for a skill without an index, exactly as before.
-        precedents=reviewer.last_precedents,
+        # like case-X was". A custom reviewer program injects no precedents, so it reports none.
+        precedents=getattr(active_reviewer, "last_precedents", []),
     )
 
 
@@ -485,6 +512,7 @@ def gate_skills(
     on_base: EventSink | None = None,
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
+    reviewer: Reviewer | None = None,
 ) -> GateOutcome:
     """Score a base and candidate version of a skill and apply the regression gate.
 
@@ -530,19 +558,22 @@ def gate_skills(
     # precedents from its *own* full corpus — not the sampled `cases`, and not the union: base's
     # index was built from base's cases, so rendering a precedent from base's corpus keeps the
     # injected diff and the vector that ranked it from the same commit.
+    # One reviewer instance serves both sides: it is stateless across calls and takes the skill
+    # per review, so base and candidate differ only in their guidance — exactly what a gate holds
+    # fixed everything else to measure.
     base_score = run_eval(
         base.model_copy(update={"eval_cases": cases}), client, trials=trials,
         wiki_limits=wiki_limits, precedent_limits=precedent_limits,
         precedent_corpus=base.eval_cases,
         judge=judge, judge_policy=judge_policy, sample=no_draw,
-        on_event=on_base, cancel=cancel,
+        on_event=on_base, cancel=cancel, reviewer=reviewer,
     )
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
         wiki_limits=wiki_limits, precedent_limits=precedent_limits,
         precedent_corpus=candidate.eval_cases,
         judge=judge, judge_policy=judge_policy, sample=no_draw,
-        on_event=on_candidate, cancel=cancel,
+        on_event=on_candidate, cancel=cancel, reviewer=reviewer,
     )
     result = gate(base_score, candidate_score, cfg)
     return GateOutcome(result=result, base=base_score, candidate=candidate_score)
@@ -570,6 +601,7 @@ def record_gate(
     on_base: EventSink | None = None,
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
+    reviewer: Reviewer | None = None,
 ) -> GateRecord:
     """Gate a candidate against a baseline and return a storable record of the comparison.
 
@@ -581,12 +613,13 @@ def record_gate(
     the content the verdict authorises publishing.
     """
     counted = CountingClient(client)
+    gate_prov = provenance_of(reviewer)
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
     outcome = gate_skills(
         base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
         precedent_limits=precedent_limits, judge=judge, judge_policy=judge_policy,
-        on_base=on_base, on_candidate=on_candidate, cancel=cancel,
+        on_base=on_base, on_candidate=on_candidate, cancel=cancel, reviewer=reviewer,
     )
     duration = time.perf_counter() - clock
 
@@ -610,6 +643,11 @@ def record_gate(
         candidate_hash=candidate_hash,
         backend=backend,
         model=model,
+        # Same instrument on both sides — `gate_skills` passes one reviewer to each — so this
+        # describes the comparison as a whole, not one half of it.
+        reviewer=gate_prov.identity,
+        reviewer_context=gate_prov.context,
+        reviewer_context_digest=gate_prov.context_digest,
         judge_hash=judge_identity(
             judge.system if judge else None,
             escalate_below=judge_policy.escalate_below
