@@ -198,8 +198,10 @@ scored by a program therefore records no precedents, rather than recording ones 
                   "message": "…", "rule_id": "R1", "confidence": 0.8 } ] }
 ```
 
-`line` = line number in the **new** file (a finding on a line the diff doesn't touch is already
-rejected downstream — `reviews.py:233` — and that validation stays).
+`line` = line number in the **new** file. Scoring is unchanged: a finding must be structurally
+eligible for an expectation before the judge sees it — same file, inside `line_range` if declared,
+meeting `severity_min` if declared (`core/matching.py:14`) — so a program reporting the right
+problem at the wrong line scores as a miss, exactly as the built-in reviewer would.
 
 **Errors** (same taxonomy as the improve subprocess): `FileNotFoundError` on the program → step
 error; non-zero exit → step error with the stderr tail; unparseable/again-invalid stdout → step
@@ -288,7 +290,8 @@ what makes a history contradict itself.
 
 - **Missing required var** → caught at preflight (§4.3).
 - **Subprocess crash / timeout / bad JSON** → step error; run fails (leaning, §5).
-- **Finding on an untouched line** → already rejected (`reviews.py:233`).
+- **Finding outside an expectation's declared region** → not eligible to satisfy it
+  (`core/matching.py:14`); it scores as a miss, and as noise if nothing else claims it.
 - **Repo not at the declared ref** → the subprocess's problem to detect; we pass `base_ref` so it
   *can*. Optional future: a whetstone-provided checkout helper (§13).
 - **Per-case repo differences.** `change.repo` already varies per case, so a fleet reviewing cases

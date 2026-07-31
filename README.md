@@ -50,8 +50,11 @@ self-measuring judge, and a console that puts every skill's state of affairs on 
 
 ## How it works
 
-A skill is scored by **replaying eval cases** through an LLM reviewer running that skill's guidance,
-then checking the reviewer's findings against what each case expects:
+A skill is scored by **replaying eval cases** through a reviewer running that skill's guidance, then
+checking the reviewer's findings against what each case expects. By default that reviewer is one LLM
+call; a skill that needs to read the actual source while reviewing can [name its own program
+instead](docs/skill-pipeline.md#bring-your-own-reviewer), and everything below is unchanged either
+way:
 
 ```
   skill (SKILL.md guidance + eval_cases/)
@@ -141,7 +144,7 @@ shipped skill produces become the next round's cases. It closes on itself.
 flowchart LR
     P("① Production signal<br/>merge requests · shipped defects · dismissed findings")
     M("② Mine and Triage<br/>a person promotes candidates to eval cases")
-    E("③ Eval Run<br/>the LLM reviewer, scored against the case corpus")
+    E("③ Eval Run<br/>the reviewer, scored against the case corpus")
     I("④ Improve<br/>clustered failures → a drafted guidance change")
     G("⑤ Gate<br/>no regressions, and targeted cases must pass")
     S("⑥ Propose and Ship<br/>merged guidance")
@@ -315,7 +318,8 @@ skills/<skill-id>/
   wiki/                 # repo context, retrieved per change and injected into the review prompt
     index.yaml          #   which source paths each page describes
     pages/*.md
-  evaluate/step.yaml    # how this skill is scored (sampling, trials, wiki caps)
+  evaluate/step.yaml    # how this skill is scored (sampling, trials, wiki caps — and optionally
+                        #   `run:`, your own source-reading reviewer, plus the `context:` it needs)
   improve/step.yaml     # how a guidance change is drafted from failures  (+ prompt.md)
   update/step.yaml      # how the wiki is regenerated, by invoking your own generator
 ```
@@ -921,6 +925,14 @@ whetstone skills steps --skill skills/code-review-rust-error-handling
 # improve   prompt
 #           up to 12 failure(s), clustered by rule, 2000B of diff each
 # update    run openwiki build --repo {{repo}} --out {{out_dir}}
+```
+
+A skill that supplies [its own reviewer](docs/skill-pipeline.md#bring-your-own-reviewer) shows the
+program instead of `config only`, since that is what will run:
+
+```bash
+# evaluate  run python reviewer.py
+#           trials=1  sample=all cases
 ```
 
 ### `whetstone skills improve`
@@ -2529,7 +2541,7 @@ Test layers:
 
 | Directory | What it covers |
 |---|---|
-| `tests/unit/` | Scoring, gate, matching, diff parser, loader, corpus builder, LLM reviewer/judge, meta-eval, run capture, run store, git I/O, config, report, service, CLI. |
+| `tests/unit/` | Scoring, gate, matching, diff parser, loader, corpus builder, LLM reviewer/judge, subprocess reviewer and its context resolution, meta-eval, run capture, run store, git I/O, config, report, service, CLI. |
 | `tests/api/` | Every console route, via `TestClient` against a temp git repo and a temp run store. No network, no model. |
 | `ui/src/**/*.test.ts` | Frontend logic (`npm test`, vitest) — the diff parser that produces the line numbers everything else anchors to. |
 | `tests/contract/` | The provider conformance suite, run against `FakeProvider` and the GitLab adapter. |

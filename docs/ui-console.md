@@ -368,8 +368,11 @@ class RunRecord(BaseModel):
     skill_id: str
     skill_version: int
     skill_hash: str              # sha256 over SKILL.md body + every eval case — the real identity
-    backend: str
+    backend: str                 # the judge's, and the reviewer's too unless `reviewer` is set
     model: str
+    reviewer: str                # "" = built-in; else e.g. "subprocess: python reviewer.py"
+    reviewer_context: dict       # a custom reviewer's inputs, redacted (`<env:NAME>`, `<file:…>`)
+    reviewer_context_digest: str # identity of the hashable slice of those inputs
     reviewer_effort: Effort
     judge_effort: Effort
     k: int
@@ -392,6 +395,14 @@ Three details that carry weight:
   judge calls depend on how many findings survive the prefilter, which is unknowable in advance. The
   estimator uses the trailing mean per skill from prior records, falling back to a conservative
   multiplier on first run.
+- **`reviewer` names the instrument, because `backend`/`model` may not.** A skill can replace the
+  reviewer with a program of its own ([skill-pipeline](skill-pipeline.md#bring-your-own-reviewer)),
+  which runs a model Whetstone never sees — so on such a run `backend`/`model` describe the *judge*
+  alone, `llm_calls` counts judge calls only, and the drill-down relabels both fields accordingly
+  rather than presenting a model that did not produce the findings. `reviewer_context` records which
+  inputs shaped the review, with environment values reduced to their names. `ReviewRecord` and
+  `GateRecord` carry the same three fields; the gate especially, since it is the record C6 publishes
+  on and "what measured this?" has to be answerable from it alone.
 
 **Disk layout** (gitignored):
 
