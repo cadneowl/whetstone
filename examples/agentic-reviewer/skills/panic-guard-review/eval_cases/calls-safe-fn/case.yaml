@@ -1,0 +1,15 @@
+id: calls-safe-fn
+kind: should_not_flag
+repo: "local:hub-backend"
+change: change.diff
+provenance:
+  source: manual
+  human_signal: "hand-written example"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: app/lookup.py
+      line_range: [1, 3]
+    semantic: "safe_get never raises, so there is nothing to flag"
+    pattern: "panic"

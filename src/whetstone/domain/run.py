@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from whetstone.caseindex import index_digest
 from whetstone.domain.enums import Severity
@@ -244,6 +244,17 @@ class RunRecord(BaseModel):
 
     backend: str = ""
     model: str = ""
+    # What produced the findings: "" for the built-in LLM reviewer (the default), or an identity
+    # like "subprocess: python reviewer.py" for a skill's own reviewer program. A score is only
+    # attributable if the instrument is named; the backend/model above describe the judge and, for
+    # the built-in reviewer, the reviewer too — a custom reviewer runs a model Whetstone never sees.
+    reviewer: str = ""
+    # The redacted context a custom reviewer was given, and the identity of its hashable slice.
+    # Which inputs shaped a review is as much a part of the instrument as which program ran: two
+    # scores against different source snapshots are different measurements, and without these the
+    # record cannot say so. Secrets never land here — an `env:` value is stored as `<env:NAME>`.
+    reviewer_context: dict[str, Any] = Field(default_factory=dict)
+    reviewer_context_digest: str = ""
     reviewer_effort: Effort = "high"
     judge_effort: Effort = "medium"
     # Identity of the judge that produced every verdict in this record — see

@@ -68,6 +68,13 @@ def run_skill_recorded(
     total = len(skill.eval_cases)
     progress = _Progress(on_event, total)
 
+    # A reviewer that shells out cannot see this event through a blocking subprocess call, and the
+    # checks below only run *between* reviews — so a cancelled run would wait out the program's full
+    # timeout on every review already in flight. Hand the event over to reviewers that can use it.
+    bind_cancel = getattr(reviewer, "bind_cancel", None)
+    if bind_cancel is not None:
+        bind_cancel(cancel)
+
     def run_one(case: EvalCase) -> CaseRun:
         _check_cancelled(cancel)
         progress.case_started(case.id)

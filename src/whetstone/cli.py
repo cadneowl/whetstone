@@ -17,6 +17,7 @@ from whetstone import staging
 from whetstone.authoring import SkillEdit, prepare_guidance
 from whetstone.candidates import store_candidates
 from whetstone.config import Config, load_config
+from whetstone.context import ContextError
 from whetstone.core.gate import GateConfig
 from whetstone.core.loader import SkillLoadError, load_skill, load_skills
 from whetstone.corpus.builder import (
@@ -45,6 +46,7 @@ from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
 from whetstone.providers.registry import available_providers
 from whetstone.report import render_run_html, render_run_text
+from whetstone.reviewer.factory import ReviewerChoice, reviewer_from_step
 from whetstone.reviews import ReviewSource, ReviewStore, ReviewUpload, build_review
 from whetstone.runs import RunStore, stale_version_ids
 from whetstone.scaffold import write_scaffold
@@ -295,6 +297,23 @@ def _step(skill_dir: Path, kind: str, *, required: bool = False) -> StepSpec | N
     return spec
 
 
+def _reviewer_choice(policy: StepSpec | None, skill_dir: Path) -> ReviewerChoice:
+    """The reviewer a CLI eval/gate uses: the skill's own `run:` program when its evaluate step
+    names one, else the built-in reviewer. A required context var that is unset is a usable error,
+    not a run that dies partway through — the same discipline the console applies at the plan."""
+    try:
+        choice = reviewer_from_step(policy, skill_dir)
+    except ContextError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if choice.context and choice.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in choice.context.missing)
+        raise typer.BadParameter(
+            f"the reviewer needs context that is not set: {names} — set the environment "
+            f"variable(s), or add them to .env"
+        )
+    return choice
+
+
 def _backend_for(
     spec: StepSpec | None, llm: str | None, model: str | None, base_url: str | None
 ) -> tuple[str | None, str | None, str | None]:
@@ -400,6 +419,7 @@ def eval_run(
         typer.echo(_dry_summary(sk))
         return
 
+    choice = _reviewer_choice(policy, skill)
     trials = trials if trials is not None else (policy.trials if policy else 1)
     drawn = _sample_policy(policy, sample, sample_seed)
     limits = policy.inputs.wiki if policy else None
@@ -410,6 +430,8 @@ def eval_run(
     plan = plan_eval(
         sk, backend, trials=trials, cases=scored, wiki_limits=limits,
         judge_cascade=bool(policy and policy.judge.enabled),
+        # A skill with its own reviewer program spends none of Whetstone's calls on the review.
+        host_reviews=not choice.custom,
     )
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
@@ -431,6 +453,7 @@ def eval_run(
         precedent_limits=policy.inputs.precedents if policy else None,
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
+        reviewer=choice.reviewer,
     )
     if save:
         _store(runs_dir).save(record)
@@ -598,6 +621,7 @@ def eval_gate(
         # Read from the candidate: a change to how a skill is evaluated travels with the change to
         # the skill, so a branch that widens its own sample is gated using the sample it proposes.
         policy = _step(cand_dir, "evaluate")
+        choice = _reviewer_choice(policy, cand_dir)
         gate_trials = trials if trials is not None else (policy.trials if policy else 1)
         drawn = _sample_policy(policy, sample, sample_seed)
         limits = policy.inputs.wiki if policy else None
@@ -634,6 +658,7 @@ def eval_gate(
             precedent_limits=policy.inputs.precedents if policy else None,
             judge=load_judge(load_config().judge_dir),
             judge_policy=policy.judge if policy else None,
+            reviewer=choice.reviewer,
         )
         if save:
             _gates(gates_dir).save(record)
@@ -711,6 +736,7 @@ def review(
     if skill is None:
         raise typer.BadParameter("--skill is required unless you are using --import")
     sk = load_skill(skill)
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill)
 
     if mr is not None:
         if not gitlab_url or not project:
@@ -736,6 +762,7 @@ def review(
         reviewer_effort=effort,
         backend=backend.name,
         model=backend.model,
+        reviewer=choice.reviewer,
     )
     _reviews(reviews_dir).save(record)
 

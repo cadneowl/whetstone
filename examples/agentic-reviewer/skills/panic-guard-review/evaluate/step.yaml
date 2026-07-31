@@ -1,0 +1,24 @@
+# A source-aware reviewer. Whetstone runs reviewer.py per case instead of the built-in LLM reviewer,
+# handing it the diff, the guidance, and the resolved context below. See ../../../README.md.
+
+description: Score with the source-aware panic-guard reviewer program.
+
+# The reviewer program. Its presence is what makes this an agentic reviewer rather than the built-in
+# one; it receives a JSON payload on stdin and returns findings on stdout.
+run: ["python", "reviewer.py"]
+
+# The open-ended inputs the reviewer needs. The host resolves these and forwards them without
+# interpreting the keys.
+context:
+  # WHERE the source tree is checked out. Machine-specific, so it comes from the environment and is
+  # never committed; `required` makes the console refuse the run at the plan when it is unset.
+  source_root: { env: PANIC_GUARD_SOURCE, required: true }
+  # A committed reference the reviewer may also read — demonstrates the `file` form (hashed by
+  # content, so changing it is a change to what the reviewer sees).
+  conventions: { file: ./conventions.md }
+  # A plain literal, forwarded verbatim.
+  project: hub-backend
+
+trials: 1
+sample:
+  max_cases: null

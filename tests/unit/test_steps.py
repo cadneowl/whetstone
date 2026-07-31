@@ -56,10 +56,30 @@ def test_update_step_requires_a_run_command(tmp_path: Path) -> None:
         load_step(tmp_path, "update")
 
 
-def test_evaluate_step_may_not_be_a_program(tmp_path: Path) -> None:
-    _write(tmp_path, "evaluate", 'run: ["python", "score.py"]\n')
-    with pytest.raises(StepError, match="configuration, not a program"):
+def test_evaluate_step_may_be_a_reviewer_program(tmp_path: Path) -> None:
+    """An evaluate step may now name its own reviewer with run: — a source-aware reviewer."""
+    _write(tmp_path, "evaluate", 'run: ["python", "reviewer.py"]\n')
+    spec = load_step(tmp_path, "evaluate")
+    assert spec is not None and spec.run == ["python", "reviewer.py"]
+
+
+def test_evaluate_step_may_not_have_a_prompt(tmp_path: Path) -> None:
+    _write(tmp_path, "evaluate", "prompt: prompt.md\n", "some prompt")
+    with pytest.raises(StepError, match="no prompt of its own"):
         load_step(tmp_path, "evaluate")
+
+
+def test_context_needs_a_reviewer_program(tmp_path: Path) -> None:
+    """context: feeds a run: reviewer; declared without one it would be resolved then dropped."""
+    _write(tmp_path, "evaluate", "context:\n  source_root: { env: X }\n")
+    with pytest.raises(StepError, match="only feeds a reviewer program"):
+        load_step(tmp_path, "evaluate")
+
+
+def test_context_is_rejected_on_a_non_evaluate_step(tmp_path: Path) -> None:
+    _write(tmp_path, "improve", 'run: ["echo", "hi"]\ncontext:\n  a: 1\n')
+    with pytest.raises(StepError, match="only feeds a reviewer program"):
+        load_step(tmp_path, "improve")
 
 
 def test_run_as_a_string_is_rejected_with_a_reason(tmp_path: Path) -> None:

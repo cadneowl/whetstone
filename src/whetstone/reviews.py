@@ -26,9 +26,9 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 from whetstone.caseindex import PrecedentRef
 from whetstone.domain.change import CodeChange, parse_unified_diff
@@ -91,6 +91,12 @@ class ReviewRecord(BaseModel):
 
     backend: str = ""
     model: str = ""
+    # What produced these findings: "" for the built-in LLM reviewer, or an identity like
+    # "subprocess: python reviewer.py" for the skill's own reviewer program, with the redacted
+    # context it was given (see `RunRecord.reviewer_context`).
+    reviewer: str = ""
+    reviewer_context: dict[str, Any] = Field(default_factory=dict)
+    reviewer_context_digest: str = ""
     reviewer_effort: Effort = "high"
     practice_mode: bool = False
     duration_s: float = 0.0

@@ -1,0 +1,7 @@
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -1,2 +1,3 @@
+ def start():
++    cfg = load_config()
+     return None

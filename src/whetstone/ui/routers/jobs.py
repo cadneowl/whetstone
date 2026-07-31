@@ -32,6 +32,7 @@ from whetstone import staging
 from whetstone.authoring import SkillEdit, prepare_guidance
 from whetstone.candidates import CandidateStore
 from whetstone.config import Config
+from whetstone.context import ContextError
 from whetstone.core.gate import GateConfig
 from whetstone.core.harness import RunCancelled
 from whetstone.core.loader import SkillLoadError
@@ -55,6 +56,7 @@ from whetstone.llm.transcript import RecordingClient, Transcript, transcript_pat
 from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
 from whetstone.preflight import Estimate, Plan, check_budget, plan_calls, plan_eval
 from whetstone.providers.base import ConnectorError
+from whetstone.reviewer.factory import ReviewerChoice, reviewer_for
 from whetstone.sampling import sample_cases
 from whetstone.service import record_eval, record_gate, record_review, strip_guidance
 from whetstone.steps import StepError, StepSpec, load_step
@@ -196,7 +198,7 @@ def plan_eval_job(
 ) -> Plan:
     selection = _pick(request.provider, request.model, selection)
     skill, _ = _skill_to_score(config, root, request)
-    return _eval_plan(config, selection, skill, request)
+    return _eval_plan(config, selection, skill, request, _reviewer_choice(config, skill))
 
 
 @router.post("/eval", response_model=Job, dependencies=[Writable])
@@ -211,7 +213,8 @@ def launch_eval(
     """Score a skill against its eval cases, in the background."""
     selection = _pick(request.provider, request.model, selection)
     skill, ref = _skill_to_score(config, root, request)
-    plan = _eval_plan(config, selection, skill, request)
+    choice = _reviewer_choice(config, skill)
+    plan = _eval_plan(config, selection, skill, request, choice)
     # The evaluate step always comes from the working tree: it is how the operator's machine runs a
     # model, not part of the guidance under test, and taking it from a branch would let a staged
     # change quietly alter the harness measuring it.
@@ -272,6 +275,7 @@ def launch_eval(
                 precedent_limits=spec.inputs.precedents if spec else None,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
+                reviewer=choice.reviewer,
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -297,12 +301,14 @@ def plan_gate_job(
     selection = _pick(request.provider, request.model, selection)
     _, candidate = _gate_sides(config, root, request.skill_id)
     plan = _eval_plan(
-        config, selection, candidate, EvalRequest(**request.model_dump(exclude={"targeted"}))
+        config,
+        selection,
+        candidate,
+        EvalRequest(**request.model_dump(exclude={"targeted"})),
+        _reviewer_choice(config, candidate),
+        sides=2,
     )
     plan.action = "gate"
-    if plan.estimate:
-        plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * 2})
-        plan.details.append("both base and candidate are scored, so this is doubled")
     return plan
 
 
@@ -318,6 +324,7 @@ def launch_gate(
     """Gate the on-disk guidance against the last committed version — the C6 evidence (advisory)."""
     selection = _pick(request.provider, request.model, selection)
     base, candidate = _gate_sides(config, root, request.skill_id)
+    choice = _reviewer_choice(config, candidate)
     plan = plan_gate_job(request, config, root, selection)
     spec = _step(root, candidate, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)
@@ -373,6 +380,7 @@ def launch_gate(
                 on_base=side("base", config.git.default_base),
                 on_candidate=side("cand", candidate_ref),
                 cancel=handle.cancel_event,
+                reviewer=choice.reviewer,
             )
         except RunCancelled as exc:
             # Nothing is saved: half a gate is not a verdict, and a record of one would be evidence
@@ -562,15 +570,23 @@ def plan_review_job(
 ) -> Plan:
     selection = _pick(request.provider, request.model, selection)
     skill = _skill(root, request.skill_id)
+    choice = _reviewer_choice(config, skill)
     plan = plan_calls(
         "review",
         _backend(selection, _step(root, skill, "evaluate")),
-        calls=1,
-        basis="one call: the reviewer over this change. No judge — there is nothing to judge yet",
+        # A reviewer program makes that one call itself, on its own backend, so Whetstone's own
+        # count is zero — and there is no judge on a live review to add one back.
+        calls=0 if choice.custom else 1,
+        basis=(
+            "no Whetstone calls: your reviewer program runs the review"
+            if choice.custom
+            else "one call: the reviewer over this change. No judge — there is nothing to judge yet"
+        ),
         details=["the findings are stored unruled; you decide which are right"],
     )
     if not skill.body.strip():
         plan.warnings.append("this skill has no guidance, so the reviewer is being sent no rules")
+    _annotate_reviewer(plan, choice, invocations=1)
     return plan
 
 
@@ -590,6 +606,7 @@ def launch_review(
     """
     selection = _pick(request.provider, request.model, selection)
     skill = _skill(root, request.skill_id)
+    choice = _reviewer_choice(config, skill)
     spec = _step(root, skill, "evaluate")
     backend = _backend(selection, spec)
     plan = plan_review_job(request, config, root, selection)
@@ -608,6 +625,7 @@ def launch_review(
             title=title,
             backend=backend.name,
             model=backend.model,
+            reviewer=choice.reviewer,
         )
         reviews.save(record)
         handle.log(
@@ -759,6 +777,7 @@ def plan_baseline_job(
             f"{skill.id} has no active eval cases to probe — promote some from triage first"
         )
     spec = _step(root, skill, "evaluate")
+    choice = _reviewer_choice(config, skill)
     plan = plan_eval(
         naked,
         _backend(selection, spec),
@@ -766,13 +785,21 @@ def plan_baseline_job(
         cases=len(naked.eval_cases),
         wiki_limits=None,
         judge_cascade=bool(spec and spec.judge.enabled),
+        host_reviews=not choice.custom,
     )
     plan.action = "baseline"
     plan.details.append(
         "scores every active case with the guidance stripped — a should_catch case the naked "
         "model passes never measured the guidance"
     )
+    _annotate_reviewer(plan, choice, invocations=len(naked.eval_cases))
     check_budget(plan, config.runs.max_llm_calls_per_run)
+    if choice.custom:
+        plan.warnings.append(
+            "this skill's reviewer is a program that reads the source, not the guidance — so "
+            "stripping the guidance changes nothing it sees, and this probe then measures whether "
+            "the program discriminates, not whether the guidance does"
+        )
     return plan
 
 
@@ -796,6 +823,7 @@ def launch_baseline(
 
     selection = _pick(request.provider, request.model, selection)
     skill = _skill(root, request.skill_id)
+    choice = _reviewer_choice(config, skill)
     plan = plan_baseline_job(request, config, root, selection)
     spec = _step(root, skill, "evaluate")
     backend = _backend(selection, spec)
@@ -821,6 +849,7 @@ def launch_baseline(
                 cancel=handle.cancel_event,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
+                reviewer=choice.reviewer,
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -1515,6 +1544,59 @@ def _gate_sides(config: Config, root: Path, skill_id: str) -> tuple[Skill, Skill
     )
 
 
+def _reviewer_choice(config: Config, skill: Skill) -> ReviewerChoice:
+    """The reviewer this skill scores with — the built-in one, or its own `run:` program.
+
+    A required context var that is unset is refused here, at the plan, so a run never dies partway
+    through because a source location the reviewer needs was never provided — the same discipline
+    that catches a missing model or token before the click.
+    """
+    try:
+        choice = reviewer_for(config.skills_root, skill)
+    except (StepError, ContextError) as exc:
+        raise Unprocessable(str(exc)) from exc
+    if choice.context and choice.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in choice.context.missing)
+        raise Unprocessable(
+            f"the reviewer for {skill.id!r} needs context that is not set: {names} — set the "
+            f"environment variable(s), or add them to .env, and try again"
+        )
+    return choice
+
+
+def _annotate_reviewer(
+    plan: Plan, choice: ReviewerChoice, *, invocations: int, gate: bool = False
+) -> None:
+    """Say, in the cost plan, that a custom reviewer will run — what it gets, and how often.
+
+    The estimate above counts only the judge, because Whetstone makes no review call at all here.
+    What it cannot price is the program's own spend, so it prices what it can and *counts* what it
+    cannot: the invocation volume is the one number the operator needs to multiply by their own
+    per-call cost, and a plan that hid it would understate the run to the point of dishonesty.
+    """
+    if not choice.custom:
+        return
+    plan.details.append(
+        f"reviewer: {choice.identity} — your program reads the diff and the context and returns "
+        f"findings; Whetstone calls no model for the review (the judge still runs on the backend "
+        f"above, and the estimate counts only that)"
+    )
+    plan.details.append(
+        f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot price "
+        f"those calls, only count them, so the cost of the run is this many invocations at "
+        f"whatever each one spends"
+    )
+    if choice.context and choice.context.redacted:
+        shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
+        plan.details.append(f"reviewer context: {shown}")
+    if gate:
+        plan.warnings.append(
+            "this gate scores with a custom reviewer that reads source Whetstone does not hash — "
+            "pin it to a fixed snapshot (a context var like source_ref) so base and candidate read "
+            "the same code, or a verdict may reflect the source moving rather than the guidance"
+        )
+
+
 def _step(root: Path, skill: Skill, kind: Any) -> StepSpec | None:
     try:
         return load_step(root / skill.id, kind, skill_id=skill.id)
@@ -1622,8 +1704,15 @@ def _client(
 
 
 def _eval_plan(
-    config: Config, selection: ModelSelection, skill: Skill, request: EvalRequest
+    config: Config,
+    selection: ModelSelection,
+    skill: Skill,
+    request: EvalRequest,
+    choice: ReviewerChoice,
+    *,
+    sides: int = 1,
 ) -> Plan:
+    """The cost plan for scoring `skill` once, or on both halves of a gate (`sides=2`)."""
     spec = _step(config.skills_root, skill, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)
     policy = _sample(spec, request.sample)
@@ -1635,7 +1724,15 @@ def _eval_plan(
         cases=scored,
         wiki_limits=spec.inputs.wiki if spec else None,
         judge_cascade=bool(spec and spec.judge.enabled),
+        # A skill with its own reviewer program spends none of Whetstone's calls on the review.
+        host_reviews=not choice.custom,
     )
+    if sides > 1 and plan.estimate:
+        # Doubled *before* the budget check: a warning computed against one half of a gate is the
+        # wrong number to be confirming.
+        plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * sides})
+        plan.details.append("both base and candidate are scored, so this is doubled")
+    _annotate_reviewer(plan, choice, invocations=scored * trials * sides, gate=sides > 1)
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if spec and spec.judge.tier1.configured:
         plan.details.append(

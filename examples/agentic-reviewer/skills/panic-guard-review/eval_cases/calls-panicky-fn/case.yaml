@@ -1,0 +1,16 @@
+id: calls-panicky-fn
+kind: should_catch
+repo: "local:hub-backend"
+change: change.diff
+provenance:
+  source: manual
+  human_signal: "hand-written example"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: app/config.py
+      line_range: [1, 3]
+    semantic: "the added call to load_config can panic when the config file is missing"
+    severity_min: warning
+    pattern: "panic"
