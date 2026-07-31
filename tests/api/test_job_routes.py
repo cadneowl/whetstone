@@ -544,3 +544,37 @@ def test_per_launch_anthropic_ignores_a_local_default_model_env(
     assert plan["backend"] == "anthropic"
     assert plan["billing"] == "billed"
     assert plan["model"] == DEFAULT_MODEL
+
+
+def test_a_model_only_override_keeps_the_default_backend(
+    client: TestClient, steps: Path
+) -> None:
+    """Choosing only a model must stay on the configured backend, not a vendor host.
+
+    This is the gateway user's 401: their default is a proxy, they pick a model for one run, and
+    the launch used to leave the proxy for a cloud host they hold no key for. An empty provider
+    with a model now keeps the default backend and swaps only the model.
+    """
+    default = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"}).json()
+    picked = client.post(
+        "/api/jobs/eval/plan",
+        json={"skill_id": "rust-errors", "model": "claude-haiku-4-5-20251001"},
+    ).json()
+    assert picked["backend"] == default["backend"]  # did not switch backends
+    assert picked["billing"] == default["billing"]  # same host, so the same billing verdict
+    assert picked["model"] == "claude-haiku-4-5-20251001"  # only the model changed
+
+
+def test_pick_model_override_preserves_a_gateway_base_url() -> None:
+    """The unit the route rests on: a model-only pick keeps the default's provider and base URL,
+    so a deployment whose default is a gateway never has one run silently leave it."""
+    from whetstone.llm.factory import ModelSelection
+    from whetstone.ui.routers.jobs import _pick
+
+    gateway = ModelSelection(provider="codex", model="house", base_url="http://gw.internal/v1")
+    picked = _pick("", "other-model", gateway)
+    assert picked.base_url == "http://gw.internal/v1"  # never leaves the gateway
+    assert picked.provider == "codex"
+    assert picked.model == "other-model"
+    # No model (or only whitespace) → the default is returned untouched.
+    assert _pick("", "  ", gateway) is gateway

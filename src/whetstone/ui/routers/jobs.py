@@ -1550,8 +1550,16 @@ def _pick(provider: str, model: str, base: ModelSelection) -> ModelSelection:
 
     This is what lets a single step run on a model of its own — draft a change on Anthropic while
     evals stay on the local box, or the reverse — without changing the default every other step
-    inherits. An empty `provider` is exactly today's behaviour: the console default, layered over
-    the step's own `model:` pin.
+    inherits. An empty `provider` with no model is exactly today's behaviour: the console default,
+    layered over the step's own `model:` pin.
+
+    An empty `provider` *with* a model is a model-only override: keep the console default's
+    backend — its provider and, crucially, its base URL — and swap just the model. A gateway
+    proxies by model name, so changing the model for one run must stay on the gateway, not fall to a
+    vendor host the deployment may hold no key for. This mirrors the header picker
+    (`meta.set_model`), which likewise preserves `base_url` when only the model changes; the two
+    must not disagree about where a chosen model runs. It is the safe way for a gateway deployment
+    to run one step on a different model — a *named* provider below deliberately leaves the gateway.
 
     Two guards, the same ones the header picker enforces, because a per-launch field must not be a
     way around them: only a provider Whetstone knows is accepted, and a base URL is never taken from
@@ -1562,7 +1570,10 @@ def _pick(provider: str, model: str, base: ModelSelection) -> ModelSelection:
     the step's `model:` pin (which `layer` would otherwise fill any blank field from).
     """
     if not provider:
-        return base
+        model = model.strip()
+        if not model:
+            return base
+        return ModelSelection(provider=base.provider, model=model, base_url=base.base_url)
     if provider not in PRESETS:
         raise Unprocessable(
             f"unknown provider {provider!r}; choose one of: {', '.join(sorted(PRESETS))}"
