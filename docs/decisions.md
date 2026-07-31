@@ -193,6 +193,12 @@ Without this, `whetstone skills update` would be a documented way around C6. Ste
 *not* hashed — they describe how to run things, not what the model reads while reviewing, so editing
 a sample size does not retract a gate.
 
+> **Amended by ADR-022.** That last sentence held while every reviewer input came from the skill
+> folder. A custom reviewer's `context:` bag lives in the *evaluate step* and does determine what the
+> reviewer reads, so the "steps describe how, not what" premise no longer covers every case. Closing
+> it properly is Phase 2 of ADR-022; until then a gate scored by a custom reviewer is warned rather
+> than hash-protected, and the run record carries a context digest so the gap is at least visible.
+
 **A skill with no wiki hashes exactly as before**, so landing this invalidated no stored gate.
 
 **Caps are enforced at the retrieval boundary and never silent.** Over the page cap the excess is
@@ -540,3 +546,75 @@ evidence is invalidated by this landing.
 travel with the branch because staging is folder-level, and the Edit tab names them so nobody
 mistakes the textarea for the whole guidance. Editing them in the browser is a bigger change — a
 multi-file editor — and not required to close the soundness hole.
+
+---
+
+## ADR-022 — A skill may bring its own reviewer, and the host stays the orchestrator
+
+**Context.** The built-in reviewer is a single structured model call with no tools: guidance and
+retrieved wiki in, findings out. For a code-review skill over a large repository that is not enough
+— whether a call is dangerous usually depends on the *called* function, which is not in the diff.
+The repository cannot be pre-baked into a wiki (400k files) and cannot fit in context. Such a
+reviewer needs to reach the actual source and query it while reviewing, and different skills need
+different things to do that: one a source location, another that plus a schema, an API spec, ten
+more.
+
+**Decision.** A skill's `evaluate` step may name its own reviewer program under `run:`, and declare
+an open-ended `context:` bag of whatever that program needs. Whetstone resolves the bag, validates
+it, forwards it on stdin with the guidance and the diff, and takes back findings. `prompt:` stays
+forbidden on `evaluate` — the reviewer prompt is the harness's.
+
+**Whetstone never gives a model filesystem access; it gives a program a folder path.** This is the
+whole shape of the decision. The alternative — teaching the built-in reviewer to use file tools —
+would make Whetstone own tool loops, retries and context management for every provider, and would
+put the agentic complexity on the side that does not want it. Instead the agent is the operator's,
+running behind a one-method seam (`Reviewer.review`), and Whetstone keeps doing what it is good at:
+picking cases, judging findings, scoring, and gating. The host stays model-agnostic.
+
+**One seam, widened along an existing pattern.** Not a plugin system. `improve`/`update` already
+shell out to operator programs with a JSON-on-stdin contract; the reviewer now does the same, with
+the same argv list (no shell), fixed `cwd`, hard timeout, and error taxonomy. A failed review raises
+and fails the run: a gate computed with cases the reviewer silently errored on is not a verdict.
+
+**One resolver for the console and the CLI.** Divergence here would be the worst kind — a gate run
+from the CLI and the same gate run from the console would measure different things. So both go
+through `reviewer_for`, and the program runs everywhere the reviewer runs: eval, both gate sides,
+the saturation probe, and live review.
+
+**Context values are typed by what is safe to commit, print and hash**, not by what they mean — the
+host never interprets the keys. An `env:` value is machine-local or secret: forwarded, shown as
+`<env:NAME>`, and excluded from the hashable slice so a shared gate survives a teammate whose
+checkout lives elsewhere. `pin: true` marks a value that identifies *what the reviewer reads* (a
+commit sha), so it is shown in full and is hashable. A `file:` value is committed material, hashed
+by content. Anything else is a literal. A mapping carrying any directive key must be a well-formed
+directive: read as a literal, a misspelled key would forward the declaration instead of the value
+and make `required: true` silently stop refusing an unset variable.
+
+**A score is only attributable if the instrument is named.** A custom reviewer runs a model
+Whetstone never sees, so on such a run `backend`/`model` describe the judge alone. Runs, gates and
+reviews therefore record the reviewer identity, the redacted context, and a digest of its hashable
+slice, and the console shows them. Recording the number without the instrument is what makes a
+history contradict itself.
+
+**Cost is counted where it cannot be priced.** Whetstone makes no review call, so the estimate drops
+the reviewer term and counts judge calls only. What it cannot know is the program's own spend, so
+the plan states the invocation volume instead — the one number the operator can multiply by their
+own per-call cost.
+
+**Determinism is the open edge, and is surfaced rather than hidden.** A gate attributes a score
+delta to the guidance only if everything else the reviewer saw was identical on both sides. One
+reviewer instance serves both sides, so guidance is the only variable on Whetstone's side — but a
+program reading a moving source can still break it. Folding the hashable context into `skill_hash`
+is **Phase 2**: `skill_hash` is a pure function of the `Skill`, while context lives in a step, and
+resolving that is a choice worth making deliberately rather than smuggling in here (see ADR-010, now
+amended). Until then the plan **warns** when a custom reviewer is gated, and the sound configuration
+is a pinned ref that the program reads.
+
+**Zero change for skills that do not opt in.** No `run:` means the built-in reviewer is constructed
+exactly as before, and `reviewer` on a record is empty. Landing this invalidated no stored evidence.
+
+**The trust boundary is unchanged, and stated.** `run:` executes code from the skill folder — the
+same boundary `improve`/`update` already cross. Whetstone passes `source_root` and never traverses
+it, so it adds no path-handling surface of its own. If a reviewer sends source to a cloud model that
+is the operator's choice; the context bag makes "this reviewer has the whole repo and a network
+model" legible where it previously would not have been.

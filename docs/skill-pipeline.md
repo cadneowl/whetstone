@@ -84,8 +84,11 @@ runs that would have come in under budget.
 
 ## `evaluate/step.yaml` — how this skill is scored
 
-Configuration only: no prompt, no program. `whetstone eval run` and `whetstone eval gate` read it
-and use it as their defaults; any flag on the command line wins.
+Configuration, with one seam. There is no `prompt:` here — the reviewer prompt is the harness's, not
+yours — but a skill that needs a reviewer the harness cannot be can name its own program under
+`run:` (see [Bring your own reviewer](#bring-your-own-reviewer)). Everything else is settings.
+`whetstone eval run` and `whetstone eval gate` read this file and use it as their defaults; any flag
+on the command line wins.
 
 ```yaml
 description: Score this skill against its promoted eval cases.
@@ -113,6 +116,88 @@ model:
   model: qwen2.5-coder:7b
   effort: high
 ```
+
+### Bring your own reviewer
+
+The built-in reviewer is one structured model call: guidance and wiki in, findings out, no tools. It
+cannot open a file. For most skills that is the right shape — but a code-review skill over a large
+repository often cannot decide anything from the diff alone, because whether a call is dangerous
+depends on the *called* function, which is not in the change. Such a skill can replace the reviewer
+with a program of its own:
+
+```yaml
+run: ["python", "reviewer.py"]     # instead of the built-in reviewer; no `prompt:` here
+
+context:                            # whatever your program needs — Whetstone forwards, not interprets
+  source_root: { env: HUB_REPO_ROOT, required: true }   # machine-local: commit the name, not the path
+  source_ref:  { env: HUB_REPO_REF, pin: true }         # a pinned sha: recorded in full, and hashable
+  db_schema:   { file: ./references/schema.sql }        # committed material, read and hashed by content
+  project: hub-backend                                  # a literal (scalar, list, or plain mapping)
+```
+
+**Whetstone does not give a model filesystem access — it gives a *program* a folder path.** Your
+program is where the agent lives: it reads `context.source_root`, opens whichever files it needs,
+runs its own model with its own tools, and answers. Whetstone keeps doing what it did before:
+picking cases, judging findings, scoring, and gating.
+
+One review is one invocation. The payload arrives as JSON on stdin, the working directory is the
+step folder, `run:` is an argv list (no shell), and `timeout_s` is a hard cap:
+
+```jsonc
+{ "skill_id": "…", "guidance": "…SKILL.md body…", "pages": { "…": "…" },
+  "change": { "repo": "…", "base_ref": "…", "head_ref": "…", "files": [ … ] },
+  "diff": "…numbered unified diff…",
+  "context": { "source_root": "/…/hub-backend", "project": "hub-backend", … },
+  "wiki": "…retrieved pages, if any…", "limits": { "timeout_s": 900 } }
+```
+
+Print the same findings contract the built-in reviewer produces, on stdout:
+
+```json
+{ "findings": [ { "path": "…", "line": 123, "severity": "warning",
+                  "message": "…", "rule_id": "R1", "confidence": 0.8 } ] }
+```
+
+`line` is a line in the **new** file. Scoring is unchanged from the built-in reviewer's: a finding
+only satisfies an expectation if it is structurally eligible first — same file, inside the
+expectation's `line_range` if it declares one, meeting `severity_min` if it declares one — and only
+then is it put to the judge. So a program that reports the right problem at the wrong line scores as
+a miss, exactly as the built-in reviewer would. A crash, a non-zero exit, unparseable output, or a
+timeout **fails the run** — a score computed with cases the reviewer silently errored on is not a
+measurement.
+
+**The context bag has three value forms**, and the difference between them is about what is safe to
+commit, print, and hash:
+
+| Form | Resolved from | In a plan / record | Hashed |
+|---|---|---|---|
+| `{ env: NAME }` | the environment | `<env:NAME>` — never the value | no |
+| `{ env: NAME, pin: true }` | the environment | shown in full | **yes** |
+| `{ file: ./path }` | a file in the skill folder | `<file:./path>` | **yes**, by content |
+| a bare literal | the declaration itself | shown in full | **yes** |
+
+`required: true` on an `env:` form makes the console refuse the run **at the plan** when the variable
+is unset, rather than three cases in. Machine-local paths are deliberately not hashed, so a shared
+gate survives a teammate whose checkout lives elsewhere; a pinned ref *is*, because it determines
+what the reviewer reads. Values from the environment never reach a stored record — only their names.
+
+**Where it runs.** Everywhere the reviewer runs: `eval`, both sides of a `gate`, the saturation
+probe, and a live `review` — from the console and the CLI alike, resolved once so the two cannot
+disagree about which reviewer a skill uses.
+
+**What it costs.** Whetstone makes no review call at all, so the estimate counts only judge calls.
+It cannot price your program's calls, so it counts them instead: the plan states how many times your
+program will be invoked (cases × trials × gate sides), and the cost is that many invocations at
+whatever each one spends.
+
+**Determinism.** A gate blames a score difference on the guidance, which holds only if everything
+else the reviewer saw was identical on both sides — and a reviewer reading a *moving* source can
+break that. One reviewer instance serves both sides, so guidance is genuinely the only variable on
+Whetstone's side; but the source is not yet part of `skill_hash` (see ADR-022), so the plan **warns**
+when a custom reviewer is gated. Pin the snapshot with `{ env: …, pin: true }` and have your program
+read that ref.
+
+Worked, runnable example: `examples/agentic-reviewer/` (`uv run python examples/agentic-reviewer/serve.py`).
 
 ### The judge cascade
 
