@@ -8,6 +8,7 @@ import {
   type PendingCase,
   type SkillDetail as Detail,
 } from '@/api/client'
+import { GuidanceDiff } from '@/components/GuidanceDiff'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, ErrorNote, score } from '@/components/primitives'
 import { SourceBadge } from '@/components/signals'
@@ -94,6 +95,8 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const review = draft && (
     <DraftReview
       draft={draft}
+      // The on-disk guidance the draft would replace, so every rewritten file shows as a diff.
+      baseline={{ body: proposal?.body ?? '', pages: proposal?.pages ?? {} }}
       applying={save.isPending}
       readOnly={readOnly}
       error={save.error}
@@ -359,6 +362,7 @@ function InPlaceNotice({ skillId }: { skillId: string }) {
 
 function DraftReview({
   draft,
+  baseline,
   applying,
   readOnly,
   error,
@@ -366,23 +370,47 @@ function DraftReview({
   onDiscard,
 }: {
   draft: Draft
+  // The on-disk guidance the draft would replace — body plus every companion page, keyed by path —
+  // so each rewritten file is shown as a diff rather than a wall of new text.
+  baseline: { body: string; pages: Record<string, string> }
   applying: boolean
   readOnly: boolean
   error: unknown
   onApply: () => void
   onDiscard: () => void
 }) {
-  const touched = Object.keys(draft.pages)
+  // Every file the draft actually rewrites: SKILL.md when the body moved, plus each companion page
+  // the drafter returned (the server already drops pages handed back unchanged). A skill is a
+  // folder and the improve step edits it as one, so the review shows it as one — not just the body.
+  const files = [
+    ...(draft.body.trim() !== baseline.body.trim()
+      ? [{ path: 'SKILL.md', before: baseline.body, after: draft.body }]
+      : []),
+    ...Object.entries(draft.pages).map(([path, after]) => ({
+      path,
+      before: baseline.pages[path] ?? '',
+      after,
+    })),
+  ]
   return (
     <div className="mt-3 space-y-2 rounded-lg border border-accent/40 bg-accent/5 p-3">
       <p className="text-xs text-muted">
-        Drafted{touched.length ? `, rewriting ${touched.join(', ')}` : ''}. Read it before applying —
-        the drafter is not the reviewer.
+        Drafted a change to {files.length} file{files.length === 1 ? '' : 's'}. Read it before
+        applying — the drafter is not the reviewer.
       </p>
       {draft.rationale && <p className="text-sm">{draft.rationale}</p>}
-      <pre className="max-h-64 overflow-auto rounded border border-line bg-canvas px-2 py-1.5 text-xs whitespace-pre-wrap">
-        {draft.body}
-      </pre>
+      {files.length === 0 ? (
+        <p className="text-xs text-warn">The drafter returned no change to any file.</p>
+      ) : (
+        <div className="space-y-3">
+          {files.map((f) => (
+            <div key={f.path} className="space-y-1">
+              <p className="font-mono text-xs text-muted">{f.path}</p>
+              <GuidanceDiff before={f.before} after={f.after} />
+            </div>
+          ))}
+        </div>
+      )}
       {draft.selectedMissing.length > 0 && (
         <p className="text-xs text-warn">
           Not drafted from: {draft.selectedMissing.join(', ')} — the score did not fail them (or they
@@ -393,7 +421,7 @@ function DraftReview({
         <button
           type="button"
           onClick={onApply}
-          disabled={readOnly || applying}
+          disabled={readOnly || applying || files.length === 0}
           className="rounded border border-good/50 px-3 py-1 text-sm text-good hover:bg-good/10 disabled:opacity-40"
         >
           {applying ? 'Applying…' : 'Apply to disk'}
