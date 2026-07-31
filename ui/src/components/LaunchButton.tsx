@@ -48,6 +48,11 @@ export function LaunchButton({
   // A backend chosen for *this* launch only (null = the console default). Kept here, not globally,
   // so running one step on another model never moves the default every other step inherits.
   const [model, setModel] = useState<{ provider: string; model: string } | null>(null)
+  // The last cost plan that resolved. A re-plan (every model keystroke) briefly clears the
+  // mutation's own `data`, and without a fallback the tall banner would collapse to a one-line
+  // "Checking…" and back on each keystroke — the panel visibly shaking. Holding the previous plan
+  // keeps the banner steady while the next estimate is in flight.
+  const [lastPlan, setLastPlan] = useState<Plan | null>(null)
   const plan = usePlanJob(kind)
   const launch = useLaunchJob(kind)
   const cancel = useCancelJob()
@@ -70,7 +75,7 @@ export function LaunchButton({
   // mid-click, so the launch takes two clicks. Nothing here reacts to the click.
   useEffect(() => {
     if (!armed || incompleteModel) return
-    const id = setTimeout(() => plan.mutate(withModel(request)), 200)
+    const id = setTimeout(() => plan.mutate(withModel(request), { onSuccess: setLastPlan }), 200)
     return () => clearTimeout(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [armed, incompleteModel, model?.provider, model?.model])
@@ -92,6 +97,7 @@ export function LaunchButton({
           setJobId(null)
           setArmed(false)
           setModel(null)
+          setLastPlan(null)
           plan.reset()
           launch.reset()
         }}
@@ -101,6 +107,7 @@ export function LaunchButton({
         onRerun={() => {
           setJobId(null)
           setSeen(null)
+          setLastPlan(null)
           plan.reset()
           launch.reset()
           setArmed(true)
@@ -110,6 +117,9 @@ export function LaunchButton({
   }
 
   if (armed) {
+    // Prefer the live plan, fall back to the last one that resolved — so a re-plan never blanks
+    // the banner (see `lastPlan`). Only a genuine first-ever plan shows "Checking…".
+    const shownPlan = plan.data ?? lastPlan
     return (
       <div className="rounded-lg border border-warn/40 bg-warn/5 p-3">
         {incompleteModel ? (
@@ -117,8 +127,8 @@ export function LaunchButton({
             Enter a model id for <span className="font-mono">{model!.provider}</span> below to see
             the cost.
           </p>
-        ) : plan.data ? (
-          <PlanBanner plan={plan.data} />
+        ) : shownPlan ? (
+          <PlanBanner plan={shownPlan} />
         ) : plan.isPending ? (
           <p className="text-sm text-muted">Checking what this will cost…</p>
         ) : null}
@@ -147,6 +157,7 @@ export function LaunchButton({
             onClick={() => {
               setArmed(false)
               setModel(null)
+              setLastPlan(null)
               plan.reset()
             }}
             className="text-sm text-muted transition-colors hover:text-ink"
@@ -196,6 +207,15 @@ export function LaunchButton({
  * same closed set the header picker offers, minus any that need a base URL the browser cannot give
  * (`custom`) — offering an option that can only ever error is worse than not offering it. A base
  * URL is never entered here, so the browser can only choose among hosts Whetstone already knows.
+ *
+ * Two shapes of choice, and the difference matters for a gateway deployment:
+ *   - `{provider:'', model:'x'}` — the console's own backend (its gateway/base URL), a different
+ *     model. This is the model-only override the server keeps on the gateway; it is what you want
+ *     when your default *is* a gateway and you only mean to change the model.
+ *   - `{provider:'anthropic', model:…}` — a named provider, which deliberately leaves the
+ *     configured backend and goes straight to that vendor. Powerful, but a footgun on a gateway
+ *     deployment with no vendor key, so the hint says so plainly.
+ *   - `null` — the pure console default, model and all.
  */
 function LaunchModel({
   value,
@@ -210,20 +230,31 @@ function LaunchModel({
   // preset with an OpenAI kind and no host, so it would 422 on every attempt. Anthropic has no host
   // either but does not need one, so it stays.
   const choosable = data.available.filter((b) => b.kind === 'anthropic' || b.base_url)
-  // A local provider (ollama and friends) has no default model, so a blank field there errors; only
-  // Anthropic resolves a blank to a default. Word the hint to match whichever is selected.
-  const needsModel = value != null && value.provider !== 'anthropic'
+  const provider = value?.provider ?? ''
+  const model = value?.model ?? ''
+  const onDefault = provider === ''
+  // Empty backend + empty model collapses to the pure default (null); anything else is an override.
+  const set = (p: string, m: string) =>
+    onChange(p === '' && m.trim() === '' ? null : { provider: p, model: m })
+  // A named local provider (ollama and friends) has no default model, so a blank field there
+  // errors; Anthropic and the default backend both resolve a blank. Word the placeholder to match.
+  const needsModel = !onDefault && provider !== 'anthropic'
+  const placeholder = onDefault
+    ? `blank = ${data.resolved_model || 'default'}`
+    : needsModel
+      ? 'model id (required)'
+      : 'blank = default'
   return (
     <div className="mt-3 border-t border-warn/20 pt-3">
       <label className="block text-xs text-muted">
         Model for this run
+        {/* The input is always present — never appearing on selection — so the panel below it does
+            not jump every time you touch the picker. */}
         <div className="mt-1 flex flex-wrap items-center gap-2">
           <select
-            value={value?.provider ?? ''}
-            onChange={(e) => {
-              const p = e.target.value
-              onChange(p ? { provider: p, model: value?.provider === p ? value.model : '' } : null)
-            }}
+            value={provider}
+            // Switching backend clears the model (ids differ per backend); staying keeps it.
+            onChange={(e) => set(e.target.value, e.target.value === provider ? model : '')}
             className="rounded border border-line bg-canvas px-2 py-1 text-sm text-ink"
           >
             <option value="">
@@ -235,19 +266,19 @@ function LaunchModel({
               </option>
             ))}
           </select>
-          {value && (
-            <input
-              value={value.model}
-              onChange={(e) => onChange({ provider: value.provider, model: e.target.value })}
-              placeholder={needsModel ? 'model id (required)' : 'model id (blank = default)'}
-              spellCheck={false}
-              className="min-w-[10rem] flex-1 rounded border border-line bg-canvas px-2 py-1 font-mono text-xs text-ink"
-            />
-          )}
+          <input
+            value={model}
+            onChange={(e) => set(provider, e.target.value)}
+            placeholder={placeholder}
+            spellCheck={false}
+            className="min-w-[10rem] flex-1 rounded border border-line bg-canvas px-2 py-1 font-mono text-xs text-ink"
+          />
         </div>
       </label>
       <p className="mt-1 text-xs text-muted">
-        Just this run — the console default stays whatever the header says.
+        {onDefault
+          ? 'Runs on your configured backend — type a model to change only the model, still on it.'
+          : 'Sends this one run straight to this provider, not your configured backend.'}
       </p>
     </div>
   )
