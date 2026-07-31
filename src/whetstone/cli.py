@@ -40,7 +40,7 @@ from whetstone.improve import build_digest, propose, render_step_prompt
 from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
-from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval, render
+from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval, plan_tasks, render
 from whetstone.providers.base import ConnectorError
 from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
@@ -55,6 +55,7 @@ from whetstone.service import (
     format_gate,
     format_holdout,
     format_score,
+    format_traces,
     precision_evidence,
     record_eval,
     record_gate,
@@ -63,6 +64,7 @@ from whetstone.service import (
     stream_defects,
 )
 from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step, load_steps
+from whetstone.tasks import TaskCaseRun, TaskScore
 from whetstone.update import refresh_wiki
 from whetstone.vcs import export_tree
 
@@ -311,6 +313,15 @@ def _reviewer_choice(policy: StepSpec | None, skill_dir: Path) -> ReviewerChoice
             f"the reviewer needs context that is not set: {names} — set the environment "
             f"variable(s), or add them to .env"
         )
+    if choice.problems:
+        raise typer.BadParameter("the reviewer cannot run: " + "; ".join(choice.problems))
+    if choice.task is not None:
+        # Scoring a task skill's empty `eval_cases/` reports recall 1.000 over nothing. Refusing is
+        # the only honest answer the review path has.
+        raise typer.BadParameter(
+            "this is a task skill (`task: enabled` in evaluate/step.yaml) — it is scored on work "
+            "it produces, not findings it reports. Run `whetstone eval task` instead."
+        )
     return choice
 
 
@@ -430,8 +441,9 @@ def eval_run(
     plan = plan_eval(
         sk, backend, trials=trials, cases=scored, wiki_limits=limits,
         judge_cascade=bool(policy and policy.judge.enabled),
-        # A skill with its own reviewer program spends none of Whetstone's calls on the review.
-        host_reviews=not choice.custom,
+        # A reviewer *program* spends none of Whetstone's calls; an agent spends one per step.
+        host_reviews=choice.agent is not None or not choice.custom,
+        calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
@@ -453,7 +465,7 @@ def eval_run(
         precedent_limits=policy.inputs.precedents if policy else None,
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
-        reviewer=choice.reviewer,
+        reviewer=choice.build(client),
     )
     if save:
         _store(runs_dir).save(record)
@@ -474,6 +486,204 @@ def _progress(event: RunEvent) -> None:
         typer.echo(
             f"  [{event.completed_cases}/{event.total_cases}] {event.case_id}", err=True
         )
+
+
+# --- task skills ------------------------------------------------------------------
+
+
+def _task_setup(skill: Path, llm: str | None, model: str | None, base_url: str | None):
+    """Load a task skill and everything needed to run it, or refuse with a usable reason.
+
+    Shared by `eval task` and `eval task-gate` so the two can never disagree about what a skill's
+    step file asked for — the same reason one resolver serves the review CLI and the console.
+    """
+    from whetstone.taskloader import load_task_cases, verifier_for
+
+    policy = _step(skill, "evaluate")
+    try:
+        choice = reviewer_from_step(policy, skill)
+    except ContextError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if choice.task is None:
+        raise typer.BadParameter(
+            f"{skill} is not a task skill — set `task: enabled: true` in evaluate/step.yaml, or "
+            f"score it with `whetstone eval run`"
+        )
+    if choice.context and choice.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in choice.context.missing)
+        raise typer.BadParameter(f"this skill needs context that is not set: {names}")
+    if choice.problems:
+        raise typer.BadParameter("this skill cannot run: " + "; ".join(choice.problems))
+
+    cases = load_task_cases(skill)
+    if not cases:
+        raise typer.BadParameter(
+            f"{skill} has no task cases — add one under task_cases/<id>/case.yaml"
+        )
+    verifier = verifier_for(choice.task.verify, skill)
+    pick = _backend_for(policy, llm, model, base_url)
+    return policy, choice, cases, verifier, pick
+
+
+def _verifier_identity(verifier: object) -> str:
+    """How the plan should describe the grader. Falls back to the class for a custom one."""
+    identity = getattr(verifier, "identity", None)
+    return str(identity) if isinstance(identity, str) else type(verifier).__name__
+
+
+def _format_task_score(score: TaskScore) -> str:
+    lines = [
+        f"Skill {score.skill_id} v{score.version}",
+        f"  pass_rate {score.pass_rate:.3f}   mean_score {score.mean_score:.3f}"
+        + (f"   errors {score.errors}" if score.errors else ""),
+        "  cases:",
+    ]
+    for case in score.cases:
+        mark = "pass" if case.outcome.passed else "FAIL"
+        detail = case.error or (case.outcome.detail.strip().splitlines() or [""])[-1]
+        lines.append(
+            f"    [{mark}] {case.case_id:<32} score {case.outcome.score:.2f}  {detail[:60]}"
+        )
+        if case.trace:
+            lines.append(f"           did: {'; '.join(case.trace)}")
+    return "\n".join(lines)
+
+
+@eval_app.command("task")
+def eval_task(
+    skill: Annotated[Path, typer.Option("--skill", help="Path to a task-skill folder")],
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    keep: Annotated[
+        Path | None,
+        typer.Option("--keep", help="Keep each case's workspace here instead of a temp dir"),
+    ] = None,
+    yes: YesOpt = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Run a skill over its task cases and score the work it produced.
+
+    The counterpart to `eval run` for skills that *make* something rather than report on a change:
+    each case gets a fresh workspace seeded from its `files/`, the skill runs as an agent and writes
+    into it, and the case's `verify:` block grades the result by running it. There is no judge — the
+    tests either pass or they do not.
+
+    `--keep` leaves the workspaces on disk, which is how a failing case is diagnosed: the work the
+    skill produced is the evidence, and a temp dir deletes everything but the exit code.
+    """
+    from whetstone.service import record_task_eval
+
+    sk = load_skill(skill)
+    _, choice, cases, verifier, pick = _task_setup(skill, llm, model, base_url)
+    backend = _resolve(*pick)
+    plan = plan_tasks(
+        backend,
+        cases=len(cases),
+        calls_per_case=choice.task.max_calls,
+        # The *verifier's* identity. `choice.identity` describes the agent doing the work, so the
+        # plan read "graded by: agent-task: 12 steps" — naming the thing under test as its own
+        # examiner, which is the one thing a grading line must never say.
+        verifier=_verifier_identity(verifier),
+    )
+    check_budget(plan, load_config().runs.max_llm_calls_per_run)
+    _preflight(plan, yes)
+
+    client = _client(*pick, api_key_env, label=f"task-{sk.id}")
+    executor = choice.build_executor(client)
+    score = record_task_eval(
+        sk,
+        cases,
+        executor.execute,
+        verifier,
+        on_case=None if json_out else _task_progress,
+        keep_workspaces=keep,
+    )
+    if json_out:
+        typer.echo(score.model_dump_json(indent=2))
+        return
+    typer.echo(_format_task_score(score))
+    typer.echo(f"\n{executor.llm_calls} llm calls  ({executor.identity})")
+    if keep:
+        typer.echo(f"\nworkspaces kept under {keep}")
+
+
+def _task_progress(run: TaskCaseRun) -> None:
+    mark = "pass" if run.outcome.passed else "FAIL"
+    typer.echo(f"  [{mark}] {run.case_id}", err=True)
+
+
+@eval_app.command("task-gate")
+def eval_task_gate(
+    base: Annotated[Path, typer.Option("--base", help="Baseline skill folder")],
+    candidate: Annotated[Path, typer.Option("--candidate", help="Candidate skill folder")],
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    tolerance: Annotated[
+        float, typer.Option(help="How much mean score may fall before this fails")
+    ] = 0.0,
+    targeted: Annotated[
+        list[str] | None,
+        typer.Option("--targeted", help="Case ids this change claims to fix (repeatable)"),
+    ] = None,
+    yes: YesOpt = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Compare a candidate task skill against a baseline; exit non-zero if it regresses.
+
+    The task twin of `eval gate`, and the same discipline: both sides run over the same cases with
+    the same executor, so a difference in the score is attributable to the guidance rather than to
+    the instrument. `--targeted` names cases the change claims to fix — without them a gate only
+    blocks regressions, so a guidance edit that does nothing at all passes.
+    """
+    from whetstone.service import gate_task_skills
+
+    base_skill = load_skill(base)
+    candidate_skill = load_skill(candidate)
+    # The candidate's step file decides how this is run and graded: it is the version being
+    # proposed, and gating it under the baseline's rules would measure the wrong thing.
+    _, choice, cases, verifier, pick = _task_setup(candidate, llm, model, base_url)
+    backend = _resolve(*pick)
+    plan = plan_tasks(
+        backend,
+        cases=len(cases),
+        calls_per_case=choice.task.max_calls,
+        action="eval task-gate",
+        sides=2,
+        verifier=_verifier_identity(verifier),
+    )
+    check_budget(plan, load_config().runs.max_llm_calls_per_run)
+    _preflight(plan, yes)
+
+    client = _client(*pick, api_key_env, label=f"task-gate-{candidate_skill.id}")
+    # One executor for both sides, so a score difference is the guidance rather than the instrument.
+    executor = choice.build_executor(client)
+    result = gate_task_skills(
+        base_skill,
+        candidate_skill,
+        cases,
+        executor.execute,
+        verifier,
+        tolerance=tolerance,
+        targeted=list(targeted or []),
+    )
+    if json_out:
+        typer.echo(result.model_dump_json(indent=2))
+    else:
+        typer.echo("Task gate: " + ("PASS" if result.passed else "FAIL"))
+        typer.echo(
+            f"  mean_score {result.base.mean_score:.3f} -> "
+            f"{result.candidate.mean_score:.3f}  (delta {result.delta:+.3f})"
+        )
+        typer.echo(
+            f"  pass_rate  {result.base.pass_rate:.3f} -> {result.candidate.pass_rate:.3f}"
+        )
+        for reason in result.reasons:
+            typer.echo(f"  - {reason}")
+    raise typer.Exit(code=0 if result.passed else 1)
 
 
 @eval_app.command("baseline")
@@ -643,10 +853,11 @@ def eval_gate(
         check_budget(plan, load_config().runs.max_llm_calls_per_run)
         _preflight(plan, yes)
 
+        client = _client(*pick, api_key_env)
         record = record_gate(
             base_skill,
             candidate_skill,
-            _client(*pick, api_key_env),
+            client,
             cfg=tolerances,
             trials=gate_trials,
             base_ref=base_ref or str(base_dir),
@@ -658,7 +869,7 @@ def eval_gate(
             precedent_limits=policy.inputs.precedents if policy else None,
             judge=load_judge(load_config().judge_dir),
             judge_policy=policy.judge if policy else None,
-            reviewer=choice.reviewer,
+            reviewer=choice.build(client),
         )
         if save:
             _gates(gates_dir).save(record)
@@ -666,6 +877,9 @@ def eval_gate(
             typer.echo(record.model_dump_json(indent=2))
         else:
             typer.echo(format_gate(record.result))
+            traces = format_traces(record)
+            if traces:
+                typer.echo(traces)
             if record.candidate_holdout:
                 typer.echo("candidate, by partition:")
                 typer.echo(format_holdout(record.candidate_holdout))
@@ -751,10 +965,11 @@ def review(
     global _transcript_flag
     _transcript_flag = _transcript_flag or transcript
     backend = resolve_backend(llm, model=model, base_url=base_url)
+    client = _client(llm, model, base_url, api_key_env, label=f"review-{sk.id}")
     record = record_review(
         sk,
         change,
-        _client(llm, model, base_url, api_key_env, label=f"review-{sk.id}"),
+        client,
         source=source,
         ref=ref,
         url=url,
@@ -762,7 +977,7 @@ def review(
         reviewer_effort=effort,
         backend=backend.name,
         model=backend.model,
-        reviewer=choice.reviewer,
+        reviewer=choice.build(client),
     )
     _reviews(reviews_dir).save(record)
 

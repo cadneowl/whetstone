@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from whetstone.core.gate import GateConfig, GateResult
 from whetstone.domain.score import HoldoutReport, SkillScore
@@ -60,6 +60,24 @@ class GateRecord(BaseModel):
     reviewer: str = ""
     reviewer_context: dict[str, Any] = Field(default_factory=dict)
     reviewer_context_digest: str = ""
+    # For an agent reviewer, what each side actually investigated. A gate attributes a score change
+    # to the guidance; if the two sides read different things, that attribution is weaker than it
+    # looks, and this is where someone reading the evidence later can see it. Empty otherwise.
+    base_trace: list[str] = Field(default_factory=list)
+    candidate_trace: list[str] = Field(default_factory=list)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def trace_diverged(self) -> bool:
+        """The two sides investigated differently — read a delta with that in mind.
+
+        A `computed_field`, so it reaches the stored record and the HTTP API. As a plain property it
+        was computed and then dropped on the way out, which meant the console could not show the
+        one thing it exists to say.
+        """
+        return bool(self.base_trace or self.candidate_trace) and (
+            self.base_trace != self.candidate_trace
+        )
     # Identity of the judge both sides' verdicts came from (`judge.llm_judge.judge_identity`).
     # One judge serves the whole gate, so the base/candidate comparison is internally valid
     # regardless — this exists so two *gates* judged differently are never read as one series.

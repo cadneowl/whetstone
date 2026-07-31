@@ -19,6 +19,8 @@ from whetstone.cadence import CadenceStore, clocks, last_anchor_at
 from whetstone.caseindex import PrecedentLimits, SkillIndex
 from whetstone.core.gate import GateConfig, GateResult, gate
 from whetstone.core.harness import EventSink, run_skill_recorded
+from whetstone.core.taskharness import Executor as TaskExecutor
+from whetstone.core.taskharness import TaskSink, run_tasks
 from whetstone.corpus.builder import (
     DEFAULT_MAX_CLEAN_FILES,
     DEFAULT_MAX_DEFECT_FILES,
@@ -65,6 +67,8 @@ from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_re
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
 from whetstone.sampling import holdout_report, partition_of, sample_cases
 from whetstone.steps import JudgePolicy, SamplePolicy
+from whetstone.tasks import TaskCase, TaskGateResult, TaskScore, gate_tasks
+from whetstone.verify.base import Verifier
 from whetstone.wiki import SkillWiki, WikiLimits
 
 
@@ -72,6 +76,22 @@ class GateOutcome(BaseModel):
     result: GateResult
     base: SkillScore
     candidate: SkillScore
+    # What an agent reviewer looked at on each side. A gate blames a score difference on the
+    # guidance, which holds only if everything else the reviewer saw was the same — and an agent
+    # that investigated differently on the two sides breaks exactly that. Empty for every reviewer
+    # that does not investigate.
+    base_trace: list[str] = []
+    candidate_trace: list[str] = []
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def trace_diverged(self) -> bool:
+        """Whether the two sides read different things — the signal that a delta may not be the
+        guidance. Not a failure: an agent reading more *because* the new guidance told it to is the
+        feature working. It is reported so a mysterious delta has somewhere to be explained from."""
+        return bool(self.base_trace or self.candidate_trace) and (
+            self.base_trace != self.candidate_trace
+        )
 
 
 def run_eval(
@@ -157,6 +177,15 @@ def record_eval(
     # `reviewer.factory` — in which case the LLM reviewer is not built and the run's client is used
     # only for the judge. None (the default) keeps every existing caller on the built-in reviewer.
     prov = provenance_of(reviewer)
+    # A fresh trajectory per run: one reviewer instance serves both sides of a gate, and merged
+    # reads would hide exactly the divergence the trace exists to expose.
+    reset = getattr(reviewer, "reset_trace", None)
+    if reset is not None:
+        reset()
+    # The counter is the reviewer's lifetime spend, not this run's, because one instance can serve
+    # two runs. Take the delta rather than zeroing it: a gate reads the same counter across both
+    # sides afterwards, and resetting here would leave it reporting only the candidate's half.
+    reviewer_calls_before = _llm_calls_of(reviewer)
     active_reviewer: Reviewer = reviewer or LLMReviewer(
         counted,
         effort=reviewer_effort,
@@ -231,6 +260,9 @@ def record_eval(
         reviewer=prov.identity,
         reviewer_context=prov.context,
         reviewer_context_digest=prov.context_digest,
+        # What an agent looked at while scoring. Read after the run, not before: the trajectory is
+        # produced by doing the work.
+        reviewer_trace=_trace_of(reviewer),
         reviewer_effort=reviewer_effort,
         judge_effort=judge_effort,
         # The judge these verdicts came from. Computed from the same text and cascade policy the
@@ -247,7 +279,11 @@ def record_eval(
         duration_s=duration,
         # Both counters: a distilled tier 1 makes its calls on its own client, and a total that
         # ignored them would report the run as cheaper than it was.
-        llm_calls=counted.calls + (tier1_client.calls if tier1_client is not counted else 0),
+        # An agent makes its own calls, which the counted client never sees — a run that said
+        # zero would misprice the whole thing.
+        llm_calls=counted.calls
+        + (tier1_client.calls if tier1_client is not counted else 0)
+        + (_llm_calls_of(reviewer) - reviewer_calls_before),
         git_ref=git_ref,
         cases=cases,
         score=score,
@@ -287,6 +323,18 @@ def strip_guidance(skill: Skill) -> Skill:
             "eval_cases": [c for c in skill.eval_cases if c.tier == "active"],
         }
     )
+
+
+def _trace_of(reviewer: Reviewer | None) -> list[str]:
+    """An agent reviewer's trajectory, or nothing at all for reviewers that do not investigate."""
+    summary = getattr(reviewer, "trace_summary", None)
+    return list(summary()) if callable(summary) else []
+
+
+def _llm_calls_of(reviewer: Reviewer | None) -> int:
+    """Calls an agent made on its own, which the counted client never saw."""
+    calls = getattr(reviewer, "llm_calls", 0)
+    return calls if isinstance(calls, int) else 0
 
 
 def record_baseline(
@@ -371,6 +419,10 @@ def record_review(
     """
     counted = CountingClient(client)
     prov = provenance_of(reviewer)
+    # The same before/after discipline the other two recorders use. `llm_calls` on an agent is its
+    # *lifetime* spend, so adding it whole is only correct while every caller happens to build a
+    # fresh reviewer per review — true today, and not a property this function can see or enforce.
+    reviewer_calls_before = _llm_calls_of(reviewer)
     active_reviewer: Reviewer = reviewer or LLMReviewer(
         counted, effort=reviewer_effort, embedder=_embedder_for(skill)
     )
@@ -401,7 +453,7 @@ def record_review(
         reviewer_effort=reviewer_effort,
         practice_mode=practice_mode,
         duration_s=duration,
-        llm_calls=counted.calls,
+        llm_calls=counted.calls + (_llm_calls_of(reviewer) - reviewer_calls_before),
         change=change,
         findings=findings,
         # Which corpus cases shaped this review — what makes a finding explainable as "flagged
@@ -568,6 +620,9 @@ def gate_skills(
         judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_base, cancel=cancel, reviewer=reviewer,
     )
+    # Snapshot before the candidate side resets it — one reviewer serves both, so the trajectories
+    # would otherwise arrive merged and the divergence check would never fire.
+    base_trace = _trace_of(reviewer)
     candidate_score = run_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
         wiki_limits=wiki_limits, precedent_limits=precedent_limits,
@@ -575,8 +630,16 @@ def gate_skills(
         judge=judge, judge_policy=judge_policy, sample=no_draw,
         on_event=on_candidate, cancel=cancel, reviewer=reviewer,
     )
+    # Read after the candidate side, which reset the trajectory when it started — so this is the
+    # candidate's alone, and `base_trace` was captured the same way before it.
     result = gate(base_score, candidate_score, cfg)
-    return GateOutcome(result=result, base=base_score, candidate=candidate_score)
+    return GateOutcome(
+        result=result,
+        base=base_score,
+        candidate=candidate_score,
+        base_trace=base_trace,
+        candidate_trace=_trace_of(reviewer),
+    )
 
 
 def record_gate(
@@ -614,6 +677,10 @@ def record_gate(
     """
     counted = CountingClient(client)
     gate_prov = provenance_of(reviewer)
+    # An agent spends the run's backend on its own client, which `counted` never sees. A gate is
+    # where that is largest — two sides, every case, up to the step ceiling each — and it was the
+    # one recorder still reporting only the judge's calls.
+    reviewer_calls_before = _llm_calls_of(reviewer)
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
     outcome = gate_skills(
@@ -648,6 +715,8 @@ def record_gate(
         reviewer=gate_prov.identity,
         reviewer_context=gate_prov.context,
         reviewer_context_digest=gate_prov.context_digest,
+        base_trace=outcome.base_trace,
+        candidate_trace=outcome.candidate_trace,
         judge_hash=judge_identity(
             judge.system if judge else None,
             escalate_below=judge_policy.escalate_below
@@ -658,7 +727,7 @@ def record_gate(
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,
-        llm_calls=counted.calls,
+        llm_calls=counted.calls + (_llm_calls_of(reviewer) - reviewer_calls_before),
         config=cfg or GateConfig(),
         result=outcome.result,
         base_score=outcome.base,
@@ -1206,3 +1275,77 @@ def format_gate(r: GateResult) -> str:
     for reason in r.reasons:
         lines.append(f"  - {reason}")
     return "\n".join(lines)
+
+
+def format_traces(record: GateRecord) -> str:
+    """What each side of a gate investigated, and whether that differed.
+
+    Not a verdict — an agent reading more *because* the new guidance told it to is the feature
+    working. But a gate attributes a score change to the guidance, and that only holds if
+    everything else the reviewer saw was the same, so a reader deciding whether to trust a delta
+    has to be able to see this. It was recorded and shown nowhere.
+    """
+    if not (record.base_trace or record.candidate_trace):
+        return ""
+    lines = [
+        "  base read      " + ("; ".join(record.base_trace) or "(nothing)"),
+        "  candidate read " + ("; ".join(record.candidate_trace) or "(nothing)"),
+    ]
+    if record.trace_diverged:
+        lines.append(
+            "  ⚠ the two sides investigated differently — this delta is not purely the guidance"
+        )
+    return "\n".join(lines)
+
+
+# --- task skills -----------------------------------------------------------------
+
+
+def record_task_eval(
+    skill: Skill,
+    cases: list[TaskCase],
+    executor: TaskExecutor,
+    verifier: Verifier,
+    *,
+    on_case: TaskSink | None = None,
+    cancel: threading.Event | None = None,
+    keep_workspaces: Path | None = None,
+) -> TaskScore:
+    """Score a skill on work it produces rather than on findings it reports.
+
+    The task-shaped counterpart to `record_eval`. Deliberately thin: the harness owns the loop and
+    the scoring, exactly as the review path does, so the two kinds of skill differ in what is run
+    and graded — never in how a run is recorded or gated.
+    """
+    return run_tasks(
+        skill,
+        cases,
+        executor,
+        verifier,
+        on_case=on_case,
+        cancel=cancel,
+        keep_workspaces=keep_workspaces,
+    )
+
+
+def gate_task_skills(
+    base: Skill,
+    candidate: Skill,
+    cases: list[TaskCase],
+    executor: TaskExecutor,
+    verifier: Verifier,
+    *,
+    tolerance: float = 0.0,
+    targeted: list[str] | None = None,
+    cancel: threading.Event | None = None,
+) -> TaskGateResult:
+    """Gate a task skill: score both sides over the same cases, and compare.
+
+    One executor serves both sides, for the same reason one reviewer does — the instrument is held
+    fixed so the guidance is the only thing that varied.
+    """
+    base_score = record_task_eval(base, cases, executor, verifier, cancel=cancel)
+    candidate_score = record_task_eval(candidate, cases, executor, verifier, cancel=cancel)
+    return gate_tasks(
+        base_score, candidate_score, tolerance=tolerance, targeted=targeted
+    )

@@ -4,6 +4,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
+from whetstone.core.cancel import RunCancelled
 from whetstone.core.scoring import case_score_from_run, record_case
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.finding import Finding
@@ -16,9 +17,7 @@ from whetstone.reviewer.base import Reviewer
 
 EventSink = Callable[[RunEvent], None]
 
-
-class RunCancelled(RuntimeError):
-    """Raised when a run is stopped through its cancel event."""
+__all__ = ["EventSink", "RunCancelled", "run_skill", "run_skill_recorded"]
 
 
 def run_skill(
@@ -79,10 +78,21 @@ def run_skill_recorded(
         _check_cancelled(cancel)
         progress.case_started(case.id)
         trials: list[list[Finding]] = []
-        for trial_index in range(k):
-            _check_cancelled(cancel)
-            trials.append(reviewer.review(skill, case.change))
-            progress.trial_done(case.id, trial_index)
+        try:
+            for trial_index in range(k):
+                _check_cancelled(cancel)
+                trials.append(reviewer.review(skill, case.change))
+                progress.trial_done(case.id, trial_index)
+        except RunCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad case must not lose the whole corpus
+            # A reviewer that cannot answer *this* case is recorded as unscorable and the run goes
+            # on. Scoring it as a miss would blame the skill for the instrument, and raising would
+            # throw away every case already reviewed — an agent makes many calls per case, so the
+            # chance of one transient failure across a large corpus is not small.
+            record = CaseRun(case_id=case.id, kind=case.kind, error=f"{type(exc).__name__}: {exc}")
+            progress.case_done(case.id, record)
+            return record
         # A cascading judge grounds its tier-2 calls in this case's own diff, so it is bound per
         # case; a plain judge passes through unchanged.
         record = record_case(case, trials, judge_for_case(judge, case.change))

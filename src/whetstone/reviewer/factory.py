@@ -1,14 +1,31 @@
-"""Choosing the reviewer for a skill — the built-in LLM one, or the operator's own program.
+"""Choosing the reviewer for a skill — built-in, the operator's own program, or the skill as agent.
 
 One resolver, used by every entry point that scores or gates a skill (the console jobs and the CLI),
 so the two can never disagree about which reviewer a skill uses. Divergence here would be the worst
 kind: a gate run from the CLI and the same gate run from the console would measure different things.
+
+Four outcomes:
+
+- **built-in** — no `run:`, no `agent:`, no `task:`. One LLM call, unchanged behaviour, `reviewer`
+  empty.
+- **program** — `run:` names an executable; Whetstone shells out and takes findings back.
+- **agent** — `agent: enabled` runs the skill *as* an agent: `SKILL.md` as instructions, its pages
+  readable on demand, source tools when it declares a root.
+- **task** — `task: enabled` scores the skill on work it produces instead of findings it reports.
+  Nothing on the review path can run it, so `task` is set and every review entry point refuses:
+  scoring a task skill's empty `eval_cases/` reports a flawless run over nothing, which is the one
+  kind of answer this project exists to prevent.
+
+The agent needs a model client, and the plan is computed before any client exists — so a choice is
+resolved in two beats: `reviewer_for` decides *what* will review (enough to plan and to validate the
+context), and `build(client)` produces the reviewer when there is a backend to give it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from whetstone.context import ResolvedContext, resolve_context
 from whetstone.domain.skill import Skill
@@ -21,20 +38,134 @@ from whetstone.steps import StepSpec, load_step
 class ReviewerChoice:
     """What reviewing this skill resolves to.
 
-    `reviewer` is None for the built-in LLM reviewer (the default, unchanged behaviour); the caller
-    then lets `record_eval`/`record_gate` build it as before. When a skill's `evaluate` step names a
-    `run:` program, `reviewer` is the `SubprocessReviewer` and `context` carries the resolved bag —
+    `reviewer` is None for the built-in LLM reviewer (the default, unchanged behaviour) *and* for an
+    agent, which cannot be built until a client exists — `agent` says which of those it is, and
+    `build(client)` returns the reviewer to use. When a skill's `evaluate` step names a `run:`
+    program, `reviewer` is the `SubprocessReviewer` and `context` carries the resolved bag —
     including `context.missing`, which the caller checks before spending so a required var that is
     unset fails at the click, not three cases in.
     """
 
-    reviewer: Reviewer | None
+    reviewer: Reviewer | None = None
     context: ResolvedContext | None = None
     identity: str = ""
+    # Set when the skill runs as an agent; `reviewer` is then None until `build`.
+    agent: AgentPlan | None = None
+    # Set when the skill is scored on work produced rather than findings reported. Nothing on the
+    # review path can run it, so every review entry point refuses rather than scoring an empty
+    # `eval_cases/` as a flawless run.
+    task: TaskPlan | None = None
+    # Configuration that resolved to something unusable — a source root that is set but is not a
+    # directory. Distinct from `context.missing` (a variable nobody set) because the fix is
+    # different, and reported the same way: at the plan, before anything is spent.
+    problems: list[str] = field(default_factory=list)
 
     @property
     def custom(self) -> bool:
-        return self.reviewer is not None
+        """Whether anything other than the built-in single-call reviewer will run."""
+        return self.reviewer is not None or self.agent is not None
+
+    def build(self, client: Any) -> Reviewer | None:
+        """The reviewer to hand the harness, given a model client.
+
+        Returns `reviewer` unchanged for a program or the built-in; constructs the agent otherwise.
+        Callers that never touch an agent skill can keep using `.reviewer` directly.
+        """
+        if self.agent is None:
+            return self.reviewer
+        from whetstone.reviewer.agent_reviewer import AgentReviewer
+
+        return AgentReviewer(
+            client,
+            source_root=self.agent.source_root,
+            max_steps=self.agent.max_steps,
+            context=self.agent.shown,
+            redacted=dict(self.context.redacted) if self.context else {},
+            context_digest=self.context.digest if self.context else "",
+            skill_tools=self._skill_tools(self.agent.tools, self.agent.skill_dir),
+        )
+
+    def build_executor(self, client: Any) -> Any:
+        """The executor that runs this skill over task cases. None unless `task:` is enabled.
+
+        Deliberately the same construction as `build`: a task skill is the same agent with a
+        workspace and a different terminal tool, and letting the two drift would mean a skill's
+        tools or source access behaved differently depending on how it was scored.
+        """
+        if self.task is None:
+            return None
+        from whetstone.agent.executor import AgentExecutor
+
+        return AgentExecutor(
+            client,
+            source_root=self.task.source_root,
+            max_steps=self.task.max_steps,
+            context=self.task.shown,
+            skill_tools=self._skill_tools(self.task.tools, self.task.skill_dir),
+        )
+
+    def _skill_tools(self, declared: list[Any], skill_dir: Path) -> Any:
+        """The dispatcher for a skill's own tools, or None when it declared none.
+
+        The tools get `context.values` — the *real* resolved bag, secrets included — because a
+        program that fetches a Jira issue needs the token. It arrives on stdin, which is why the
+        model's prompt can be given the redacted view instead.
+        """
+        if not declared:
+            return None
+        from whetstone.agent.skilltools import SkillTools
+
+        return SkillTools(
+            declared=list(declared),
+            cwd=skill_dir,
+            context=dict(self.context.values) if self.context else {},
+        )
+
+
+@dataclass
+class AgentPlan:
+    """Everything needed to build the agent once a client exists."""
+
+    skill_dir: Path
+    max_steps: int
+    source_root: str | None = None
+    # The **redacted** context view, for the agent's system prompt. Never `values`: an `env:` entry
+    # is a token as often as it is a path, and writing the resolved value into the prompt would put
+    # a credential in front of the model and into every transcript. The tools that actually need the
+    # secret get it on stdin, out of band — see `ReviewerChoice.build`.
+    shown: dict[str, Any] | None = None
+    # Tools the skill declared; built into a `SkillTools` dispatcher when a client arrives.
+    tools: list[Any] = field(default_factory=list)
+
+    @property
+    def max_calls(self) -> int:
+        """Model calls one review can cost, which is one more than the step budget.
+
+        The loop spends `max_steps` investigating and then, if it has still not answered, is forced
+        with one final call. Pricing the plan at `max_steps` understates every review by one — small
+        per case, four hundred calls across a two-hundred-case gate.
+        """
+        return self.max_steps + 1
+
+
+@dataclass
+class TaskPlan:
+    """Everything needed to run a skill over task cases once a client exists.
+
+    The task twin of `AgentPlan`: same agent, same tools, same resolved context — what differs is
+    that it writes files into a workspace and is graded by a verifier instead of a judge.
+    """
+
+    skill_dir: Path
+    max_steps: int
+    verify: dict[str, Any] = field(default_factory=dict)
+    source_root: str | None = None
+    shown: dict[str, Any] | None = None
+    tools: list[Any] = field(default_factory=list)
+
+    @property
+    def max_calls(self) -> int:
+        return self.max_steps + 1
 
 
 def reviewer_for(skills_root: str | Path, skill: Skill) -> ReviewerChoice:
@@ -53,9 +184,16 @@ def reviewer_for(skills_root: str | Path, skill: Skill) -> ReviewerChoice:
 def reviewer_from_step(spec: StepSpec | None, skill_dir: str | Path) -> ReviewerChoice:
     """The reviewer for an already-loaded `evaluate` step — the CLI path, which has the spec and the
     skill folder in hand and need not address the skill by id under a root."""
-    if spec is None or not spec.run:
-        return ReviewerChoice(reviewer=None)
-    resolved = resolve_context(spec.context, skill_dir=Path(skill_dir))
+    if spec is None:
+        return ReviewerChoice()
+    directory = Path(skill_dir)
+    if spec.task.enabled:
+        return _task_choice(spec, directory)
+    if spec.agent.enabled:
+        return _agent_choice(spec, directory)
+    if not spec.run:
+        return ReviewerChoice()
+    resolved = resolve_context(spec.context, skill_dir=directory)
     reviewer = SubprocessReviewer(
         spec.run,
         cwd=spec.directory,
@@ -64,3 +202,67 @@ def reviewer_from_step(spec: StepSpec | None, skill_dir: str | Path) -> Reviewer
         wiki_limits=spec.inputs.wiki,
     )
     return ReviewerChoice(reviewer=reviewer, context=resolved, identity=reviewer.identity)
+
+
+def _agent_context(
+    spec: StepSpec, source: Any, skill_dir: Path
+) -> tuple[ResolvedContext, str | None, dict[str, Any], list[str]]:
+    """The shared resolution behind `agent:` and `task:`.
+
+    `source` is folded in as a context directive so a checkout path validates like everything else —
+    a required-but-unset one is reported at the plan rather than discovered mid-run. Returns the
+    resolved bag, the source root, the **redacted** view to show the model, and any problems.
+    """
+    declared: dict[str, Any] = dict(spec.context)
+    if source is not None:
+        declared["source_root"] = source
+    resolved = resolve_context(declared, skill_dir=skill_dir)
+    raw_root = resolved.values.get("source_root")
+    root = str(raw_root) if raw_root else None
+    # Redacted, not raw: see `AgentPlan.shown`.
+    shown = {k: v for k, v in resolved.redacted.items() if k != "source_root"}
+
+    problems: list[str] = []
+    # A path that is set but wrong is the quiet one. Every source tool answers "no such file" / "no
+    # matches", which reads exactly like a clean codebase, so the agent reviews having opened
+    # nothing and the run looks normal. Refused here, for the same reason a backend that cannot call
+    # tools is refused loudly rather than degraded.
+    if root and not Path(root).is_dir():
+        problems.append(
+            f"the source root {root!r} is not a directory — the agent would review with no access "
+            f"to the code and report on what it never read"
+        )
+    return resolved, root, shown, problems
+
+
+def _agent_choice(spec: StepSpec, skill_dir: Path) -> ReviewerChoice:
+    """Resolve an `agent:` block — the skill runs as an agent over its eval cases."""
+    resolved, root, shown, problems = _agent_context(spec, spec.agent.source, skill_dir)
+    plan = AgentPlan(
+        skill_dir=skill_dir,
+        max_steps=spec.agent.max_steps,
+        source_root=root,
+        shown=shown,
+        tools=list(spec.agent.tools),
+    )
+    identity = f"agent: {spec.agent.max_steps} steps" + (" +source" if root else "")
+    if spec.agent.tools:
+        identity += f" +{len(spec.agent.tools)} tool(s)"
+    return ReviewerChoice(context=resolved, identity=identity, agent=plan, problems=problems)
+
+
+def _task_choice(spec: StepSpec, skill_dir: Path) -> ReviewerChoice:
+    """Resolve a `task:` block — the skill is scored on work it produces, not findings."""
+    resolved, root, shown, problems = _agent_context(spec, spec.task.source, skill_dir)
+    plan = TaskPlan(
+        skill_dir=skill_dir,
+        max_steps=spec.task.max_steps,
+        verify=dict(spec.task.verify),
+        source_root=root,
+        shown=shown,
+        tools=list(spec.task.tools),
+    )
+    identity = f"agent-task: {spec.task.max_steps} steps" + (" +source" if root else "")
+    if spec.task.tools:
+        identity += f" +{len(spec.task.tools)} tool(s)"
+    return ReviewerChoice(context=resolved, identity=identity, task=plan, problems=problems)

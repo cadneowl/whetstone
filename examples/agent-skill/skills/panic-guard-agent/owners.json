@@ -1,0 +1,4 @@
+{
+  "ledger.py": "@payments-guild",
+  "config.py": "@platform-guild"
+}

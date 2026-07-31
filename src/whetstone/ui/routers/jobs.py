@@ -249,19 +249,22 @@ def launch_eval(
                 handle.progress(event.completed_cases, event.total_cases, event.case_id)
                 handle.log(*transcript(event))
 
+        # A retry is the usual reason a run looks stuck: each attempt gets its own timeout, and
+        # there are two nested loops of them. Put in the log the operator is already watching,
+        # rather than left to be inferred from the clock. Bound to a name because an agent reviewer
+        # is built from this same backend — one client, so its calls and the judge's are counted
+        # against the same budget.
+        client = _client(
+            config,
+            spec,
+            selection,
+            label=f"eval-{skill.id}",
+            on_retry=lambda note: handle.log(LogLine(text=f"retry: {note}")),
+        )
         try:
             record = record_eval(
                 skill,
-                # A retry is the usual reason a run looks stuck: each attempt gets its own timeout,
-                # and there are two nested loops of them. Put in the log the operator is already
-                # watching, rather than left to be inferred from the clock.
-                _client(
-                    config,
-                    spec,
-                    selection,
-                    label=f"eval-{skill.id}",
-                    on_retry=lambda note: handle.log(LogLine(text=f"retry: {note}")),
-                ),
+                client,
                 trials=trials,
                 backend=backend.name,
                 model=backend.model,
@@ -275,7 +278,7 @@ def launch_eval(
                 precedent_limits=spec.inputs.precedents if spec else None,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
-                reviewer=choice.reviewer,
+                reviewer=choice.build(client),
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -361,11 +364,12 @@ def launch_gate(
 
             return sink
 
+        client = _client(config, spec, selection, label=f"gate-{candidate.id}")
         try:
             record = record_gate(
                 base,
                 candidate,
-                _client(config, spec, selection, label=f"gate-{candidate.id}"),
+                client,
                 cfg=cfg,
                 trials=trials,
                 base_ref=config.git.default_base,
@@ -380,7 +384,7 @@ def launch_gate(
                 on_base=side("base", config.git.default_base),
                 on_candidate=side("cand", candidate_ref),
                 cancel=handle.cancel_event,
-                reviewer=choice.reviewer,
+                reviewer=choice.build(client),
             )
         except RunCancelled as exc:
             # Nothing is saved: half a gate is not a verdict, and a record of one would be evidence
@@ -393,6 +397,10 @@ def launch_gate(
             "passed": record.result.passed,
             "reasons": list(record.result.reasons),
             "llm_calls": record.llm_calls,
+            # A gate blames a delta on the guidance, which holds only if both sides saw the same
+            # things. When an agent investigated differently the verdict is still the verdict —
+            # but the operator reading it deserves to know, and this was recorded nowhere they look.
+            "trace_diverged": record.trace_diverged,
         }
 
     return _launch(jobs, "gate", candidate.id, work, plan)
@@ -571,22 +579,35 @@ def plan_review_job(
     selection = _pick(request.provider, request.model, selection)
     skill = _skill(root, request.skill_id)
     choice = _reviewer_choice(config, skill)
+    # Three reviewers, three costs — and an agent is the one that spends *this* backend. It was
+    # lumped in with the reviewer program on `choice.custom`, so the banner said "up to 0 LLM
+    # call(s) — no Whetstone calls" directly above a note that the same run would make up to 13.
+    # A zero estimate is not merely wrong reading: `check_budget` reads it, so an agent review
+    # could never trip `max_llm_calls_per_run` however large its ceiling.
+    agent = choice.agent
+    if agent is not None:
+        calls, basis = agent.max_calls, (
+            f"up to {agent.max_calls} calls: this skill runs as an agent over this change "
+            f"({agent.max_steps} investigation steps + one forced answer). No judge — there is "
+            f"nothing to judge yet"
+        )
+    elif choice.custom:
+        calls, basis = 0, "no Whetstone calls: your reviewer program runs the review"
+    else:
+        calls, basis = 1, (
+            "one call: the reviewer over this change. No judge — there is nothing to judge yet"
+        )
     plan = plan_calls(
         "review",
         _backend(selection, _step(root, skill, "evaluate")),
-        # A reviewer program makes that one call itself, on its own backend, so Whetstone's own
-        # count is zero — and there is no judge on a live review to add one back.
-        calls=0 if choice.custom else 1,
-        basis=(
-            "no Whetstone calls: your reviewer program runs the review"
-            if choice.custom
-            else "one call: the reviewer over this change. No judge — there is nothing to judge yet"
-        ),
+        calls=calls,
+        basis=basis,
         details=["the findings are stored unruled; you decide which are right"],
     )
     if not skill.body.strip():
         plan.warnings.append("this skill has no guidance, so the reviewer is being sent no rules")
-    _annotate_reviewer(plan, choice, invocations=1)
+    _annotate_reviewer(plan, choice, invocations=1, judged=False)
+    check_budget(plan, config.runs.max_llm_calls_per_run)
     return plan
 
 
@@ -615,17 +636,18 @@ def launch_review(
     def work(handle: JobHandle) -> dict[str, Any]:
         handle.progress(0, 1, f"reviewing {ref or 'the change'}")
         handle.check()
+        client = _client(config, spec, selection, label=f"review-{skill.id}")
         record = record_review(
             skill,
             change,
-            _client(config, spec, selection, label=f"review-{skill.id}"),
+            client,
             source=source,
             ref=ref,
             url=url,
             title=title,
             backend=backend.name,
             model=backend.model,
-            reviewer=choice.reviewer,
+            reviewer=choice.build(client),
         )
         reviews.save(record)
         handle.log(
@@ -785,7 +807,8 @@ def plan_baseline_job(
         cases=len(naked.eval_cases),
         wiki_limits=None,
         judge_cascade=bool(spec and spec.judge.enabled),
-        host_reviews=not choice.custom,
+        host_reviews=choice.agent is not None or not choice.custom,
+        calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     plan.action = "baseline"
     plan.details.append(
@@ -839,17 +862,18 @@ def launch_baseline(
             elif event.kind == "case_started":
                 handle.progress(event.completed_cases, event.total_cases, f"{event.case_id}…")
 
+        client = _client(config, spec, selection, label=f"baseline-{skill.id}")
         try:
             record = record_baseline(
                 skill,
-                _client(config, spec, selection, label=f"baseline-{skill.id}"),
+                client,
                 backend=backend.name,
                 model=backend.model,
                 on_event=on_event,
                 cancel=handle.cancel_event,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
-                reviewer=choice.reviewer,
+                reviewer=choice.build(client),
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -1545,7 +1569,7 @@ def _gate_sides(config: Config, root: Path, skill_id: str) -> tuple[Skill, Skill
 
 
 def _reviewer_choice(config: Config, skill: Skill) -> ReviewerChoice:
-    """The reviewer this skill scores with — the built-in one, or its own `run:` program.
+    """The reviewer this skill scores with — the built-in one, its own `run:` program, or an agent.
 
     A required context var that is unset is refused here, at the plan, so a run never dies partway
     through because a source location the reviewer needs was never provided — the same discipline
@@ -1561,11 +1585,23 @@ def _reviewer_choice(config: Config, skill: Skill) -> ReviewerChoice:
             f"the reviewer for {skill.id!r} needs context that is not set: {names} — set the "
             f"environment variable(s), or add them to .env, and try again"
         )
+    if choice.problems:
+        raise Unprocessable(
+            f"the reviewer for {skill.id!r} cannot run: " + "; ".join(choice.problems)
+        )
+    if choice.task is not None:
+        # The review path would score this skill's (empty) `eval_cases/` and report a flawless run
+        # over nothing, which is worse than any error message.
+        raise Unprocessable(
+            f"{skill.id!r} is a task skill (`task: enabled` in evaluate/step.yaml): it is scored "
+            f"on work it produces, not findings it reports, so the review path cannot run it. Use "
+            f"`whetstone eval task --skill <folder>` — the console does not yet drive task skills."
+        )
     return choice
 
 
 def _annotate_reviewer(
-    plan: Plan, choice: ReviewerChoice, *, invocations: int, gate: bool = False
+    plan: Plan, choice: ReviewerChoice, *, invocations: int, gate: bool = False, judged: bool = True
 ) -> None:
     """Say, in the cost plan, that a custom reviewer will run — what it gets, and how often.
 
@@ -1573,19 +1609,50 @@ def _annotate_reviewer(
     What it cannot price is the program's own spend, so it prices what it can and *counts* what it
     cannot: the invocation volume is the one number the operator needs to multiply by their own
     per-call cost, and a plan that hid it would understate the run to the point of dishonesty.
+
+    `judged=False` for a live review, which has no judge — there is nothing to judge until a human
+    rules on the findings. Saying "plus the judge" there described a call that never happens, in the
+    same banner whose built-in wording already says the opposite.
     """
     if not choice.custom:
         return
-    plan.details.append(
-        f"reviewer: {choice.identity} — your program reads the diff and the context and returns "
-        f"findings; Whetstone calls no model for the review (the judge still runs on the backend "
-        f"above, and the estimate counts only that)"
-    )
-    plan.details.append(
-        f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot price "
-        f"those calls, only count them, so the cost of the run is this many invocations at "
-        f"whatever each one spends"
-    )
+    if choice.agent is not None:
+        # An agent *does* spend Whetstone's backend — it is the one custom reviewer whose calls are
+        # ours, so they are priced rather than merely counted, at the step ceiling.
+        # `max_calls`, not `max_steps`: the budget buys that many investigation turns and then one
+        # more forced turn to make it answer. Pricing the ceiling at `max_steps` understates every
+        # review by exactly one call.
+        calls = choice.agent.max_calls
+        plan.details.append(
+            f"reviewer: {choice.identity} — this skill runs as an agent. Its SKILL.md is the "
+            f"instruction set, its other pages are read on demand, and it investigates before "
+            f"answering."
+        )
+        plan.details.append(
+            f"up to {calls} model call(s) per review ({choice.agent.max_steps} steps + one forced "
+            f"answer) x {invocations} review(s) = up to {calls * invocations} calls on the backend "
+            f"above{', plus the judge' if judged else ' (there is no judge on a live review)'}. An "
+            f"agent usually stops well short of its step ceiling, so this is an upper bound, not "
+            f"an estimate."
+        )
+        if choice.agent.source_root:
+            plan.details.append(
+                "the agent can read the declared source tree (read-only, sandboxed to its root)"
+            )
+        if choice.agent.tools:
+            names = ", ".join(t.name for t in choice.agent.tools)
+            plan.details.append(f"skill-provided tools: {names} — run as programs by this skill")
+    else:
+        plan.details.append(
+            f"reviewer: {choice.identity} — your program reads the diff and the context and "
+            f"returns findings; Whetstone calls no model for the review (the judge still runs on "
+            f"the backend above, and the estimate counts only that)"
+        )
+        plan.details.append(
+            f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot "
+            f"price those calls, only count them, so the cost of the run is this many invocations "
+            f"at whatever each one spends"
+        )
     if choice.context and choice.context.redacted:
         shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
         plan.details.append(f"reviewer context: {shown}")
@@ -1724,8 +1791,9 @@ def _eval_plan(
         cases=scored,
         wiki_limits=spec.inputs.wiki if spec else None,
         judge_cascade=bool(spec and spec.judge.enabled),
-        # A skill with its own reviewer program spends none of Whetstone's calls on the review.
-        host_reviews=not choice.custom,
+        # A reviewer *program* spends none of Whetstone's calls; an agent spends one per step.
+        host_reviews=choice.agent is not None or not choice.custom,
+        calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     if sides > 1 and plan.estimate:
         # Doubled *before* the budget check: a warning computed against one half of a gate is the

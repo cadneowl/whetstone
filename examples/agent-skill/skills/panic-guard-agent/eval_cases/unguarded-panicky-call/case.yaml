@@ -1,0 +1,18 @@
+id: unguarded-panicky-call
+kind: should_catch
+repo: "local:hub-backend"
+change: change.diff
+provenance:
+  source: manual
+  human_signal: "hand-written example"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: app/worker.py
+      line_range: [1, 4]
+    semantic: >
+      the added call to open_ledger can panic and its result is used unguarded, so a locked
+      ledger would abort the worker
+    severity_min: warning
+    pattern: "panic"

@@ -69,17 +69,42 @@ def test_evaluate_step_may_not_have_a_prompt(tmp_path: Path) -> None:
         load_step(tmp_path, "evaluate")
 
 
-def test_context_needs_a_reviewer_program(tmp_path: Path) -> None:
-    """context: feeds a run: reviewer; declared without one it would be resolved then dropped."""
+def test_context_needs_something_that_consumes_it(tmp_path: Path) -> None:
+    """context: feeds a reviewer program or an agent; with neither it would be resolved — a secret
+    read, a file loaded — and then silently dropped, because the built-in reviewer takes no inputs.
+    """
     _write(tmp_path, "evaluate", "context:\n  source_root: { env: X }\n")
-    with pytest.raises(StepError, match="only feeds a reviewer program"):
+    with pytest.raises(StepError, match="has no effect without 'run:', 'agent:' or 'task:'"):
         load_step(tmp_path, "evaluate")
 
 
 def test_context_is_rejected_on_a_non_evaluate_step(tmp_path: Path) -> None:
     _write(tmp_path, "improve", 'run: ["echo", "hi"]\ncontext:\n  a: 1\n')
-    with pytest.raises(StepError, match="only feeds a reviewer program"):
+    with pytest.raises(StepError, match="has no effect without 'run:', 'agent:' or 'task:'"):
         load_step(tmp_path, "improve")
+
+
+def test_an_agent_may_declare_context_for_the_tools_it_brings(tmp_path: Path) -> None:
+    """The whole point of the tools seam: a skill that ships a Jira script needs a token, and the
+    token has to be named in the step rather than committed. It used to be rejected outright —
+    `context:` demanded `run:`, which `agent:` forbids, so the documented path could not be taken.
+    """
+    _write(
+        tmp_path,
+        "evaluate",
+        "agent:\n  enabled: true\ncontext:\n  jira_token: { env: JIRA_TOKEN }\n",
+    )
+    spec = load_step(tmp_path, "evaluate")
+    assert spec is not None
+    assert spec.context == {"jira_token": {"env": "JIRA_TOKEN"}}
+
+
+def test_a_task_skill_may_declare_context_too(tmp_path: Path) -> None:
+    _write(
+        tmp_path, "evaluate", "task:\n  enabled: true\ncontext:\n  api: https://internal\n"
+    )
+    spec = load_step(tmp_path, "evaluate")
+    assert spec is not None and spec.context == {"api": "https://internal"}
 
 
 def test_run_as_a_string_is_rejected_with_a_reason(tmp_path: Path) -> None:

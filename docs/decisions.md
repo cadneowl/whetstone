@@ -618,3 +618,180 @@ same boundary `improve`/`update` already cross. Whetstone passes `source_root` a
 it, so it adds no path-handling surface of its own. If a reviewer sends source to a cloud model that
 is the operator's choice; the context bag makes "this reviewer has the whole repo and a network
 model" legible where it previously would not have been.
+
+---
+
+## ADR-023 — A skill folder is run, not concatenated
+
+**Context.** ADR-022 widened the reviewer seam so an operator could plug in their own program, and
+declared a non-goal: *"Giving whetstone's own reviewer model filesystem tools."* That was the wrong
+call for the thing skills actually are. A skill is a folder — `SKILL.md` plus reference pages plus
+generated repo docs — and `SKILL.md` refers to the rest of it the way a person would, with markdown
+links: *"see [principles.md](references/principles.md)."* The built-in reviewer cannot follow a
+link, so `_load_pages` swept every `.md` in the folder into one prompt. On a real skill that meant
+17.6KB sent on every case regardless of what the change touched, a `README.md` written for humans
+fed to the model as rules, and a `wiki:` path index that mapped documentation to source paths doing
+nothing at all. The seam ADR-022 added did not fix this: it only moved the work, since every skill
+would have had to ship its own agent loop.
+
+**Decision.** Whetstone runs a skill as an agent. `SKILL.md` is the instruction set, the folder's
+other pages are fetched on demand through `read_skill_file`, a declared source root adds sandboxed
+`read_file`/`grep`/`list_dir`, and the skill may declare its own tools as programs. This supersedes
+ADR-022's non-goal; the reviewer-program seam remains, and the two are mutually exclusive.
+
+**Progressive disclosure, because that is what the author wrote.** The alternative — keep inlining
+but do it more cleverly — cannot work: only the agent knows which page is relevant to the change in
+front of it, which is precisely the judgement `SKILL.md` was written to express.
+
+**The host still learns nothing domain-specific.** A skill that needs a tracker ships a script that
+reads the tracker and names it under `agent: tools:`. Whetstone offers it to the model and runs it
+on the same JSON-on-stdin contract `improve`/`update` already use. Whetstone never grows a Jira
+integration, and a tool that fails reports back *to the model* rather than ending the run, because
+an agent told "no such issue" tries something else.
+
+**It cannot block on a human, and that is enforced rather than hoped for.** Skills written for
+interactive use say things like "ask clarifying questions"; unattended there is nobody to ask. So:
+no tool exists for asking, the runtime preamble states there is no human, a turn calling no tool
+costs a step and is nudged, and at `max_steps` the answer is forced with only the terminal tool
+offered. If the model still refuses, the run fails — an eval reporting zero findings because nobody
+answered is indistinguishable from a clean review, and that ambiguity is worse than a failure.
+
+**A terminal tool, not parsed prose.** `submit_findings` is the only way to finish, so the harness
+never guesses what a skill concluded.
+
+**Tool support is required, never worked around.** `structured` degrades gracefully when a local
+server rejects `response_format`; `converse` does the opposite and raises `ToolsUnsupported`. A
+review carried out with no tools looks exactly like one that worked and would report confidently on
+code the model never opened.
+
+**Determinism is weaker, so it is measured.** An agent is a less fixed instrument than a single
+call. Both gate sides share one instance, and every run records the trajectory it actually took;
+`trace_diverged` reports when the two sides investigated differently, which is the honest signal —
+a delta may then reflect what the agent chose to read rather than the guidance. `k>1` still measures
+per-trial variance. This does not make an agentic gate as strong as a single-call one, and the
+record says so instead of implying otherwise.
+
+**Cost is the run's own.** Unlike a reviewer program, an agent spends Whetstone's backend, so the
+estimate counts `max_steps` calls per review rather than one and the plan names the ceiling.
+
+**Off by default.** Without `agent: enabled` nothing changes, and `agent:` and `run:` are mutually
+exclusive — the skill is run here, or reviewing is handed over entirely.
+
+---
+
+## ADR-024 — The judge is one verifier, not the definition of scoring
+
+**Context.** Every layer of the eval model assumed code review. `EvalCase.change` is a diff,
+`kind` is `should_catch`/`should_not_flag`, `Expectation.must` is `appear`/`not_appear` at a
+`path`+`line_range`, `Finding` is the only output type, and scoring reduces to recall and fp_rate
+via the judge's match/no-match calls. That is an honest model of *reviewing*. It cannot express a
+skill that writes tests: the output is code, not located claims, and success is "the tests pass and
+catch the defect", which is a question for a test runner rather than for a judge comparing two
+sentences. Forcing such a skill into `must: appear` would not be awkward — it would produce numbers
+that mean nothing.
+
+**Decision.** Generalise the *grading*, not the whole model. A skill may be scored on **task cases**
+(`task_cases/`) instead of eval cases: it is given an instruction and a fresh workspace, it produces
+files, and a **verifier** grades them. The judge becomes one verifier among several rather than the
+definition of what scoring is.
+
+**The constraint that shaped everything: a verifier must return a comparable scalar.** Whetstone's
+whole claim is that no skill change ships without evidence it is an improvement, and that only works
+if base and candidate reduce to numbers that can be compared. So `VerifyOutcome` always carries
+`score` (0–1) beside `passed`. A grader that answered "it depends" would quietly turn the gate into
+decoration.
+
+**Partial credit is not a nicety.** A gate over binary outcomes can only see whole cases flip, and
+most real improvement is smaller than that. So a command verifier may report a degree — while the
+exit code keeps the verdict, so a grader cannot pass itself by printing `1.0`.
+
+**Two verifiers ship, and an escape hatch.** `command:` covers the overwhelming majority (run the
+tests, run the linter, run the build) and is deterministic, which matters more here than anywhere
+else: a flaky grader corrupts a gate in a way that is far harder to notice than a flaky reviewer,
+because the number still looks like a score. `run:` hands grading to a program the skill ships, for
+quality an exit code cannot express. There is deliberately no LLM-judge-on-prose verifier yet —
+that would reintroduce the ambiguity this ADR exists to remove, and should be added only against a
+real skill that needs it.
+
+**Additive, not a rewrite.** The review path is untouched: same `EvalCase`, same judge, same
+`SkillScore`, same gate, same stored evidence. Task skills run alongside. Merging the two scoring
+models would have meant migrating every stored record and every C6 gate for no gain — the machinery
+worth reusing (sampling, trials, gate discipline, provenance, the console) was never review-specific
+in the first place.
+
+**Errors are separated from failures.** An executor that crashes on one case records the error and
+scores zero, so one malformed case cannot lose a corpus of two hundred. A *verifier* that crashes
+stops the run instead: scoring an ungradeable case as a failure would blame the skill for a broken
+grader, and a corpus that silently grades itself down is worse than one that refuses.
+
+**Isolation per case.** Each task case gets its own workspace, seeded from a `files/` directory
+rather than YAML-embedded strings — the seed for a realistic task is source code, and source code
+inside YAML is neither readable nor reviewable, the same reason a case's diff has always been its
+own file. The write tool is sandboxed exactly as the read tools are.
+
+**What is deliberately not built.** A generic `Input` union (task cases take an instruction, seed
+files and optionally a change — enough for every task described so far), task cases in the console,
+and mining task cases from production signal. Each needs a real skill to design against rather than
+a guess, and guessing here is what produced the wrong abstraction the first time.
+
+## ADR-025 — An agent that fails must fail visibly, and one that succeeds must be affordable
+
+**Context.** ADR-023 made a skill folder something Whetstone *runs*. A code review of that work
+found the engine sound and the edges around it not: the configuration channel the design depended on
+was unreachable, the failure paths disagreed with each other, and several things the records claimed
+were not true. The individual defects were small; what they had in common is that each one degraded
+into something that *looked like a normal run*.
+
+**Configuration was declared and then refused.** `context:` — the documented way a skill names the
+token its own Jira tool needs — was validated as requiring `run:`, which `agent:` forbids. So the
+bag could never be populated for an agent, and the only configuration that reached one was
+`agent.source:`. The fix is that `context:` is accepted wherever something consumes it (`run:`,
+`agent:`, `task:`) and still refused where nothing does.
+
+**The obvious way to fix that would have leaked secrets.** The agent's system prompt was assembled
+from the *resolved* context values. With the bag reachable, a `{ env: JIRA_TOKEN }` would have been
+written into the prompt of every case and into every transcript. So the split is explicit and
+load-bearing: **tools receive `values`, the model receives `redacted`**. A script calling Jira needs
+the credential; a model reasoning about a diff never does.
+
+**Silent degradation is the failure mode this feature is prone to.** Three instances, all fixed the
+same way — refuse loudly:
+
+- A `source:` root that is *set but wrong* left every source tool answering "no such file", which
+  reads exactly like a clean codebase. Refused at the plan.
+- A `task:` skill fell through to the review path, scored its empty `eval_cases/`, and reported
+  `recall 1.000` — a perfect score over nothing, on the bundled example. The review path now refuses
+  it and `whetstone eval task` runs it.
+- A glob with a directory component (`src/**/*.py`) matched nothing, because `Path.match` compares
+  right-to-left against the file name. A model asking the obvious question got "no such code".
+
+**Cancelling is one event, however deep it is noticed.** `AgentCancelled` was an unrelated exception
+that fell past every `except RunCancelled`, so stopping a run reported a crash. It now subclasses a
+`RunCancelled` that lives in a dependency-free module both layers can reach.
+
+**A run is not lost because one case was.** A reviewer that cannot answer used to kill the whole
+run — and an agent makes many calls per case, so the exposure across a large corpus is not small.
+An unscorable case is now recorded as such and contributes *nothing* to the confusion counts:
+scoring it as a miss would blame the skill for the instrument, and scoring it as a pass would hide a
+broken run. `SkillScore.errors` reports the count and the gate blocks a candidate that produced more
+of them than its base — the same rule the task gate already applied. This closes a disagreement
+between the two harnesses that had no justification other than being written at different times.
+
+**Unbounded work is a correctness problem, not a performance one.** `grep` pruned only
+dot-directories, so a real checkout meant walking `node_modules` and decoding bundles and
+executables as text: 42.5s per call against this repository, against 0.1s with the usual vendor
+trees pruned. An agent greps several times per case, on every case, on both sides of a gate. A tool
+that slow is a tool a skill author stops using, which quietly returns the agent to reviewing a diff
+with nothing open.
+
+**Evidence nobody can read is not evidence.** `trace_diverged` was computed on two classes and
+rendered nowhere; as a plain `@property` it did not even survive serialization. The trajectory has
+the same job as `reviewer_context_digest` — letting a reader decide whether to trust a delta — so it
+is now a `computed_field`, printed by the CLI for runs and gates, and flagged in the console. In the
+same spirit, `record_gate` now counts the agent's own calls, which it alone was omitting while its
+two sibling recorders included them, and the cost plan prices the forced final turn it had been
+quietly leaving out of every review.
+
+**What is deliberately not built.** Driving task skills from the console: the review console is
+built around recall/fp_rate and a run drill-down, and giving task runs a first-class surface is a
+feature, not a fix. The CLI runs them and both the console and the CLI refuse to pretend otherwise.

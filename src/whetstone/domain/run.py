@@ -194,6 +194,12 @@ class CaseRun(BaseModel):
     # record loads as, which is honest: everything was learnable-from before the split existed.
     partition: Literal["train", "holdout"] = "train"
     trials: list[TrialRecord] = []
+    # Set when the reviewer could not answer this case at all — a model that refused even when
+    # forced, a backend that rejected tools, a reviewer program that died. The case then carries no
+    # trials and contributes nothing to the confusion counts, because "we do not know what the skill
+    # would have said" is not the same as "the skill missed it". `SkillScore.errors` keeps it
+    # visible; the gate refuses a candidate that produced more of them than its base.
+    error: str = ""
 
     @property
     def confusion(self) -> Confusion:
@@ -255,6 +261,11 @@ class RunRecord(BaseModel):
     # record cannot say so. Secrets never land here — an `env:` value is stored as `<env:NAME>`.
     reviewer_context: dict[str, Any] = Field(default_factory=dict)
     reviewer_context_digest: str = ""
+    # For an agent reviewer: what it actually looked at, as "n× tool(detail)" lines. An agent is a
+    # less fixed instrument than a single call — two runs can differ because the agent investigated
+    # differently rather than because the guidance changed. This is what makes that visible instead
+    # of leaving a moved score unexplainable. Empty for every non-agent reviewer.
+    reviewer_trace: list[str] = Field(default_factory=list)
     reviewer_effort: Effort = "high"
     judge_effort: Effort = "medium"
     # Identity of the judge that produced every verdict in this record — see

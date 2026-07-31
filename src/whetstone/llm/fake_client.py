@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from whetstone.llm.base import Effort, LLMRequest, T
+from whetstone.llm.tools import Message, ToolSpec, Turn
 
 
 class FakeLLMClient:
@@ -30,3 +31,33 @@ class FakeLLMClient:
                 f"fake handler returned {type(result).__name__}, expected {schema.__name__}"
             )
         return result
+
+
+class FakeToolClient:
+    """Deterministic `ToolClient` for tests and offline demos.
+
+    A handler maps (system, messages, tools) → a `Turn`, so a test can script an agent's whole
+    trajectory: read this page, grep for that, then submit. Every turn is recorded in `.turns`, and
+    `.forced` says whether the loop had to demand a final answer — which is how the "never gets
+    stuck" behaviour is asserted rather than assumed.
+    """
+
+    def __init__(
+        self, handler: Callable[[str, list[Message], list[ToolSpec]], Turn]
+    ) -> None:
+        self._handler = handler
+        self.turns: list[list[Message]] = []
+        self.forced: list[str] = []
+
+    def converse(
+        self,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        *,
+        force_tool: str | None = None,
+    ) -> Turn:
+        self.turns.append(list(messages))
+        if force_tool:
+            self.forced.append(force_tool)
+        return self._handler(system, messages, tools)

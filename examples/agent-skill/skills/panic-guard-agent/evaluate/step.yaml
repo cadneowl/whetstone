@@ -1,0 +1,42 @@
+# Run this skill *as an agent*: SKILL.md becomes the instructions, references/panics.md is fetched
+# on demand, the source tree is searchable, and the skill brings one tool of its own.
+#
+# Contrast with ../../../../agentic-reviewer/, which uses `run:` — there, your program does the
+# reviewing and Whetstone only feeds it. Here Whetstone runs the skill itself.
+
+description: Run the panic-guard skill as an agent over its eval cases.
+
+agent:
+  enabled: true
+  # Investigation budget per case. Read the reference, grep a couple of functions, ask the owner
+  # tool, answer — four or five turns in practice; twelve is the ceiling, not the expectation.
+  # Cost is priced at max_steps + 1: the budget buys twelve turns and then one forced answer.
+  max_steps: 12
+
+  # Where the code is. Machine-specific, so it comes from the environment and is never committed —
+  # `required` makes both the CLI and the console refuse at the plan when it is unset, rather than
+  # letting the agent review with no access and report on what it never read.
+  source: { env: PANIC_GUARD_AGENT_SOURCE, required: true }
+
+  # A tool the skill brings. Whetstone offers it to the model and runs it on request; it never
+  # learns what an owner is. The program gets {"arguments": …, "context": …} on stdin.
+  tools:
+    - name: owner_of
+      description: >
+        Return the team that owns a module, given its path in the source tree
+        (e.g. "ledger.py"). Use it so a finding names who should pick it up.
+      run: ["python", "tools/owner_of.py"]
+      input_schema:
+        type: object
+        properties:
+          module: { type: string, description: "path relative to the source root" }
+        required: [module]
+
+# What the skill's own tools need, resolved by Whetstone and handed to them on stdin — never shown
+# to the model, which sees `<file:./owners.json>` in its prompt instead. A token would live here the
+# same way. Committed `file:` entries are hashed by content, so changing one is a change to what the
+# reviewer saw, and the run record says so.
+context:
+  owners: { file: ./owners.json }
+
+trials: 1

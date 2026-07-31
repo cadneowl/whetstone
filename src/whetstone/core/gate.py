@@ -45,6 +45,17 @@ def gate(old: SkillScore, new: SkillScore, cfg: GateConfig | None = None) -> Gat
     cfg = cfg or GateConfig()
     reasons: list[str] = []
 
+    # Before any comparison: are these numbers measurements at all? A side whose every case errored
+    # reports recall 1.000 — an empty confusion is indistinguishable from a perfect one — so two
+    # such sides compare equal and the gate passes over a run in which nothing happened. Checked
+    # first because every reason below is arithmetic on figures this decides the meaning of.
+    for label, score in (("baseline", old), ("candidate", new)):
+        if score.cases and not score.scorable:
+            reasons.append(
+                f"the {label} scored no cases at all: every one of its {len(score.cases)} case(s) "
+                f"errored, so its metrics are computed over nothing and mean nothing"
+            )
+
     if new.recall < old.recall - cfg.recall_tol:
         reasons.append(
             f"recall regressed {old.recall:.3f} -> {new.recall:.3f} (tol {cfg.recall_tol})"
@@ -68,6 +79,14 @@ def gate(old: SkillScore, new: SkillScore, cfg: GateConfig | None = None) -> Gat
         reasons.append(
             f"{len(regressed)} case(s) regressed (max {cfg.max_case_regressions}): "
             + ", ".join(regressed)
+        )
+    # An unscorable case contributes zeros, so it neither passes nor fails — which means a candidate
+    # that quietly stopped being reviewable on more cases would otherwise sail through on a recall
+    # computed over whatever survived. Same rule the task gate applies.
+    if new.errors > old.errors:
+        reasons.append(
+            f"{new.errors - old.errors} more case(s) could not be scored at all "
+            f"({old.errors} -> {new.errors})"
         )
 
     fixed, unfixed = _targeted(old, new, cfg, reasons)
@@ -109,6 +128,16 @@ def _targeted(
             # ignoring it would make `--targeted` look enforced while enforcing nothing.
             unfixed.append(case_id)
             reasons.append(f"targeted case {case_id!r} is not in the candidate's eval set")
+            continue
+        if nc.error:
+            # Its own reason, not "still fails": the metrics on an unscorable case are an artifact
+            # of an empty confusion, so reporting `recall 1.000` here would be absurd — and the fix
+            # is to repair the reviewer, not the guidance.
+            unfixed.append(case_id)
+            reasons.append(
+                f"targeted case {case_id!r} could not be scored, so this change cannot claim to "
+                f"have fixed it: {nc.error[:120]}"
+            )
             continue
         if not nc.passed(cfg.case_recall_floor, cfg.case_fp_ceiling):
             unfixed.append(case_id)

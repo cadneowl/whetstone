@@ -29,7 +29,12 @@ def record_case(case: EvalCase, trials_findings: list[list[Finding]], judge: Jud
 def case_score_from_run(run: CaseRun) -> CaseScore:
     """Project a recorded case run down to the confusion counts the gate math operates on."""
     return CaseScore(
-        case_id=run.case_id, kind=run.kind, trials=[t.confusion for t in run.trials]
+        case_id=run.case_id,
+        kind=run.kind,
+        trials=[t.confusion for t in run.trials],
+        # Carried through so a score can report how many cases were unscorable. Without it an
+        # errored case is indistinguishable from a case with nothing to catch.
+        error=run.error,
     )
 
 

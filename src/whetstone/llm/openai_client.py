@@ -8,6 +8,14 @@ from typing import Any
 import httpx
 
 from whetstone.llm.base import Effort, T
+from whetstone.llm.tools import (
+    Message,
+    ToolCall,
+    ToolSpec,
+    ToolsUnsupported,
+    Turn,
+    json_arguments,
+)
 
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 # Statuses that usually mean "this server doesn't understand response_format" — retry without it.
@@ -39,6 +47,90 @@ def _content_of(data: Any) -> str:
         return data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as exc:  # pragma: no cover - defensive
         raise LLMStructuredError(f"unexpected chat-completions response shape: {data!r}") from exc
+
+
+def _refuse_text_tool_call(content: str, tools: list[ToolSpec]) -> None:
+    """Catch a model that describes a tool call instead of making one.
+
+    Found against a live Ollama: `qwen2.5-coder` answers a tool-calling request with the call as
+    *prose* — `{"name": "read_skill_file", "arguments": {...}}` in `content`, and no `tool_calls`
+    key at all. Nothing about that is an error to the transport, so without this check the agent
+    loop sees a turn that called nothing, nudges, burns its whole budget, and finally reports that
+    the model never answered — which is true but blames the wrong thing.
+
+    Caught on the first turn instead, and named for what it is: the model cannot call tools, so a
+    skill run on it would review having opened nothing.
+    """
+    text = (content or "").strip()
+    if not text or not tools:
+        return
+    try:
+        # The same extractor `structured` uses: local models routinely fence their JSON, and the
+        # first attempt at this check missed a ```json wrapper for exactly that reason.
+        parsed = _extract_json_object(text)
+    except (json.JSONDecodeError, ValueError):
+        return
+    named = isinstance(parsed, dict) and parsed.get("name")
+    if named and any(t.name == named for t in tools):
+        raise ToolsUnsupported(
+            f"the model emitted a tool call as text instead of calling it — it answered with "
+            f"{{'name': {named!r}, …}} in the message content and no tool_calls. This model or "
+            f"runtime does not support tool calling; use one that does (for Ollama, a tool-capable "
+            f"model such as qwen3-coder). Running a skill without tools would mean reviewing with "
+            f"nothing opened."
+        )
+
+
+def _to_openai(message: Message) -> list[dict[str, Any]]:
+    """Neutral message → chat-completions messages.
+
+    A tool turn expands to *one message per result*, each addressed by `tool_call_id` — where
+    Anthropic groups them into a single user turn. Returning a list keeps that difference here.
+    """
+    if message.role == "tool":
+        return [
+            {"role": "tool", "tool_call_id": r.call_id, "content": r.content}
+            for r in message.results
+        ]
+    if message.role == "assistant":
+        out: dict[str, Any] = {"role": "assistant", "content": message.text or None}
+        if message.calls:
+            out["tool_calls"] = [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.name, "arguments": json.dumps(c.arguments)},
+                }
+                for c in message.calls
+            ]
+        return [out]
+    return [{"role": "user", "content": message.text}]
+
+
+def _turn_of(data: Any, tools: list[ToolSpec] | None = None) -> Turn:
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:  # pragma: no cover - defensive
+        raise LLMStructuredError(f"unexpected chat-completions response shape: {data!r}") from exc
+    if not message.get("tool_calls"):
+        _refuse_text_tool_call(message.get("content") or "", tools or [])
+    calls: list[ToolCall] = []
+    for raw in message.get("tool_calls") or []:
+        function = raw.get("function") or {}
+        try:
+            arguments = json_arguments(function.get("arguments") or "")
+        except json.JSONDecodeError:
+            # Feed it back as an empty call rather than crashing; the loop reports the failure to
+            # the model, which is recoverable, where a raise would end the run.
+            arguments = {}
+        calls.append(
+            ToolCall(
+                id=str(raw.get("id") or ""),
+                name=str(function.get("name") or ""),
+                arguments=arguments,
+            )
+        )
+    return Turn(text=str(message.get("content") or ""), calls=calls)
 
 
 class OpenAICompatibleClient:
@@ -134,6 +226,58 @@ class OpenAICompatibleClient:
             f"{self._model} did not return schema-valid JSON for {schema.__name__} after "
             f"{self._max_retries + 1} attempt(s): {last_error}"
         )
+
+    # --- tool-calling (`ToolClient`) ------------------------------------------------
+
+    def converse(
+        self,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        *,
+        force_tool: str | None = None,
+    ) -> Turn:
+        """One turn of a tool-calling conversation.
+
+        Unlike `structured`, a server that rejects this is **not** worked around. Dropping
+        `response_format` costs a little robustness; dropping `tools` would mean the agent silently
+        reviewed with no access to the source or the skill's own pages, and reported confidently on
+        what it could not see. That failure has to be loud.
+        """
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": "system", "content": system}]
+            + [m for msg in messages for m in _to_openai(msg)],
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    },
+                }
+                for t in tools
+            ],
+        }
+        if force_tool:
+            body["tool_choice"] = {"type": "function", "function": {"name": force_tool}}
+        # Per call, as `structured` does. Without this the "one line per kind of trouble" budget is
+        # spent once for the whole client, so an agent that hits retries on case 1 goes silent for
+        # every case after it — on exactly the slow local backends that provoke retries.
+        self._noted = set()
+        resp = self._post(body)
+        if resp.status_code in _NO_RESPONSE_FORMAT_STATUS:
+            raise ToolsUnsupported(
+                f"{self._base} ({self._model}) rejected a tool-calling request with "
+                f"{resp.status_code}: {resp.text[:300]}. An agent skill needs a backend that "
+                f"supports tools — reviewing without them would mean reporting on code the model "
+                f"never read."
+            )
+        resp.raise_for_status()
+        return _turn_of(resp.json(), tools)
 
     def _complete(self, messages: list[dict[str, str]]) -> str:
         body: dict[str, Any] = {

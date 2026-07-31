@@ -92,6 +92,9 @@ class CaseScore(BaseModel):
     case_id: str
     kind: EvalKind
     trials: list[Confusion]
+    # Why this case could not be scored, when it could not be. An errored case has no trials, so it
+    # contributes zeros — deliberately neither a pass nor a fail, since nothing was measured.
+    error: str = ""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -109,6 +112,17 @@ class CaseScore(BaseModel):
         return self.confusion.fp_rate
 
     def passed(self, recall_floor: float, fp_ceiling: float) -> bool:
+        """Whether this case *demonstrably* met the bar. An unscorable one did not.
+
+        The metrics alone would say it did: an errored case has no trials, so its confusion is
+        empty, and an empty confusion reads as `recall 1.0, fp_rate 0.0` — the conventions that are
+        right for "there was nothing to catch here" and catastrophic for "we never found out". Both
+        callers want the same answer to that: a `--targeted` case that could not be run has not been
+        fixed, and a case that stopped being scorable has regressed. Neither is a claim this can
+        make on an empty measurement, so it declines to.
+        """
+        if self.error:
+            return False
         return self.recall >= recall_floor and self.fp_rate <= fp_ceiling
 
 
@@ -140,6 +154,32 @@ class SkillScore(BaseModel):
 
     def f_beta(self, beta: float = 2.0) -> float:
         return self.confusion.f_beta(beta)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def errors(self) -> int:
+        """Cases the reviewer could not be run on at all — never silently scored as failures.
+
+        Serialized like every other metric, because a recall computed over 190 of 200 cases is a
+        different measurement from one computed over all of them, and a reader has to be able to
+        tell which they are looking at.
+        """
+        return sum(1 for c in self.cases if c.error)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def scorable(self) -> int:
+        """Cases that actually produced a measurement. **Zero makes every metric above a fiction.**
+
+        An empty confusion reads as `recall 1.0, precision 1.0, F2 1.0` — the right convention for a
+        case with nothing to catch, and the worst possible answer for a run where nothing was
+        measured at all. A reviewer pointed at a backend that cannot call tools fails every case and
+        the run reports a flawless score over nothing, which is the one shape this project exists to
+        prevent. The number cannot be fixed without breaking the convention that is correct
+        everywhere else, so it is reported alongside instead, and `core.gate` refuses to compare two
+        scores when either was computed over nothing.
+        """
+        return sum(1 for c in self.cases if not c.error)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
