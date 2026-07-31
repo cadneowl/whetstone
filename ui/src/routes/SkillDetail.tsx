@@ -64,7 +64,16 @@ export function SkillDetail() {
           rather than rendering a blank pane under the tab strip. */}
       <Tabs.Root
         value={tab}
-        onValueChange={(next) => setParams(next === 'guidance' ? {} : { tab: next }, { replace: true })}
+        // Only `tab` changes; every other param survives. It used to replace the whole query, which
+        // quietly threw away the Improve workspace's state — the batch run it had just scored and
+        // the cases you had ticked — the moment you followed its own advice to go and hand-edit on
+        // the Edit tab. "The loop, in one place" has to survive a round trip out of the tab.
+        onValueChange={(next) => {
+          const keep = new URLSearchParams(params)
+          if (next === 'guidance') keep.delete('tab')
+          else keep.set('tab', next)
+          setParams(keep, { replace: true })
+        }}
       >
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">
           <Trigger value="guidance">Guidance</Trigger>

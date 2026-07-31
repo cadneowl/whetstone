@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   useConsoleConfig,
   useGraduate,
@@ -13,6 +13,33 @@ import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, ErrorNote, score } from '@/components/primitives'
 import { SourceBadge } from '@/components/signals'
 
+/** The `cases` param when the selection is deliberately empty — distinct from the param being
+ *  absent, which means "everything" (the default a fresh visit starts on). */
+const NONE = '-'
+
+/**
+ * Which cases the URL says are selected. Absent means all of them.
+ *
+ * Ids that are no longer pending — a stale link, or a case graduated since — are dropped rather
+ * than carried into a request the server would refuse.
+ */
+export function selectionFrom(param: string | null, all: readonly string[]): ReadonlySet<string> {
+  if (param === null) return new Set(all)
+  if (param === NONE || param === '') return new Set()
+  const known = new Set(all)
+  return new Set(param.split(',').filter((id) => known.has(id)))
+}
+
+/** The inverse: `null` to drop the param entirely, which is how "all" stays out of the URL. */
+export function selectionParam(
+  selected: ReadonlySet<string>,
+  all: readonly string[],
+): string | null {
+  if (selected.size === all.length && all.every((id) => selected.has(id))) return null
+  if (selected.size === 0) return NONE
+  return all.filter((id) => selected.has(id)).join(',')
+}
+
 /**
  * The improve workspace: one place to take a skill from "triage promoted some cases it fails on"
  * to a gate-proven guidance change, ready for you to commit.
@@ -21,6 +48,10 @@ import { SourceBadge } from '@/components/signals'
  * editor, or by the LLM sharpen below, both writing straight to `skills/<id>/`. It never touches
  * git; you commit, branch and push the result yourself. Every action is scoped to the promoted cases
  * you select.
+ *
+ * The selection and the batch run live in the URL rather than in component state, because step 2
+ * sends you to the Edit tab to hand-edit and you have to be able to come back to where you were —
+ * and because a workspace whose state cannot be linked to cannot be handed to a colleague.
  */
 export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const skillId = detail.skill.id
@@ -31,20 +62,45 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const graduate = useGraduate(skillId)
   const readOnly = Boolean(config?.read_only)
 
-  const [selected, setSelected] = useState<ReadonlySet<string>>(
-    () => new Set(pending.map((c) => c.id)),
-  )
-  const [batchRun, setBatchRun] = useState<string | null>(null)
+  const [params, setParams] = useSearchParams()
+  const ids = pending.map((c) => c.id)
+  const selected = selectionFrom(params.get('cases'), ids)
+  const batchRun = params.get('run')
   const [draft, setDraft] = useState<Draft | null>(null)
   const [notice, setNotice] = useState('')
+  const [instruction, setInstruction] = useState('')
 
-  const toggle = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+  /** Write workspace state back to the query, leaving `tab` and anything else alone. */
+  const patch = (changes: Record<string, string | null>) =>
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        for (const [key, value] of Object.entries(changes)) {
+          if (value === null) next.delete(key)
+          else next.set(key, value)
+        }
+        return next
+      },
+      { replace: true },
+    )
+
+  const setSelected = (next: ReadonlySet<string>) =>
+    patch({ cases: selectionParam(next, ids) })
+
+  const toggle = (id: string) => {
+    const next = new Set(selected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setSelected(next)
+  }
+
+  // Where the Edit tab's full editor lives, with the workspace's state carried across so coming
+  // back lands on the same score and the same ticked cases.
+  const editorSearch = (() => {
+    const next = new URLSearchParams(params)
+    next.set('tab', 'edit')
+    return `?${next.toString()}`
+  })()
 
   // The batch is the pre-commit sharpening path: promote cases in triage, then close the gap here.
   // Without one, the same loop still runs against the corpus cases the last run failed — which is
@@ -110,7 +166,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const step = hasBatch ? { sharpen: '2', gate: '3' } : { sharpen: '1', gate: '2' }
 
   return (
-    <div className="max-w-3xl space-y-5">
+    // No inner measure: this is a workbench, not prose. It sat at `max-w-3xl` inside the skill
+    // page's own `max-w-6xl`, so two thirds of a wide window was empty while the case rows — which
+    // carry a checkbox, three badges, a path and two controls — wrapped for want of room.
+    <div className="space-y-5">
       <InPlaceNotice skillId={skillId} />
 
       {hasBatch && (
@@ -120,7 +179,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               Proposed cases ({selected.size} of {pending.length} selected)
             </h3>
             <div className="flex gap-3 text-xs text-muted">
-              <button type="button" onClick={() => setSelected(new Set(pending.map((c) => c.id)))}>
+              <button type="button" onClick={() => setSelected(new Set(ids))}>
                 all
               </button>
               <button
@@ -214,7 +273,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               label={scoreSubset ? `Score ${selected.size} selected` : 'Score the promoted batch'}
               onDone={(job) => {
                 const r = job.result as Record<string, unknown>
-                setBatchRun(String(r.run_id ?? '') || null)
+                patch({ run: String(r.run_id ?? '') || null })
                 setNotice(
                   `Scored: recall ${fmt(r.recall)} · fp ${fmt(r.fp_rate)}` +
                     (r.run_id ? ` — open the run to see each case.` : ''),
@@ -236,20 +295,34 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           <h3 className="text-sm font-medium">{step.sharpen} · Sharpen the guidance</h3>
           {hasBatch ? (
             <>
+              {/* Both paths, and both reachable. This used to offer hand-editing in prose and only
+                  the LLM in fact — the editor is on another tab and nothing here said so, let alone
+                  linked to it. */}
               <p className="mt-0.5 mb-2 text-xs text-muted">
-                Edit the skill files on disk by hand, or draft a change with the LLM from the cases
-                you selected. Either way it lands on disk and is re-scored above.
+                Draft a change with the LLM from the cases you selected, or{' '}
+                <Link to={{ search: editorSearch }} className="text-accent underline">
+                  edit the files by hand
+                </Link>{' '}
+                in the Edit tab (your ticked cases and this score come back with you). Either way it
+                lands on disk and is re-scored above.
               </p>
               <LaunchButton
                 kind="improve"
-                request={{ skill_id: skillId, run_id: batchRun, cases: [...selected] }}
-                label="Improve from selected"
+                request={{ skill_id: skillId, run_id: batchRun, cases: [...selected], instruction }}
+                label={selected.size ? 'Improve from selected' : 'Improve from every failure'}
                 onDone={onDrafted}
               >
-                <p className="text-xs text-muted">
-                  Drafts from the {selected.size} selected case(s)
+                {/* An empty selection is not an empty draft: the server reads no ids as "no
+                    filter" and learns from every failure in the run. Saying "drafts from the 0
+                    selected case(s)" described the opposite of what the button does — and sat
+                    directly above a cost banner correctly saying "up to N clustered failure(s)". */}
+                <p className="mb-2 text-xs text-muted">
+                  {selected.size
+                    ? `Drafts from the ${selected.size} selected case(s)`
+                    : 'Nothing is ticked, so this drafts from every failure in the run — tick cases above to narrow it'}
                   {batchRun ? '' : ' — score them first for the drafter to see what fails'}.
                 </p>
+                <Steer value={instruction} onChange={setInstruction} />
               </LaunchButton>
             </>
           ) : (
@@ -266,14 +339,18 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               {latestRunId ? (
                 <LaunchButton
                   kind="improve"
-                  request={{ skill_id: skillId, run_id: latestRunId }}
+                  request={{ skill_id: skillId, run_id: latestRunId, instruction }}
                   label="Draft from the last run"
                   onDone={onDrafted}
                 >
-                  <p className="text-xs text-muted">
-                    Drafts from every case the last run failed. For a finer, multi-file hand edit,
-                    the <em>Edit</em> tab has the full editor.
+                  <p className="mb-2 text-xs text-muted">
+                    Drafts from every case the last run failed. For a finer, multi-file hand edit,{' '}
+                    <Link to={{ search: editorSearch }} className="text-accent underline">
+                      the Edit tab
+                    </Link>{' '}
+                    has the full editor.
                   </p>
+                  <Steer value={instruction} onChange={setInstruction} />
                 </LaunchButton>
               ) : (
                 <p className="text-xs text-muted italic">
@@ -343,6 +420,27 @@ type Draft = {
   pages: Record<string, string>
   rationale: string
   selectedMissing: string[]
+}
+
+/**
+ * The free-text steer on an improve run.
+ *
+ * Not a nicety: when the selected cases all pass, the cost plan says *"there is nothing to fix —
+ * add an instruction if you want it rewritten anyway"*, and this workspace had no instruction to
+ * add. The advice named a control that existed only on another tab.
+ */
+function Steer({ value, onChange }: { value: string; onChange: (next: string) => void }) {
+  return (
+    <label className="block text-xs text-muted">
+      Steer this run (optional)
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="e.g. focus on false positives in test files"
+        className="mt-1 w-full max-w-xl rounded border border-line bg-surface px-2 py-1 text-sm text-ink outline-none focus:border-accent/60"
+      />
+    </label>
+  )
 }
 
 function InPlaceNotice({ skillId }: { skillId: string }) {

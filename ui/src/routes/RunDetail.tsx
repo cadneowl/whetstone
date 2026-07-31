@@ -184,6 +184,25 @@ function Header({ run }: { run: RunRecord }) {
         )}
         {run.principal && <li>by {run.principal}</li>}
       </ul>
+
+      {(run.reviewer_trace?.length ?? 0) > 0 && (
+        <p
+          className="mt-2 text-xs text-muted"
+          title="An agent decides for itself what to open, so it is a less fixed instrument than a single call. Two runs can differ because it investigated differently rather than because the guidance changed — this is what makes that visible."
+        >
+          the agent read:{' '}
+          <code className="font-mono">{run.reviewer_trace!.join(' · ')}</code>
+        </p>
+      )}
+      {run.score.errors > 0 && (
+        <p className="mt-2 text-xs text-warn">
+          {run.score.errors} of {run.cases.length} case(s) could not be scored at all — the reviewer
+          failed on them, so they are excluded from the metrics above rather than counted as misses.
+          They carry a <span className="font-medium">could not score</span> badge below.
+          {run.score.scorable === 0 &&
+            ' Every case errored, so the metrics above are computed over nothing and mean nothing.'}
+        </p>
+      )}
     </header>
   )
 }
@@ -217,6 +236,17 @@ function CaseBlock({
         >
           {caseRun.case_id}
         </Link>
+        {/* An errored case has no trials, so without this it renders as an empty row scoring 0/0 —
+            which for a `should not flag` case is pixel-identical to a perfect one. The metrics
+            cannot say what happened here, so the row has to. */}
+        {caseRun.error && (
+          <Badge
+            tone="bad"
+            title="The reviewer could not answer this case at all, so nothing was measured. It is excluded from the run's metrics rather than counted as a miss — fix the reviewer, not the guidance."
+          >
+            could not score
+          </Badge>
+        )}
         {flaky && (
           <Badge tone="warn" title="Trials disagreed — unstable, as opposed to simply wrong">
             flaky
@@ -234,13 +264,19 @@ function CaseBlock({
           {totals.map((o, i) => (
             <OutcomeChip key={i} outcome={o.outcome} />
           ))}
+          {/* "0/0" would read as a score. Nothing was measured, so it says so. */}
           <span className="ml-2 tabular text-muted">
-            {good}/{totals.length}
+            {caseRun.error ? 'not scored' : `${good}/${totals.length}`}
           </span>
         </span>
       </summary>
 
       <div className="space-y-2 px-3 pt-1 pb-3 pl-6">
+        {caseRun.error && (
+          <p className="rounded border border-bad/40 bg-bad/5 px-2.5 py-2 font-mono text-xs text-bad">
+            {caseRun.error}
+          </p>
+        )}
         {caseRun.trials.map((trial) => (
           <TrialBlock
             key={trial.index}

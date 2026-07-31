@@ -1525,6 +1525,11 @@ export interface components {
             /** Case Id */
             case_id: string;
             /**
+             * Error
+             * @default
+             */
+            error: string;
+            /**
              * Kind
              * @enum {string}
              */
@@ -1549,6 +1554,11 @@ export interface components {
             /** Case Id */
             case_id: string;
             readonly confusion: components["schemas"]["Confusion"];
+            /**
+             * Error
+             * @default
+             */
+            error: string;
             /** Fp Rate */
             readonly fp_rate: number;
             /**
@@ -2335,6 +2345,8 @@ export interface components {
              */
             base_ref: string;
             base_score: components["schemas"]["SkillScore"];
+            /** Base Trace */
+            base_trace?: string[];
             /** Candidate Hash */
             candidate_hash: string;
             candidate_holdout?: components["schemas"]["HoldoutReport"] | null;
@@ -2344,6 +2356,8 @@ export interface components {
              */
             candidate_ref: string;
             candidate_score: components["schemas"]["SkillScore"];
+            /** Candidate Trace */
+            candidate_trace?: string[];
             /**
              * @default {
              *       "case_fp_ceiling": 0.001,
@@ -2414,6 +2428,15 @@ export interface components {
             reviewer_context_digest: string;
             /** Skill Id */
             skill_id: string;
+            /**
+             * Trace Diverged
+             * @description The two sides investigated differently — read a delta with that in mind.
+             *
+             *     A `computed_field`, so it reaches the stored record and the HTTP API. As a plain property it
+             *     was computed and then dropped on the way out, which meant the console could not show the
+             *     one thing it exists to say.
+             */
+            readonly trace_diverged: boolean;
         };
         /**
          * GateRequest
@@ -3856,6 +3879,8 @@ export interface components {
              * @default high
              */
             reviewer_effort: string;
+            /** Reviewer Trace */
+            reviewer_trace?: string[];
             score: components["schemas"]["SkillScore"];
             /** Skill Hash */
             skill_hash: string;
@@ -4300,6 +4325,15 @@ export interface components {
             cases: components["schemas"]["CaseScore"][];
             readonly confusion: components["schemas"]["Confusion"];
             /**
+             * Errors
+             * @description Cases the reviewer could not be run on at all — never silently scored as failures.
+             *
+             *     Serialized like every other metric, because a recall computed over 190 of 200 cases is a
+             *     different measurement from one computed over all of them, and a reader has to be able to
+             *     tell which they are looking at.
+             */
+            readonly errors: number;
+            /**
              * F2
              * @description The recall-favouring composite, serialized. `f_beta()` covers other betas.
              */
@@ -4316,6 +4350,19 @@ export interface components {
             readonly recall: number;
             /** Recall Stdev */
             readonly recall_stdev: number;
+            /**
+             * Scorable
+             * @description Cases that actually produced a measurement. **Zero makes every metric above a fiction.**
+             *
+             *     An empty confusion reads as `recall 1.0, precision 1.0, F2 1.0` — the right convention for a
+             *     case with nothing to catch, and the worst possible answer for a run where nothing was
+             *     measured at all. A reviewer pointed at a backend that cannot call tools fails every case and
+             *     the run reports a flawless score over nothing, which is the one shape this project exists to
+             *     prevent. The number cannot be fixed without breaking the convention that is correct
+             *     everywhere else, so it is reported alongside instead, and `core.gate` refuses to compare two
+             *     scores when either was computed over nothing.
+             */
+            readonly scorable: number;
             /** Skill Id */
             skill_id: string;
             /** Version */
