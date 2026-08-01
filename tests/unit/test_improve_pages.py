@@ -322,3 +322,74 @@ def test_emptying_a_page_is_refused(tmp_path: Path) -> None:
         assert "patterns/errors.md" in str(exc)
     else:
         raise AssertionError("emptying a page must be refused")
+
+
+# --- the whole chain: an agent rewrites several files, and they reach disk -----------
+#
+# Each link is covered above on its own. This is the one test that walks all of them, because the
+# question it answers — "will improve actually modify the pages SKILL.md points at?" — is not
+# answered by any single link. It was verified by hand against a live HTTP endpoint before being
+# written down here; this is what stops it needing to be verified by hand again.
+
+
+def test_an_agent_improve_rewrites_several_files_and_all_of_them_reach_disk(tmp_path: Path) -> None:
+    from whetstone.agent.step import AgentStep
+    from whetstone.authoring import SkillEdit, prepare_guidance
+    from whetstone.improve import SUBMIT_GUIDANCE
+    from whetstone.llm.fake_client import FakeToolClient
+    from whetstone.llm.tools import Message, ToolCall, ToolSpec, Turn
+    from whetstone.steps import AgentPolicy
+
+    d = tmp_path / "s"
+    (d / "patterns").mkdir(parents=True)
+    (d / "SKILL.md").write_text(BODY, encoding="utf-8")
+    (d / "patterns" / "errors.md").write_text(ERRORS, encoding="utf-8")
+    (d / "patterns" / "panics.md").write_text(PANICS, encoding="utf-8")
+    (d / "patterns" / "frozen.md").write_text("- **R9** unchanged.\n", encoding="utf-8")
+    skill = load_skill(d)
+
+    new_body = "---\nid: s\nname: S\n---\n\n# Rules\n\nBody rewritten.\n"
+    answer = {
+        "body": new_body,
+        "pages": {
+            "patterns/errors.md": "- **R2** rewritten.\n",
+            "patterns/panics.md": "- **R1** rewritten.\n",
+            # Handed back byte-identical, and a path the skill does not have. Neither may be
+            # written: one is a commit touching a file with the same content, the other is a model
+            # response creating a file in the repository.
+            "patterns/frozen.md": "- **R9** unchanged.\n",
+            "patterns/invented.md": "- **R99** out of nowhere.\n",
+        },
+        "rationale": "fixed each rule in the file that holds it",
+    }
+    read: list[str] = []
+
+    def turns(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        if not any(m.role == "tool" for m in messages):
+            return Turn(calls=[ToolCall("1", "read_skill_file", {"path": "patterns/errors.md"})])
+        read.append("fetched")
+        return Turn(calls=[ToolCall("2", SUBMIT_GUIDANCE, answer)])
+
+    spec = StepSpec(
+        kind="improve", skill_id="s", directory=tmp_path,
+        prompt="{{failures}}", agent=AgentPolicy(enabled=True),
+    )
+    result = propose(spec, skill, None, agent=AgentStep(FakeToolClient(turns), max_steps=4))
+
+    # The page arrived through the tool, not pasted — the whole reason a folder runs this way.
+    assert read == ["fetched"]
+    assert set(result.proposal.pages) == {"patterns/errors.md", "patterns/panics.md"}
+
+    prepared = prepare_guidance(
+        skill, new_body,
+        SkillEdit(body=new_body, pages=result.proposal.pages),
+        skills_root="skills",
+    )
+
+    assert set(prepared.files) == {
+        "skills/s/SKILL.md",
+        "skills/s/patterns/errors.md",
+        "skills/s/patterns/panics.md",
+    }
+    assert prepared.files["skills/s/patterns/errors.md"] == "- **R2** rewritten.\n"
+    assert prepared.guidance_changed, "a rewritten page invalidates a gate like a rewritten body"

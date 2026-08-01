@@ -70,3 +70,39 @@ fixed instrument than a single call, so when a gate's two sides read different t
 says so (`trace_diverged`) and the delta is not purely the guidance. Watch for
 `forced answer (ran out of steps)` too: it means the agent hit `max_steps` and had to be made to
 answer, which is the signal to raise the budget.
+
+## The gotchas this example is shaped around
+
+Each of these is silent — the run looks normal and the answer looks like an answer.
+
+**`required: true` on `source:` is load-bearing.** Without it an unset variable is not an error: the
+step runs with `read_skill_file` and nothing else, every instruction about checking the code becomes
+unverifiable, and nothing says so. Both step files here write it.
+
+**The absolute path never reaches the model.** It is told a checkout exists and that paths are
+relative to its root — no more, because an `env:` value is as often a token as a path. If the agent
+should know *which* repository it is looking at, say so as a literal in `context:`.
+
+**`grep` is a fixed substring, not a regex.** `PANICS:` works; `PANICS:\s*\w+` matches nothing and
+returns "No matches", which reads exactly like clean code. There is no glob tool either, and
+`list_dir` is one level at a time.
+
+**`meta.yaml` is not reachable.** Only markdown files under the skill folder are pages, so
+`read_skill_file` cannot serve it — see the comment at the top of this skill's `meta.yaml`. A prompt
+that says "cite only rules traceable to a recorded ticket" is asking for something the agent cannot
+check, unless you hand the file over through `context:` and a tool.
+
+**`tools:` paths resolve from the skill root; a step's own `run:` resolves from the step folder.**
+`tools/owner_of.py` here is `<skill>/tools/owner_of.py` for all three steps. Had `improve/step.yaml`
+used `run:` instead of `prompt:`, its program would have been `<skill>/improve/…`.
+
+**Triage does not get the guidance.** `agent:` means "SKILL.md is the instructions" on evaluate and
+improve, and deliberately not on triage — `triage/step.yaml` explains why. Source and tools are
+unaffected.
+
+**Drop `agent:` from `improve/step.yaml` and it is refused, not degraded.** This skill has a
+companion page, and a single call's only way to show a folder is to paste it. Try it: the error
+names the setting that fixes it.
+
+Full reference, including the pieces this example does not use (`task:`, `wiki:`, `pin:`):
+**[docs/authoring-skills.md](../../docs/authoring-skills.md)**.

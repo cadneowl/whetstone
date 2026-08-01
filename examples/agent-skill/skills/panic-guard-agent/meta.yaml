@@ -1,0 +1,17 @@
+# Machine metadata. Not guidance, and deliberately not reachable by the agent.
+#
+# `read_skill_file` serves the skill's *markdown* pages. This file is YAML, so it is not a page and
+# the agent cannot open it — which matters the moment a prompt tells the drafter to cite only rules
+# traceable to a recorded ticket. If a skill needs its own provenance at drafting time, it has to
+# hand it over deliberately: an `agent: tools:` entry with `{ file: ./meta.yaml }` in `context:`.
+# That is a real gotcha and it is worth knowing before you write the rule rather than after.
+
+owner: "@platform-guild"
+
+# What justified each rule. Written by triage when a promotion cites a rule id, and read back by
+# `rule_ids` / `untested_rules` — a rule with no provenance is one nothing has ever tested.
+provenance:
+  panic-guard:
+    - source: gitlab_mr
+      ref: "acme/ledger!204"
+      human_signal: "reviewer asked for a guard around open_ledger()"
