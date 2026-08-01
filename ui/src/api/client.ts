@@ -115,6 +115,14 @@ export type JobRequest = {
    * Empty/absent means the step's default (for eval, every promoted case).
    */
   cases?: string[]
+  /**
+   * eval + `scope: 'promoted'` only: score the graduated eval corpus underneath the promoted
+   * cases as well. Off by default, because the two questions cost wildly different amounts —
+   * "does it catch these two yet?" must not become a thousand-case run just because the skill has
+   * a thousand graduated cases. The regression cover is not lost by leaving it off: the gate
+   * scores the whole corpus on both sides before a propose is possible.
+   */
+  with_corpus?: boolean
   /** task-eval only: keep each case's workspace on disk instead of a temp dir. */
   keep_workspaces?: boolean
   /** task-gate only: how far the mean score may fall before the gate fails. */

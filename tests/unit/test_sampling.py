@@ -83,6 +83,64 @@ def test_stratification_can_be_turned_off() -> None:
     assert len(drawn) == 20
 
 
+# --- the configured policy has to survive the trip to a run -----------------------
+
+
+def _spec(**sample: object) -> object:
+    from pathlib import Path
+
+    from whetstone.steps import StepSpec
+
+    return StepSpec(
+        kind="evaluate", skill_id="x", directory=Path("."), sample=SamplePolicy(**sample)
+    )
+
+
+def test_a_configured_holdout_fraction_reaches_the_run() -> None:
+    """The knob was inert on every scoring path, in both the console and the CLI.
+
+    `_sample`/`_sample_policy` rebuilt the policy from three fields, so `holdout_fraction` and
+    `archive_weight` reset to their defaults; an uncapped run then returned None and reset the
+    rest. `record_eval` reads the fraction off this object, so a skill asking for no holdout was
+    partitioned at 0.2 regardless — while the skill page's holdout badge and the gate's target
+    check, which load the spec directly, reported the number the operator actually set. The screen
+    and the drafter disagreed about which cases were learnable-from.
+    """
+    from whetstone.cli import _sample_policy
+    from whetstone.ui.routers.jobs import _sample
+
+    spec = _spec(holdout_fraction=0.0, archive_weight=0.4)
+    for resolved in (_sample(spec, None), _sample_policy(spec, None, None)):
+        assert resolved is not None, "an uncapped run still carries the rest of the policy"
+        assert resolved.holdout_fraction == 0.0
+        assert resolved.archive_weight == 0.4
+        # What `service.record_eval` actually stamps partitions from.
+        assert (resolved or SamplePolicy()).holdout_fraction == 0.0
+
+
+def test_a_case_cap_does_not_reset_the_rest_of_the_policy() -> None:
+    """Passing `--sample`/`sample=` is a cap, not a request for default everything else."""
+    from whetstone.cli import _sample_policy
+    from whetstone.ui.routers.jobs import _sample
+
+    spec = _spec(holdout_fraction=0.5, seed=7, stratify=False, max_cases=100)
+    console = _sample(spec, 12)
+    cli = _sample_policy(spec, 12, None)
+    for resolved in (console, cli):
+        assert resolved.max_cases == 12
+        assert resolved.holdout_fraction == 0.5
+        assert resolved.seed == 7
+        assert resolved.stratify is False
+
+
+def test_an_explicit_seed_still_wins_over_the_spec() -> None:
+    from whetstone.cli import _sample_policy
+
+    resolved = _sample_policy(_spec(seed=7, holdout_fraction=0.3), None, 99)
+    assert resolved.seed == 99
+    assert resolved.holdout_fraction == 0.3, "overriding one field must not reset the others"
+
+
 def test_every_stratum_gets_at_least_its_share_when_the_budget_allows() -> None:
     cases = (
         _cases(50, "should_catch", "a")

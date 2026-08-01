@@ -42,7 +42,7 @@ def test_draft_scope_scores_the_on_disk_guidance(client: TestClient) -> None:
 
     _edit_on_disk(client)
     config = client.app.state.config  # type: ignore[attr-defined]
-    scored, ref = _skill_to_score(
+    scored, ref, _ = _skill_to_score(
         config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="draft")
     )
     assert ref is None  # no branch — the working tree

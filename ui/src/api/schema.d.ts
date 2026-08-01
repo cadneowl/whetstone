@@ -2417,6 +2417,11 @@ export interface components {
             skill_id: string;
             /** Trials */
             trials?: number | null;
+            /**
+             * With Corpus
+             * @default false
+             */
+            with_corpus: boolean;
         };
         /**
          * Expectation

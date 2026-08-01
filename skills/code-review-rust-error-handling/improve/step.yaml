@@ -13,9 +13,12 @@ inputs:
     # How many failures reach the prompt. These are cluster representatives, not the first N —
     # 12 here means twelve different kinds of failure, largest group first.
     max: 12
-    # What counts as the same kind of failure:
-    #   rule        the rule id the reviewer cited (default; falls back to the expectation)
-    #   expectation the specific expectation that failed
+    # What counts as the same kind of failure. Merging is lossy — only the representative's diff
+    # and problem statement reach the prompt, the rest arrive as "and N more like it" — so a
+    # grouping is only ever applied where there is real evidence of a shared cause.
+    #   rule        the rule id the reviewer cited (default). A miss cites nothing, so a failure
+    #               with no rule is its own cluster rather than being merged with every other one.
+    #   expectation what the expectation asserts, compared as text
     #   path        the top-level directory, i.e. roughly the subsystem
     #   none        no clustering; representatives are individual failures
     cluster_by: rule

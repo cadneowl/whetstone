@@ -569,10 +569,52 @@ def test_the_promoted_case_batch_can_be_scored(client: TestClient) -> None:
         "/api/jobs/eval/plan", json={"skill_id": "rust-errors", "scope": "promoted"}
     )
     working = client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"})
-    assert batch_plan.status_code == 200, batch_plan.text
-    assert batch_plan.json()["estimate"]["calls"] > working.json()["estimate"]["calls"], (
-        "scoring the batch must cover the promoted case as well as the ones already on disk"
+    with_corpus = client.post(
+        "/api/jobs/eval/plan",
+        json={"skill_id": "rust-errors", "scope": "promoted", "with_corpus": True},
     )
+    assert batch_plan.status_code == 200, batch_plan.text
+    assert with_corpus.json()["estimate"]["calls"] > working.json()["estimate"]["calls"], (
+        "with the corpus, scoring the batch must cover the promoted case as well as the ones "
+        "already on disk"
+    )
+    assert batch_plan.json()["estimate"]["calls"] < with_corpus.json()["estimate"]["calls"], (
+        "the promoted set alone must be the cheaper of the two — that is the point of the choice"
+    )
+
+
+def test_the_promoted_set_is_scored_alone_unless_the_corpus_is_asked_for(
+    client: TestClient,
+) -> None:
+    """The cost of the triage question must not scale with the corpus it will eventually join.
+
+    Scoring the promoted set used to mean scoring the graduated corpus *and* the promoted set, with
+    no way to say otherwise: two cases curated against a corpus of a thousand was a 1002-case run,
+    and the button offered for it said "Score all promoted". Both numbers are now the operator's to
+    pick, and the plan says which was picked.
+    """
+    from whetstone.core.loader import load_skill
+    from whetstone.ui.routers.jobs import EvalRequest, _skill_to_score
+
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    config = client.app.state.config
+    graduated = {c.id for c in load_skill(config.skills_root / "rust-errors").eval_cases}
+    assert graduated, "the fixture needs a graduated corpus for this to be a distinction at all"
+
+    alone = _skill_to_score(
+        config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="promoted")
+    )
+    both = _skill_to_score(
+        config,
+        config.skills_root,
+        EvalRequest(skill_id="rust-errors", scope="promoted", with_corpus=True),
+    )
+
+    assert {c.id for c in alone.skill.eval_cases} == {"812-t0"}
+    assert {c.id for c in both.skill.eval_cases} == graduated | {"812-t0"}
+    # The plan has to say which question is being paid for — the case count alone does not.
+    assert "only" in (alone.note or "") and "gate" in (alone.note or "")
+    assert "regression view" in (both.note or "")
 
 
 def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
@@ -591,35 +633,52 @@ def test_scoring_the_batch_measures_the_staged_draft_not_the_merged_guidance(
     _stage_a_draft(client, "# Rust errors\n\n- **R9 — a rule only the draft carries.**\n")
 
     config = client.app.state.config
-    scored, _ = _skill_to_score(
+    scored = _skill_to_score(
         config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="promoted")
     )
 
-    assert "R9" in scored.body, "the guidance must come from the draft"
-    ids = {c.id for c in scored.eval_cases}
+    assert "R9" in scored.skill.body, "the guidance must come from the draft"
+    ids = {c.id for c in scored.skill.eval_cases}
     assert "812-t0" in ids, "the cases must come from the promoted set"
 
 
 def test_scoring_a_promoted_subset_covers_only_the_picked_case(client: TestClient) -> None:
     """Ticking one promoted case scores exactly it — not the rest of the promoted set, and not the
-    graduated corpus the whole-set score otherwise carries for regression cover."""
+    graduated corpus.
+
+    The two narrowings compose: `with_corpus` adds the graduated cases to whatever subset was
+    ticked, and never the promoted cases that were left unticked. Anything else would make "check
+    just this one against the corpus" impossible to ask for.
+    """
+    from whetstone.core.loader import load_skill
     from whetstone.ui.routers.jobs import EvalRequest, _skill_to_score
 
     client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    client.post("/api/candidates/813-t1/promote", json={"edits": _edits(client, "813-t1")})
 
     config = client.app.state.config
-    whole, _ = _skill_to_score(
+    graduated = {c.id for c in load_skill(config.skills_root / "rust-errors").eval_cases}
+    whole = _skill_to_score(
         config, config.skills_root, EvalRequest(skill_id="rust-errors", scope="promoted")
     )
-    subset, _ = _skill_to_score(
+    subset = _skill_to_score(
         config,
         config.skills_root,
         EvalRequest(skill_id="rust-errors", scope="promoted", cases=["812-t0"]),
     )
+    subset_and_corpus = _skill_to_score(
+        config,
+        config.skills_root,
+        EvalRequest(
+            skill_id="rust-errors", scope="promoted", cases=["812-t0"], with_corpus=True
+        ),
+    )
 
-    assert {c.id for c in subset.eval_cases} == {"812-t0"}, "only the picked case is scored"
-    assert {c.id for c in whole.eval_cases} >= {"812-t0"}
-    assert len(whole.eval_cases) >= len(subset.eval_cases)
+    assert {c.id for c in subset.skill.eval_cases} == {"812-t0"}, "only the picked case is scored"
+    assert {c.id for c in whole.skill.eval_cases} == {"812-t0", "813-t1"}, "the promoted set"
+    assert {c.id for c in subset_and_corpus.skill.eval_cases} == graduated | {"812-t0"}, (
+        "the corpus joins the ticked case, and the unticked promoted case stays out"
+    )
 
 
 def test_scoring_a_promoted_subset_of_unknown_ids_is_rejected(client: TestClient) -> None:

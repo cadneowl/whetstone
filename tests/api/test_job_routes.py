@@ -414,6 +414,89 @@ def test_improve_shows_the_drafter_a_promoted_cases_diff(
     assert "db.settle(id).unwrap()" in prompt
 
 
+HELD_ID = "case-held-back"  # proven below to hash into the holdout partition
+
+HELD_CASE = f"""id: {HELD_ID}
+kind: should_catch
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: src/handlers/settle.rs
+    semantic: "unwrap on the settlement lookup panics on a normal error path"
+"""
+
+
+def test_improve_plan_refuses_a_selection_the_drafter_may_never_see(
+    client: TestClient, steps: Path, skills_root: Path
+) -> None:
+    """Promote one case, score it, watch it miss, sharpen against it — and get nothing.
+
+    The failure this pins was silent in the worst way: every stage was individually truthful. The
+    case is scored and misses; the plan priced "drafting from 1 selected case(s)"; the drafter is
+    shown nothing because the case is holdout; the draft returns the body unchanged reporting "no
+    failures in the visible sample"; and only afterwards does a footnote mention the case "did not
+    fail (or is holdout)". One model call to be told the selection was never eligible.
+
+    `_warn_if_nothing_to_learn` could not catch it — it asks whether the *run* had failures, and it
+    did. The only one was on the case being withheld.
+    """
+    from whetstone.sampling import partition_of
+    from whetstone.steps import SamplePolicy
+
+    assert partition_of(HELD_ID, SamplePolicy().holdout_fraction) == "holdout"
+
+    case = skills_root / "rust-errors" / "promoted_cases" / HELD_ID
+    case.mkdir(parents=True)
+    (case / "case.yaml").write_text(HELD_CASE, encoding="utf-8")
+    (case / "change.diff").write_text(PROMOTED_DIFF, encoding="utf-8")
+
+    scored = client.post(
+        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "promoted"}
+    ).json()
+    assert _await(client, scored["id"])["state"] == "done"
+
+    response = client.post(
+        "/api/jobs/improve/plan", json={"skill_id": "rust-errors", "cases": [HELD_ID]}
+    )
+    assert response.status_code == 422, response.text
+    message = response.json()["message"]
+    assert HELD_ID in message
+    assert "holdout partition" in message
+    # A refusal that only says no leaves the operator exactly as stuck as the silent draft did.
+    assert "sample.holdout_fraction: 0" in message
+
+
+def test_improve_plan_says_how_much_of_a_mixed_selection_is_eligible(
+    client: TestClient, steps: Path, skills_root: Path
+) -> None:
+    """A partly-eligible selection proceeds — but priced and described as what it will really use.
+
+    "Drafting from 2 selected case(s)" when one of them is withheld is the same lie as the refusal
+    case, just quieter: the draft comes back having ignored half the request and looks like it
+    honoured all of it.
+    """
+    for case_id, body in ((PROMOTED_ID, PROMOTED_CASE), (HELD_ID, HELD_CASE)):
+        case = skills_root / "rust-errors" / "promoted_cases" / case_id
+        case.mkdir(parents=True)
+        (case / "case.yaml").write_text(body, encoding="utf-8")
+        (case / "change.diff").write_text(PROMOTED_DIFF, encoding="utf-8")
+
+    scored = client.post(
+        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "promoted"}
+    ).json()
+    assert _await(client, scored["id"])["state"] == "done"
+
+    plan = client.post(
+        "/api/jobs/improve/plan",
+        json={"skill_id": "rust-errors", "cases": [PROMOTED_ID, HELD_ID]},
+    )
+    assert plan.status_code == 200, plan.text
+    details = " ".join(plan.json()["details"])
+    assert "drafting from 1 of 2 selected cases" in details
+    assert HELD_ID in details and "holdout partition" in details
+
+
 def test_gate_plan_refuses_a_target_that_is_not_in_the_eval_set(
     client: TestClient, steps: Path
 ) -> None:

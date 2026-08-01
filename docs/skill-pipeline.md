@@ -721,14 +721,25 @@ failures chosen that way are twelve *different things wrong with the guidance*; 
 slicing are usually one thing said twelve times. Cluster size is also the best available proxy for
 what a rule change is worth, which is why the biggest group is what the model reads first.
 
+Merging is lossy: only the representative's diff and problem statement reach the prompt, and the
+rest of its group arrives as "(and N more like it)" — no diff, no statement, not even an id. So a
+key may only ever be something that *means the same thing across cases*. Where no such thing is
+available the failure stands alone, because inventing a shared cause hides real evidence.
+
+That rule is why `rule` no longer falls back to the expectation id. Expectation ids are per-case
+ordinals — `promote.prepare` writes exactly one expectation per triage case and always names it
+`e1` — and a miss cites no rule, so the fallback keyed every promoted case in a corpus to the
+constant `fn:e1` and folded them into one cluster. Ten curated cases handed to a drafter produced
+one diff and a claim that the other nine were "like it".
+
 `cluster_by` options:
 
 | value | groups by | use when |
 |---|---|---|
-| `rule` | the rule id the reviewer cited, falling back to the expectation | default; rules are the thing you are editing |
-| `expectation` | the specific expectation that failed | expectations map cleanly to distinct behaviours |
+| `rule` | the rule id the reviewer cited; a failure citing none is its own cluster | default; rules are the thing you are editing |
+| `expectation` | what the expectation asserts, compared as text | expectations map cleanly to distinct behaviours |
 | `path` | the top-level directory | failures track subsystems more than rules |
-| `none` | nothing; representatives are individual failures | small corpora where every failure is distinct |
+| `none` | nothing; representatives are individual failures | you want every failure shown, whatever the cause |
 
 ### Template variables
 
