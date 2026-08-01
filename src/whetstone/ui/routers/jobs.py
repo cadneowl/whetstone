@@ -64,9 +64,9 @@ from whetstone.preflight import (
 )
 from whetstone.providers.base import ConnectorError
 from whetstone.reviewer.factory import ReviewerChoice, reviewer_for, step_agent
-from whetstone.sampling import sample_cases
+from whetstone.sampling import partition_of, sample_cases
 from whetstone.service import record_eval, record_gate, record_review, strip_guidance
-from whetstone.steps import StepError, StepSpec, load_step
+from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
     DriftDep,
@@ -321,7 +321,44 @@ def plan_gate_job(
         sides=2,
     )
     plan.action = "gate"
+    _check_targets(config, root, candidate, request)
     return plan
+
+
+def _check_targets(
+    config: Config, root: Path, candidate: Skill, request: GateRequest
+) -> None:
+    """Apply the gate's own rules about targeted cases here, before the operator confirms a spend.
+
+    Both rules are enforced downstream and neither was checked at the plan: `gate_skills` raises on
+    a holdout target, and `core.gate` fails the verdict for one that is not in the eval set. So a
+    stale selection — a case graduated or removed since the page loaded — bought a confirmation
+    dialog and then an error, or worse, a full two-sided gate that scored everything and then failed
+    for a reason that was knowable before it started.
+
+    The console filters holdout cases out of its own selection already; this is the same rule stated
+    where every caller meets it, including the API and a browser tab left open too long.
+    """
+    if not request.targeted:
+        return
+    spec = _step(root, candidate, "evaluate")
+    fraction = (_sample(spec, request.sample) or SamplePolicy()).holdout_fraction
+    known = {c.id for c in candidate.eval_cases}
+
+    unknown = sorted(c for c in request.targeted if c not in known)
+    if unknown:
+        raise Unprocessable(
+            f"targeted case(s) {', '.join(unknown)} are not in this skill's eval set, so the gate "
+            f"would score everything and then fail on them. Reload the skill and pick again — they "
+            f"may have been graduated or removed since."
+        )
+    leaked = sorted(c for c in request.targeted if partition_of(c, fraction) == "holdout")
+    if leaked:
+        raise Unprocessable(
+            f"targeted case(s) {', '.join(leaked)} are in the holdout partition — the improve loop "
+            f"never sees their failures, so a change cannot claim to fix them. They are still "
+            f"scored; their effect shows up in the holdout score, which is the point."
+        )
 
 
 @router.post("/gate", response_model=Job, dependencies=[Writable])
@@ -337,6 +374,8 @@ def launch_gate(
     selection = _pick(request.provider, request.model, selection)
     base, candidate = _gate_sides(config, root, request.skill_id)
     choice = _reviewer_choice(config, candidate)
+    # Re-checked here, not only in the plan: the plan is advisory and a caller can post straight to
+    # this route. `plan_gate_job` runs it too, so the refusal lands before the confirmation.
     plan = plan_gate_job(request, config, root, selection)
     spec = _step(root, candidate, "evaluate")
     trials = request.trials or (spec.trials if spec else 1)

@@ -414,6 +414,58 @@ def test_improve_shows_the_drafter_a_promoted_cases_diff(
     assert "db.settle(id).unwrap()" in prompt
 
 
+def test_gate_plan_refuses_a_target_that_is_not_in_the_eval_set(
+    client: TestClient, steps: Path
+) -> None:
+    """`core.gate` fails the verdict for an unknown target — after scoring both sides.
+
+    Knowable before the click, so it is said before the click. A selection goes stale the moment a
+    case is graduated or removed in another tab.
+    """
+    response = client.post(
+        "/api/jobs/gate/plan", json={"skill_id": "rust-errors", "targeted": ["gone-away"]}
+    )
+    assert response.status_code == 422
+    assert "not in this skill's eval set" in response.json()["message"]
+
+
+def test_gate_plan_refuses_a_holdout_target(
+    client: TestClient, steps: Path, skills_root: Path
+) -> None:
+    """`gate_skills` raises on this; the plan now says so first, and in the same words."""
+    case = skills_root / "rust-errors" / "eval_cases" / "case-held-back"
+    case.mkdir(parents=True)
+    (case / "case.yaml").write_text(
+        "id: case-held-back\nkind: should_catch\nexpect:\n  - id: e1\n    must: appear\n"
+        "    where:\n      path: src/handlers/charge.rs\n    semantic: 'unwrap panics'\n",
+        encoding="utf-8",
+    )
+    (case / "change.diff").write_text(
+        "diff --git a/src/handlers/charge.rs b/src/handlers/charge.rs\n"
+        "--- a/src/handlers/charge.rs\n+++ b/src/handlers/charge.rs\n"
+        "@@ -1,2 +1,3 @@\n fn charge() {\n+    db.get(1).unwrap();\n }\n",
+        encoding="utf-8",
+    )
+    from whetstone.sampling import partition_of
+    from whetstone.steps import SamplePolicy
+
+    assert partition_of("case-held-back", SamplePolicy().holdout_fraction) == "holdout"
+
+    response = client.post(
+        "/api/jobs/gate/plan", json={"skill_id": "rust-errors", "targeted": ["case-held-back"]}
+    )
+    assert response.status_code == 422
+    assert "holdout partition" in response.json()["message"]
+
+
+def test_gate_plan_accepts_a_real_target(client: TestClient, steps: Path) -> None:
+    """The guard must not block the ordinary case, which is the whole point of targeting."""
+    response = client.post(
+        "/api/jobs/gate/plan", json={"skill_id": "rust-errors", "targeted": ["unwrap-in-handler"]}
+    )
+    assert response.status_code == 200, response.text
+
+
 def test_an_instruction_clears_that_warning(client: TestClient, steps: Path) -> None:
     _score(client)
     plan = client.post(
