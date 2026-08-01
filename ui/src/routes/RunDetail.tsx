@@ -132,11 +132,16 @@ function Header({ run }: { run: RunRecord }) {
           </>
         )}
       </div>
-      {run.holdout && run.holdout.divergence > 0.1 && (
+      {/* One definition of whether the alarm is sounding, and it lives on the run's own report —
+          this used to be a fourth hand-copied `> 0.1` and fired on a holdout of one case. */}
+      {run.holdout?.diverging && (
         <p className="mt-1 text-xs text-bad">
           Train is running well ahead of holdout — the guidance may be memorizing its cases rather
           than learning the pattern. Promote fresh cases before polishing further.
         </p>
+      )}
+      {run.holdout && !run.holdout.diverging && (
+        <p className="mt-1 text-xs text-muted">{run.holdout.reading}.</p>
       )}
 
       <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">

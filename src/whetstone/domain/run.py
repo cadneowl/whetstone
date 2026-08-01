@@ -321,7 +321,12 @@ def skill_hash(skill: Skill) -> str:
     _feed_rules(h, skill)
     for case in sorted(skill.eval_cases, key=lambda c: c.id):
         h.update(b"\0case\0")
-        h.update(case.model_dump_json().encode("utf-8"))
+        # `partition` is excluded because it changes nothing this hash exists to identify. Both
+        # sides of a gate score every case whatever side of the split it is on; the partition
+        # governs who may *learn* from it, not what gets measured. Including it would also mean
+        # that landing the field re-hashed every case in every corpus and revoked the right to
+        # propose everywhere until each skill was gated again — for a change no gate could see.
+        h.update(case.model_dump_json(exclude={"partition"}).encode("utf-8"))
     _feed_wiki(h, skill)
     _feed_index(h, skill)
     return h.hexdigest()

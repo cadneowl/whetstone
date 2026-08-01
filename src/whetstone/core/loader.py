@@ -235,6 +235,9 @@ def _load_eval_case(case_dir: Path, skill_id: str) -> EvalCase:
         provenance=provenance,
         # Absent means active — every case file written before tiers existed keeps its meaning.
         tier=raw.get("tier", "active"),
+        # Absent means "leave it to the hash", which is the normal state of every case. Present
+        # only where a decision was recorded — see `EvalCase.partition`.
+        partition=raw.get("partition"),
     )
 
 

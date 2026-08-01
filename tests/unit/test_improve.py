@@ -20,7 +20,7 @@ from whetstone.domain.run import (
 )
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
-from whetstone.improve import GuidanceProposal, build_digest, propose
+from whetstone.improve import GuidanceProposal, build_digest, propose, shown_cases
 from whetstone.llm import FakeLLMClient
 from whetstone.steps import FailureInputs, StepError, StepSpec
 
@@ -111,6 +111,60 @@ def test_clustering_shows_one_representative_per_kind_not_the_first_n() -> None:
     assert [c.size for c in digest.clusters] == [50, 1]
     # The rarer failure survives, which slicing the first two alphabetically would have lost.
     assert "z999" in digest.render_failures()
+
+
+def test_misses_with_no_cited_rule_do_not_collapse_into_one_case() -> None:
+    """The hole at the centre of the sharpening loop, and the reason no test caught it.
+
+    Every other clustering test above passes `rule="R1"` — they only ever exercised the branch
+    where the reviewer cited a rule. The fallback was `rule_id or expectation_id`, and expectation
+    ids are per-case ordinals: `promote.prepare` writes exactly one expectation per triage case and
+    always names it `e1`. A miss where the reviewer said nothing is both the commonest failure and
+    the most valuable one, and it has no rule id — so every promoted case in the corpus keyed to
+    the same constant `fn:e1` and collapsed into a single cluster.
+
+    The consequence was silent and total: select ten curated cases, ask for a draft, and the model
+    is shown one diff and told the other nine are "like it" — nine different problems, in nine
+    different files, that it never sees.
+    """
+    ids = [f"promoted-{i}" for i in range(5)]
+    cases = [_case(cid, f"src/mod{i}/f.rs") for i, cid in enumerate(ids)]
+    runs = [_miss(cid, f"src/mod{i}/f.rs") for i, cid in enumerate(ids)]  # no rule cited
+
+    digest = build_digest(_skill(cases), _record(runs), FailureInputs())
+
+    assert len(digest.clusters) == 5, "unrelated misses must not be merged on a shared ordinal"
+    assert shown_cases(digest) == set(ids)
+    rendered = digest.render_failures()
+    for cid in ids:
+        assert cid in rendered, f"{cid} was selected and never reached the prompt"
+    assert "more like it" not in rendered
+
+
+def test_a_genuinely_shared_cause_still_clusters() -> None:
+    """The fix must not disable clustering — a cited rule is real evidence of a shared cause."""
+    cases = [_case(f"c{i}") for i in range(4)]
+    runs = [_miss(f"c{i}", rule="R1") for i in range(4)]
+    digest = build_digest(_skill(cases), _record(runs), FailureInputs())
+    assert [c.key for c in digest.clusters] == ["fn:R1"]
+    assert digest.clusters[0].size == 4
+
+
+def test_a_selection_folded_away_is_reported_not_silently_dropped() -> None:
+    """`selected_missing` promises "the drafter never saw" — so it must be read off the prompt.
+
+    Computed from eligibility instead, it reported nothing while clustering and the `max` cap threw
+    cases away between the two, which is precisely the state it exists to make impossible.
+    """
+    ids = [f"c{i}" for i in range(6)]
+    cases = [_case(cid) for cid in ids]
+    runs = [_miss(cid, rule="R1") for cid in ids]  # one shared cause: five get folded away
+    digest = build_digest(_skill(cases), _record(runs), FailureInputs(), only=set(ids))
+
+    seen = shown_cases(digest)
+    assert len(seen) == 1
+    assert sorted(set(ids) - seen) == sorted(i for i in ids if i not in seen)
+    assert digest.total_failures == 6, "the count stays honest even when the cases do not show"
 
 
 def test_largest_cluster_is_shown_first() -> None:

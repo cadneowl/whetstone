@@ -62,6 +62,11 @@ class Confusion(BaseModel):
         return (1 + b2) * p * r / (b2 * p + r)
 
 
+# The smallest train-vs-holdout gap worth calling overfitting rather than noise, once the holdout
+# is large enough to express it at all. Below this a gap is ordinary run-to-run variation.
+DIVERGENCE_FLOOR = 0.1
+
+
 class HoldoutReport(BaseModel):
     """Train vs holdout, side by side — the overfitting alarm's readout.
 
@@ -69,6 +74,14 @@ class HoldoutReport(BaseModel):
     two numbers answer different questions: train recall is "did the drafting work?", holdout
     recall is "did the *skill* get better, or just better at its own exam?". A widening gap is
     the earliest signal that guidance is memorizing cases rather than learning patterns.
+
+    Whether that gap can be *read* is a separate question from what it is, and it used not to be
+    asked. Two call sites compared `divergence` against two different constants, and both fired on
+    a holdout of one case: a single unseen case failing put "diverging — possible overfitting"
+    across the console and "the guidance is learning its own exam" into the sharpening report. One
+    case is the whole of a one-case holdout's recall, so that gap was never a measurement. This
+    module already declines to report at all over *zero* holdout cases — "noise wearing the costume
+    of a number" — and the same argument does not stop at zero.
     """
 
     fraction: float
@@ -84,6 +97,94 @@ class HoldoutReport(BaseModel):
     def divergence(self) -> float:
         """Train minus holdout recall — positive and growing means overfitting."""
         return self.train_recall - self.holdout_recall
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def resolution(self) -> float:
+        """The smallest recall gap this holdout can express: one case is 1/n of its score.
+
+        Derived rather than configured, and it is why there is no minimum corpus size anywhere in
+        this design. A flat cutoff would silence a holdout of four cases that all failed — which is
+        a real and alarming signal — while a resolution scales: four cases can report a gap of 0.75
+        and cannot report one of 0.10, which is exactly the truth about four cases.
+        """
+        return 1.0 / self.holdout_cases if self.holdout_cases else 1.0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def diverging(self) -> bool:
+        """Whether the gap is both large enough to matter and larger than this holdout can fake.
+
+        The single definition of the overfitting alarm, so the skills index, the status page and
+        the sharpening report cannot disagree about whether one is sounding.
+        """
+        return self.divergence >= max(DIVERGENCE_FLOOR, self.resolution)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def conclusive(self) -> bool:
+        """Whether this holdout can support a fine reading *in either direction*.
+
+        The mirror of the alarm, and the half that is easy to forget. Suppressing a false warning
+        while leaving the all-clear in place just swaps one unearned verdict for another: a
+        one-case holdout that happens to pass cannot show that a skill "performs on cases the
+        improve loop has never seen" any more than a one-case failure shows overfitting. Below the
+        resolution needed to express the floor, this holdout says nothing either way — except in
+        the one case a small sample genuinely can carry, an overwhelming gap, which `diverging`
+        still reports at any size.
+        """
+        return self.resolution <= DIVERGENCE_FLOOR
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def unreadable(self) -> bool:
+        """A gap worth caring about that this holdout is too small to confirm.
+
+        Its own state rather than a client-side subtraction, so no surface has to keep a copy of
+        the floor to work out which reading to show. This is the one an operator acts on: the alarm
+        is not silent because all is well, it is silent because it cannot hear.
+        """
+        return self.divergence >= DIVERGENCE_FLOOR and not self.diverging
+
+    @property
+    def _arming(self) -> str:
+        needed = max(0, int(round(1.0 / DIVERGENCE_FLOOR)) - self.holdout_cases)
+        return f"graduating ~{needed} more case(s) would arm it"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def reading(self) -> str:
+        """What this holdout is currently able to tell you — including "not yet, and here is why".
+
+        A silenced alarm with nothing in its place is its own kind of dishonest: the operator is
+        left reading a rising train score with no idea that the number meant to check it is not
+        yet connected. So every unarmed state names what would arm it, which is also the thing
+        that actually sharpens a skill — more graduated cases.
+        """
+        if self.diverging:
+            return (
+                f"train recall leads holdout by {self.divergence:.2f} across "
+                f"{self.holdout_cases} holdout case(s) — the improve loop never sees these, so a "
+                f"gap this wide is the guidance learning its own exam rather than the pattern "
+                f"behind it"
+            )
+        if self.unreadable:
+            return (
+                f"{self.holdout_cases} holdout case(s) can only resolve a gap of "
+                f"{self.resolution:.2f}, and the gap is {self.divergence:.2f} — too close to call. "
+                f"Nothing here tells sharpening from memorisation; {self._arming}"
+            )
+        if not self.conclusive:
+            return (
+                f"{self.holdout_cases} holdout case(s) is too few to say much either way — one "
+                f"case is {self.resolution:.2f} of the score, so neither this gap nor its absence "
+                f"is evidence. The overfitting alarm is not armed yet; {self._arming}"
+            )
+        return (
+            f"holdout is within {abs(self.divergence):.2f} of train across "
+            f"{self.holdout_cases} holdout case(s) — the skill performs on cases the improve loop "
+            f"has never seen"
+        )
 
 
 class CaseScore(BaseModel):

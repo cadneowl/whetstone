@@ -83,6 +83,99 @@ def test_stratification_can_be_turned_off() -> None:
     assert len(drawn) == 20
 
 
+# --- the configured policy has to survive the trip to a run -----------------------
+
+
+def _spec(**sample: object) -> object:
+    from pathlib import Path
+
+    from whetstone.steps import StepSpec
+
+    return StepSpec(
+        kind="evaluate", skill_id="x", directory=Path("."), sample=SamplePolicy(**sample)
+    )
+
+
+def test_a_configured_holdout_fraction_reaches_the_run() -> None:
+    """The knob was inert on every scoring path, in both the console and the CLI.
+
+    `_sample`/`_sample_policy` rebuilt the policy from three fields, so `holdout_fraction` and
+    `archive_weight` reset to their defaults; an uncapped run then returned None and reset the
+    rest. `record_eval` reads the fraction off this object, so a skill asking for no holdout was
+    partitioned at 0.2 regardless — while the skill page's holdout badge and the gate's target
+    check, which load the spec directly, reported the number the operator actually set. The screen
+    and the drafter disagreed about which cases were learnable-from.
+    """
+    from whetstone.cli import _sample_policy
+    from whetstone.ui.routers.jobs import _sample
+
+    spec = _spec(holdout_fraction=0.0, archive_weight=0.4)
+    for resolved in (_sample(spec, None), _sample_policy(spec, None, None)):
+        assert resolved is not None, "an uncapped run still carries the rest of the policy"
+        assert resolved.holdout_fraction == 0.0
+        assert resolved.archive_weight == 0.4
+        # What `service.record_eval` actually stamps partitions from.
+        assert (resolved or SamplePolicy()).holdout_fraction == 0.0
+
+
+def test_a_case_cap_does_not_reset_the_rest_of_the_policy() -> None:
+    """Passing `--sample`/`sample=` is a cap, not a request for default everything else."""
+    from whetstone.cli import _sample_policy
+    from whetstone.ui.routers.jobs import _sample
+
+    spec = _spec(holdout_fraction=0.5, seed=7, stratify=False, max_cases=100)
+    console = _sample(spec, 12)
+    cli = _sample_policy(spec, 12, None)
+    for resolved in (console, cli):
+        assert resolved.max_cases == 12
+        assert resolved.holdout_fraction == 0.5
+        assert resolved.seed == 7
+        assert resolved.stratify is False
+
+
+def test_a_stated_partition_wins_over_the_hash() -> None:
+    from whetstone.sampling import partition_for, partition_of, pinned_partitions
+
+    held = "case-held-back"
+    assert partition_of(held, 0.2) == "holdout"  # the hash, unchanged
+
+    cases = _cases(1)
+    stated = cases[0].model_copy(update={"id": held, "partition": "train"})
+    pinned = pinned_partitions([stated])
+    assert partition_for(held, 0.2, pinned) == "train"
+    # A case saying nothing is still the hash's to decide — the override is the exception.
+    assert partition_for(held, 0.2, pinned_partitions(cases)) == "holdout"
+
+
+def test_landing_the_partition_field_does_not_re_hash_a_corpus() -> None:
+    """Adding a field to `EvalCase` re-hashes every case in every skill unless it is excluded.
+
+    `skill_hash` is what a stored gate verdict is keyed on, so a changed hash revokes the right to
+    propose everywhere until each skill is gated again. The partition governs who may *learn* from
+    a case, never what gets measured — both sides of a gate score it either way — so it is excluded
+    and landing this invalidates nothing.
+    """
+    from whetstone.domain.run import skill_hash
+    from whetstone.domain.skill import Skill
+
+    cases = _cases(3)
+    plain = Skill(id="s", body="rules", eval_cases=cases)
+    stated = Skill(
+        id="s",
+        body="rules",
+        eval_cases=[c.model_copy(update={"partition": "train"}) for c in cases],
+    )
+    assert skill_hash(plain) == skill_hash(stated)
+
+
+def test_an_explicit_seed_still_wins_over_the_spec() -> None:
+    from whetstone.cli import _sample_policy
+
+    resolved = _sample_policy(_spec(seed=7, holdout_fraction=0.3), None, 99)
+    assert resolved.seed == 99
+    assert resolved.holdout_fraction == 0.3, "overriding one field must not reset the others"
+
+
 def test_every_stratum_gets_at_least_its_share_when_the_budget_allows() -> None:
     cases = (
         _cases(50, "should_catch", "a")

@@ -461,6 +461,27 @@ to promote fresh cases rather than polish further.
 Membership is an unseeded hash of the case id: stable forever, on every machine, with deliberately
 no way to re-roll it — a seed would offer exactly the workaround the partition exists to prevent.
 
+**The exam is the graduated corpus.** A case waiting under `promoted_cases/` is on the train side
+while it waits, whatever its id hashes to. That folder is where an operator decides whether a mined
+case has earned a place — scoring it, sharpening against it, rewriting its expectation — and every
+one of those is a use the blindfold forbids. Applying the hash there meant that a fifth of
+everything ever mined could never be sharpened against, permanently and at random, when sharpening
+against it is the entire reason to promote it. The only escape was setting `holdout_fraction: 0`,
+which switches the alarm off for the whole skill to unblock one case.
+
+**A case the drafter has read is recorded as such.** When an improve step is actually shown a case
+whose id hashes to the holdout, `partition: train` is written into its `case.yaml`. That survives
+graduation, which is a folder move — without it, a case the model has read would go back to the
+hash on graduation and be counted as an exam question it passed unseen, *flattering* the one number
+whose job is to be unflattering. You can write the same line by hand to say "this case is for
+teaching": it is the one exception to a partition nobody can re-roll, and it is deliberately a
+visible line in a reviewable diff rather than a setting. It is also one-way in practice — nothing
+un-reads a case.
+
+`partition` is excluded from `skill_hash`: both sides of a gate score a case whichever side it is
+on, so it changes nothing a gate measures, and including it would revoke every stored gate verdict
+the moment the field landed.
+
 ### Case tiers: active and archive
 
 A corpus mined from a live MR stream only grows, and deterministic sampling gives every case an
@@ -721,14 +742,25 @@ failures chosen that way are twelve *different things wrong with the guidance*; 
 slicing are usually one thing said twelve times. Cluster size is also the best available proxy for
 what a rule change is worth, which is why the biggest group is what the model reads first.
 
+Merging is lossy: only the representative's diff and problem statement reach the prompt, and the
+rest of its group arrives as "(and N more like it)" — no diff, no statement, not even an id. So a
+key may only ever be something that *means the same thing across cases*. Where no such thing is
+available the failure stands alone, because inventing a shared cause hides real evidence.
+
+That rule is why `rule` no longer falls back to the expectation id. Expectation ids are per-case
+ordinals — `promote.prepare` writes exactly one expectation per triage case and always names it
+`e1` — and a miss cites no rule, so the fallback keyed every promoted case in a corpus to the
+constant `fn:e1` and folded them into one cluster. Ten curated cases handed to a drafter produced
+one diff and a claim that the other nine were "like it".
+
 `cluster_by` options:
 
 | value | groups by | use when |
 |---|---|---|
-| `rule` | the rule id the reviewer cited, falling back to the expectation | default; rules are the thing you are editing |
-| `expectation` | the specific expectation that failed | expectations map cleanly to distinct behaviours |
+| `rule` | the rule id the reviewer cited; a failure citing none is its own cluster | default; rules are the thing you are editing |
+| `expectation` | what the expectation asserts, compared as text | expectations map cleanly to distinct behaviours |
 | `path` | the top-level directory | failures track subsystems more than rules |
-| `none` | nothing; representatives are individual failures | small corpora where every failure is distinct |
+| `none` | nothing; representatives are individual failures | you want every failure shown, whatever the cause |
 
 ### Template variables
 

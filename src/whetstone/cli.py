@@ -353,17 +353,23 @@ def _effort_for(spec: StepSpec | None, effort: str | None, default: str = "high"
     return effort or (spec.model.effort if spec else None) or default
 
 
-def _sample_policy(spec: StepSpec | None, max_cases: int | None, seed: int | None) -> (
-    SamplePolicy | None
-):
-    """Merge `--sample`/`--sample-seed` over the skill's own evaluate policy. Flags win."""
+def _sample_policy(
+    spec: StepSpec | None, max_cases: int | None, seed: int | None
+) -> SamplePolicy:
+    """Merge `--sample`/`--sample-seed` over the skill's own evaluate policy. Flags win.
+
+    The whole policy, and never None — see `ui.routers.jobs._sample`, which had the identical bug.
+    Copying three fields into a fresh `SamplePolicy` silently reset `holdout_fraction` and
+    `archive_weight` to their defaults, and an uncapped run returned None and reset the lot, so a
+    skill that configured either one was scored as if it had not.
+    """
     base = spec.sample if spec else SamplePolicy()
-    resolved = SamplePolicy(
-        max_cases=max_cases if max_cases is not None else base.max_cases,
-        seed=seed if seed is not None else base.seed,
-        stratify=base.stratify,
-    )
-    return resolved if resolved.max_cases is not None else None
+    update: dict[str, object] = {}
+    if max_cases is not None:
+        update["max_cases"] = max_cases
+    if seed is not None:
+        update["seed"] = seed
+    return base.model_copy(update=update) if update else base
 
 
 def _dry_summary(skill: Skill) -> str:

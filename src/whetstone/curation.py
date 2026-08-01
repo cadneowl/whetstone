@@ -28,7 +28,7 @@ import yaml
 from pydantic import BaseModel, computed_field
 
 from whetstone.corpus.model import CandidateCase
-from whetstone.domain.eval_model import CaseTier, EvalCase
+from whetstone.domain.eval_model import CaseTier, EvalCase, Partition
 from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.gates import GateRecord
@@ -267,34 +267,53 @@ class CurationError(ValueError):
     """A tier flip that would not produce a loadable case file."""
 
 
-# Top-level only: a nested `tier:` is always indented, and `case.yaml` is a mapping at the root.
-_TIER_LINE = re.compile(r"^tier:[^\n]*$", re.MULTILINE)
-
-
-def retier_yaml(text: str, tier: CaseTier) -> str:
-    """`case.yaml` with its top-level `tier` set, and *nothing else touched*.
+def _set_top_level(text: str, key: str, value: str) -> str:
+    """`case.yaml` with one top-level scalar set, and *nothing else touched*.
 
     A textual edit rather than a YAML round-trip: case files may be hand-written, and reserializing
     one to change a single field would rewrite quoting, ordering, and comments — turning the
     one-line diff a reviewer should see into a rewrite they have to trust. The result is validated
     by parsing before it is returned, so a file this cannot edit safely is refused, never mangled.
+
+    Top-level only: a nested key of the same name is always indented, and `case.yaml` is a mapping
+    at the root.
     """
-    if _TIER_LINE.search(text):
-        edited = _TIER_LINE.sub(f"tier: {tier}", text, count=1)
+    line = re.compile(rf"^{re.escape(key)}:[^\n]*$", re.MULTILINE)
+    if line.search(text):
+        edited = line.sub(f"{key}: {value}", text, count=1)
     else:
         newline = "" if (not text or text.endswith("\n")) else "\n"
-        edited = f"{text}{newline}tier: {tier}\n"
+        edited = f"{text}{newline}{key}: {value}\n"
 
     try:
         parsed = yaml.safe_load(edited)
     except yaml.YAMLError as exc:
-        raise CurationError(f"editing tier produced invalid YAML: {exc}") from exc
-    if not isinstance(parsed, dict) or parsed.get("tier") != tier:
+        raise CurationError(f"editing {key} produced invalid YAML: {exc}") from exc
+    if not isinstance(parsed, dict) or parsed.get(key) != value:
         raise CurationError(
-            "editing tier did not take — the case file's structure is unusual enough that it "
-            "should be edited by hand"
+            f"editing {key} did not take — the case file's structure is unusual enough that it "
+            f"should be edited by hand"
         )
     return edited
+
+
+def retier_yaml(text: str, tier: CaseTier) -> str:
+    """`case.yaml` with its top-level `tier` set, and nothing else touched."""
+    return _set_top_level(text, "tier", tier)
+
+
+def repartition_yaml(text: str, partition: Partition) -> str:
+    """`case.yaml` with its top-level `partition` set, and nothing else touched.
+
+    Written when the improve drafter has actually been shown a case whose id hashes to the holdout
+    — a promoted case, which is on the train side while it waits to graduate. Without the record,
+    graduating it would hand the hash back the decision and quietly turn a case the model has read
+    into an exam question it is credited with passing unseen.
+
+    One line, in the case file, in the diff: the exception to a partition nobody can re-roll has to
+    be visible to whoever reviews the corpus change.
+    """
+    return _set_top_level(text, "partition", partition)
 
 
 def tier_counts(cases: list[EvalCase]) -> dict[str, int]:

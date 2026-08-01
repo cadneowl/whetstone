@@ -192,10 +192,11 @@ class ProposalResult(BaseModel):
     # Targeted ids the model named that sit in the holdout partition — dropped, not honored, for
     # the reason `_failures` withholds those cases in the first place.
     holdout_cases: list[str] = Field(default_factory=list)
-    # Cases the caller asked to improve *from* that the drafter never saw — because the run did not
-    # score them, they passed, or they were withheld as holdout. Reported, never silent, for the
-    # same reason `unknown_cases` is: a narrowed improve that quietly dropped half its selection
-    # would look like it acted on the whole of it.
+    # Cases the caller asked to improve *from* whose failure never reached the prompt — the run did
+    # not score them, they passed, they were withheld as holdout, or they were folded into another
+    # failure's cluster (or cut by `FailureInputs.max`) and so appear only as "and N more like it".
+    # Reported, never silent, for the same reason `unknown_cases` is: a narrowed improve that
+    # quietly dropped half its selection would look like it acted on the whole of it.
     selected_missing: list[str] = Field(default_factory=list)
     llm_calls: int = 0
 
@@ -267,6 +268,36 @@ def _failures(
                 _failure(case_run, trial, outcome, cases.get(case_run.case_id), inputs)
             )
     return out
+
+
+def shown_cases(digest: Digest) -> set[str]:
+    """The case ids whose failure actually reaches the prompt.
+
+    Not the same as "had an eligible failure", and the gap between the two is where a selection
+    quietly evaporates. Clustering keeps one representative and renders the rest as "(and N more
+    like it)" — no diff, no problem statement, not even an id — and `FailureInputs.max` then cuts
+    the tail of the cluster list outright. A case on either side of that was counted, priced and
+    reported as drafted-from while contributing nothing the model could read.
+    """
+    return {cluster.representative.case_id for cluster in digest.clusters}
+
+
+def drafts_from(
+    record: RunRecord, skill: Skill, inputs: FailureInputs, only: set[str] | None = None
+) -> set[str]:
+    """The case ids whose failures a drafter would actually be shown, out of `only`.
+
+    The one answer to "will narrowing the improve to these cases do anything?", and it has to be
+    the *same* answer the drafter gets — so it is `_failures` itself, not a second reading of what
+    counts as a failure. A caller that reimplemented "failing and not holdout" would drift from
+    this one the first time either rule moved, and the symptom would be a console that promises to
+    draft from a case the drafter never sees.
+
+    Used by `propose` to report `selected_missing` after the fact, and by the console's improve
+    plan to refuse *before* the spend when the whole selection is invisible.
+    """
+    cases = {c.id: c for c in skill.eval_cases}
+    return {f.case_id for f in _failures(record, cases, inputs, only=only)}
 
 
 def _withheld(record: RunRecord, inputs: FailureInputs) -> int:
@@ -362,15 +393,41 @@ def _cluster(failures: list[Failure], inputs: FailureInputs) -> list[Cluster]:
 
 
 def _key(failure: Failure, strategy: str) -> str:
+    """The cause two failures must share to be represented by one of them.
+
+    The rule this enforces: **a key may only be something that means the same thing across cases.**
+    Merging is lossy — the members of a cluster reach the prompt as "(and N more like it)", with no
+    diff and no problem statement of their own — so a key that groups unrelated failures does not
+    summarise the corpus, it hides most of it.
+
+    `expectation_id` is not such a thing, and using it as the fallback was the sharpest hole in the
+    sharpening loop. Expectation ids are *per-case ordinals*: `promote.prepare` writes exactly one
+    expectation per triage case and always names it `e1`. A miss where the reviewer said nothing —
+    the commonest and most valuable failure there is — has no `rule_id`, so every promoted case in
+    the corpus fell through to the same constant key `fn:e1` and collapsed into a single cluster.
+    Selecting ten curated cases and asking for a draft showed the model one diff and told it the
+    other nine were "like it", when they were nine different problems in nine different files.
+
+    So the fallback is now the case itself: with no cited rule there is no evidence two failures
+    share a cause, and inventing one costs the drafter everything it was given. Clustering still
+    does its job wherever a real shared cause exists — a cited rule, a subsystem, a restated
+    expectation — which is the case the design was written for.
+    """
     if strategy == "none":
         return failure.case_id
     if strategy == "expectation":
-        return f"{failure.kind}:{failure.expectation_id}"
+        # The expectation's *text*, not its ordinal: what it asserts is comparable between cases,
+        # and "e1" is not. Distinct wording is treated as a distinct problem, which is the safe
+        # direction to be wrong in.
+        said = " ".join(failure.semantic.lower().split())
+        return f"{failure.kind}:said:{said}" if said else f"{failure.kind}:case:{failure.case_id}"
     if strategy == "path":
         # The top directory: a proxy for subsystem, which is usually what a rule gap tracks.
         return f"{failure.kind}:{failure.path.split('/')[0] if failure.path else '?'}"
-    # "rule": the rule the reviewer cited, falling back to the expectation when it cited none.
-    return f"{failure.kind}:{failure.rule_id or failure.expectation_id}"
+    # "rule": the rule the reviewer cited. With none cited, nothing links this failure to another.
+    if failure.rule_id:
+        return f"{failure.kind}:{failure.rule_id}"
+    return f"{failure.kind}:case:{failure.case_id}"
 
 
 def propose(
@@ -410,9 +467,9 @@ def propose(
     )
     selected_missing: list[str] = []
     if only is not None and record is not None:
-        cases_by_id = {c.id: c for c in skill.eval_cases}
-        drew_from = {f.case_id for f in _failures(record, cases_by_id, inputs, only=only)}
-        selected_missing = sorted(only - drew_from)
+        # Against what reached the *prompt*, not what was merely eligible — clustering and the
+        # `max` cap both drop cases after eligibility and before the model sees anything.
+        selected_missing = sorted(only - shown_cases(digest))
 
     if spec.is_subprocess:
         # No rendered prompt to compare against: a subprocess step is handed the digest as JSON, so

@@ -84,7 +84,7 @@ def test_batch_scope_scores_a_skill_authored_in_the_working_tree(
     _promote_a_case_to_disk(config.skills_root)
 
     # The resolver returns the working-tree skill body carrying its promoted case.
-    skill, ref = _skill_to_score(
+    skill, ref, _ = _skill_to_score(
         config, config.skills_root, EvalRequest(skill_id="architect", scope="promoted")
     )
     assert ref is None  # promoted cases are uncommitted on disk — no git ref

@@ -5,6 +5,7 @@ import {
   useGraduate,
   useProposal,
   useSaveGuidance,
+  type Job,
   type PendingCase,
   type SkillDetail as Detail,
 } from '@/api/client'
@@ -114,6 +115,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   // and say why rather than let the run fail after minutes of model calls.
   const heldSelected = pending.filter((c) => selected.has(c.id) && c.holdout)
   const targetable = pending.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
+  // The same blindfold blocks the *improve* step, which is where it actually hurt: a lone promoted
+  // case that hashes into the holdout could be scored, seen to miss, and then handed to a drafter
+  // forbidden from looking at it — one wasted call and a draft that changed nothing.
+  const noneDraftable = selected.size > 0 && heldSelected.length === selected.size
 
   // Corpus cases the last run got wrong — exactly what the no-batch improve step drafts from, so
   // exactly what a gate on that draft should be made to prove. Holdout cases are excluded: a change
@@ -128,10 +133,22 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     .map((c) => c.id)
 
   // A strict subset scores just those cases — the cheap, targeted check. All (or none) selected
-  // scores the whole promoted set, so a regression on a case you did not pick still shows.
+  // scores the whole promoted set. Neither touches the graduated corpus unless the second button
+  // is used, so regressions come from there or from the gate.
   // `scoreKey` resets the launch button's cost plan whenever the selection changes.
   const scoreSubset = selected.size > 0 && selected.size < pending.length
   const scoreKey = scoreSubset ? [...selected].sort().join(',') : 'all'
+
+  // Both score buttons land the same way — the run they produce is what the sharpen step drafts
+  // from, whether or not the corpus was underneath it.
+  const scored = (job: Job) => {
+    const r = job.result as Record<string, unknown>
+    patch({ run: String(r.run_id ?? '') || null })
+    setNotice(
+      `Scored: recall ${fmt(r.recall)} · fp ${fmt(r.fp_rate)}` +
+        (r.run_id ? ` — open the run to see each case.` : ''),
+    )
+  }
 
   const applyDraft = () =>
     draft &&
@@ -271,27 +288,35 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               {scoreSubset
                 ? `Runs the on-disk guidance over the ${selected.size} case(s) you ticked above.`
                 : 'Runs the on-disk guidance over every promoted case.'}{' '}
-              Missed / falsely-flagged cases are what to sharpen next; a regressed case is what to
-              protect.
+              Missed / falsely-flagged cases are what to sharpen next. Add the corpus to see
+              regressions too — it costs every graduated case, which is why it is the second
+              button rather than the only one.
             </p>
-            <LaunchButton
-              key={scoreKey}
-              kind="eval"
-              request={{
-                skill_id: skillId,
-                scope: 'promoted',
-                ...(scoreSubset ? { cases: [...selected] } : {}),
-              }}
-              label={scoreSubset ? `Score ${selected.size} selected` : 'Score the promoted batch'}
-              onDone={(job) => {
-                const r = job.result as Record<string, unknown>
-                patch({ run: String(r.run_id ?? '') || null })
-                setNotice(
-                  `Scored: recall ${fmt(r.recall)} · fp ${fmt(r.fp_rate)}` +
-                    (r.run_id ? ` — open the run to see each case.` : ''),
-                )
-              }}
-            />
+            <div className="flex flex-wrap items-center gap-3">
+              <LaunchButton
+                key={scoreKey}
+                kind="eval"
+                request={{
+                  skill_id: skillId,
+                  scope: 'promoted',
+                  ...(scoreSubset ? { cases: [...selected] } : {}),
+                }}
+                label={scoreSubset ? `Score ${selected.size} selected` : 'Score the promoted batch'}
+                onDone={scored}
+              />
+              <LaunchButton
+                key={`corpus-${scoreKey}`}
+                kind="eval"
+                request={{
+                  skill_id: skillId,
+                  scope: 'promoted',
+                  with_corpus: true,
+                  ...(scoreSubset ? { cases: [...selected] } : {}),
+                }}
+                label="…with the eval corpus too"
+                onDone={scored}
+              />
+            </div>
             {batchRun && (
               <Link
                 to={`/runs/${encodeURIComponent(batchRun)}`}
@@ -318,10 +343,30 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                 in the Edit tab (your ticked cases and this score come back with you). Either way it
                 lands on disk and is re-scored above.
               </p>
+              {/* Every ticked case is holdout, so the drafter would be shown nothing at all and
+                  the call could only return the guidance unchanged. The server refuses this at
+                  plan time now; disabling it here means the operator never gets as far as a cost
+                  banner for a draft that cannot happen. Selecting nothing is *not* this case — an
+                  empty selection means "every failure in the run". */}
+              {noneDraftable && (
+                <p className="mb-2 text-xs text-warn">
+                  {heldSelected.map((c) => c.id).join(', ')}{' '}
+                  {heldSelected.length === 1 ? 'is the only ticked case, and it is' : 'are all'}{' '}
+                  holdout — scored on every run, never shown to the drafter, so there is nothing
+                  here to sharpen from. Cases still waiting under{' '}
+                  <code className="font-mono">promoted_cases/</code> are always available — the
+                  exam is the graduated corpus — so tick one of those, or a graduated case outside
+                  the holdout. To spend a graduated holdout case anyway, record{' '}
+                  <code className="font-mono">partition: train</code> in its case file; it then
+                  counts as taught rather than as an unseen pass.
+                </p>
+              )}
               <LaunchButton
                 kind="improve"
                 request={{ skill_id: skillId, run_id: batchRun, cases: [...selected], instruction }}
                 label={selected.size ? 'Improve from selected' : 'Improve from every failure'}
+                disabled={noneDraftable}
+                disabledReason="Every ticked case is holdout — the drafter is never shown one."
                 onDone={onDrafted}
               >
                 {/* An empty selection is not an empty draft: the server reads no ids as "no

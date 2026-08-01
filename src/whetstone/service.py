@@ -65,7 +65,12 @@ from whetstone.reviewer.base import Reviewer, provenance_of
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
-from whetstone.sampling import holdout_report, partition_of, sample_cases
+from whetstone.sampling import (
+    holdout_report,
+    partition_for,
+    pinned_partitions,
+    sample_cases,
+)
 from whetstone.steps import JudgePolicy, SamplePolicy
 from whetstone.taskruns import (
     TaskGateRecord,
@@ -245,10 +250,12 @@ def record_eval(
 
     # Stamp each case's holdout partition into the record, so the improve digest and the
     # drill-down read the run's own truth rather than recomputing with a fraction that may have
-    # been reconfigured since.
+    # been reconfigured since. A case stating its own partition wins over the hash, which is how a
+    # promoted case stays learnable-from and how one the drafter has already seen stays that way.
     fraction = (sample or SamplePolicy()).holdout_fraction
+    pinned = pinned_partitions(skill.eval_cases)
     for case_run in cases:
-        case_run.partition = partition_of(case_run.case_id, fraction)  # type: ignore[assignment]
+        case_run.partition = partition_for(case_run.case_id, fraction, pinned)
 
     return RunRecord(
         id=new_run_id(skill.id, started_at),
@@ -293,7 +300,7 @@ def record_eval(
         git_ref=git_ref,
         cases=cases,
         score=score,
-        holdout=holdout_report(score, fraction),
+        holdout=holdout_report(score, fraction, pinned),
     )
 
 
@@ -586,11 +593,16 @@ def gate_skills(
     """
     cfg = cfg or GateConfig()
     fraction = (sample or SamplePolicy()).holdout_fraction
+    # Read off the union both sides will be scored over, so a case that states its own partition is
+    # honoured here exactly as it will be when the run stamps it.
+    pinned = pinned_partitions(union_cases(base, candidate))
     # A targeted case must come from the train partition: a change may only claim to fix cases
     # the improve drafter was allowed to see. Without this rule, targeted-case pressure leaks
     # holdout cases into prompts one at a time, and the overfitting alarm quietly disconnects
     # itself.
-    leaked = sorted(c for c in cfg.targeted_cases if partition_of(c, fraction) == "holdout")
+    leaked = sorted(
+        c for c in cfg.targeted_cases if partition_for(c, fraction, pinned) == "holdout"
+    )
     if leaked:
         raise ValueError(
             f"targeted case(s) {', '.join(leaked)} are in the holdout partition — the improve "
@@ -697,6 +709,7 @@ def record_gate(
     duration = time.perf_counter() - clock
 
     fraction = (sample or SamplePolicy()).holdout_fraction
+    pinned = pinned_partitions(union_cases(base, candidate))
     candidate_hash = skill_hash(candidate)
     # The tier-1 model folds into the identity exactly as it does on a plain run: a gate judged by
     # a distilled tier 1 is a different instrument than one judged by the teacher, and recording
@@ -738,8 +751,8 @@ def record_gate(
         result=outcome.result,
         base_score=outcome.base,
         candidate_score=outcome.candidate,
-        base_holdout=holdout_report(outcome.base, fraction),
-        candidate_holdout=holdout_report(outcome.candidate, fraction),
+        base_holdout=holdout_report(outcome.base, fraction, pinned),
+        candidate_holdout=holdout_report(outcome.candidate, fraction, pinned),
     )
 
 

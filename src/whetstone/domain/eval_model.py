@@ -18,6 +18,12 @@ Must = Literal["appear", "not_appear"]
 # a person (see `curation.py`) — never by anything automatic.
 CaseTier = Literal["active", "archive"]
 
+# Which side of the train/holdout split a case sits on. `train` may be learned from and named as a
+# gate target; `holdout` may only ever be scored — it is the exam that makes a rising train score
+# mean something. Normally derived from the case id (`sampling.partition_of`); see
+# `EvalCase.partition` for the one case in which it is stated outright instead.
+Partition = Literal["train", "holdout"]
+
 
 # The vocabulary `human_signal` is drawn from. Kept closed and free of detail — which merge request
 # or issue a case came from belongs in `ref` — so the field stays answerable by machine as well as
@@ -134,3 +140,21 @@ class EvalCase(BaseModel):
     expect: list[Expectation]
     provenance: Provenance = Provenance()
     tier: CaseTier = "active"
+    # Which side of the holdout split this case is on, when it is not left to the hash.
+    #
+    # `None` means "decided by `sampling.partition_of`", which is the default and stays the default:
+    # membership computed from the case id alone is what makes a holdout impossible to re-roll into
+    # the shape you wanted. This field is the one honest exception — a *recorded* statement that
+    # this case is for teaching, not for examining.
+    #
+    # It exists because the alternative was worse. A case promoted from triage is mined precisely
+    # because production missed it, and the operator's next move is to sharpen against it; a hash
+    # that says "holdout" makes that impossible, permanently, for a fifth of everything mined. The
+    # only escape was `sample.holdout_fraction: 0`, which switches the overfitting alarm off for
+    # the whole skill to unblock one case.
+    #
+    # `train` is written here automatically once the improve drafter has actually been shown the
+    # case (see `improve.shown_cases`), and it survives graduation because that is a folder move.
+    # So the guarantee the holdout exists to give is kept by construction rather than by hope: a
+    # case the drafter has seen can never later be counted as an exam question it passed unseen.
+    partition: Partition | None = None

@@ -469,11 +469,13 @@ inputs:
     # Cluster representatives, not the first N — 12 here means twelve different kinds of failure,
     # largest group first.
     max: 12
-    # `none` because these skills have ten cases between them. The default, `rule`, groups by the
-    # rule the reviewer cited — and a *miss* cites nothing, so at this size every miss collapses
-    # into one cluster and the model is shown one gap out of three. Clustering earns its keep at
-    # thousands of failures, not at four.
-    cluster_by: none
+    # The default, deliberately — the demo has to exercise what a scaffolded skill actually gets.
+    # This said `none` for a long time, because `rule` used to fall back to the *expectation id*
+    # when the reviewer cited no rule, and a miss cites nothing: every miss in the corpus keyed to
+    # `fn:e1` and collapsed into one cluster, so the model was shown one gap out of three. Setting
+    # `none` here made the demo look right and left every real skill on the broken default. The
+    # fallback is now the case itself, so `rule` is correct at four failures and at four thousand.
+    cluster_by: rule
     max_diff_bytes: 2000
     outcomes: [fn, fp]
 
@@ -796,7 +798,7 @@ agent:
 inputs:
   failures:
     max: 12
-    cluster_by: none
+    cluster_by: rule
     max_diff_bytes: 2000
     outcomes: [fn, fp]
 

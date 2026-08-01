@@ -351,6 +351,9 @@ function PromotedBatch({ batch, readOnly }: { batch: Batch; readOnly: boolean })
   const skillsChosen = [...new Set(chosen.map((c) => c.skill_id))]
   const skillsAll = [...new Set(cases.map((c) => c.skill_id))]
   const scoreSkill = chosen.length ? (skillsChosen.length === 1 ? skillsChosen[0] : null) : (skillsAll.length === 1 ? skillsAll[0] : null)
+  // Ticking nothing means the whole promoted set, which both score buttons share — they differ
+  // only in whether the graduated corpus goes underneath it.
+  const pickedCases = chosen.length ? { cases: chosen.map((c) => c.case_id) } : {}
 
   const toggle = (c: PromotedCase) => {
     const next = new Set(picked)
@@ -448,17 +451,30 @@ function PromotedBatch({ batch, readOnly }: { batch: Batch; readOnly: boolean })
 
       <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3">
         {scoreSkill ? (
-          <LaunchButton
-            // Re-plans when the selection changes, so the cost shown is the cost of what is ticked.
-            key={picked.join(',') || 'all'}
-            kind="eval"
-            request={{
-              skill_id: scoreSkill,
-              scope: 'promoted',
-              ...(chosen.length ? { cases: chosen.map((c) => c.case_id) } : {}),
-            }}
-            label={chosen.length ? `Score ${chosen.length} selected` : 'Score all promoted'}
-          />
+          <>
+            <LaunchButton
+              // Re-plans when the selection changes, so the cost shown is what is ticked.
+              key={`only-${picked.join(',') || 'all'}`}
+              kind="eval"
+              request={{ skill_id: scoreSkill, scope: 'promoted', ...pickedCases }}
+              label={
+                chosen.length
+                  ? `Score ${chosen.length} selected`
+                  : `Score all ${cases.length} promoted`
+              }
+            />
+            <LaunchButton
+              key={`corpus-${picked.join(',') || 'all'}`}
+              kind="eval"
+              request={{
+                skill_id: scoreSkill,
+                scope: 'promoted',
+                with_corpus: true,
+                ...pickedCases,
+              }}
+              label="…with the eval corpus too"
+            />
+          </>
         ) : (
           <p className="text-xs text-muted">
             {chosen.length
@@ -499,6 +515,15 @@ function PromotedBatch({ batch, readOnly }: { batch: Batch; readOnly: boolean })
           >
             graduate them →
           </Link>
+        )}
+        {scoreSkill && (
+          <p className="w-full text-[11px] text-muted">
+            The first scores <em>only</em> these promoted case(s) — the cheap check that the skill
+            catches them yet, at a cost that does not grow as the corpus does. The second puts the
+            graduated eval corpus underneath: the regression view, and it costs every case in it.
+            Leaving it out is a spend decision, not a gap — the gate scores the whole corpus on
+            both sides before anything can be proposed.
+          </p>
         )}
       </div>
       {remove.error != null && <ErrorNote error={remove.error} />}

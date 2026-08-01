@@ -196,6 +196,43 @@ def test_a_flipped_case_round_trips_through_the_loader(tmp_path: Path) -> None:
     assert load_skill(skill_dir).eval_cases[0].tier == "archive"
 
 
+def test_a_recorded_partition_round_trips_through_the_loader(tmp_path: Path) -> None:
+    """Written by the improve step, read back by everything that asks which side a case is on.
+
+    The loader builds `EvalCase` field by field, so a new field it does not name is dropped in
+    silence — the case file says `partition: train` and every reader goes on believing the hash.
+    Exactly how `holdout_fraction` came to be inert, and worth a test of its own for that reason.
+    """
+    from whetstone.curation import repartition_yaml
+
+    skill_dir = tmp_path / "s"
+    case_dir = skill_dir / "eval_cases" / "seen-by-the-drafter"
+    case_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nid: s\n---\n\nbody\n", encoding="utf-8")
+    (case_dir / "case.yaml").write_text(CASE_YAML, encoding="utf-8")
+    (case_dir / "change.diff").write_text(
+        "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n"
+        "@@ -1,1 +1,2 @@\n context\n+    db.get(1).unwrap();\n",
+        encoding="utf-8",
+    )
+
+    assert load_skill(skill_dir).eval_cases[0].partition is None  # absent means "ask the hash"
+
+    (case_dir / "case.yaml").write_text(
+        repartition_yaml(CASE_YAML, "train"), encoding="utf-8"
+    )
+    assert load_skill(skill_dir).eval_cases[0].partition == "train"
+
+
+def test_repartition_leaves_the_tier_alone_and_vice_versa() -> None:
+    """Two one-line edits on the same file must compose, not overwrite each other."""
+    from whetstone.curation import repartition_yaml
+
+    both = repartition_yaml(retier_yaml(CASE_YAML, "archive"), "train")
+    assert both.endswith("tier: archive\npartition: train\n")
+    assert repartition_yaml(both, "train") == both  # idempotent
+
+
 def test_tier_counts() -> None:
     counts = tier_counts([_case("a"), _case("b", tier="archive"), _case("c")])
     assert counts == {"active": 2, "archive": 1}

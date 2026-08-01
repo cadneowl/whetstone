@@ -23,12 +23,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from whetstone import staging
+from whetstone import improve, staging
 from whetstone.authoring import SkillEdit, prepare_guidance
 from whetstone.candidates import CandidateStore
 from whetstone.config import Config
@@ -64,7 +64,7 @@ from whetstone.preflight import (
 )
 from whetstone.providers.base import ConnectorError
 from whetstone.reviewer.factory import ReviewerChoice, reviewer_for, step_agent
-from whetstone.sampling import partition_of, sample_cases
+from whetstone.sampling import partition_for, pinned_partitions, sample_cases
 from whetstone.service import record_eval, record_gate, record_review, strip_guidance
 from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step
 from whetstone.ui.deps import (
@@ -112,6 +112,20 @@ class EvalRequest(BaseModel):
     # weakens the safety net: the gate always scores the whole union, so a regression on a case you
     # skipped here still blocks the propose.
     cases: list[str] = Field(default_factory=list)
+    # `promoted` scope only: also score the graduated corpus the promoted cases would join.
+    #
+    # Two different questions, and the caller has to be able to pick. "Do the cases I just curated
+    # get caught yet?" is answered by the promoted set alone, and it is the question triage asks —
+    # over and over, on two or three cases at a time. "Did fixing them break anything?" needs the
+    # graduated corpus underneath, and it is worth its cost far less often.
+    #
+    # Off by default because the cost of the two diverges without bound: a corpus of a thousand
+    # cases makes checking two promoted ones a thousand-and-two-case run, and the console offered
+    # no way to say no. Defaulting to the cheap question also makes the buttons honest — every
+    # caller's own label and copy already said "the promoted set", while every one of them ran the
+    # union. Nothing is weakened by the flip: the gate scores the whole union on both sides and is
+    # what stands between a change and a propose, so regressions are still caught where it counts.
+    with_corpus: bool = False
     # The backend for this one launch. Empty is the console default — the header picker, or `[llm]`.
     # A provider here (one Whetstone knows) runs just this step on that model instead, so a single
     # step can go to the cloud while everything else stays on the local box, or the reverse, without
@@ -206,8 +220,13 @@ def plan_eval_job(
     request: EvalRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
 ) -> Plan:
     selection = _pick(request.provider, request.model, selection)
-    skill, _ = _skill_to_score(config, root, request)
-    return _eval_plan(config, selection, skill, request, _reviewer_choice(config, skill))
+    scored = _skill_to_score(config, root, request)
+    plan = _eval_plan(
+        config, selection, scored.skill, request, _reviewer_choice(config, scored.skill)
+    )
+    if scored.note:
+        plan.details.append(scored.note)
+    return plan
 
 
 @router.post("/eval", response_model=Job, dependencies=[Writable])
@@ -221,9 +240,11 @@ def launch_eval(
 ) -> Job:
     """Score a skill against its eval cases, in the background."""
     selection = _pick(request.provider, request.model, selection)
-    skill, ref = _skill_to_score(config, root, request)
+    skill, ref, note = _skill_to_score(config, root, request)
     choice = _reviewer_choice(config, skill)
     plan = _eval_plan(config, selection, skill, request, choice)
+    if note:
+        plan.details.append(note)
     # The evaluate step always comes from the working tree: it is how the operator's machine runs a
     # model, not part of the guidance under test, and taking it from a branch would let a staged
     # change quietly alter the harness measuring it.
@@ -342,7 +363,10 @@ def _check_targets(
     if not request.targeted:
         return
     spec = _step(root, candidate, "evaluate")
-    fraction = (_sample(spec, request.sample) or SamplePolicy()).holdout_fraction
+    fraction = _sample(spec, request.sample).holdout_fraction
+    # `candidate` is the union the gate will score, promoted cases included, so a case stating its
+    # own partition is read here exactly as `gate_skills` will read it.
+    pinned = pinned_partitions(candidate.eval_cases)
     known = {c.id for c in candidate.eval_cases}
 
     unknown = sorted(c for c in request.targeted if c not in known)
@@ -352,7 +376,9 @@ def _check_targets(
             f"would score everything and then fail on them. Reload the skill and pick again — they "
             f"may have been graduated or removed since."
         )
-    leaked = sorted(c for c in request.targeted if partition_of(c, fraction) == "holdout")
+    leaked = sorted(
+        c for c in request.targeted if partition_for(c, fraction, pinned) == "holdout"
+    )
     if leaked:
         raise Unprocessable(
             f"targeted case(s) {', '.join(leaked)} are in the holdout partition — the improve loop "
@@ -477,7 +503,7 @@ def plan_improve_job(
             details=["this step runs your own program; Whetstone calls no model"],
         )
     scope = (
-        f"drafting from {len(request.cases)} selected case(s)"
+        _narrowed_scope(store, skill, spec, request)
         if request.cases
         else f"digest: up to {spec.inputs.failures.max} clustered failure(s)"
     )
@@ -510,6 +536,82 @@ def plan_improve_job(
             plan.details.append(f"step context: {shown}")
     _warn_if_nothing_to_learn(plan, store, skill, request)
     return plan
+
+
+def _narrowed_scope(store: Any, skill: Skill, spec: StepSpec, request: ImproveRequest) -> str:
+    """What "improve from these cases" resolves to — and a refusal when it resolves to nothing.
+
+    The gap this closes was the worst kind: every part of it was individually honest. A promoted
+    case is scored and misses; the workspace offers "Improve from selected"; the plan priced it at
+    "drafting from 1 selected case(s)"; the drafter is shown nothing, because the case sits in the
+    holdout partition it may never learn from; the draft comes back "no failures were reported,
+    returning body unchanged"; and a footnote afterwards explains that the case "did not fail (or
+    is holdout)". A model call spent to be told the selection was never eligible.
+
+    `_warn_if_nothing_to_learn` did not catch it: that asks whether the *run* had failures, and it
+    did — the only one was on the very case being withheld.
+
+    So the question is asked here in the terms the drafter answers it in — by assembling the very
+    digest the step will be handed and reading which cases reached it. Not by re-deriving
+    eligibility: a case can be perfectly eligible and still never appear, because clustering keeps
+    one representative per cause and `FailureInputs.max` cuts the tail. Anything short of building
+    the digest prices a selection the model will not be shown.
+
+    A selection with nothing left is refused rather than warned about: unlike "rewrite my passing
+    guidance", which is a legitimate thing to want and so stays a warning, "draft from cases you
+    cannot be shown" is not a request that can be honoured at any price.
+    """
+    wanted = set(request.cases)
+    plural = "" if len(wanted) == 1 else "s"
+    try:
+        record = _run_for(store, skill, request)
+    except Unprocessable:
+        # Left to `_warn_if_nothing_to_learn`, which turns it into the warning the operator needs;
+        # saying it twice, once as a refusal, would hide the run-selection problem behind this one.
+        return f"drafting from {len(wanted)} selected case{plural}"
+    if record is None:
+        return f"drafting from {len(wanted)} selected case{plural}"
+
+    inputs = spec.inputs.failures
+    # No wiki text and no network: the digest is assembled from the run and the skill alone, so
+    # planning it costs nothing and is exactly what `propose` will build.
+    shown = improve.shown_cases(improve.build_digest(skill, record, inputs, only=wanted))
+    if len(shown) == len(wanted):
+        return f"drafting from {len(wanted)} selected case{plural}"
+
+    eligible = improve.drafts_from(record, skill, inputs, wanted)
+    scored = {c.case_id for c in record.cases}
+    held = {c.case_id for c in record.cases if c.partition == "holdout"}
+    missing = wanted - shown
+    # Disjoint by construction: a case absent from the run cannot be in `held`, which is read off
+    # the run's own case list, and `folded` is what survived eligibility but not assembly.
+    unscored = missing - scored
+    withheld = missing & held
+    folded = missing & eligible
+    why = {
+        "in the holdout partition, which the improve step is never shown": sorted(withheld),
+        f"not scored by run {record.id}": sorted(unscored),
+        "already passing in that run": sorted(missing - unscored - withheld - folded),
+        (
+            f"folded into another failure's cluster or past the {inputs.max}-failure cap, so the "
+            f"drafter sees them only as \"and N more like it\""
+        ): sorted(folded),
+    }
+    reasons = "; ".join(f"{', '.join(ids)} {label}" for label, ids in why.items() if ids)
+    if shown:
+        return (
+            f"drafting from {len(shown)} of {len(wanted)} selected case{plural} — the rest do not "
+            f"reach the prompt: {reasons}"
+        )
+    raise Unprocessable(
+        f"none of the {len(wanted)} selected case{plural} reach the drafter: {reasons}. "
+        f"This would spend a model call to change nothing. Pick a case the last run failed "
+        f"outside the holdout — cases still waiting under promoted_cases/ are always available, "
+        f"because the exam is the graduated corpus. A graduated case in the holdout stays out on "
+        f"purpose: its score is the only evidence that a rising recall is capability rather than "
+        f"memorisation. If you mean to spend it anyway, say so in that case's file with "
+        f"`partition: train` and it will never be counted as an unseen pass again."
+    )
 
 
 def _warn_if_nothing_to_learn(
@@ -586,6 +688,24 @@ def launch_improve(
             only=set(request.cases) or None,
             agent=agent,
         )
+        # The model has now read these cases. Recording it is what stops a promoted case that was
+        # sharpened against from being handed back to the hash at graduation and counted as an
+        # exam question it passed unseen. Written on the draft rather than on the apply: the
+        # contamination is the model having read the case, and discarding the wording it produced
+        # does not unread it.
+        evaluate = _step(root, skill, "evaluate")
+        pinned = staging.pin_shown_to_train(
+            config,
+            skill.id,
+            improve.shown_cases(result.digest),
+            _sample(evaluate, None).holdout_fraction,
+        )
+        for case_id in pinned:
+            handle.log(
+                LogLine(
+                    text=f"  {case_id}: recorded partition: train — the drafter has now seen it"
+                )
+            )
         handle.progress(1, 1, "done")
         return {
             "body": result.proposal.body,
@@ -599,6 +719,7 @@ def launch_improve(
             # Selected cases the drafter never saw (unscored, passing, or holdout) — named so a
             # narrowed improve never looks like it acted on cases it did not.
             "selected_missing": result.selected_missing,
+            "pinned_to_train": pinned,
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
             "holdout_withheld": result.digest.holdout_withheld,
@@ -1858,7 +1979,22 @@ def _skill(root: Path, skill_id: str) -> Skill:
     return _load_one(root, skill_id)
 
 
-def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[Skill, str | None]:
+class Scored(NamedTuple):
+    """What an eval will run over: the skill, the git ref it came from, and how to say so.
+
+    `note` exists because the case set is now a choice rather than a consequence. A plan that says
+    "1002 case(s) x 1 trial(s)" is arithmetic; it does not tell an operator which question they are
+    about to pay for, nor that skipping the corpus here leaves the gate's regression cover intact.
+    Carried out of the resolver rather than re-derived in the planner, because both numbers are
+    known exactly once — here, where the set is decided.
+    """
+
+    skill: Skill
+    ref: str | None
+    note: str | None = None
+
+
+def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> Scored:
     """The skill an eval scores, and the git ref it came from.
 
     The working tree by default, which is what `eval run` has always meant. `staged=True` scores the
@@ -1878,21 +2014,27 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
     is what the console offered to spend a model call on. So the guidance comes from wherever the
     operator is editing and the cases come from the promoted set overlaid onto it, which is the only
     pairing that answers "does my rewrite handle the cases I just curated?".
+
+    Which cases *that* means is `with_corpus`, and it is the operator's call rather than this
+    function's. The promoted set alone is the triage question — two cases, two model calls, ask it
+    twenty times an afternoon. The promoted set on top of the graduated corpus is the regression
+    question, and it costs the whole corpus every time it is asked, which on a mature skill is
+    hundreds of cases to learn something about two.
     """
     if request.scope == "working":
-        return _skill(root, request.skill_id), None
+        return Scored(_skill(root, request.skill_id), None)
 
     if request.scope == "draft":
         # The on-disk guidance is the draft now — edits land in the working tree, not a branch — so
         # `draft` and `working` resolve to the same skill. The name is kept for the editor's
         # "Score the draft" button, which asks "how does the guidance I am editing do?".
-        return _skill(root, request.skill_id), None
+        return Scored(_skill(root, request.skill_id), None)
 
     # The promoted set is a folder on disk (`promoted_cases/`), read as cases and overlaid onto the
     # working-tree / staged body — no branch, no reconstruction, so a skill authored in the working
     # tree scores exactly like a committed one.
-    cases = staging.promoted_cases(config, request.skill_id)
-    if not cases:
+    promoted = staging.promoted_cases(config, request.skill_id)
+    if not promoted:
         raise Unprocessable(
             f"no promoted cases for {request.skill_id!r} — promote some from triage first, "
             f"or score the working tree instead."
@@ -1901,25 +2043,41 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
         # A targeted subset: score only the promoted cases the operator selected. Filter here, so
         # both the cost plan and the run (which share this resolver) count exactly what was picked.
         wanted = set(request.cases)
-        cases = [c for c in cases if c.id in wanted]
-        if not cases:
+        promoted = [c for c in promoted if c.id in wanted]
+        if not promoted:
             raise Unprocessable(
                 f"none of the selected case(s) are promoted for {request.skill_id!r} — they may "
                 f"have been graduated or undone since. Reload the skill and pick again."
             )
-    # The same overlay the gate uses, so a run reporting recall 1.00 and the gate that confirms it
-    # are talking about the same content. No git ref: the promoted cases are uncommitted on disk.
-    editing = _skill_being_edited(config, root, request.skill_id)
-    scored = staging.overlay_cases(editing, cases)
-    if request.cases:
-        # Score *exactly* the selected cases — not the graduated corpus the overlay also carries.
-        # A subset run is an explicit "just check these"; the whole-corpus regression view is what
-        # the unfiltered score (and the gate) are for.
-        keep = {c.id for c in cases}
+    # The guidance being edited is what is on disk; the graduated corpus rides along with it. The
+    # overlay is the same one the gate uses, so when the corpus *is* included a run reporting recall
+    # 1.00 and the gate that confirms it are talking about the same content. No git ref: the
+    # promoted cases are uncommitted on disk.
+    editing = _skill(root, request.skill_id)
+    graduated = len(editing.eval_cases)
+    scored = staging.overlay_cases(editing, promoted)
+    if not request.with_corpus:
+        # Score *exactly* the promoted cases asked for — not the graduated corpus the overlay also
+        # carries, and not the promoted cases left unticked. Skipping the corpus is a cost decision
+        # and never a safety one: the gate scores the whole union on both sides, so a regression on
+        # a case left out here still blocks the propose.
+        keep = {c.id for c in promoted}
         scored = scored.model_copy(
             update={"eval_cases": [c for c in scored.eval_cases if c.id in keep]}
         )
-    return scored, None
+    picked = len(promoted)
+    if request.with_corpus:
+        note = (
+            f"{picked} promoted case(s) over the graduated corpus ({graduated} case(s)) — the "
+            f"regression view, so a rule that fixes these and breaks those shows up here"
+        )
+    else:
+        note = (
+            f"{picked} promoted case(s) only — the graduated corpus ({graduated} case(s)) is not "
+            f"re-scored. The gate scores both sides over all of it before a propose, so this is a "
+            f"cost decision, not a gap in cover"
+        )
+    return Scored(scored, None, note)
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:
@@ -2109,16 +2267,26 @@ def _require_step(root: Path, skill: Skill, kind: str) -> StepSpec:
     return spec
 
 
-def _sample(spec: StepSpec | None, override: int | None) -> Any:
-    from whetstone.steps import SamplePolicy
+def _sample(spec: StepSpec | None, override: int | None) -> SamplePolicy:
+    """The evaluate step's sampling policy, with a per-launch case cap laid over it.
 
+    Passed through whole, and always. Rebuilding it field by field dropped `holdout_fraction` and
+    `archive_weight` on the floor, and returning None for an uncapped run dropped everything — so
+    `record_eval`, which reads the fraction off this policy, partitioned at the 0.2 default no
+    matter what the skill's `step.yaml` said. The knob has never done anything on any scoring path.
+
+    That made it worse than a missing feature, because two other readers get it *right*: the
+    holdout badge on the skill page and the gate's target check both load the spec directly. Set
+    `sample.holdout_fraction: 0` and the console would stop calling a case holdout and start
+    accepting it as a gate target, while the run record went on stamping `partition: holdout` and
+    the improve drafter went on refusing to look at it. A screen and a prompt disagreeing about
+    which cases are learnable-from, with no way to tell from either.
+
+    `sample_cases` already treats `max_cases=None` as "score everything", so carrying the policy
+    for its other fields costs nothing.
+    """
     base = spec.sample if spec else SamplePolicy()
-    resolved = SamplePolicy(
-        max_cases=override if override is not None else base.max_cases,
-        seed=base.seed,
-        stratify=base.stratify,
-    )
-    return resolved if resolved.max_cases is not None else None
+    return base if override is None else base.model_copy(update={"max_cases": override})
 
 
 def _pick(provider: str, model: str, base: ModelSelection) -> ModelSelection:
