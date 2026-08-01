@@ -192,9 +192,17 @@ def test_the_skill_page_can_say_each_step_runs_as_an_agent() -> None:
     assert rows["improve"].mode == "agent"
 
 
-def test_a_step_with_no_file_is_shown_as_absent_not_as_broken() -> None:
-    rows = _runtimes(ROOT / "examples" / "agent-skill" / "skills" / "panic-guard-agent")
+def test_a_step_with_no_file_is_shown_as_absent_not_as_broken(tmp_path: Path) -> None:
+    """Absent and broken are different answers: one is a skill that does not do that yet, the
+    other is a file that needs opening. Built here rather than pointed at a shipped skill, so
+    adding a step to an example cannot quietly make this test about something else."""
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+
+    rows = _runtimes(tmp_path)
+
     assert rows["triage"].present is False
+    assert rows["triage"].note == "no step file"
+    assert not rows["triage"].problem
 
 
 def test_a_triage_agent_row_says_it_is_blindfolded() -> None:
@@ -381,3 +389,106 @@ def test_the_cost_preflight_warns_on_the_same_threshold(tmp_path: Path) -> None:
     annotate_reviewer(plan, choice, invocations=1, skill=skill, large_prompt_chars=40_000)
 
     assert any("large_prompt_chars" in w for w in plan.warnings)
+
+
+# --- the authoring tutorial ---------------------------------------------------------
+#
+# Every claim it makes that a reader would act on, asserted against behaviour. A tutorial that has
+# drifted is worse than none: it is believed, and it is the thing someone reads *instead of* the
+# code.
+
+TUTORIAL = ("docs", "authoring-skills.md")
+AGENT_EXAMPLE = ROOT / "examples" / "agent-skill" / "skills" / "panic-guard-agent"
+
+
+def test_the_tutorial_exists_and_the_example_points_at_it() -> None:
+    assert _read(*TUTORIAL)
+    assert "authoring-skills.md" in _read("examples", "agent-skill", "README.md")
+
+
+def test_the_agent_example_uses_every_capability_the_tutorial_says_it_does() -> None:
+    """The tutorial's example table promises `agent:` on all three steps, plus source, tools,
+    context and the triage blindfold. A promise about a folder is checkable."""
+    from whetstone.service import step_runtimes
+
+    skill = load_skill(AGENT_EXAMPLE)
+    rows = {s.kind: s for s in step_runtimes(skill, AGENT_EXAMPLE)}
+
+    for kind in ("evaluate", "improve", "triage"):
+        assert rows[kind].mode == "agent", f"{kind} is not an agent step"
+        assert "+source" in rows[kind].note
+        assert "tool(s)" in rows[kind].note
+    assert "not shown the guidance" in rows["triage"].note
+
+
+def test_every_source_in_the_example_is_required() -> None:
+    """The checklist item the tutorial calls load-bearing. An example that omitted it would teach
+    the failure, and it is the silent one."""
+    from whetstone.steps import load_step
+
+    for kind in ("evaluate", "improve", "triage"):
+        spec = load_step(AGENT_EXAMPLE, kind, skill_id="panic-guard-agent")
+        assert spec is not None and spec.agent.source.get("required") is True, kind
+
+
+def test_meta_yaml_is_really_unreachable_as_the_tutorial_warns() -> None:
+    """The headline gotcha of the reachability section. The example now ships a meta.yaml precisely
+    so this is demonstrable rather than asserted."""
+    assert (AGENT_EXAMPLE / "meta.yaml").is_file()
+    pages = {p.path for p in load_skill(AGENT_EXAMPLE).pages}
+    assert "meta.yaml" not in pages
+    assert not any(p.endswith(".yaml") for p in pages)
+    assert load_skill(AGENT_EXAMPLE).provenance, "but provenance still loads for the host"
+
+
+def test_grep_really_is_a_substring_not_a_regex() -> None:
+    """The tutorial tells authors not to write a regex. If that stopped being true the advice would
+    be wrong in the expensive direction — people would delete working instructions."""
+    import tempfile
+
+    from whetstone.agent.builtins import BuiltinTools
+    from whetstone.domain.skill import Skill
+    from whetstone.llm.tools import ToolCall
+
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "a.py").write_text("def f():  # PANICS: aborts\n", encoding="utf-8")
+        tools = BuiltinTools(skill=Skill(id="s", body="x"), root=Path(tmp))
+        literal = tools.dispatch(ToolCall("1", "grep", {"pattern": "PANICS:"})).content
+        regexy = tools.dispatch(ToolCall("2", "grep", {"pattern": r"PANICS:\s*\w+"})).content
+
+    assert "a.py" in literal
+    assert "No matches" in regexy, "a regex must fail, or the tutorial's warning is wrong"
+
+
+def test_a_skill_tool_runs_from_the_skill_root_not_the_step_folder() -> None:
+    """The two-bases gotcha, which is the one people get wrong silently: the tool is simply not
+    found, and the model is told so instead of the author."""
+    from whetstone.reviewer.factory import step_agent
+    from whetstone.steps import load_step
+
+    spec = load_step(AGENT_EXAMPLE, "improve", skill_id="panic-guard-agent")
+    plan = step_agent(spec, AGENT_EXAMPLE)
+
+    assert plan is not None
+    assert spec.directory.name == "improve", "a step program would resolve from here"
+    assert plan.skill_dir == AGENT_EXAMPLE, "a skill tool resolves from here"
+    assert (AGENT_EXAMPLE / plan.tools[0].run[1]).is_file()
+
+
+def test_pin_un_redacts_which_is_why_the_tutorial_restricts_it() -> None:
+    """The correction that matters most in the context section: `pin:` is not "also hash it". It
+    shows the value to the model, which is why it is for a commit SHA and not for a credential."""
+    import os
+
+    from whetstone.context import resolve_context
+
+    os.environ["TUTORIAL_PROBE"] = "abc123-not-sensitive"
+    try:
+        plain = resolve_context({"v": {"env": "TUTORIAL_PROBE"}}, skill_dir=ROOT)
+        pinned = resolve_context({"v": {"env": "TUTORIAL_PROBE", "pin": True}}, skill_dir=ROOT)
+    finally:
+        del os.environ["TUTORIAL_PROBE"]
+
+    assert plain.redacted["v"] == "<env:TUTORIAL_PROBE>" and "v" not in plain.hashable
+    assert pinned.redacted["v"] == "abc123-not-sensitive", "pin shows the value to the model"
+    assert pinned.hashable["v"] == "abc123-not-sensitive"

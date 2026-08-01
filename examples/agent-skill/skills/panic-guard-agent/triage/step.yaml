@@ -1,0 +1,45 @@
+# The third step that can run as an agent — and the one with an exception worth knowing.
+#
+# `agent:` on evaluate and improve means "SKILL.md is the instructions". On triage it does not, and
+# that is deliberate rather than an oversight. This step writes the *ground truth* for a new eval
+# case: one sentence saying what was actually wrong with the code a reviewer objected to. A drafter
+# that could read the rules would write the sentence in the rules' words, the reviewer would then
+# answer in the same words, and the case would pass forever without ever testing anything.
+#
+# So a triage agent gets the drafting brief as its instructions, and `read_skill_file` is not
+# offered at all — the tool route is closed with the prompt route. Everything the runtime is
+# actually wanted for here survives: the source tree, the skill's own tools, the resolved context.
+# Reading the code around a reviewer's comment is exactly how you find out what they objected to.
+
+description: Draft an eval case's expectation from the review evidence.
+
+agent:
+  enabled: true
+  # Smaller than the other two: this is one sentence about one location. Read the function the
+  # comment sits on, maybe its caller, write. Priced at 4 (3 + one forced answer).
+  max_steps: 3
+  source: { env: PANIC_GUARD_AGENT_SOURCE, required: true }
+  tools:
+    - name: owner_of
+      description: >
+        Return the team that owns a module, given its path in the source tree. Use it when the
+        expectation is about code whose intent is not obvious from the code itself.
+      run: ["python", "tools/owner_of.py"]
+      input_schema:
+        type: object
+        properties:
+          module: { type: string, description: "path relative to the source root" }
+        required: [module]
+
+context:
+  owners: { file: ./owners.json }
+
+inputs:
+  draft:
+    # The review thread, capped. Enough to see what was objected to; not so much that one
+    # unusually chatty merge request costs more than the rest of the queue combined.
+    max_comments: 6
+    max_comment_chars: 1200
+    max_diff_bytes: 2000
+
+prompt: prompt.md

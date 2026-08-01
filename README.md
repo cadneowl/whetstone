@@ -336,9 +336,12 @@ would: `SKILL.md` as instructions, companion pages fetched with a tool when the 
 at them, and `source:` adding sandboxed `read_file`/`grep`/`list_dir` over a checkout. It is valid
 on `evaluate`, `improve` and `triage`, and the reference skill uses it on the first two. The cost
 plan for a run, a gate or a baseline says which of the two you are about to get, and warns when the
-concatenation cap is silently dropping pages from every review. Full reference:
+concatenation cap is silently dropping pages from every review.
+
+**Writing one: [docs/authoring-skills.md](docs/authoring-skills.md)** — the working reference for
+these files, organised around the mistakes that are silent (`required:` on a source root, `pin:`
+un-redacting, `grep` being a substring, `meta.yaml` not being readable). Full behavioural reference:
 **[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
-Full reference: **[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
 
 ### `SKILL.md`
 
