@@ -226,6 +226,7 @@ def _client(
             base_url=base_url,
             api_key_env=key_env,
             max_tokens=config.llm.max_tokens,
+            timeout=config.llm.timeout,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -866,6 +867,13 @@ def eval_gate(
         plan = plan_eval(
             candidate_skill, backend, trials=gate_trials, cases=scored, action="eval gate",
             wiki_limits=limits, judge_cascade=bool(policy and policy.judge.enabled),
+            # What `eval run` and the console's gate already pass, and this one did not: a gate on
+            # an agent skill was quoted at one review call per case when it spends up to `max_steps`
+            # + 1, understating the confirmation prompt by an order of magnitude on the single most
+            # expensive thing the CLI does — and a `run:` skill was quoted for review calls
+            # Whetstone never makes.
+            host_reviews=choice.agent is not None or not choice.custom,
+            calls_per_review=choice.agent.max_calls if choice.agent else 1,
         )
         # Both sides are scored, so a gate costs twice what the same run would.
         if plan.estimate:

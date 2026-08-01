@@ -26,14 +26,27 @@ inputs:
     max_diff_bytes: 2000
     # Learn from misses, from false positives, or both.
     outcomes: [fn, fp]
-  wiki:
-    max_pages: 4
-    max_bytes: 24000
+  # No `wiki:` block: this skill has no wiki/ folder, and prompt.md places no {{wiki}}. An agent
+  # with a source root reads the real repository instead of a pre-baked summary of it.
 
 # The instructions given to the model. Whetstone supplies the output structure (a complete
 # guidance body, a rationale, and the eval case ids the change should fix), so this file only has
 # to say how to think about the change.
 prompt: prompt.md
+
+# Draft as an agent, the same runtime the evaluate step uses. Without this the drafter is one call:
+# the failure digest in, rewritten guidance out, with SKILL.md and every companion page pasted into
+# the prompt as text. With it, the guidance it is rewriting is its own instructions, pages arrive
+# through `read_skill_file`, and it can read the code the failures are about before writing a rule
+# about it.
+agent:
+  enabled: true
+  # Fewer than the reviewer's: a rewrite is bounded work — read the failing cases, check two or
+  # three functions, write. Priced at 9 (8 + one forced answer).
+  max_steps: 8
+  # The same checkout the evaluate step reads, declared again rather than inherited: a step says
+  # what it needs, and one that quietly acquired another step's access would be the surprising one.
+  source: { env: WHETSTONE_RUST_SOURCE }
 
 # model:
 #   llm: ollama

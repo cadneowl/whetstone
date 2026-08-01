@@ -772,6 +772,7 @@ would cheerfully improve a skill it was shown nothing about.
 |---|---|
 | `{{skill_id}}` | the skill's id |
 | `{{guidance}}` | the current `SKILL.md` body |
+| `{{pages}}` | its companion pages, each under the path to return it as |
 | `{{failures}}` | the rendered cluster representatives |
 | `{{failure_count}}` | how many failures there really were |
 | `{{shown_count}}` | how many reached the prompt |
@@ -783,7 +784,15 @@ would cheerfully improve a skill it was shown nothing about.
 
 `{{instruction}}` lets the template decide where a one-off steer is read. Leave it out and a passed
 instruction is appended at the end instead — it is never silently dropped, because a flag that
-sometimes does nothing is worse than no flag.
+sometimes does nothing is worse than no flag. `{{pages}}` works the same way, so a template written
+before pages existed still sends them.
+
+**Under `agent:`, the two guidance variables become pointers.** An agent's `SKILL.md` is already its
+system prompt and its pages are a `read_skill_file` call away, so `{{guidance}}` renders as a
+reference to those instructions and `{{pages}}` as the list of paths to ask for — and the `{{pages}}`
+appendix is not added at all. Pasting them would hand the drafter, in one text, the folder the
+harness gives it tools to read a page at a time; a skill is split across files precisely so that it
+is never all in one context, and that has to hold on the improve path as well as the evaluate one.
 
 Whetstone supplies the output *structure* (body, rationale, targeted cases), so `prompt.md` only has
 to say how to think about the change. Case ids the model returns are validated against the skill;

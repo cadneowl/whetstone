@@ -20,7 +20,10 @@ money is a write, whatever it leaves on disk.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -690,16 +693,29 @@ def launch_improve(
         agent = step.build(client) if step is not None else None
         if agent is not None:
             agent.bind_cancel(handle.cancel_event)
-        result = propose(
-            spec,
-            skill,
-            record,
-            client=client,
-            effort=spec.model.effort or "high",
-            instruction=request.instruction,
-            only=set(request.cases) or None,
-            agent=agent,
+        # Said before the wait, because the wait is the part that looks broken. An improve step
+        # returns a complete guidance body in one reply, so minutes is normal and the console
+        # should say so rather than leave an operator to guess whether it has hung.
+        handle.log(
+            LogLine(
+                text=(
+                    "drafting: one call that returns the complete new guidance, so this is the "
+                    "longest wait in the console — minutes is normal. Nothing streams back until "
+                    "the model has finished writing it."
+                )
+            )
         )
+        with _waiting(handle, "waiting for the model"):
+            result = propose(
+                spec,
+                skill,
+                record,
+                client=client,
+                effort=spec.model.effort or "high",
+                instruction=request.instruction,
+                only=set(request.cases) or None,
+                agent=agent,
+            )
         # The model has now read these cases. Recording it is what stops a promoted case that was
         # sharpened against from being handed back to the hash at graduation and counted as an
         # exam question it passed unseen. Written on the draft rather than on the apply: the
@@ -859,7 +875,10 @@ def improve_prompt(
         # question this route was opened to ask.
         raise Unprocessable(str(exc)) from exc
 
-    values = digest.prompt_values()
+    # The same view `render_step_prompt` just used, so the per-variable sizes describe the text
+    # above them. An agent's `{{guidance}}` and `{{pages}}` are pointers to tools, and reporting
+    # their pasted length here would say the drafter was sent a folder it was not sent.
+    values = digest.prompt_values(served_by_tools=spec.agent.enabled)
     if spec.calls_a_model and "failures" not in named:
         warnings.append(
             f"{_step_file(spec, root)} never places {{{{failures}}}}, so the drafter is "
@@ -1310,18 +1329,22 @@ def launch_review(
         handle.progress(0, 1, f"reviewing {ref or 'the change'}")
         handle.check()
         client = _client(config, spec, selection, label=f"review-{skill.id}")
-        record = record_review(
-            skill,
-            change,
-            client,
-            source=source,
-            ref=ref,
-            url=url,
-            title=title,
-            backend=backend.name,
-            model=backend.model,
-            reviewer=choice.build(client),
-        )
+        # The same shape as the improve step — one call, nothing to report until it returns — so it
+        # goes silent the same way on a slow backend. Leaving one of two identical jobs unfixed
+        # would just move the confusion to another tab.
+        with _waiting(handle, f"reviewing {ref or 'the change'}"):
+            record = record_review(
+                skill,
+                change,
+                client,
+                source=source,
+                ref=ref,
+                url=url,
+                title=title,
+                backend=backend.name,
+                model=backend.model,
+                reviewer=choice.build(client),
+            )
         reviews.save(record)
         handle.log(
             *(
@@ -2128,6 +2151,37 @@ _OUTCOME = {
 # --- shared ----------------------------------------------------------------------
 
 
+@contextmanager
+def _waiting(handle: JobHandle, label: str) -> Iterator[None]:
+    """Count the seconds while one long call is in flight.
+
+    A run reports per case and an agent reports per tool call, so both look alive. A single
+    structured call reports nothing at all — and the improve step *is* one call, the longest in the
+    system, because it returns a whole rewritten guidance body. So the console sat on "assembling
+    the digest" for however long the model took and then, when the read timed out, showed a failure
+    with no indication that anything had been happening. Indistinguishable from a hang, which is
+    what it was reported as.
+
+    A ticking elapsed count is the least this can do without streaming: it does not say how far
+    along the model is — nothing here knows that — but it does say the wait is real and how long it
+    has been, which is what decides whether to keep waiting or raise the timeout.
+    """
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def tick() -> None:
+        while not stop.wait(2.0):
+            handle.progress(0, 1, f"{label} — {int(time.monotonic() - started)}s")
+
+    ticker = threading.Thread(target=tick, daemon=True, name="job-heartbeat")
+    ticker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        ticker.join(timeout=1.0)
+
+
 def _launch(
     jobs: JobStore, kind: Any, skill_id: str, work: Any, plan: Plan | None
 ) -> Job:
@@ -2525,6 +2579,9 @@ def _client(
             # model runs, never how much room it gets. So it comes from the config rather than from
             # `selection`, and a per-launch model override keeps the configured cap.
             max_tokens=config.llm.max_tokens,
+            # Non-streaming, so this budget covers the whole generation: a cap large enough
+            # to finish a guidance rewrite needs a timeout large enough to wait for one.
+            timeout=config.llm.timeout,
         )
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
