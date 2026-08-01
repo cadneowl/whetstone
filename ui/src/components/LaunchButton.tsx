@@ -401,7 +401,13 @@ function JobStatus({
         </div>
       )}
 
-      {job.state === 'failed' && <p className="mt-2 text-xs text-bad">{job.error}</p>}
+      {/* `whitespace-pre-wrap` because a job error is often the most carefully written prose in
+          the product — the truncation diagnosis names a cause, a cap, a knob and shows where the
+          reply stopped, in paragraphs. Collapsed into one line it reads as a wall and the fix at
+          the end of it goes unread. */}
+      {job.state === 'failed' && (
+        <p className="mt-2 text-xs break-words whitespace-pre-wrap text-bad">{job.error}</p>
+      )}
       {job.state === 'cancelled' && (
         <p className="mt-2 text-xs text-muted">Stopped. Nothing was recorded.</p>
       )}
@@ -526,8 +532,7 @@ function JobResult({ job }: { job: Job }) {
           {r.passed ? 'clears' : 'misses'} the {fmt(r.bar)} bar
         </span>{' '}
         <span className="text-muted">
-          over {String(r.total)} pair(s) — missed {String(r.missed)}, spurious{' '}
-          {String(r.spurious)}
+          over {String(r.total)} pair(s) — missed {String(r.missed)}, spurious {String(r.spurious)}
         </span>
       </p>
     )
@@ -556,8 +561,8 @@ function JobResult({ job }: { job: Job }) {
       <p className="mt-2 text-xs">
         {uncovered.length === 0 ? (
           <span className="text-good">
-            coverage {fmt(r.coverage)} — every one of {String(r.recent_mrs)} recent MR(s) has a
-            case within the similarity radius
+            coverage {fmt(r.coverage)} — every one of {String(r.recent_mrs)} recent MR(s) has a case
+            within the similarity radius
           </span>
         ) : (
           <span className="text-warn">

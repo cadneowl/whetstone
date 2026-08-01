@@ -164,3 +164,25 @@ def test_the_environment_can_move_the_gate_store(
 ) -> None:
     monkeypatch.setenv("WHETSTONE_GATES_DIR", str(tmp_path / "elsewhere"))
     assert load_config(start=tmp_path).gates_dir == (tmp_path / "elsewhere").resolve()
+
+
+# --- the output cap ---------------------------------------------------------------
+
+
+def test_the_output_cap_is_read_from_the_llm_block(tmp_path: Path) -> None:
+    """`[llm] max_tokens` — the knob a truncated improve draft sends an operator to."""
+    (tmp_path / "whetstone.toml").write_text(
+        "[llm]\nprovider = 'anthropic'\nmax_tokens = 32000\n", encoding="utf-8"
+    )
+    assert load_config(start=tmp_path).llm.max_tokens == 32000
+
+
+def test_an_unset_cap_leaves_the_client_default(tmp_path: Path) -> None:
+    """None, not 0: every client keeps its own default rather than being capped at nothing."""
+    assert load_config(start=tmp_path).llm.max_tokens is None
+
+
+def test_a_cap_below_one_is_refused_by_the_config(tmp_path: Path) -> None:
+    (tmp_path / "whetstone.toml").write_text("[llm]\nmax_tokens = 0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="max_tokens"):
+        load_config(start=tmp_path)

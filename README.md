@@ -2063,10 +2063,51 @@ lifetime — this block is the default it starts from). A value here wins over a
 provider = "ollama"          # anthropic · openai · ollama · lmstudio · vllm · llamacpp · custom
 model = "qwen3-coder:30b"    # required for local / OpenAI-compatible backends
 base_url = ""                # a custom OpenAI-compatible gateway — NOT changeable from the browser
+max_tokens = 32000           # how much one reply may generate (default: ask the backend)
 ```
 
 `base_url` is deliberately not settable from the console: an operator picks among known providers
 whose hosts are fixed, but the browser can never redirect model traffic to an arbitrary URL.
+
+**`max_tokens` — the output cap.** Leave it unset and Whetstone **asks the backend**: several
+OpenAI-compatible runners publish their limit on `GET /v1/models` — vLLM as `max_model_len`,
+llama.cpp as `n_ctx`, LM Studio as `max_context_length`, newer gateways as `max_output_tokens` — and
+the reply is sized from that, once per client, reported when it happens. Where nothing is published
+(OpenAI's own listing carries no limits) it falls back to 64000. Setting this key pins the number
+yourself and skips the question entirely.
+
+A *context window* is shared between the prompt and the reply, so when that is what a backend
+publishes, the prompt is subtracted per call — sending the whole window as `max_tokens` is a hard
+error on vLLM, not merely optimistic, and an agent turn carrying ten tool results has far less room
+left for its answer than its first turn did.
+
+It is a ceiling, not a request: billing is for tokens produced, so a cap higher than a call needs
+costs nothing. Set too low it is not a degradation but a hard failure —
+the reply stops mid-token and the JSON being assembled from it cannot be completed, which surfaces
+as **`LLMTruncatedError`** naming this key, the value in force, and how far the reply got. That call
+is not retried: a truncated reply comes back identical every time, and the only retry that could
+"succeed" would be one asking for a shorter answer — guidance trimmed to fit the cap, which is a
+silent rule deletion.
+
+The call needing the most room is **improve**, whose contract is *return the COMPLETE new guidance
+body* in a single field. Budget for the whole of a skill's rules, not for the change to them.
+
+Unlike the three fields above, this one is **not** console-only — `whetstone skills improve` reads
+it too, so a skill drafts the same way from either entry point. `WHETSTONE_LLM_MAX_TOKENS` overrides
+it for one run or one shell, the environment beating the file as everywhere else.
+
+The 64000 fallback is deliberately larger than some models accept, because unused headroom is free
+and a cap that decides whether sharpening works is the wrong thing to be conservative about. A model
+with a lower ceiling refuses the request outright and says what its ceiling is; both clients read
+that, **clamp to it once, and report the clamp** — so the fallback costs a single extra round trip
+on such a backend rather than breaking it. Three sources, in order of authority: what the backend
+refuses, what it publishes, and this key.
+
+Anthropic direct is the exception on both counts: its API publishes no per-model limits, and its SDK
+refuses any *non-streaming* request whose `max_tokens` could run past ten minutes — a fixed
+`3600 x max_tokens / 128000 > 600`, raised before anything is sent. So that client holds its own
+ceiling of 21,333 tokens (about 85,000 characters in one reply) and says so rather than pointing at
+a setting that cannot move it.
 
 **Relocating the stores.** Each store has its own block with a `dir`. `[reviews]`, `[meta_eval]`,
 `[drift]` and `[cadence]` all default under `.whetstone/`; `[judge] dir` defaults to `judges/default`
@@ -2387,7 +2428,7 @@ only needed when you actually construct this client.
 
 ```python
 from whetstone.llm.anthropic_client import AnthropicClient
-client = AnthropicClient(model="claude-opus-4-8", max_tokens=8192)
+client = AnthropicClient(model="claude-opus-4-8", max_tokens=64000)
 ```
 
 Credentials resolve from the environment (`ANTHROPIC_API_KEY`) or an `ant auth login` profile — see
@@ -2727,6 +2768,7 @@ Two things worth knowing, both about values being read back exactly as written:
 | `WHETSTONE_LLM_BASE_URL` | `build_llm_client` | OpenAI-compatible endpoint when `--base-url` is omitted — e.g. a remote Pi or custom harness. |
 | `WHETSTONE_LLM_API_KEY_ENV` | `build_llm_client` | Name of the env var holding the API key, if the backend needs one. |
 | `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Per-request timeout in seconds for OpenAI-compatible backends (raise it for slow local hardware). |
+| `WHETSTONE_LLM_MAX_TOKENS` | `build_llm_client` | Overrides `[llm] max_tokens` (default 64000) for one run or one shell — how much a single reply may generate. Raise it when a call fails as `LLMTruncatedError`, meaning the reply was cut off before it finished. See `[llm]` above. |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
 | `JIRA_TOKEN` | Jira connector | API token (Cloud) or personal access token (Server/DC). Name configurable via `--jira-token-env` / `token_env`. |
 | `SSL_CERT_FILE` | every HTTPS client | CA bundle to verify against — how you point Whetstone at a corporate root behind a TLS-inspecting proxy. Read by `httpx` itself, so it covers GitLab, Jira and both model backends with no configuration of ours. |

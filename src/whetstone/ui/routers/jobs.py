@@ -66,7 +66,7 @@ from whetstone.providers.base import ConnectorError
 from whetstone.reviewer.factory import ReviewerChoice, reviewer_for, step_agent
 from whetstone.sampling import partition_for, pinned_partitions, sample_cases
 from whetstone.service import record_eval, record_gate, record_review, strip_guidance
-from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step
+from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step, placeholders
 from whetstone.ui.deps import (
     ConfigDep,
     DriftDep,
@@ -573,9 +573,11 @@ def _narrowed_scope(store: Any, skill: Skill, spec: StepSpec, request: ImproveRe
         return f"drafting from {len(wanted)} selected case{plural}"
 
     inputs = spec.inputs.failures
-    # No wiki text and no network: the digest is assembled from the run and the skill alone, so
-    # planning it costs nothing and is exactly what `propose` will build.
-    shown = improve.shown_cases(improve.build_digest(skill, record, inputs, only=wanted))
+    # `digest_for`, the same assembly `propose` runs, so "which cases reach the drafter?" is decided
+    # once. Building it by hand here would answer the question about a digest nobody is ever sent —
+    # which is the exact drift that made the CLI's `--dry-run` print a prompt with no wiki in it.
+    # Nothing here touches the network: the digest comes from the run and the skill folder alone.
+    shown = improve.shown_cases(improve.digest_for(spec, skill, record, only=wanted))
     if len(shown) == len(wanted):
         return f"drafting from {len(wanted)} selected case{plural}"
 
@@ -668,8 +670,18 @@ def launch_improve(
     def work(handle: JobHandle) -> dict[str, Any]:
         handle.progress(0, 1, "assembling the digest")
         handle.check()
+        # `on_retry`, which this call was the only model-spending one to omit — so a draft that hit
+        # a retry loop showed a spinner and nothing else for however long four generations take.
+        # The improve step is the single longest call in the console (one reply carrying a whole
+        # rewritten guidance body), which makes it the one where silence lasts longest.
         client = (
-            _client(config, spec, selection, label=f"improve-{skill.id}")
+            _client(
+                config,
+                spec,
+                selection,
+                label=f"improve-{skill.id}",
+                on_retry=lambda note: handle.log(LogLine(text=f"retry: {note}", tone="bad")),
+            )
             if spec.calls_a_model
             else None
         )
@@ -727,6 +739,158 @@ def launch_improve(
         }
 
     return _launch(jobs, "improve", skill.id, work, plan)
+
+
+class PromptVariable(BaseModel):
+    """One `{{variable}}` an improve prompt may use, and what it came to on this launch."""
+
+    name: str
+    # Whether the template places it. A variable the host appends anyway (`pages`, `instruction`)
+    # is reported as unused, because that is the fact: the *template* does not name it.
+    used: bool
+    chars: int
+
+
+class ImprovePrompt(BaseModel):
+    """The improve step's own prompt file with every variable filled — what the model reads.
+
+    Diagnostics for the one step whose input is invisible. A run is a score you can drill into; a
+    gate is a verdict with reasons; a draft is a rewrite you read line by line. The prompt behind
+    the draft was the only thing in the loop nobody could see, and it is assembled from six moving
+    parts — the failure digest, the clustering, the holdout blindfold, the case narrowing, the
+    guidance, the wiki. When a draft comes back wrong, the first question is what it was shown, and
+    until this route the only way to answer it was to read `improve.py`.
+    """
+
+    skill_id: str
+    # The prompt file this rendered, or the command a subprocess step runs.
+    source: str
+    calls_a_model: bool
+    # An agent step's instructions are the skill's own body plus a runtime preamble, assembled per
+    # call from the client — so `system` is empty there and `text` is the task message it opens on.
+    runs_as_agent: bool
+    system: str
+    template: str
+    # The prompt as sent. For a subprocess step, the JSON digest handed to it on stdin instead.
+    text: str
+    variables: list[PromptVariable]
+    from_run: str
+    total_failures: int
+    shown: int
+    holdout_withheld: int
+    # Sections the host appended because the template did not place them — see `improve.appendices`.
+    appended: list[str]
+    warnings: list[str]
+
+
+def _step_file(spec: StepSpec, root: Path) -> str:
+    """`skills/<id>/improve/prompt.md`, the way the rest of the console names a file.
+
+    The absolute path is correct and unreadable: it is 90 characters of machine-specific prefix
+    beside a run id, on a line that has to stay one line. The workspace's own banner already says
+    `skills/<id>/`, so this matches it, and falls back to the full path wherever the step does not
+    sit under the skills root (which would mean the relative form was a guess).
+
+    The name comes from the step rather than being assumed: a step declaring `prompt: rewrite.md` is
+    a step whose template is not in `prompt.md`, and sending an operator to edit a file that does
+    not exist is a poor answer to "show me what this sends".
+    """
+    path = spec.prompt_path
+    try:
+        return (Path(root.name) / path.relative_to(root)).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+@router.post("/improve/prompt", response_model=ImprovePrompt)
+def improve_prompt(
+    request: ImproveRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    store: StoreDep,
+) -> ImprovePrompt:
+    """Render the prompt this improve launch would send, without sending it.
+
+    Not `Writable`-gated and not a plan: it spends nothing, writes nothing and calls no model, so a
+    read-only console can show it. It is a POST only because the thing being described is a request
+    body — the same one `/improve` takes, so the prompt shown is the prompt that launch would send
+    rather than a generic one for the skill.
+
+    Built through `improve.digest_for` and `improve.render_step_prompt`, which is what `propose`
+    itself calls. That is the whole discipline here: a preview assembled by a second code path would
+    drift from the real one and be believed anyway, which is strictly worse than showing nothing.
+
+    Where the launch would refuse, this still renders and says why in `warnings`. A stale run is the
+    case that matters: "the failures describe a reviewer that no longer exists" is a claim an
+    operator should be able to check by *looking at the failures*, and refusing the diagnostic is
+    refusing exactly at the moment it is wanted.
+    """
+    skill = _skill_being_edited(config, root, request.skill_id)
+    spec = _require_step(root, skill, "improve")
+
+    warnings: list[str] = []
+    try:
+        record = _run_for(store, skill, request)
+    except Unprocessable as exc:
+        warnings.append(f"{exc} Shown anyway — this is what that run would send.")
+        record = _run_for(store, skill, request.model_copy(update={"stale_ok": True}))
+    if record is None:
+        warnings.append(
+            "no stored run for this skill, so there are no failures to show: the drafter would see "
+            "the guidance and nothing else. Score it first."
+        )
+
+    digest = improve.digest_for(
+        spec, skill, record, instruction=request.instruction, only=set(request.cases) or None
+    )
+    template = spec.prompt or ""
+    named = placeholders(template)
+    try:
+        # A subprocess step has no template — it is handed the digest as JSON on stdin, so *that* is
+        # what "the prompt with its variables filled" means for one.
+        text = (
+            digest.model_dump_json(indent=2)
+            if spec.is_subprocess
+            else improve.render_step_prompt(spec, digest)
+        )
+    except StepError as exc:
+        # A typo'd placeholder. `render_template` already refuses it rather than rendering the
+        # literal text, and its message names the available variables — which is the answer to the
+        # question this route was opened to ask.
+        raise Unprocessable(str(exc)) from exc
+
+    values = digest.prompt_values()
+    if spec.calls_a_model and "failures" not in named:
+        warnings.append(
+            f"{_step_file(spec, root)} never places {{{{failures}}}}, so the drafter is "
+            f"not shown what the run got wrong — it is being asked to rewrite the guidance blind. "
+            f"Nothing errors: an unused variable renders as an absence."
+        )
+    if spec.calls_a_model and not spec.agent.enabled and not {"guidance", "pages"} & named:
+        warnings.append(
+            "this template places neither {{guidance}} nor {{pages}}, so the drafter is not shown "
+            "the rules it is being asked to rewrite and will return an invented body."
+        )
+
+    return ImprovePrompt(
+        skill_id=skill.id,
+        source=" ".join(spec.run) if spec.is_subprocess else _step_file(spec, root),
+        calls_a_model=spec.calls_a_model,
+        runs_as_agent=spec.agent.enabled,
+        system="" if spec.is_subprocess or spec.agent.enabled else improve.SYSTEM,
+        template=template,
+        text=text,
+        variables=[
+            PromptVariable(name=name, used=name in named, chars=len(value))
+            for name, value in sorted(values.items())
+        ],
+        from_run=record.id if record else "",
+        total_failures=digest.total_failures,
+        shown=len(digest.clusters),
+        holdout_withheld=digest.holdout_withheld,
+        appended=[name for name, _ in improve.appendices(spec, digest)],
+        warnings=warnings,
+    )
 
 
 # --- task skills -----------------------------------------------------------------
@@ -2353,7 +2517,14 @@ def _client(
     provider, model, base_url = selection.layer(spec)
     try:
         client = build_llm_client(
-            provider, model=model, base_url=base_url, on_retry=on_retry
+            provider,
+            model=model,
+            base_url=base_url,
+            on_retry=on_retry,
+            # A deployment setting, not part of the backend choice: the header picker swaps which
+            # model runs, never how much room it gets. So it comes from the config rather than from
+            # `selection`, and a per-launch model override keeps the configured cap.
+            max_tokens=config.llm.max_tokens,
         )
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
@@ -2416,9 +2587,20 @@ def _run_for(store: Any, skill: Skill, request: ImproveRequest) -> Any:
     and it is exactly what scoring a triage batch produces.
     """
     from whetstone.domain.run import guidance_hash
+    from whetstone.runs import CorruptRecord
 
     if request.run_id:
-        record = store.load(request.run_id)
+        try:
+            record = store.load(request.run_id)
+        except (FileNotFoundError, CorruptRecord) as exc:
+            # A 500 with no message, reachable from an ordinary link: the workspace writes the run
+            # it scored into the query string, so a bookmarked or shared URL outlives the run store
+            # the moment one is pruned. Every other route that loads a record by id already says
+            # this properly; the three improve routes went through here and did not.
+            raise Unprocessable(
+                f"run {request.run_id!r} is no longer in the run store, so there are no failures "
+                f"to draft from. Score the skill again, or open it from the Runs list."
+            ) from exc
     else:
         recent = store.list(skill_id=skill.id, limit=1)
         if not recent:

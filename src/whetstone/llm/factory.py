@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from whetstone.llm.base import LLMClient
 
@@ -125,6 +125,7 @@ def build_llm_client(
     api_key: str | None = None,
     api_key_env: str | None = None,
     timeout: float | None = None,
+    max_tokens: int | None = None,
     on_retry: Callable[[str], None] | None = None,
 ) -> LLMClient:
     """Construct an `LLMClient` for a provider preset, resolving each field from arg → env → preset.
@@ -143,11 +144,28 @@ def build_llm_client(
     ``Authorization`` header is sent unless you ask for one. ``timeout`` (or
     ``WHETSTONE_LLM_TIMEOUT``, seconds) raises the per-request budget for slow local hardware.
 
+    ``max_tokens`` is how much one reply may generate — the knob to reach for when a call fails as
+    `LLMTruncatedError`, meaning the reply was cut off before it finished. It carries the
+    deployment's configured value (``[llm] max_tokens`` in ``whetstone.toml``), which
+    ``WHETSTONE_LLM_MAX_TOKENS`` then overrides: the environment beats the file here exactly as it
+    does for every other setting in this project, so one command can be given more room without
+    editing the deployment's config. Both entry points pass it — `cli._client` and the console's —
+    because a cap that applied to one and silently not the other would mean the same skill drafting
+    differently depending on which of them ran it.
+
     ``on_retry`` is told when a call is being repeated — malformed JSON, or a 429/5xx — so a caller
     with somewhere to show it can explain a long wait instead of leaving it silent. Ignored by the
     Anthropic client, whose SDK does its own retrying.
     """
     backend = resolve_backend(provider, model=model, base_url=base_url)
+    # Left out of the call entirely when unset, so each client keeps its own default rather than
+    # having one imposed by whichever module the factory happened to import.
+    tuning: dict[str, Any] = {}
+    # Environment first, then the configured value, then each client's own default — the order
+    # `envfile.py` documents for everything else, resolved in one place so no caller has to know it.
+    resolved_max = _env_max_tokens() or max_tokens
+    if resolved_max is not None:
+        tuning["max_tokens"] = resolved_max
 
     if backend.kind == "anthropic":
         from whetstone.llm.anthropic_client import AnthropicClient
@@ -159,20 +177,20 @@ def build_llm_client(
             backend.model,
             base_url=backend.base_url,
             api_key=api_key or _resolve_key(api_key_env, backend.preset),
+            **tuning,
         )
 
     from whetstone.llm.openai_client import OpenAICompatibleClient
 
-    endpoint = backend.base_url or ""
-    key = api_key or _resolve_key(api_key_env, backend.preset)
     resolved_timeout = timeout if timeout is not None else _env_timeout()
-    if resolved_timeout is None:
-        return OpenAICompatibleClient(
-            model=backend.model, base_url=endpoint, api_key=key, on_retry=on_retry
-        )
+    if resolved_timeout is not None:
+        tuning["timeout"] = resolved_timeout
     return OpenAICompatibleClient(
-        model=backend.model, base_url=endpoint, api_key=key,
-        timeout=resolved_timeout, on_retry=on_retry,
+        model=backend.model,
+        base_url=backend.base_url or "",
+        api_key=api_key or _resolve_key(api_key_env, backend.preset),
+        on_retry=on_retry,
+        **tuning,
     )
 
 
@@ -265,3 +283,26 @@ def _env_timeout() -> float | None:
         raise ValueError(
             f"WHETSTONE_LLM_TIMEOUT must be a number of seconds, got {raw!r}"
         ) from exc
+
+
+def _env_max_tokens() -> int | None:
+    """How much one reply may generate, when the deployment has said.
+
+    Refused rather than ignored if it is not a positive integer: this is the knob a truncation
+    error sends an operator to, and the one outcome worse than the original failure is setting it,
+    seeing the same error, and having no way to tell the value never took.
+    """
+    raw = os.getenv("WHETSTONE_LLM_MAX_TOKENS")
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"WHETSTONE_LLM_MAX_TOKENS must be a whole number of tokens, got {raw!r}"
+        ) from exc
+    if value < 1:
+        raise ValueError(
+            f"WHETSTONE_LLM_MAX_TOKENS must be at least 1, got {value}"
+        )
+    return value

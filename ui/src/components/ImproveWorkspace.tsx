@@ -6,10 +6,12 @@ import {
   useProposal,
   useSaveGuidance,
   type Job,
+  type JobRequest,
   type PendingCase,
   type SkillDetail as Detail,
 } from '@/api/client'
 import { GuidanceDiff } from '@/components/GuidanceDiff'
+import { ImprovePromptPanel } from '@/components/ImprovePrompt'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, ErrorNote, score } from '@/components/primitives'
 import { SourceBadge } from '@/components/signals'
@@ -85,8 +87,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       { replace: true },
     )
 
-  const setSelected = (next: ReadonlySet<string>) =>
-    patch({ cases: selectionParam(next, ids) })
+  const setSelected = (next: ReadonlySet<string>) => patch({ cases: selectionParam(next, ids) })
 
   const toggle = (id: string) => {
     const next = new Set(selected)
@@ -131,6 +132,13 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     )
     .filter((c) => !c.holdout)
     .map((c) => c.id)
+
+  // The one request the sharpen step is described by, held here rather than written out at each
+  // use: the launch button spends it and the prompt panel renders it, and those two disagreeing
+  // about the run, the selection or the steer would make the preview a plausible fiction.
+  const improveRequest: JobRequest = hasBatch
+    ? { skill_id: skillId, run_id: batchRun, cases: [...selected], instruction }
+    : { skill_id: skillId, run_id: latestRunId, instruction }
 
   // A strict subset scores just those cases — the cheap, targeted check. All (or none) selected
   // scores the whole promoted set. Neither touches the graduated corpus unless the second button
@@ -289,8 +297,8 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                 ? `Runs the on-disk guidance over the ${selected.size} case(s) you ticked above.`
                 : 'Runs the on-disk guidance over every promoted case.'}{' '}
               Missed / falsely-flagged cases are what to sharpen next. Add the corpus to see
-              regressions too — it costs every graduated case, which is why it is the second
-              button rather than the only one.
+              regressions too — it costs every graduated case, which is why it is the second button
+              rather than the only one.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <LaunchButton
@@ -354,16 +362,16 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                   {heldSelected.length === 1 ? 'is the only ticked case, and it is' : 'are all'}{' '}
                   holdout — scored on every run, never shown to the drafter, so there is nothing
                   here to sharpen from. Cases still waiting under{' '}
-                  <code className="font-mono">promoted_cases/</code> are always available — the
-                  exam is the graduated corpus — so tick one of those, or a graduated case outside
-                  the holdout. To spend a graduated holdout case anyway, record{' '}
+                  <code className="font-mono">promoted_cases/</code> are always available — the exam
+                  is the graduated corpus — so tick one of those, or a graduated case outside the
+                  holdout. To spend a graduated holdout case anyway, record{' '}
                   <code className="font-mono">partition: train</code> in its case file; it then
                   counts as taught rather than as an unseen pass.
                 </p>
               )}
               <LaunchButton
                 kind="improve"
-                request={{ skill_id: skillId, run_id: batchRun, cases: [...selected], instruction }}
+                request={improveRequest}
                 label={selected.size ? 'Improve from selected' : 'Improve from every failure'}
                 disabled={noneDraftable}
                 disabledReason="Every ticked case is holdout — the drafter is never shown one."
@@ -381,34 +389,41 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                 </p>
                 <Steer value={instruction} onChange={setInstruction} />
               </LaunchButton>
+              {/* Outside the LaunchButton, not inside its confirmation: the point of reading the
+                  prompt is to decide whether to spend at all, and the confirmation is one click too
+                  late for that. It tracks the same request, so ticking a case changes both. */}
+              <ImprovePromptPanel request={improveRequest} />
             </>
           ) : (
             <>
               <p className="mt-0.5 mb-2 text-xs text-muted">
-                No promoted batch waiting — sharpening runs against the corpus cases the last run got
-                wrong. Draft with the LLM here, or edit the files on disk by hand. To sharpen against
-                fresh signal instead,{' '}
+                No promoted batch waiting — sharpening runs against the corpus cases the last run
+                got wrong. Draft with the LLM here, or edit the files on disk by hand. To sharpen
+                against fresh signal instead,{' '}
                 <Link to="/triage" className="underline">
                   promote cases in Triage
                 </Link>
                 .
               </p>
               {latestRunId ? (
-                <LaunchButton
-                  kind="improve"
-                  request={{ skill_id: skillId, run_id: latestRunId, instruction }}
-                  label="Draft from the last run"
-                  onDone={onDrafted}
-                >
-                  <p className="mb-2 text-xs text-muted">
-                    Drafts from every case the last run failed. For a finer, multi-file hand edit,{' '}
-                    <Link to={{ search: editorSearch }} className="text-accent underline">
-                      the Edit tab
-                    </Link>{' '}
-                    has the full editor.
-                  </p>
-                  <Steer value={instruction} onChange={setInstruction} />
-                </LaunchButton>
+                <>
+                  <LaunchButton
+                    kind="improve"
+                    request={improveRequest}
+                    label="Draft from the last run"
+                    onDone={onDrafted}
+                  >
+                    <p className="mb-2 text-xs text-muted">
+                      Drafts from every case the last run failed. For a finer, multi-file hand edit,{' '}
+                      <Link to={{ search: editorSearch }} className="text-accent underline">
+                        the Edit tab
+                      </Link>{' '}
+                      has the full editor.
+                    </p>
+                    <Steer value={instruction} onChange={setInstruction} />
+                  </LaunchButton>
+                  <ImprovePromptPanel request={improveRequest} />
+                </>
               ) : (
                 <p className="text-xs text-muted italic">
                   Never scored — run evals from the header first, so the drafter can see what the
@@ -579,8 +594,8 @@ function DraftReview({
       )}
       {draft.selectedMissing.length > 0 && (
         <p className="text-xs text-warn">
-          Not drafted from: {draft.selectedMissing.join(', ')} — the score did not fail them (or they
-          are holdout), so they were not shown to the drafter.
+          Not drafted from: {draft.selectedMissing.join(', ')} — the score did not fail them (or
+          they are holdout), so they were not shown to the drafter.
         </p>
       )}
       <div className="flex gap-2">

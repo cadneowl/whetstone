@@ -35,7 +35,7 @@ from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRe
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.tools import ToolSpec
-from whetstone.steps import FailureInputs, StepError, StepSpec
+from whetstone.steps import FailureInputs, StepError, StepSpec, placeholders
 from whetstone.wiki import retrieve
 
 FailureKind = Literal["fn", "fp"]
@@ -232,6 +232,33 @@ def build_digest(
         recall=None if record is None else record.score.recall,
         fp_rate=None if record is None else record.score.fp_rate,
         instruction=instruction.strip(),
+    )
+
+
+def digest_for(
+    spec: StepSpec,
+    skill: Skill,
+    record: RunRecord | None,
+    *,
+    instruction: str = "",
+    only: set[str] | None = None,
+) -> Digest:
+    """The digest *this step* will be handed — `build_digest` with the step's own inputs applied.
+
+    One assembly, because there is now more than one thing that has to show it. `propose` built this
+    inline and every other caller rebuilt it by hand from `build_digest`, which is how the CLI's
+    `--dry-run` came to print a prompt whose `{{wiki}}` read "(no repo context indexed for this
+    skill)" for a skill whose wiki the real run sends: the preview forgot the one argument that is
+    not on the digest already. A preview that differs from the prompt is worse than no preview,
+    because it is read as evidence about what the model saw.
+    """
+    return build_digest(
+        skill,
+        record,
+        spec.inputs.failures,
+        wiki_text=_wiki_for(skill, record, spec),
+        instruction=instruction,
+        only=only,
     )
 
 
@@ -456,15 +483,7 @@ def propose(
     Cases in `only` the drafter never gets to (unscored, passing, or holdout) come back in
     `ProposalResult.selected_missing` rather than being dropped in silence.
     """
-    inputs = spec.inputs.failures
-    digest = build_digest(
-        skill,
-        record,
-        inputs,
-        wiki_text=_wiki_for(skill, record, spec),
-        instruction=instruction,
-        only=only,
-    )
+    digest = digest_for(spec, skill, record, instruction=instruction, only=only)
     selected_missing: list[str] = []
     if only is not None and record is not None:
         # Against what reached the *prompt*, not what was merely eligible — clustering and the
@@ -496,7 +515,7 @@ def propose(
         if client is None:
             raise StepError("this improve step calls a model, but no LLM client was provided")
         prompt = render_step_prompt(spec, digest)
-        proposal = client.structured(_SYSTEM, prompt, GuidanceProposal, effort=effort)
+        proposal = client.structured(SYSTEM, prompt, GuidanceProposal, effort=effort)
         # Every guidance file, for every file checked: see `strip_prompt_echo`. Rules moved between
         # files are still rules, whichever file they arrive in.
         quoted = [skill.body, *digest.pages.values()]
@@ -601,35 +620,49 @@ def _without(prompt: str, guidance: list[str]) -> str:
     return scaffold
 
 
-def render_step_prompt(spec: StepSpec, digest: Digest) -> str:
-    """The prompt as sent, including an instruction the template forgot to place.
+def appendices(spec: StepSpec, digest: Digest) -> list[tuple[str, str]]:
+    """The sections the host adds because the template did not place them itself, `(name, text)`.
 
     A template that references `{{instruction}}` decides where it goes. One that does not still
     gets it, appended last and clearly labelled — silently dropping what an operator typed on the
     command line is the one outcome that would make the flag untrustworthy.
+
+    Same rule for `{{pages}}`, for the same reason. Every skill scaffolded before pages were part of
+    this prompt has a template that never mentions them, and those are exactly the skills that have
+    grown companion pages — so leaving it to the template means the long-established skills stay the
+    broken ones. A step that places `{{pages}}` decides where they go; one that does not still sends
+    them.
+
+    Split out of `render_step_prompt` because the console now shows an operator what the drafter
+    will be sent, and "which sections did the host add for me?" is part of that answer. Deriving it
+    a second time somewhere else is how the two would come to disagree — so there is one list, this
+    one, and the renderer appends exactly it.
     """
-    template = spec.prompt or ""
-    text = spec.render_prompt(digest.prompt_values())
-    # Same rule as `{{instruction}}`, for the same reason. Every skill scaffolded before pages were
-    # part of this prompt has a template that never mentions them, and those are exactly the skills
-    # that have grown companion pages — so leaving it to the template means the long-established
-    # skills stay the broken ones. A step that places `{{pages}}` decides where they go; one that
-    # does not still sends them.
-    if digest.pages and "{{pages}}" not in template:
-        text += (
+    named = placeholders(spec.prompt or "")
+    out: list[tuple[str, str]] = []
+    if digest.pages and "pages" not in named:
+        out.append((
+            "pages",
             "\n\n## Current guidance — companion pages\n\n"
             "These are part of the same guidance and reach the reviewer verbatim, under the paths "
             "shown. If a rule you need to change lives here, change it here, and return the page's "
             "complete new text in `pages` under that path.\n\n"
-            f"{digest.render_pages()}\n"
-        )
-    if digest.instruction and "{{instruction}}" not in template:
-        text += (
+            f"{digest.render_pages()}\n",
+        ))
+    if digest.instruction and "instruction" not in named:
+        out.append((
+            "instruction",
             "\n\n## Additional instruction for this run\n\n"
             "This takes precedence over the general direction above where they conflict:\n\n"
-            f"{digest.instruction}\n"
-        )
-    return text
+            f"{digest.instruction}\n",
+        ))
+    return out
+
+
+def render_step_prompt(spec: StepSpec, digest: Digest) -> str:
+    """The prompt as sent: the template filled, plus what it forgot to place — see `appendices`."""
+    text = spec.render_prompt(digest.prompt_values())
+    return text + "".join(body for _, body in appendices(spec, digest))
 
 
 SUBMIT_GUIDANCE = "submit_guidance"
@@ -688,7 +721,9 @@ def _proposal_from(answer: dict[str, Any]) -> GuidanceProposal:
     )
 
 
-_SYSTEM = (
+# Public because it is half of what the drafter reads, and the console shows an operator the whole
+# of it. A diagnostic that displayed the filled template alone would be showing the smaller half.
+SYSTEM = (
     "You improve the guidance of an automated code-review skill. You are given the current "
     "guidance and a sample of the failures it produced on a corpus of real, human-labelled review "
     "cases. Rewrite the guidance so those failures would not recur, while keeping every rule that "

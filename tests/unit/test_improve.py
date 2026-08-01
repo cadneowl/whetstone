@@ -368,3 +368,83 @@ def test_subprocess_printing_junk_is_a_clear_error(tmp_path: Path) -> None:
     )
     with pytest.raises(StepError, match="JSON object with a 'body' key"):
         propose(spec, _skill([]), None)
+
+
+# --- showing the prompt -----------------------------------------------------------
+#
+# Anything that displays "what the drafter will be sent" has to assemble it the way `propose` does.
+# A preview built by a second code path drifts from the real one and is believed anyway, which is
+# worse than showing nothing at all — so there is one assembly and these hold it to that.
+
+
+def _prompt_spec(tmp_path: Path, prompt: str) -> StepSpec:
+    return StepSpec(kind="improve", skill_id="s", directory=tmp_path, prompt=prompt)
+
+
+def _wiki_skill(cases: list[EvalCase]) -> Skill:
+    from whetstone.wiki import SkillWiki, WikiEntry, WikiPage
+
+    return Skill(
+        id="s",
+        body="R1 — no unwrap.",
+        eval_cases=cases,
+        wiki=SkillWiki(
+            entries=[WikiEntry(page="charge", paths=["src/*.rs"])],
+            pages={"charge": WikiPage(id="charge", title="Charging", text="Errors are retried.")},
+        ),
+    )
+
+
+def test_the_previewed_digest_carries_the_wiki_the_real_call_sends(tmp_path: Path) -> None:
+    """The bug this closes shipped in `skills improve --dry-run`.
+
+    It rebuilt the digest from `build_digest` by hand and forgot `wiki_text`, which is not on the
+    digest already — so the preview printed `{{wiki}}` as "(no repo context indexed for this skill)"
+    for a skill whose wiki every real run sends. Read as evidence about what the model saw, that is
+    a lie about the one input the operator cannot otherwise inspect.
+    """
+    from whetstone.improve import digest_for
+
+    skill = _wiki_skill([_case("c1")])
+    digest = digest_for(_spec(tmp_path), skill, _record([_miss("c1")]))
+
+    assert "Errors are retried." in digest.wiki
+    assert "Errors are retried." in digest.prompt_values()["wiki"]
+
+
+def test_the_previewed_prompt_is_the_prompt_the_model_is_sent(tmp_path: Path) -> None:
+    """Byte for byte, or the diagnostic is describing something else."""
+    from whetstone.improve import digest_for, render_step_prompt
+
+    spec = _prompt_spec(tmp_path, "{{guidance}} / {{failures}} / {{wiki}}")
+    skill, record = _wiki_skill([_case("c1")]), _record([_miss("c1")])
+    sent: list[str] = []
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        sent.append(user)
+        return GuidanceProposal(body="new rules")
+
+    propose(spec, skill, record, client=FakeLLMClient(handler))
+    previewed = render_step_prompt(spec, digest_for(spec, skill, record))
+
+    assert sent == [previewed]
+
+
+def test_the_preview_names_the_sections_the_host_appended(tmp_path: Path) -> None:
+    """`{{instruction}}` and `{{pages}}` reach the model whether or not the template places them,
+    so an operator reading their own template cannot tell what was actually sent."""
+    from whetstone.improve import appendices, digest_for
+
+    spec = _prompt_spec(tmp_path, "{{guidance}}")
+    digest = digest_for(spec, _skill([_case("c1")]), None, instruction="focus on false positives")
+
+    assert [name for name, _ in appendices(spec, digest)] == ["instruction"]
+
+
+def test_a_template_that_places_a_variable_gets_no_appendix_for_it(tmp_path: Path) -> None:
+    from whetstone.improve import appendices, digest_for
+
+    spec = _prompt_spec(tmp_path, "{{guidance}} {{instruction}}")
+    digest = digest_for(spec, _skill([_case("c1")]), None, instruction="focus on false positives")
+
+    assert appendices(spec, digest) == []

@@ -158,6 +158,22 @@ class LLMConfig(BaseModel):
     provider: str = ""
     model: str = ""
     base_url: str = ""
+    # How much one reply may generate. Unset means **ask the backend**: the OpenAI-compatible
+    # client reads a published limit off `GET /v1/models` where one exists (see `llm/limits.py`)
+    # and falls back to 64000 where it does not. Setting it pins the number and skips the probe.
+    #
+    # A ceiling, not a request: billing is for tokens produced, so a cap set higher than a call
+    # needs costs nothing. Set too low it is not a degradation but a hard failure — the reply stops
+    # mid-token and the JSON being assembled from it cannot be completed, which surfaces as
+    # `LLMTruncatedError` naming this key. The call that needs the most room is the improve step,
+    # whose contract is "return the COMPLETE new guidance body": budget for the whole of a skill's
+    # rules, not for the change to them.
+    #
+    # Unlike the three fields above, this is *not* console-only. Those seed a picker an operator
+    # changes while the server runs; a cap that applied to the console and silently not to
+    # `whetstone skills improve` would mean the same skill drafting differently depending on which
+    # entry point ran it. So the CLI reads it too — see `cli._client`.
+    max_tokens: int | None = Field(default=None, ge=1)
 
 
 class WatchConfig(BaseModel):

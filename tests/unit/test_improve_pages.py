@@ -82,6 +82,18 @@ def test_pages_are_not_appended_twice_when_the_template_places_them(tmp_path: Pa
     assert rendered.count("### patterns/errors.md") == 1
 
 
+def test_spaced_braces_are_the_same_variable_and_are_not_sent_twice(tmp_path: Path) -> None:
+    """`{{ pages }}` is what `render_template` substitutes and `{{pages}}` is what the append check
+    looked for, so a template that spaced its braces got every companion page rendered where it
+    asked for them and then appended again underneath — the same rules twice, in one prompt."""
+    from whetstone.improve import render_step_prompt
+
+    spec = StepSpec(kind="improve", skill_id="s", directory=tmp_path, prompt="{{ pages }}")
+    rendered = render_step_prompt(spec, build_digest(_skill(tmp_path), None, FailureInputs()))
+
+    assert rendered.count("### patterns/errors.md") == 1
+
+
 def test_a_single_file_skill_gets_no_appended_page_section(tmp_path: Path) -> None:
     """"(this skill has no companion pages)" under a heading is noise on the common case."""
     from whetstone.improve import render_step_prompt
