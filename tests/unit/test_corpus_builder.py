@@ -108,6 +108,72 @@ def _declined_suggestion_thread(*, resolved: bool = True) -> ReviewThread:
     )
 
 
+def _expanded_context_thread() -> ReviewThread:
+    """A comment left on a line the change never touches.
+
+    Forges let a reviewer expand the collapsed context and comment on surrounding code, and they
+    do — "this JavaDoc belongs on the interface" points at a declaration the change did not edit.
+    The hunk here covers new-file lines 40-45; the comment sits at 58.
+    """
+    return ReviewThread(
+        comments=[
+            ReviewComment(
+                author="reviewer_a",
+                body="JavaDoc method comments should be put in the interface declaration.",
+                path="src/handlers/charge.rs",
+                line=58,
+            )
+        ],
+        resolved=True,
+    )
+
+
+def test_a_comment_outside_every_hunk_anchors_to_the_file_not_the_line() -> None:
+    """Otherwise the candidate is born unpromotable and says nothing about why.
+
+    An expectation pinned outside every hunk can never match — the reviewer under test is shown the
+    diff — so `promote._check_region` refuses it. That refusal used to arrive at the *end* of
+    triage, after the operator had chosen a skill and written the expectation, with nothing on
+    screen connecting it to a comment left outside the change.
+    """
+    [candidate] = build_candidates(_reviewed([_expanded_context_thread()]), [RUST_SKILL])
+    where = candidate.expect[0].where
+    assert where.path == "src/handlers/charge.rs"
+    assert where.line_range is None  # the whole file — what is honestly known
+    # The line is not lost; it is where the operator can act on it.
+    assert "line 58" in candidate.rationale
+    assert "40-45" in candidate.rationale
+
+
+def test_such_a_candidate_promotes_instead_of_being_refused() -> None:
+    """The end-to-end shape of the bug: mined, triaged, and then rejected by validation."""
+    from whetstone.candidates import CandidateEntry
+    from whetstone.promote import edits_from, prepare
+
+    [candidate] = build_candidates(_reviewed([_expanded_context_thread()]), [RUST_SKILL])
+    entry = CandidateEntry(
+        candidate=candidate, diff=candidate.change.to_unified_diff(), decision=None
+    )
+    edits = edits_from(entry, skill_id="code-review-rust-error-handling")
+    assert edits.line_range is None
+    prepare(entry, edits, skills_root="skills")  # raises SkillLoadError if the region is unusable
+
+
+def test_a_comment_inside_a_hunk_keeps_its_exact_line() -> None:
+    """The fallback must not swallow the precise anchors, which are the majority."""
+    thread = ReviewThread(
+        comments=[
+            ReviewComment(
+                author="reviewer_a", body="Don't unwrap.", path="src/handlers/charge.rs", line=41
+            )
+        ],
+        resolved=True,
+    )
+    [candidate] = build_candidates(_reviewed([thread]), [RUST_SKILL])
+    assert candidate.expect[0].where.line_range == (41, 41)
+    assert "expanded the diff" not in candidate.rationale
+
+
 def test_applied_suggestion_becomes_strong_should_catch() -> None:
     cands = build_candidates(_reviewed([_applied_suggestion_thread()]), [RUST_SKILL])
     c = next(c for c in cands if c.kind == "should_catch")

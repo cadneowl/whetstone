@@ -245,12 +245,36 @@ def build_candidates(
 
         signal = classify(thread)
         semantic = thread.comments[0].body if thread.comments else ""
+        # A reviewer can expand the collapsed context in the forge's diff view and comment on a
+        # line no hunk touches. That is an ordinary thing to do — "this JavaDoc belongs on the
+        # interface" points at a declaration the change never edited — but it is not a usable
+        # anchor: the reviewer under test is shown the diff, so an expectation pinned outside every
+        # hunk can never match, and `promote._check_region` rightly refuses it.
+        #
+        # Refusing at promote time was the worst place to find out. The candidate looked ordinary
+        # in the queue, and the operator only met the error after choosing a skill, editing the
+        # expectation and pressing Promote — with nothing on screen explaining that the line had
+        # come from a comment left outside the change.
+        #
+        # So the region falls back to the whole file, which is what is honestly known: the concern
+        # is about this file, somewhere. The exact line is not lost — it goes into the rationale,
+        # where the operator can read it and narrow the region by hand if it belongs to a hunk.
+        outside = line_range is not None and not file.covers(line_range)
         expectation = Expectation(
             id="e1",
             must="appear" if signal.kind == "should_catch" else "not_appear",
-            where=Region(path=path, line_range=line_range),
+            where=Region(path=path, line_range=None if outside else line_range),
             semantic=semantic,
         )
+        rationale = signal.rationale
+        if outside:
+            spans = ", ".join(f"{lo}-{hi}" for lo, hi in file.new_line_spans()) or "(none)"
+            rationale += (
+                f" The reviewer left this on line {line_range[0]}, which this change does not "
+                f"touch (it changes {spans}) — they expanded the diff to comment on surrounding "
+                f"code. The expectation covers the whole file instead; narrow it yourself if the "
+                f"concern is really about a line the change edits."
+            )
         candidates.append(
             CandidateCase(
                 id=_candidate_id(reviewed.mr, f"t{i}"),
@@ -262,7 +286,7 @@ def build_candidates(
                 ),
                 confidence=signal.confidence,
                 suggested_skill=route_to_skill(path, skills, labels),
-                rationale=signal.rationale,
+                rationale=rationale,
                 discussion=_discussion(reviewed, thread),
             )
         )
