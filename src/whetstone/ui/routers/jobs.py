@@ -506,6 +506,11 @@ def plan_improve_job(
             billing="local",
             details=["this step runs your own program; Whetstone calls no model"],
         )
+    # Before the cost plan, not after: this is not a thing to be warned about while the button stays
+    # live. A single call cannot read a folder, so for a multi-file skill it can only paste one.
+    refusal = improve.would_paste_the_folder(spec, skill)
+    if refusal:
+        raise Unprocessable(refusal)
     scope = (
         _narrowed_scope(store, skill, spec, request)
         if request.cases
@@ -891,6 +896,11 @@ def improve_prompt(
             "this template places neither {{guidance}} nor {{pages}}, so the drafter is not shown "
             "the rules it is being asked to rewrite and will return an invented body."
         )
+    # Rendered anyway — this route exists to show what *would* be sent, and refusing the diagnostic
+    # at the moment it is most wanted is how the size stayed invisible in the first place.
+    refusal = improve.would_paste_the_folder(spec, skill)
+    if refusal:
+        warnings.append(f"{refusal} Launching is blocked until then; this is what it would send.")
 
     return ImprovePrompt(
         skill_id=skill.id,

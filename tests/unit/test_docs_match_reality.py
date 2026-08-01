@@ -170,3 +170,61 @@ def test_a_source_root_that_is_not_a_directory_is_refused(tmp_path: Path) -> Non
     )
     choice = reviewer_from_step(load_step(tmp_path, "evaluate", skill_id="s"), tmp_path)
     assert any("not a directory" in p for p in choice.problems)
+
+
+# --- how a step runs, on the screen rather than in a file ---------------------------
+
+
+def _runtimes(skill_dir: Path) -> dict[str, object]:
+    from whetstone.service import step_runtimes
+
+    return {s.kind: s for s in step_runtimes(load_skill(skill_dir), skill_dir)}
+
+
+def test_the_skill_page_can_say_each_step_runs_as_an_agent() -> None:
+    """`agent:` decides whether a skill is run or pasted — the largest difference in what a model
+    sees — and it appeared on no screen. You had to know the setting existed to go looking."""
+    rows = _runtimes(ROOT / "examples" / "agent-skill" / "skills" / "panic-guard-agent")
+
+    assert rows["evaluate"].mode == "agent"
+    assert "+source" in rows["evaluate"].note
+    assert "read on demand" in rows["evaluate"].note
+    assert rows["improve"].mode == "agent"
+
+
+def test_a_step_with_no_file_is_shown_as_absent_not_as_broken() -> None:
+    rows = _runtimes(ROOT / "examples" / "agent-skill" / "skills" / "panic-guard-agent")
+    assert rows["triage"].present is False
+
+
+def test_a_triage_agent_row_says_it_is_blindfolded() -> None:
+    """Otherwise a row reading "an agent" everywhere implies it reads SKILL.md, which is the one
+    thing it must not do."""
+    rows = _runtimes(
+        ROOT / "examples" / "console-demo" / "workspace" / "skills" / "go-timeout-guard"
+    )
+    assert rows["triage"].mode == "agent"
+    assert "not shown the guidance" in rows["triage"].note
+
+
+def test_a_folder_shaped_skill_on_a_plain_improve_step_shows_as_refusing(tmp_path: Path) -> None:
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "a.md").write_text("- R1\n", encoding="utf-8")
+    (tmp_path / "improve").mkdir()
+    (tmp_path / "improve" / "step.yaml").write_text(
+        "description: x\nprompt: prompt.md\n", encoding="utf-8"
+    )
+    (tmp_path / "improve" / "prompt.md").write_text("{{guidance}}", encoding="utf-8")
+
+    row = _runtimes(tmp_path)["improve"]
+
+    assert row.mode == "prompt"
+    assert "whole folder" in row.note
+    assert "agent: enabled: true" in row.problem, "the row says the fix, before the button does"
+
+
+def test_a_single_file_skill_is_not_flagged() -> None:
+    """Pasting one file is right, so the row is informative rather than a complaint."""
+    row = _runtimes(REFERENCE)["evaluate"]
+    assert row.mode == "agent" and not row.problem

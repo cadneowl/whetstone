@@ -42,7 +42,12 @@ from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
 from whetstone.gitio import GitError
-from whetstone.improve import digest_for, propose, render_step_prompt
+from whetstone.improve import (
+    digest_for,
+    propose,
+    render_step_prompt,
+    would_paste_the_folder,
+)
 from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
@@ -1871,7 +1876,17 @@ def skills_improve(
         typer.echo(
             render_step_prompt(spec, digest) if spec.prompt else digest.model_dump_json(indent=2)
         )
+        # After the prompt, on stderr: `--dry-run` exists to show what would be sent, and the size
+        # of that is exactly what the reader is being shown. Refusing to print it would hide the
+        # evidence for the refusal.
+        refusal = would_paste_the_folder(spec, sk)
+        if refusal:
+            typer.echo(f"\n{refusal}\nWithout --dry-run this is refused.", err=True)
         return
+
+    refusal = would_paste_the_folder(spec, sk)
+    if refusal:
+        raise typer.BadParameter(refusal)
 
     if record is not None and not _worth_improving(record, instruction):
         return

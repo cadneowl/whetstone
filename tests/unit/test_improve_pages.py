@@ -174,20 +174,76 @@ def test_a_plain_prompt_step_is_unchanged(tmp_path: Path) -> None:
     assert "R2 — no swallowed errors" in rendered, "still appended for a non-agent step"
 
 
+# --- a folder may not be pasted into one prompt ---------------------------------------
+
+
+def test_a_multi_file_skill_may_not_be_pasted_into_one_prompt(tmp_path: Path) -> None:
+    """The single call has no tools, so its only way to show a folder is to concatenate it —
+    measured at 162,972 characters of pages on a real skill, with nothing anywhere saying so.
+
+    Refused rather than bounded. A byte cap was the first answer and it is the wrong one: it makes
+    the paste smaller by *dropping rules*, so the drafter rewrites guidance it was shown a fraction
+    of. The failure is the paste, not its size.
+    """
+    import pytest
+
+    from whetstone.steps import StepError
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        raise AssertionError("no model call may be made")
+
+    spec = StepSpec(kind="improve", skill_id="s", directory=tmp_path, prompt="{{guidance}}")
+    with pytest.raises(StepError) as caught:
+        propose(spec, _skill(tmp_path), None, client=FakeLLMClient(handler))
+
+    assert "agent: enabled: true" in str(caught.value), "name the fix, not just the problem"
+    assert "2 companion page(s)" in str(caught.value)
+
+
+def test_a_single_file_skill_is_still_one_call(tmp_path: Path) -> None:
+    """Pasting one file is exactly right and always was. The refusal is about folders."""
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body="# R", rationale="ok")
+
+    spec = StepSpec(kind="improve", skill_id="s", directory=tmp_path, prompt="{{guidance}}")
+    result = propose(spec, Skill(id="s", body="# R"), None, client=FakeLLMClient(handler))
+
+    assert result.proposal.body == "# R"
+
+
 # --- what it may write --------------------------------------------------------------
+#
+# Through the agent path, because that is the only path a multi-file skill has. What a proposal is
+# allowed to write is unchanged by how it was reached, which is what these check.
+
+
+def _agent_propose(tmp_path: Path, answer: dict[str, object]):
+    """Run `propose` as an agent, with the model scripted to submit `answer` and finish."""
+    from whetstone.agent.step import AgentStep
+    from whetstone.improve import SUBMIT_GUIDANCE
+    from whetstone.llm.fake_client import FakeToolClient
+    from whetstone.llm.tools import Message, ToolCall, ToolSpec, Turn
+    from whetstone.steps import AgentPolicy
+
+    def turns(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        return Turn(calls=[ToolCall("1", SUBMIT_GUIDANCE, answer)])
+
+    spec = StepSpec(
+        kind="improve",
+        skill_id="s",
+        directory=tmp_path,
+        prompt="{{guidance}}{{pages}}",
+        agent=AgentPolicy(enabled=True),
+    )
+    agent = AgentStep(FakeToolClient(turns), max_steps=3)
+    return propose(spec, _skill(tmp_path), None, agent=agent)
 
 
 def test_a_page_rewrite_reaches_the_editor(tmp_path: Path) -> None:
     fixed = "- **R2 — no swallowed errors.** `let _ = f()` counts as discarding it.\n"
 
-    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        assert "R2 — no swallowed errors" in user, "the page must be in the prompt"
-        return GuidanceProposal(body=BODY, pages={"patterns/errors.md": fixed})
-
-    spec = StepSpec(
-        kind="improve", skill_id="s", directory=tmp_path, prompt="{{guidance}}{{pages}}"
-    )
-    result = propose(spec, _skill(tmp_path), None, client=FakeLLMClient(handler))
+    result = _agent_propose(tmp_path, {"body": BODY, "pages": {"patterns/errors.md": fixed}})
 
     assert result.proposal.pages == {"patterns/errors.md": fixed}
 
@@ -195,24 +251,16 @@ def test_a_page_rewrite_reaches_the_editor(tmp_path: Path) -> None:
 def test_pages_handed_back_unchanged_are_not_reported_as_edits(tmp_path: Path) -> None:
     """Asked for the pages it changed, a model returns all of them. Staging those is a commit that
     touches files with identical content — noise in the diff, and a version bump for nothing."""
-
-    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        return GuidanceProposal(body=BODY, pages={"patterns/errors.md": ERRORS})
-
-    spec = StepSpec(kind="improve", skill_id="s", directory=tmp_path, prompt="{{guidance}}")
-    result = propose(spec, _skill(tmp_path), None, client=FakeLLMClient(handler))
+    result = _agent_propose(tmp_path, {"body": BODY, "pages": {"patterns/errors.md": ERRORS}})
 
     assert result.proposal.pages == {}
 
 
 def test_a_page_the_skill_does_not_have_is_dropped(tmp_path: Path) -> None:
     """A model response must not be able to create files in the repo."""
-
-    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        return GuidanceProposal(body=BODY, pages={"../../etc/passwd": "x", "new.md": "y"})
-
-    spec = StepSpec(kind="improve", skill_id="s", directory=tmp_path, prompt="{{guidance}}")
-    result = propose(spec, _skill(tmp_path), None, client=FakeLLMClient(handler))
+    result = _agent_propose(
+        tmp_path, {"body": BODY, "pages": {"../../etc/passwd": "x", "new.md": "y"}}
+    )
 
     assert result.proposal.pages == {}
 

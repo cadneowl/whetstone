@@ -4791,6 +4791,11 @@ export interface components {
             scored_by?: components["schemas"]["RunSummary"] | null;
             skill: components["schemas"]["Skill"];
             /**
+             * Steps
+             * @default []
+             */
+            steps: components["schemas"]["StepRuntime"][];
+            /**
              * Untested Rules
              * @default []
              */
@@ -5032,6 +5037,43 @@ export interface components {
             };
             /** Skill Id */
             skill_id: string;
+        };
+        /**
+         * StepRuntime
+         * @description How one of a skill's steps actually runs — the thing that was only in a YAML file.
+         *
+         *     `agent:` decides whether a skill is *run* or *pasted*, which is the largest single difference in
+         *     what a model sees, and it was visible nowhere: not on the skill page, not on a launch button,
+         *     not on the editor. An operator had to already know the setting existed to go looking for it, and
+         *     the symptom when it was off was a prompt quietly carrying a whole folder.
+         *
+         *     `mode` is the one-word answer. `note` is the sentence under it, and `problem` is set when the
+         *     step will refuse — so the screen says what is wrong before the button does.
+         */
+        StepRuntime: {
+            /** Kind */
+            kind: string;
+            /**
+             * Mode
+             * @default none
+             * @enum {string}
+             */
+            mode: "agent" | "prompt" | "program" | "task" | "none";
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Present
+             * @default true
+             */
+            present: boolean;
+            /**
+             * Problem
+             * @default
+             */
+            problem: string;
         };
         /**
          * Sweep

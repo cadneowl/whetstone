@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, computed_field
 
@@ -946,8 +947,29 @@ class CaseHistoryEntry(BaseModel):
     flaky: bool
 
 
+class StepRuntime(BaseModel):
+    """How one of a skill's steps actually runs — the thing that was only in a YAML file.
+
+    `agent:` decides whether a skill is *run* or *pasted*, which is the largest single difference in
+    what a model sees, and it was visible nowhere: not on the skill page, not on a launch button,
+    not on the editor. An operator had to already know the setting existed to go looking for it, and
+    the symptom when it was off was a prompt quietly carrying a whole folder.
+
+    `mode` is the one-word answer. `note` is the sentence under it, and `problem` is set when the
+    step will refuse — so the screen says what is wrong before the button does.
+    """
+
+    kind: str
+    present: bool = True
+    mode: Literal["agent", "prompt", "program", "task", "none"] = "none"
+    note: str = ""
+    problem: str = ""
+
+
 class SkillDetail(BaseModel):
     skill: Skill
+    # How each step runs, in pipeline order. Empty only for a skill with no step files at all.
+    steps: list[StepRuntime] = []
     cases: list[CaseSummary] = []
     runs: list[RunSummary] = []
     rules: list[str] = []
@@ -1191,6 +1213,57 @@ def skill_detail(skill: Skill, store: RunStore, *, runs: int = 20) -> SkillDetai
         # Same record the case outcomes were read from, so the two can never disagree.
         scored_by=history[0] if history else None,
     )
+
+
+def step_runtimes(skill: Skill, skill_dir: Path) -> list[StepRuntime]:
+    """How each of this skill's steps runs, for a screen rather than for a YAML reader.
+
+    Best-effort by design: a step file that will not parse becomes a `problem` on its row instead of
+    failing the whole page. The skill detail screen is where someone goes to find out *why* a skill
+    is behaving oddly, so it is the last place that should refuse to load because of it.
+    """
+    from whetstone.improve import would_paste_the_folder
+    from whetstone.steps import AGENT_KINDS, STEP_KINDS, StepError, load_step
+
+    out: list[StepRuntime] = []
+    for kind in STEP_KINDS:
+        try:
+            spec = load_step(skill_dir, kind, skill_id=skill.id)
+        except StepError as exc:
+            out.append(StepRuntime(kind=kind, present=True, problem=str(exc)))
+            continue
+        if spec is None:
+            out.append(StepRuntime(kind=kind, present=False, note="no step file"))
+            continue
+        if spec.task.enabled:
+            out.append(StepRuntime(
+                kind=kind, mode="task",
+                note=f"scored on work produced, {spec.task.max_steps} steps",
+            ))
+        elif spec.agent.enabled:
+            extra = " +source" if spec.agent.source else ""
+            extra += f" +{len(spec.agent.tools)} tool(s)" if spec.agent.tools else ""
+            note = f"{spec.agent.max_steps} steps{extra}"
+            if kind == "triage":
+                # Otherwise this row implies the drafter reads SKILL.md, which is the one thing it
+                # must not do — and someone reading "agent" everywhere would never learn otherwise.
+                note += " — not shown the guidance"
+            elif skill.pages:
+                note += f", {len(skill.pages)} page(s) read on demand"
+            out.append(StepRuntime(kind=kind, mode="agent", note=note))
+        elif spec.is_subprocess:
+            out.append(StepRuntime(kind=kind, mode="program", note=" ".join(spec.run)))
+        else:
+            pages = (
+                f"the whole folder ({len(skill.pages)} page(s)) is pasted into one prompt"
+                if skill.pages and kind in AGENT_KINDS
+                else "one prompt, one answer"
+            )
+            out.append(StepRuntime(
+                kind=kind, mode="prompt", note=pages,
+                problem=would_paste_the_folder(spec, skill) if kind == "improve" else "",
+            ))
+    return out
 
 
 def _case_summary(case: EvalCase, latest: RunRecord | None) -> CaseSummary:

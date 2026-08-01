@@ -34,6 +34,7 @@ from whetstone.service import (
     case_detail,
     skill_detail,
     skill_summaries,
+    step_runtimes,
 )
 from whetstone.sharpening import DEFAULT_WINDOW, SharpeningReport, sharpening_report
 from whetstone.steps import StepError
@@ -68,6 +69,9 @@ def get_skill(
 ) -> SkillDetail:
     skill = _load_one(root, skill_id)
     detail = skill_detail(skill, store)
+    # How each step runs — `agent:` decides whether a skill is run or pasted, which is the largest
+    # difference in what a model sees, and it was visible on no screen at all.
+    detail.steps = step_runtimes(skill, root / skill_id)
     # The same record `skill_detail` read the on-disk outcomes from, so a pending case and a merged
     # one can never report from different runs on one screen.
     latest = store.load(detail.runs[0].id) if detail.runs else None

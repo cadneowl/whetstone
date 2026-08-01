@@ -383,7 +383,7 @@ def stub_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     from pydantic import BaseModel
 
     from whetstone.judge.llm_judge import JudgeVerdict
-    from whetstone.llm.fake_client import FakeLLMClient, FakeToolClient
+    from whetstone.llm.fake_client import FakeBothClient
     from whetstone.llm.tools import Message, ToolCall, ToolSpec, Turn
     from whetstone.reviewer.agent_reviewer import SUBMIT
     from whetstone.reviewer.llm_reviewer import LLMFindingList
@@ -396,12 +396,7 @@ def stub_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     def turns(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
         return Turn(calls=[ToolCall("1", SUBMIT, {"findings": []})])
 
-    class Both(FakeLLMClient, FakeToolClient):
-        def __init__(self) -> None:
-            FakeLLMClient.__init__(self, handler)
-            FakeToolClient.__init__(self, turns)
-
-    monkeypatch.setattr("whetstone.cli._client", lambda *a, **k: Both())
+    monkeypatch.setattr("whetstone.cli._client", lambda *a, **k: FakeBothClient(handler, turns))
 
 
 def test_eval_gate_stores_a_record(tmp_path: Path, stub_gate: None) -> None:

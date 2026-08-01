@@ -35,7 +35,7 @@ from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRe
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.tools import ToolSpec
-from whetstone.steps import FailureInputs, StepError, StepSpec, placeholders
+from whetstone.steps import STEP_FILE, FailureInputs, StepError, StepSpec, placeholders
 from whetstone.wiki import retrieve
 
 FailureKind = Literal["fn", "fp"]
@@ -512,6 +512,34 @@ def _key(failure: Failure, strategy: str) -> str:
     return f"{failure.kind}:case:{failure.case_id}"
 
 
+def would_paste_the_folder(spec: StepSpec, skill: Skill) -> str:
+    """Why this improve step would concatenate the skill folder into one prompt, or `""`.
+
+    A skill is split across files precisely so that it is never all in one context at once:
+    `SKILL.md` says what to consult and when, and the harness serves the rest a page at a time. The
+    single-call improve path cannot do that — it has no tools to read with — so for a skill that is
+    a folder it has only one move, which is to paste the folder. Measured on a real skill: 162,972
+    characters of pages inside a 178,046-character prompt, with nothing anywhere saying so.
+
+    Refused rather than bounded. A byte cap was the first answer and it is the wrong one: it makes
+    the paste smaller by *dropping rules*, so the drafter rewrites guidance it was never shown a
+    third of. The failure is the paste, not its size. `agent:` is the setting that removes it, and a
+    refusal that names the setting is the only version of this an operator cannot miss.
+
+    A single-file skill is unaffected — pasting one file is exactly right, and always was.
+    """
+    if not skill.pages or spec.agent.enabled or not spec.calls_a_model:
+        return ""
+    total = sum(len(page.text.encode("utf-8")) for page in skill.pages)
+    return (
+        f"{skill.id} is a folder: {len(skill.pages)} companion page(s), {total:,} bytes, and this "
+        f"improve step would paste every one of them into a single prompt. That is the opposite of "
+        f"how the skill is used — a page is meant to be opened when the guidance points at it. Set "
+        f"`agent: enabled: true` in {spec.directory.name}/{STEP_FILE} and the drafter reads them "
+        f"with a tool instead."
+    )
+
+
 def propose(
     spec: StepSpec,
     skill: Skill,
@@ -537,7 +565,14 @@ def propose(
     `only` narrows the drafter to a chosen set of case ids — the workspace's "improve from these".
     Cases in `only` the drafter never gets to (unscored, passing, or holdout) come back in
     `ProposalResult.selected_missing` rather than being dropped in silence.
+
+    Refuses outright for a multi-file skill on the single-call path — see `would_paste_the_folder`.
+    The check is here as well as in every caller's preflight because this is the one door all of
+    them go through, and a guard that lives only in the callers is a guard the next caller forgets.
     """
+    refusal = would_paste_the_folder(spec, skill)
+    if refusal:
+        raise StepError(refusal)
     digest = digest_for(spec, skill, record, instruction=instruction, only=only)
     selected_missing: list[str] = []
     if only is not None and record is not None:
