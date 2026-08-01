@@ -182,7 +182,8 @@ def build_llm_client(
 
     from whetstone.llm.openai_client import OpenAICompatibleClient
 
-    resolved_timeout = timeout if timeout is not None else _env_timeout()
+    # Environment first, then the configured value, then the client default — as for the cap.
+    resolved_timeout = _env_timeout() or timeout
     if resolved_timeout is not None:
         tuning["timeout"] = resolved_timeout
     return OpenAICompatibleClient(
@@ -278,11 +279,17 @@ def _env_timeout() -> float | None:
     if not raw:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(
             f"WHETSTONE_LLM_TIMEOUT must be a number of seconds, got {raw!r}"
         ) from exc
+    if value <= 0:
+        # Refused rather than ignored, for the reason `_env_max_tokens` gives: a knob an error
+        # message sends you to must not be capable of silently doing nothing. Zero is also the one
+        # value that would read as "unset" to the caller below and quietly defer to the file.
+        raise ValueError(f"WHETSTONE_LLM_TIMEOUT must be greater than 0 seconds, got {value}")
+    return value
 
 
 def _env_max_tokens() -> int | None:

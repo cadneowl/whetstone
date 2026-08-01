@@ -146,9 +146,17 @@ class LLMConfig(BaseModel):
     model and lets an operator change while it runs. A change made in the console lasts for the
     server's lifetime; this block is the default it starts from.
 
-    Precedence: a value set here (or chosen in the console) wins over both a skill step's own
-    `model:` block and the `WHETSTONE_LLM*` environment — it is the deployment's explicit default.
-    Leave it empty to defer to the step and the environment, which is the pre-existing behaviour.
+    **Two precedences in one block, and the difference is worth stating plainly.**
+
+    `provider`/`model`/`base_url` are the exception to this project's usual order: a value set here
+    (or chosen in the console) wins over both a skill step's own `model:` block and the
+    `WHETSTONE_LLM*` environment, because it is the deployment's explicit *choice of backend* and
+    the console can change it at runtime. Leave them empty to defer to the step and the
+    environment, which is the pre-existing behaviour.
+
+    `max_tokens`/`timeout` follow the ordinary rule instead — environment, then this file, then the
+    built-in default (see `envfile.py`). They are limits rather than a choice: a long run needs to
+    be given more room for one command without editing, and reverting, a committed file.
 
     `base_url` exists for a deployment whose default is a custom OpenAI-compatible gateway. It is
     deliberately not changeable from the browser: the console lets an operator pick among known
@@ -174,6 +182,14 @@ class LLMConfig(BaseModel):
     # `whetstone skills improve` would mean the same skill drafting differently depending on which
     # entry point ran it. So the CLI reads it too — see `cli._client`.
     max_tokens: int | None = Field(default=None, ge=1)
+    # Seconds one request may take. Unset leaves the client default (600).
+    #
+    # These are non-streaming requests: the endpoint sends nothing until the whole reply is
+    # generated, so this budget has to cover the entire generation and not a gap between bytes.
+    # Raising `max_tokens` therefore raises how long a call can legitimately take — the two knobs
+    # move together, and a cap large enough to finish a guidance rewrite needs a timeout large
+    # enough to wait for one. Read by the console and the CLI alike, for the same reason.
+    timeout: float | None = Field(default=None, gt=0)
 
 
 class WatchConfig(BaseModel):

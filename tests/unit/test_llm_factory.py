@@ -176,6 +176,32 @@ def test_both_entry_points_apply_the_configured_cap(
     assert cli._max_tokens == 30000
 
 
+def test_a_configured_timeout_reaches_both_entry_points(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap and the budget move together: these are non-streaming requests, so a `max_tokens`
+    large enough to finish a guidance rewrite needs a timeout large enough to wait for one."""
+    monkeypatch.delenv("WHETSTONE_LLM_TIMEOUT", raising=False)
+    (tmp_path / "whetstone.toml").write_text(
+        "[llm]\nprovider = 'ollama'\nmodel = 'q'\ntimeout = 1800\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    from whetstone.cli import _client as cli_client
+    from whetstone.config import load_config
+    from whetstone.ui.routers.jobs import _client as console_client
+
+    config = load_config(start=tmp_path)
+    console = console_client(config, None, ModelSelection(provider="ollama", model="q"))
+    assert console._client.timeout.read == 1800.0
+    assert cli_client("ollama", "q", None, None)._client.timeout.read == 1800.0
+
+
+def test_the_environment_overrides_a_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WHETSTONE_LLM_TIMEOUT", "90")
+    assert build_llm_client("ollama", model="q", timeout=1800)._client.timeout.read == 90.0
+
+
 def test_a_cap_that_is_not_a_number_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """Refused, not ignored: this is the knob a truncation error sends you to, and the one outcome
     worse than the original failure is setting it, seeing the same error, and never learning why."""
@@ -242,3 +268,11 @@ def test_default_provider_is_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")  # let the SDK construct without network
     client = build_llm_client()
     assert type(client).__name__ == "AnthropicClient"
+
+
+def test_a_timeout_of_zero_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero is the one value that would also read as "unset" to the resolver and quietly defer to
+    whetstone.toml — so the knob an error message names would appear to do nothing."""
+    monkeypatch.setenv("WHETSTONE_LLM_TIMEOUT", "0")
+    with pytest.raises(ValueError, match="greater than 0"):
+        build_llm_client("ollama", model="q")

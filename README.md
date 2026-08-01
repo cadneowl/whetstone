@@ -2064,6 +2064,7 @@ provider = "ollama"          # anthropic · openai · ollama · lmstudio · vllm
 model = "qwen3-coder:30b"    # required for local / OpenAI-compatible backends
 base_url = ""                # a custom OpenAI-compatible gateway — NOT changeable from the browser
 max_tokens = 32000           # how much one reply may generate (default: ask the backend)
+timeout = 1800               # seconds one request may take (default 600)
 ```
 
 `base_url` is deliberately not settable from the console: an operator picks among known providers
@@ -2492,8 +2493,10 @@ Two safety properties for custom harnesses:
 - **Typos still fail loudly.** An unknown name *without* a base URL is treated as a typo and rejected
   with the list of valid presets — you don't silently hit the wrong endpoint.
 
-Slow hardware? Raise the per-request timeout (a Pi running a 7B model can take minutes):
-`--llm ollama ... ` with `WHETSTONE_LLM_TIMEOUT=600` (seconds), or `build_llm_client(..., timeout=600)`.
+Slow hardware? Raise the per-request timeout (a Pi running a 7B model can take minutes): `timeout`
+under `[llm]` in `whetstone.toml`, `WHETSTONE_LLM_TIMEOUT=1800` (seconds) for one run, or
+`build_llm_client(..., timeout=1800)`. The default is 600s, and it has to cover the *whole* reply —
+these are non-streaming requests, so nothing arrives until the model has finished writing.
 
 From the CLI, `eval run` and `eval gate` take the same options:
 
@@ -2767,7 +2770,7 @@ Two things worth knowing, both about values being read back exactly as written:
 | `WHETSTONE_LLM_MODEL` | `build_llm_client` | Model id when `--model` is omitted (required for local/OpenAI/custom backends). |
 | `WHETSTONE_LLM_BASE_URL` | `build_llm_client` | OpenAI-compatible endpoint when `--base-url` is omitted — e.g. a remote Pi or custom harness. |
 | `WHETSTONE_LLM_API_KEY_ENV` | `build_llm_client` | Name of the env var holding the API key, if the backend needs one. |
-| `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Per-request timeout in seconds for OpenAI-compatible backends (raise it for slow local hardware). |
+| `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Overrides `[llm] timeout` (default 600s) for one run or one shell. These are non-streaming requests, so the budget covers the *whole* generation — raise it for slow hardware or very long guidance rewrites. |
 | `WHETSTONE_LLM_MAX_TOKENS` | `build_llm_client` | Overrides `[llm] max_tokens` (default 64000) for one run or one shell — how much a single reply may generate. Raise it when a call fails as `LLMTruncatedError`, meaning the reply was cut off before it finished. See `[llm]` above. |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
 | `JIRA_TOKEN` | Jira connector | API token (Cloud) or personal access token (Server/DC). Name configurable via `--jira-token-env` / `token_env`. |

@@ -30,6 +30,23 @@ Effort = str  # "low" | "medium" | "high" | "xhigh" | "max"
 DEFAULT_MAX_TOKENS = 64000
 
 
+# How long one request may take. Ten minutes rather than the two this started at, because these are
+# **non-streaming** requests: the server sends nothing at all until the whole reply is generated, so
+# the read timeout has to cover the entire generation rather than a gap between bytes. Two minutes
+# is comfortably less than a large guidance rewrite takes, and the failure it produced was a
+# `ReadTimeout` after the model had done most of the work — paid for and thrown away.
+#
+# The same reasoning the Anthropic SDK applies to its own non-streaming calls, which is where this
+# number comes from. It is deliberately generous in one direction: a hung endpoint now holds a job
+# for ten minutes instead of two, which is the trade for a long call being able to finish. Every
+# console job has a Cancel button, and `[llm] timeout` moves it either way.
+DEFAULT_TIMEOUT_S = 600.0
+
+
+class LLMTimeoutError(RuntimeError):
+    """A request that never came back inside its budget."""
+
+
 # Numbers big enough to be an output limit. Four digits at minimum, so an HTTP status or a small
 # ordinal in the same sentence cannot be mistaken for one — clamping to 400 would be far worse than
 # not clamping at all.
