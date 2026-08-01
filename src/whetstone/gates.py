@@ -18,10 +18,10 @@ filename already encodes.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -108,6 +108,24 @@ class GateRecord(BaseModel):
         """
         return self.result.passed and not self.practice_mode
 
+    # --- the `GateLike` view, so one verdict serves review and task gates alike ---
+
+    @property
+    def passed(self) -> bool:
+        return self.result.passed
+
+    @property
+    def reasons(self) -> list[str]:
+        return self.result.reasons
+
+    @property
+    def fixed(self) -> list[str]:
+        return self.result.fixed_cases
+
+    @property
+    def targeted(self) -> list[str]:
+        return self.config.targeted_cases
+
 
 def new_gate_id(skill_id: str, candidate_hash: str, created_at: datetime) -> str:
     """Timestamp-prefixed and lexically sortable, carrying the hash the C6 lookup searches for."""
@@ -115,11 +133,71 @@ def new_gate_id(skill_id: str, candidate_hash: str, created_at: datetime) -> str
     return f"{stamp}-{skill_id}-{candidate_hash[:_HASH_PREFIX]}-{uuid.uuid4().hex[:6]}"
 
 
-def _detail(record: GateRecord) -> str:
-    return record.result.reasons[0] if record.result.reasons else "no reason recorded"
+class GateLike(Protocol):
+    """The shape the C6 verdict is computed over — deliberately less than a whole record.
+
+    A task gate compares work produced rather than findings reported, so it carries a `TaskScore`
+    on each side and no recall at all. But *whether a change may be published on it* turns on none
+    of that: only on when it ran, whether it was practice, whether it passed, what it claimed to
+    fix, and what it actually fixed. Naming exactly those makes one verdict serve both kinds — the
+    alternative was a second copy of this logic, and two copies of a publish rule is how a task
+    skill quietly ends up held to a weaker standard than a review one.
+    """
+
+    created_at: datetime
+    practice_mode: bool
+
+    @property
+    def evidential(self) -> bool: ...
+
+    @property
+    def passed(self) -> bool: ...
+
+    @property
+    def reasons(self) -> list[str]: ...
+
+    @property
+    def fixed(self) -> list[str]: ...
+
+    @property
+    def targeted(self) -> list[str]: ...
 
 
-def _contradiction(evidence: GateRecord, records: GateRecords) -> str:
+def _detail(record: GateLike) -> str:
+    return record.reasons[0] if record.reasons else "no reason recorded"
+
+
+def _caveats(evidence: GateLike, records: Sequence[GateLike]) -> str:
+    """Everything true of this evidence that does not block, joined into one sentence."""
+    return " ".join(
+        note for note in (_unproven(evidence), _contradiction(evidence, records)) if note
+    )
+
+
+def _unproven(evidence: GateLike) -> str:
+    """Say so when a passing gate proves only that nothing broke.
+
+    This is the difference between what Whetstone claims and what it enforces. The claim is that no
+    skill change ships without evidence it is an *improvement*; the rule is that a gate passed, and
+    a gate passes when nothing regressed. A reworded rule, a reordered section, an LLM draft that
+    changed prose and nothing else — all clear it, and `can_propose` goes true.
+
+    `targeted_cases` is what turns "I did not break anything" into "I fixed what I said I would",
+    and it is optional everywhere: two of the console's three gate buttons send none. Requiring it
+    would be wrong — a gate after a wiki refresh legitimately claims nothing — so instead the
+    verdict stops overstating itself. A change proven only not to regress is publishable, and the
+    person publishing it should know that is all it is.
+    """
+    if evidence.fixed or evidence.targeted:
+        return ""
+    return (
+        "this gate proves the change breaks nothing, not that it improves anything — no case was "
+        "named as one it should fix, and none went from failing to passing. Re-gate with the cases "
+        "you meant to fix if you want that on the record."
+    )
+
+
+def _contradiction(evidence: GateLike, records: Sequence[GateLike]) -> str:
     """Something worth saying when the history over one version of a skill disagrees with itself.
 
     A pass followed by a failure does not revoke the pass: an eval at `k=1` is noisy, and letting a
@@ -131,7 +209,7 @@ def _contradiction(evidence: GateRecord, records: GateRecords) -> str:
     later = [
         r
         for r in records
-        if r.created_at > evidence.created_at and not r.practice_mode and not r.result.passed
+        if r.created_at > evidence.created_at and not r.practice_mode and not r.passed
     ]
     if not later:
         return ""
@@ -157,6 +235,64 @@ class Verdict(BaseModel):
     # The most recent gate over this content whether or not it qualifies, so a refusal can quote
     # the run it is refusing on rather than leaving someone to guess which one it means.
     latest: GateRecord | None = None
+
+
+def verdict_over(records: Sequence[GateLike]) -> Verdict:
+    """C6 applied to every gate over one version of a skill, newest first.
+
+    The reasons are the console's disabled-button text, so each one names the action that clears
+    it. "Not allowed" with no route forward is what makes a safety rule feel like an obstruction
+    rather than a step. By the same standard every reason here has to be *true* of the history it
+    is describing, which is why the practice-mode branch below tests whether a real gate exists
+    rather than whether the newest one happens to be practice.
+
+    A free function over `GateLike` rather than a method, because a task skill's gates live in
+    their own store and must be held to exactly this standard — not to a second implementation of
+    it that drifts.
+    """
+    latest = records[0] if records else None
+    evidence = next((r for r in records if r.evidential), None)
+
+    if evidence is not None:
+        return Verdict(
+            can_propose=True,
+            caveat=_caveats(evidence, records),
+            evidence=_as_record(evidence),
+            latest=_as_record(latest),
+        )
+    if not records:
+        return Verdict(
+            can_propose=False,
+            reason="no gate has been run on this version of the skill — run one to see "
+            "whether the change is an improvement",
+        )
+
+    real = [r for r in records if not r.practice_mode]
+    if not real:
+        return Verdict(
+            can_propose=False,
+            latest=_as_record(latest),
+            reason="every gate on this version ran in practice mode, which scores a regex "
+            "rather than the reviewer — re-run against a real backend",
+        )
+    # The newest *real* gate, not the newest overall: a practice run made afterwards must not
+    # displace the failure that is the actual reason this is blocked.
+    return Verdict(
+        can_propose=False,
+        latest=_as_record(latest),
+        reason=f"the gate on this version failed: {_detail(real[0])}",
+    )
+
+
+def _as_record(record: GateLike | None) -> GateRecord | None:
+    """`Verdict` carries a review `GateRecord`; a task gate has no such thing to hand over.
+
+    Returning None there is deliberate and is not a loss: `can_propose`, `reason` and `caveat`
+    carry the whole verdict, and a task skill's console reads its own store for the detail. The
+    alternative — inventing a `GateRecord` with a recall of zero — would put a number that was
+    never measured in front of the person deciding whether to ship.
+    """
+    return record if isinstance(record, GateRecord) else None
 
 
 # `GateStore.list` shadows the builtin for every annotation defined after it in the class body, so
@@ -232,49 +368,10 @@ class GateStore:
         return records
 
     def verdict_for(self, skill_id: str, candidate_hash: str) -> Verdict:
-        """Whether this exact version of a skill may be published, and — when not — why not.
-
-        The reasons are the console's disabled-button text, so each one names the action that
-        clears it. "Not allowed" with no route forward is what makes a safety rule feel like an
-        obstruction rather than a step. By the same standard every reason here has to be *true* of
-        the history it is describing, which is why the practice-mode branch below tests whether a
-        real gate exists rather than whether the newest one happens to be practice.
-        """
+        """Whether this exact version of a skill may be published, and — when not — why not."""
         # One scan. Reading the directory twice to ask two questions about the same records was
         # both slower and a place for the two answers to disagree.
-        records = self._matching(skill_id, candidate_hash)
-        latest = records[0] if records else None
-        evidence = next((r for r in records if r.evidential), None)
-
-        if evidence is not None:
-            return Verdict(
-                can_propose=True,
-                caveat=_contradiction(evidence, records),
-                evidence=evidence,
-                latest=latest,
-            )
-        if not records:
-            return Verdict(
-                can_propose=False,
-                reason="no gate has been run on this version of the skill — run one to see "
-                "whether the change is an improvement",
-            )
-
-        real = [r for r in records if not r.practice_mode]
-        if not real:
-            return Verdict(
-                can_propose=False,
-                latest=latest,
-                reason="every gate on this version ran in practice mode, which scores a regex "
-                "rather than the reviewer — re-run against a real backend",
-            )
-        # The newest *real* gate, not the newest overall: a practice run made afterwards must not
-        # displace the failure that is the actual reason this is blocked.
-        return Verdict(
-            can_propose=False,
-            latest=latest,
-            reason=f"the gate on this version failed: {_detail(real[0])}",
-        )
+        return verdict_over(self._matching(skill_id, candidate_hash))
 
     def _iter(self, pattern: str) -> Iterator[GateRecord]:
         if not self.root.is_dir():

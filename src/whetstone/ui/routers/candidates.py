@@ -8,7 +8,7 @@ graduated into the eval corpus. Rejections are recorded with a reason rather tha
 from __future__ import annotations
 
 import shutil
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, StringConstraints
@@ -18,6 +18,8 @@ from whetstone.candidates import CandidateEntry, CandidateStore, Decision, new_d
 from whetstone.config import Config
 from whetstone.core.loader import PROMOTED_CASES_DIR, SkillLoadError, load_skill
 from whetstone.curation import SimilarCase, similar_cases
+from whetstone.domain.enums import Severity
+from whetstone.domain.eval_model import CaseTier, EvalKind, Provenance
 from whetstone.domain.skill import Skill
 from whetstone.drafting import SemanticDraft
 from whetstone.llm.base import LLMClient
@@ -25,6 +27,7 @@ from whetstone.llm.factory import Backend, ModelSelection, build_llm_client, res
 from whetstone.naming import is_safe_segment
 from whetstone.preflight import Plan, plan_calls
 from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
+from whetstone.reviewer.factory import step_agent
 from whetstone.steps import StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
@@ -134,24 +137,183 @@ class _CorpusCache:
         return staging.overlay_cases(skill, staging.promoted_cases(self.config, skill_id))
 
 
+class PromotedCase(BaseModel):
+    """One case waiting under `promoted_cases/`, as the batch view lists it.
+
+    Enough to decide its fate without opening it: what it asserts, where it came from, and which
+    candidate wrote it — so removing it can put that candidate back in the queue rather than
+    stranding it as decided-about-nothing.
+    """
+
+    skill_id: str
+    case_id: str
+    kind: EvalKind
+    path: str = ""
+    # Where the case came from — an MR, a Jira defect, a live review. The same reason the improve
+    # workspace shows it: a batch of cryptic ids gives no basis for keeping or dropping any of them.
+    provenance: Provenance = Provenance()
+    # The candidate whose promotion wrote this, when it can be traced. Empty for a case written by
+    # the CLI or by hand, which is not an error — it just means removal has no decision to undo.
+    candidate_id: str = ""
+    # The editable substance of the case, taken from its first expectation. Carried so the console
+    # can *edit* a promoted case rather than only create and destroy one — a form that cannot show
+    # the current wording is a form that silently replaces it.
+    semantic: str = ""
+    line_range: tuple[int, int] | None = None
+    severity_min: Severity | None = None
+    tier: CaseTier = "active"
+    # Carried so an edit preserves them rather than silently resetting: `expectation_id` is what
+    # rulings recorded against this case key on, and `rule_id` is the only record of which piece of
+    # guidance the case is evidence for.
+    expectation_id: str = "e1"
+    rule_id: str = ""
+
+
 class BatchView(BaseModel):
     """The cases promoted from triage and waiting on disk, and the skills they belong to.
 
     Promotion writes each case to `skills/<id>/promoted_cases/` on disk, so this is a folder scan,
     not a branch. The console reads it to offer scoring the promoted set and to point graduation at
     the skills that have something to graduate.
+
+    `cases` is the batch itself. It used to report only a count, which told an operator that seven
+    cases existed and nothing whatever about them — not what they assert, not which skill they are
+    for, and no way to drop one that should not have been promoted short of finding its candidate
+    again in the decided list.
     """
 
     count: int = 0
     skills: list[str] = []
+    cases: list[PromotedCase] = []
 
 
 @router.get("/batch", response_model=BatchView)
 def get_batch(config: ConfigDep) -> BatchView:
-    """The cases promoted and waiting on disk, and for which skills."""
+    """The cases promoted and waiting on disk, what each one is, and for which skills."""
     skills = _skills_with_promoted(config)
-    count = sum(len(staging.promoted_cases(config, skill_id)) for skill_id in skills)
-    return BatchView(count=count, skills=skills)
+    owners = _promotion_owners(config)
+    cases: list[PromotedCase] = []
+    for skill_id in skills:
+        for case in staging.promoted_cases(config, skill_id):
+            # One expectation per promoted case by construction — `promote.prepare` writes exactly
+            # one — so this is the case's substance, not a sample of it.
+            first = case.expect[0] if case.expect else None
+            cases.append(
+                PromotedCase(
+                    skill_id=skill_id,
+                    case_id=case.id,
+                    kind=case.kind,
+                    path=(first.where.path if first else "")
+                    or (case.change.files[0].path if case.change.files else ""),
+                    provenance=case.provenance,
+                    candidate_id=owners.get((skill_id, case.id), ""),
+                    semantic=first.semantic if first else "",
+                    line_range=first.where.line_range if first else None,
+                    severity_min=first.severity_min if first else None,
+                    tier=case.tier,
+                    expectation_id=first.id if first else "e1",
+                    # On the case, not the expectation — it files the case under a rule in
+                    # `meta.yaml`, which is the only record of why that guidance exists.
+                    rule_id=getattr(case, "rule_id", "") or "",
+                )
+            )
+    return BatchView(count=len(cases), skills=skills, cases=cases)
+
+
+def _promotion_owners(config: Config) -> dict[tuple[str, str], str]:
+    """`(skill_id, case_id)` -> the candidate whose promotion wrote it.
+
+    Read once for the whole batch rather than per case: the decided list is scanned either way, and
+    a queue of a few hundred candidates would otherwise be walked once per promoted case.
+    """
+    owners: dict[tuple[str, str], str] = {}
+    for entry in _store(config).list(include_decided=True):
+        decision = entry.decision
+        if decision is None or decision.status != "promoted":
+            continue
+        if decision.skill_id and decision.case_id:
+            owners[(decision.skill_id, decision.case_id)] = entry.id
+    return owners
+
+
+class EditPromotedRequest(BaseModel):
+    """New edits for a case already on the batch."""
+
+    edits: CaseEdits
+
+
+@router.put("/batch/{skill_id}/{case_id}", dependencies=[Writable], response_model=PromoteResponse)
+def edit_promoted(
+    skill_id: str,
+    case_id: str,
+    request: EditPromotedRequest,
+    config: ConfigDep,
+    principal: PrincipalDep,
+) -> PromoteResponse:
+    """Rewrite a promoted case — the expectation, the region, the kind, the tier.
+
+    A promoted case is a *draft* of an eval case; getting the wording right is the whole reason it
+    waits in `promoted_cases/` instead of joining the corpus. Until now it could only be created and
+    (since a moment ago) destroyed: an expectation with a typo, or one that turned out to describe
+    the wrong line, meant removing the case, finding its candidate again in the queue, and promoting
+    it a second time. That is not an edit, it is a re-do.
+
+    Re-prepared from the original candidate rather than patched on disk, so an edit passes exactly
+    the validation the promotion did — the region must still be one the diff touches, the rule must
+    still exist. Hand-patching the YAML is the one way to get a case the loader will later refuse.
+    """
+    if not (is_safe_segment(skill_id) and is_safe_segment(case_id)):
+        raise Unprocessable(f"{skill_id}/{case_id} is not a valid promoted case path")
+    existing = config.skills_root / skill_id / PROMOTED_CASES_DIR / case_id
+    if not existing.is_dir():
+        raise NotFound(f"no promoted case {case_id!r} for skill {skill_id!r}")
+
+    candidate_id = _promotion_owners(config).get((skill_id, case_id), "")
+    if not candidate_id:
+        raise Unprocessable(
+            f"{case_id!r} cannot be re-derived: no candidate in the queue records having promoted "
+            f"it, so there is no evidence to re-validate the edit against. It was written by the "
+            f"CLI or by hand — edit "
+            f"skills/{skill_id}/{PROMOTED_CASES_DIR}/{case_id}/case.yaml directly."
+        )
+    entry = _load(config, candidate_id)
+    prepared = prepare_promotion(config, entry, request.edits)
+    # The same write path a first promotion takes — files plus the decision record, which now points
+    # at the edited case. Re-using it is what keeps an edited case indistinguishable from one
+    # promoted correctly the first time.
+    response = commit_promotion(config, principal, candidate_id=candidate_id, prepared=prepared)
+    # A rename leaves the old folder behind, which would read as two cases from one candidate — and
+    # the decision can only name one of them, so the orphan could never be removed from the console.
+    if prepared.case_id != case_id:
+        shutil.rmtree(existing, ignore_errors=True)
+        response.promoted = len(staging.promoted_cases(config, skill_id))
+    return response
+
+
+@router.delete("/batch/{skill_id}/{case_id}", dependencies=[Writable], response_model=BatchView)
+def remove_promoted(skill_id: str, case_id: str, config: ConfigDep) -> BatchView:
+    """Drop a promoted case, and return the candidate that wrote it to the queue.
+
+    Both halves, or the state lies. The folder is the case; the candidate's decision is the record
+    that it was promoted. Deleting only the folder leaves a candidate marked "promoted" pointing at
+    nothing — it stays out of the queue, so the signal it came from is silently lost, which is worse
+    than never having promoted it. `undo` already does this pair keyed by candidate; this is the
+    same operation keyed by the thing the operator is actually looking at.
+
+    Nothing here is committed or graduated, so there is nothing downstream to unwind — which is the
+    whole reason `promoted_cases/` is separate from the corpus.
+    """
+    if not (is_safe_segment(skill_id) and is_safe_segment(case_id)):
+        raise Unprocessable(f"{skill_id}/{case_id} is not a valid promoted case path")
+    promoted = config.skills_root / skill_id / PROMOTED_CASES_DIR / case_id
+    if not promoted.is_dir():
+        raise NotFound(f"no promoted case {case_id!r} for skill {skill_id!r}")
+    shutil.rmtree(promoted, ignore_errors=True)
+
+    candidate_id = _promotion_owners(config).get((skill_id, case_id), "")
+    if candidate_id:
+        _store(config).clear_decision(candidate_id)
+    return get_batch(config)
 
 
 def _skills_with_promoted(config: Config) -> list[str]:
@@ -193,17 +355,30 @@ class DraftResponse(BaseModel):
 def plan_draft(
     candidate_id: str, request: DraftRequest, config: ConfigDep, selection: SelectionDep
 ) -> Plan:
-    _load(config, candidate_id)
-    _, backend = _draft_step(config, selection, candidate_id, request)
+    entry = _load(config, candidate_id)
+    spec, backend = _draft_step(config, selection, candidate_id, request)
+    skill_id = request.skill_id or entry.candidate.suggested_skill or ""
+    agent, _ = _draft_agent(config, skill_id, spec)
+    details = [
+        "the drafter is shown the review comment, the diff and the outcome — never the "
+        "guidance, so the expectation cannot be phrased in the rules' own words"
+    ]
+    if agent is not None:
+        details.append(
+            f"reviewer: {agent.identity} — it investigates before answering"
+            + (", including the declared source tree" if agent.source_root else "")
+        )
     return plan_calls(
         "triage draft",
         backend,
-        calls=1,
-        basis="one call: rewriting this candidate's expectation",
-        details=[
-            "the drafter is shown the review comment, the diff and the outcome — never the "
-            "guidance, so the expectation cannot be phrased in the rules' own words"
-        ],
+        calls=agent.max_calls if agent else 1,
+        basis=(
+            f"up to {agent.max_calls} calls: the skill drafts the expectation as an agent "
+            f"({agent.max_steps} investigation steps + one forced answer)"
+            if agent
+            else "one call: rewriting this candidate's expectation"
+        ),
+        details=details,
     )
 
 
@@ -219,12 +394,17 @@ def draft_expectation(
     """
     entry = _load(config, candidate_id)
     spec, backend = _draft_step(config, selection, candidate_id, request)
+    skill_id = request.skill_id or entry.candidate.suggested_skill or ""
+    agent, skill = _draft_agent(config, skill_id, spec)
     try:
+        client = _draft_client(spec, selection) if spec.calls_a_model else None
         draft = drafting.draft_semantic(
             spec,
             entry,
-            client=_draft_client(spec, selection) if spec.calls_a_model else None,
+            client=client,
             effort=spec.model.effort or "medium",
+            agent=agent.build(client) if agent else None,
+            skill=skill,
         )
     except StepError as exc:
         raise Unprocessable(str(exc)) from exc
@@ -238,6 +418,32 @@ def draft_expectation(
             "switch the model (top-right) to one that is reachable — e.g. a local Ollama."
         ) from exc
     return DraftResponse(draft=draft, drafted_by=backend.model)
+
+
+def _draft_agent(
+    config: Config, skill_id: str, spec: StepSpec
+) -> tuple[Any | None, Skill | None]:
+    """The agent a triage step declares, plus the skill it belongs to.
+
+    The agent *is* the skill, so it needs the folder whose `SKILL.md` becomes its instructions and
+    whose pages it reads on demand — the same thing the reviewer path passes to `review()`.
+    """
+    agent = step_agent(spec, config.skills_root / skill_id)
+    if agent is None:
+        return None, None
+    if agent.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in agent.context.missing)
+        raise Unprocessable(
+            f"the triage step for {skill_id!r} needs context that is not set: {names}"
+        )
+    if agent.problems:
+        raise Unprocessable(
+            f"the triage step for {skill_id!r} cannot run: " + "; ".join(agent.problems)
+        )
+    try:
+        return agent, load_skill(config.skills_root / skill_id)
+    except SkillLoadError as exc:
+        raise Unprocessable(str(exc)) from exc
 
 
 def _draft_step(

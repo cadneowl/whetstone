@@ -172,8 +172,18 @@ whetstone eval task-gate --base <dir> --candidate <dir>   # regression gate, --t
 ```
 
 `whetstone eval run` **refuses** a task skill rather than scoring its (empty) `eval_cases/` — that
-path would report a flawless run over nothing. The console refuses it the same way and points here;
-driving task skills from the browser is not built yet.
+path would report a flawless run over nothing.
+
+In the console, a task skill grows a **Tasks** tab: the cases with what each starts from and how it
+is graded, buttons to run or gate them, and the run history. It names both instruments separately —
+the agent that does the work and the verifier that grades it — because a task score means nothing
+without both. The inbox routes such a skill to its own actions rather than to the review gate, and
+the header's *Run evals* is suppressed there: it could only ever be refused.
+
+**Records.** A task run lands in `.whetstone/task-runs/` and a task gate in `.whetstone/task-gates/`
+— beside the review ones, never among them, so two incomparable kinds of score never share a
+listing. The gate record is what C6 reads before a task skill's change may be published, computed
+by the same verdict function the review gates use. `whetstone skills trend --skill <id>` reads both.
 
 `task:` and `agent:` are mutually exclusive — a skill is scored one way.
 
@@ -268,6 +278,53 @@ the console) the delta is flagged as not purely the guidance.
 
 `agent:` and `run:` are mutually exclusive: one runs the skill inside Whetstone, the other hands
 reviewing to your program.
+
+### The same everywhere: improve and triage run as agents too
+
+`agent:` is **not** an evaluate-step setting. It is valid on every step whose work is the skill
+thinking — `evaluate`, `improve` and `triage` — and it means the same thing on each: `SKILL.md` is
+the instructions, the folder's other pages are fetched on demand, `source:` and `tools:` are in
+reach, and the step finishes by calling a terminal tool.
+
+This matters most on `improve`. The drafter is asked to rewrite guidance so a set of failures stops
+recurring, and until it could run as an agent it was a single call that had never read the code
+those failures were about, could not open the ticket the case came from, and was handed every
+companion page pasted into its prompt — the exact treatment `agent:` exists to replace. A skill
+that is a folder on one step and a wall of text on the next is two different things.
+
+```yaml
+# improve/step.yaml — the prompt is still required, and now means something different
+prompt: prompt.md
+agent:
+  enabled: true
+  source: { env: SERVICE_REPO, required: true }
+  tools:
+    - { name: jira_issue, description: "Fetch an issue.", run: ["python", "tools/jira.py"] }
+context:
+  jira_token: { env: JIRA_TOKEN, required: true }
+```
+
+**The prompt is the task; the skill body is the instructions.** Same split the reviewer has: its
+`SKILL.md` becomes the system prompt, and the step's rendered prompt — the failure digest, or the
+candidate's diff — is what it is being asked to do. So an agent step still needs its `prompt:`.
+
+| step | terminal tool | what it returns |
+| --- | --- | --- |
+| `evaluate` | `submit_findings` | located findings, judged as always |
+| `evaluate` + `task:` | `submit_work` | files in a workspace, graded by a verifier |
+| `improve` | `submit_guidance` | the complete new body, plus any pages it rewrote |
+| `triage` | `submit_expectation` | the expectation a candidate should become |
+
+`update` is the one exclusion: it invokes the wiki generator your deployment owns via `run:`, so
+there is no skill judgement in it to give tools to.
+
+Everything downstream of the answer is unchanged — the same echo-stripping, the same dropping of
+targeted case ids the drafter was never shown, the same page filtering. What changes is how the
+answer was reached.
+
+**Cost.** An agent improve step costs up to `max_steps + 1` calls instead of one, and every plan
+says so before you spend. `agent:` is opt-in, so a step without it keeps the single call it has
+today.
 
 ### Bring your own reviewer
 

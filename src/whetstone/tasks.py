@@ -110,6 +110,15 @@ class TaskGateResult(BaseModel):
     base: TaskScore
     candidate: TaskScore
     reasons: list[str] = Field(default_factory=list)
+    # Cases that used to pass and now do not — the regression this gate exists to block.
+    regressed_cases: list[str] = Field(default_factory=list)
+    # Targeted cases the candidate made pass, and those it did not. The review gate has reported
+    # these since it was written; the task gate computed the same facts and threw them away, which
+    # left it unable to say a change *fixed* anything — only that nothing broke. A gate that can
+    # only ever report the absence of harm is a rot guard, and a corpus of them is what makes a
+    # skill's history look like progress when it may be nothing of the kind.
+    fixed_cases: list[str] = Field(default_factory=list)
+    unfixed_cases: list[str] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -136,17 +145,44 @@ def gate_tasks(
             f"mean score fell {base.mean_score:.3f} → {candidate.mean_score:.3f} "
             f"(tolerance {tolerance:.3f})"
         )
+    was = {c.case_id: c for c in base.cases}
     by_id = {c.case_id: c for c in candidate.cases}
+
+    # A case the baseline got right and the candidate does not. Named the same way the review gate
+    # names them, so one reader of a gate history does not need two vocabularies.
+    regressed = [
+        c.case_id
+        for c in candidate.cases
+        if c.case_id in was and was[c.case_id].outcome.passed and not c.outcome.passed
+    ]
+    if regressed:
+        reasons.append(f"{len(regressed)} case(s) regressed: " + ", ".join(regressed))
+
+    fixed: list[str] = []
+    unfixed: list[str] = []
     for case_id in targeted or []:
         run = by_id.get(case_id)
         if run is None:
+            unfixed.append(case_id)
             reasons.append(f"targeted case {case_id!r} was not scored")
         elif not run.outcome.passed:
+            unfixed.append(case_id)
             reasons.append(f"targeted case {case_id!r} still fails: {run.outcome.detail[:120]}")
+        elif case_id not in was or not was[case_id].outcome.passed:
+            # Passing now and not before — the only shape of evidence that a change *improved*
+            # something. A targeted case that already passed on both sides proves nothing, so it
+            # is deliberately neither fixed nor unfixed.
+            fixed.append(case_id)
     if candidate.errors > base.errors:
         reasons.append(
             f"{candidate.errors - base.errors} more case(s) could not be run at all"
         )
     return TaskGateResult(
-        passed=not reasons, base=base, candidate=candidate, reasons=reasons
+        passed=not reasons,
+        base=base,
+        candidate=candidate,
+        reasons=reasons,
+        regressed_cases=regressed,
+        fixed_cases=fixed,
+        unfixed_cases=unfixed,
     )

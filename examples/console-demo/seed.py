@@ -1,4 +1,9 @@
-"""Build the demo workspace: three skills, ten eval cases, mined signal, and a review to rule on.
+"""Build the demo workspace: four skills, their eval cases, mined signal, and a review to rule on.
+
+One of the four — `go-timeout-guard` — is an **agent** skill: `agent: enabled` in its evaluate step,
+so Whetstone *runs* the folder the way a real agent runtime would rather than pasting it into a
+prompt. It is here because that is how skills behave in production, and a demo that could only show
+the single-shot reviewer could not show whether the loop sharpens a skill *as it actually runs*.
 
 Everything here is fiction, but it is fiction shaped like the real thing. Each skill is parked at a
 different point in the loop so the inbox has something to sort:
@@ -575,6 +580,14 @@ TIMEOUT_HUNK = """\
      return c.post(ctx, "/settle", body)
 """
 
+# Something no skill claims, so the unrouted counter is still exercised.
+TERRAFORM_HUNK = """\
+@@ -12,3 +12,4 @@ resource "aws_db_instance" "ledger" {
+   instance_class = "db.r6g.large"
++  storage_encrypted = false
+ }
+"""
+
 SIGNALS: tuple[tuple[str, str, str, str, str | None, str], ...] = (
     (
         "mr-1902-chaining",
@@ -601,12 +614,32 @@ SIGNALS: tuple[tuple[str, str, str, str, str | None, str], ...] = (
         CHAINING_HUNK,
     ),
     (
-        "mr-1918-timeout",
+        # Named so it lands in the *train* partition (`sampling.partition_of` hashes the id, and
+        # the default holds a fifth of cases back). The holdout rule is right and the workspace
+        # explains it well — but the demo's flagship walkthrough is "promote one case and gate a
+        # change against it", and a single promoted case drawn into holdout cannot be gate-targeted,
+        # so the tour dead-ends on its most important step through pure luck of the hash.
+        # Renaming this is fine; `test_the_walkthrough_case_is_one_the_loop_can_learn_from` fails
+        # if the new name hashes the other way, so the dependency cannot go quiet again.
+        "mr-1918-background-context",
         "src/gateway/client.go",
         "acme/payments!1918",
-        "reviewer asked for a context timeout — no skill claims Go yet",
-        None,
+        "reviewer asked for a context timeout; the guidance says 'give calls a deadline' and "
+        "never names the construct",
+        # Routed to the agent skill, which claims `**/*.go`. This is the signal the whole
+        # agent-skill walkthrough starts from: a real review outcome the skill missed.
+        "go-timeout-guard",
         TIMEOUT_HUNK,
+    ),
+    (
+        "mr-1921-unrouted",
+        "infra/terraform/main.tf",
+        "acme/payments!1921",
+        "reviewer asked for a lifecycle block — no skill claims Terraform",
+        # Deliberately unrouted, so the inbox's "could not be matched to any skill" counter still
+        # has something in it now that the Go signal has a home.
+        None,
+        TERRAFORM_HUNK,
     ),
 )
 
@@ -629,18 +662,200 @@ REVIEW_DIFF = (
 )
 
 
-def _skill_files(guidance: str, cases: dict[str, tuple[str, str]]) -> dict[str, str]:
+# --- the agent skill: a folder that gets *run*, not pasted into a prompt --------------
+#
+# This is how a skill behaves inside a real agent runtime, and until now the demo could not show
+# it. `SKILL.md` is the instruction set, the reference page is fetched on demand with
+# `read_skill_file`, and the skill answers by calling a tool. Its *improve* step is an agent too,
+# so the way a skill is run is the same everywhere in the loop rather than only where it is scored.
+#
+# The v1 guidance states the principle and never names the construct — which is exactly the kind of
+# rule that reads well and catches nothing. The reference page is where the detail belongs, so the
+# review only works if the agent actually goes and reads it.
+
+GO_GUIDANCE = """\
+---
+id: go-timeout-guard
+name: Go timeout guard
+description: Flags outbound calls made with no deadline.
+version: 1
+triggers:
+  paths: ["**/*.go"]
+---
+
+# Go timeout guard
+
+Review outbound network calls in this service.
+
+- **G0 — every outbound call needs a deadline.** A call with no deadline turns a slow dependency
+  into a stuck worker. See [references/timeouts.md](references/timeouts.md) for how deadlines are
+  set in this codebase, and read it before deciding whether a call is safe.
+"""
+
+GO_TIMEOUTS_PAGE = """\
+# Deadlines in this service
+
+Every outbound call goes through `gateway.Client`. A context reaches it one of two ways:
+
+- derived from the request's context with `context.WithTimeout`, which is what callers should do;
+- or freshly created, which detaches the call from the request lifetime entirely.
+
+The gateway does not impose a deadline of its own, so a call that arrives with an open-ended
+context will wait indefinitely.
+"""
+
+# A second Go hunk that *does* set a deadline — the negative case, so the skill is measured on
+# staying quiet as well as on speaking up.
+DERIVED_CONTEXT_HUNK = """\
+@@ -22,3 +22,4 @@ func (c *Client) Report(id string) error {
+     ctx, cancel := context.WithTimeout(c.ctx, 2*time.Second)
+     defer cancel()
++    return c.post(ctx, "/report", encode(id))
+ }
+"""
+
+GO_CASES: dict[str, tuple[str, str]] = {
+    "background-context-in-gateway": (
+        """\
+# The case v1 misses: the guidance states the principle but never names the construct.
+id: background-context-in-gateway
+kind: should_catch
+repo: "gitlab:acme/payments"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/payments!1893"
+  human_signal: "suggestion applied"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: src/gateway/client.go
+    semantic: "the call is made with no deadline, so a hung dependency blocks the worker"
+""",
+        SIGNAL_DIFF.format(path="src/gateway/client.go", hunk=TIMEOUT_HUNK),
+    ),
+    "derived-context-is-fine": (
+        """\
+# The negative: a call that does set a deadline must not be flagged.
+id: derived-context-is-fine
+kind: should_not_flag
+repo: "gitlab:acme/payments"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/payments!1899"
+  human_signal: "merged without comment"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: src/gateway/reports.go
+""",
+        SIGNAL_DIFF.format(path="src/gateway/reports.go", hunk=DERIVED_CONTEXT_HUNK),
+    ),
+}
+
+GO_AGENT_STEP = """\
+# How this skill is scored — by *running* it, the way an agent runtime would.
+#
+# `agent: enabled` stops Whetstone pasting the whole folder into one prompt. Instead SKILL.md is the
+# instruction set, the other pages are fetched on demand, and the skill answers by calling
+# `submit_findings`. That is the same shape it has inside real code, which is the point: a skill
+# sharpened here is sharpened as it will actually run.
+
+description: Run this skill as an agent over each change.
+
+trials: 1
+
+agent:
+  enabled: true
+  # Investigation turns before the skill is made to answer. Each one is a model call, so this is
+  # the number that sets the cost of a run — the plan prices it at max_steps + 1.
+  max_steps: 6
+
+sample:
+  max_cases: null
+  seed: 0
+  stratify: true
+"""
+
+GO_IMPROVE_STEP = """\
+# Drafting a guidance change — also as an agent.
+#
+# The same reasoning as evaluate: a skill that is *run* when scored and merely *prompted* when
+# improved is being sharpened as something other than what it is. The drafter reads its own pages
+# on demand and answers with `submit_guidance`.
+
+description: Draft a guidance change from the failures of the last run.
+
+agent:
+  enabled: true
+  max_steps: 4
+
+inputs:
+  failures:
+    max: 12
+    cluster_by: none
+    max_diff_bytes: 2000
+    outcomes: [fn, fp]
+
+prompt: prompt.md
+"""
+
+GO_TRIAGE_STEP = """\
+# Turning a mined signal into an expectation — as an agent, like the other two steps.
+#
+# The point of running all three the same way: the thing being sharpened is the skill *as it runs*.
+# A skill scored as an agent but triaged and improved through one-shot prompts is being tuned
+# against a reviewer that only exists inside Whetstone.
+
+description: Draft an eval case's expectation from the review evidence.
+
+agent:
+  enabled: true
+  max_steps: 3
+
+inputs:
+  draft:
+    max_comments: 6
+    max_comment_chars: 1200
+    max_diff_bytes: 2000
+
+prompt: prompt.md
+"""
+
+
+def _skill_files(
+    guidance: str,
+    cases: dict[str, tuple[str, str]],
+    *,
+    evaluate: str = "",
+    improve: str = "",
+    triage: str = "",
+    pages: dict[str, str] | None = None,
+) -> dict[str, str]:
     files = {
         "SKILL.md": guidance,
         "meta.yaml": META,
-        "evaluate/step.yaml": EVALUATE_STEP,
-        "improve/step.yaml": IMPROVE_STEP,
+        "evaluate/step.yaml": evaluate or EVALUATE_STEP,
+        "improve/step.yaml": improve or IMPROVE_STEP,
         "improve/prompt.md": IMPROVE_PROMPT,
     }
+    if triage:
+        files["triage/step.yaml"] = triage
+    # Companion pages: guidance the reviewer reaches a different way depending on how the skill is
+    # run — concatenated into the prompt for the built-in reviewer, fetched on demand by an agent.
+    files.update(pages or {})
     # The triage step straight from the scaffold: it is what a real skill would carry, and copying
-    # it here rather than writing a demo variant keeps the two from drifting.
+    # it here rather than writing a demo variant keeps the two from drifting. An explicit `triage`
+    # overrides only the step file; the scaffold's prompt is still what renders.
     files.update(
-        {rel: content for rel, content in scaffold_files().items() if rel.startswith("triage/")}
+        {
+            rel: content
+            for rel, content in scaffold_files().items()
+            if rel.startswith("triage/") and rel not in files
+        }
     )
     for case_id, (case_yaml, diff) in cases.items():
         files[f"eval_cases/{case_id}/case.yaml"] = case_yaml
@@ -652,11 +867,21 @@ SKILLS: dict[str, dict[str, str]] = {
     "rust-error-handling": _skill_files(RUST_GUIDANCE, RUST_CASES),
     "python-service-errors": _skill_files(PYTHON_GUIDANCE, PYTHON_CASES),
     "sql-migration-safety": _skill_files(SQL_GUIDANCE, SQL_CASES),
+    # The one that is *run* rather than prompted — see GO_GUIDANCE above.
+    "go-timeout-guard": _skill_files(
+        GO_GUIDANCE,
+        GO_CASES,
+        evaluate=GO_AGENT_STEP,
+        improve=GO_IMPROVE_STEP,
+        triage=GO_TRIAGE_STEP,
+        pages={"references/timeouts.md": GO_TIMEOUTS_PAGE},
+    ),
 }
 
 # Which skills start with a baseline. `sql-migration-safety` deliberately has none, so the inbox
-# has a reason to say "never measured" out loud.
-SCORED = ("rust-error-handling", "python-service-errors")
+# has a reason to say "never measured" out loud. `go-timeout-guard` is scored so the agent path has
+# a run to improve from — and so the demo opens with an agent trajectory already on record.
+SCORED = ("rust-error-handling", "python-service-errors", "go-timeout-guard")
 
 
 def _force_remove(root: Path) -> None:
@@ -705,7 +930,7 @@ def _git_init(root: Path) -> None:
     _git(root, "config", "user.name", "Whetstone demo")
     _git(root, "config", "user.email", "demo@example.invalid")
     _git(root, "add", ".")
-    _git(root, "commit", "-m", "Three skills, ten cases, and the failures they are meant to find")
+    _git(root, "commit", "-m", "Four skills, the cases they are meant to find, and one that runs")
     subprocess.run(
         ["git", "init", "--bare", str(root / "origin.git")], check=True, capture_output=True
     )
@@ -718,24 +943,44 @@ def populate(config: Config, client: LLMClient, *, backend: str, model: str) -> 
 
     Returns a line per thing seeded, for the launcher to print.
     """
+    from whetstone.reviewer.factory import reviewer_for
+
     notes = []
     notes.append(f"{_seed_signals(config)} signals in the triage queue")
     notes.append(f"1 review awaiting rulings ({_seed_review(config)})")
     for skill_id in SCORED:
+        skill = load_skill(config.skills_root / skill_id)
+        # Resolved exactly as the console and the CLI resolve it, so a skill that declares
+        # `agent: enabled` is *run* here too. Passing no reviewer silently fell back to the built-in
+        # one, which meant the demo opened with a baseline produced by a different instrument than
+        # every button on the page would use — the agent skill's own trajectory was empty, and its
+        # first re-score would have looked like a change in the skill rather than in the harness.
+        choice = reviewer_for(config.skills_root, skill)
         record = record_eval(
-            load_skill(config.skills_root / skill_id),
+            skill,
             client,
             trials=1,
             backend=backend,
             model=model,
             principal="demo",
+            reviewer=choice.build(client),
         )
         RunStore(config.runs_dir).save(record)
+        how = f" [{record.reviewer}]" if record.reviewer else ""
         notes.append(
             f"{skill_id}: recall {record.score.recall:.2f}, "
-            f"fp_rate {record.score.fp_rate:.2f} ({record.id})"
+            f"fp_rate {record.score.fp_rate:.2f}{how} ({record.id})"
         )
     return notes
+
+
+# What each mined signal is about, by the language it is in. A mapping rather than a chain of
+# conditionals so adding a signal in a new language is one line and cannot silently inherit the
+# wrong sentence — which is what a trailing `else` had been doing.
+_SEMANTICS = {
+    ".go": "the request is sent with no deadline, so a hung gateway blocks the worker forever",
+    ".tf": "the database is created unencrypted, and encryption cannot be enabled in place later",
+}
 
 
 def _seed_signals(config: Config) -> int:
@@ -747,10 +992,9 @@ def _seed_signals(config: Config) -> int:
             base_ref="main",
             head_ref="head",
         )
-        semantic = (
-            "the request is sent with no deadline, so a hung gateway blocks the worker forever"
-            if path.endswith(".go")
-            else "the re-raise drops the original error, so the traceback stops at the wrapper"
+        semantic = _SEMANTICS.get(
+            Path(path).suffix,
+            "the re-raise drops the original error, so the traceback stops at the wrapper",
         )
         cases.append(
             CandidateCase(

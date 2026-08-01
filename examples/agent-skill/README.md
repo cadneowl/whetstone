@@ -16,9 +16,16 @@ skills/panic-guard-agent/
   owners.json                 committed config, loaded by `context: { file: … }`
   tools/owner_of.py           a tool the skill brings; Whetstone runs it on request
   evaluate/step.yaml          `agent: enabled`, plus source and tools
+  improve/step.yaml           the *same* runtime — the drafter reads the code too
   eval_cases/                 one should_catch, one should_not_flag
 source/ledger.py              the "source tree" — the evidence that is *not* in the diff
 ```
+
+**Both steps run the same way**, which is the point of the example as much as the reviewing is.
+Score the skill and the reviewer greps `ledger.py` to decide whether a call can panic; improve it
+and the *drafter* greps the same tree before writing a rule about it. Drop `agent:` from
+`improve/step.yaml` and you have the old behaviour to compare against: one call, every companion
+page pasted into the prompt, and a rewrite grounded in a failure list rather than in the code.
 
 ## Why an agent here
 
@@ -39,6 +46,9 @@ at the bundled tree:
 export PANIC_GUARD_AGENT_SOURCE="$PWD/examples/agent-skill/source"     # Windows: $env:PANIC_GUARD_AGENT_SOURCE = "$PWD\examples\agent-skill\source"
 
 whetstone eval run --skill examples/agent-skill/skills/panic-guard-agent --llm ollama --model qwen3-coder
+
+# ...then improve it from what that run got wrong — the drafter runs as an agent too
+whetstone skills improve --skill examples/agent-skill/skills/panic-guard-agent --run <run-id>
 ```
 
 Leave the variable unset and the run is refused **at the plan**, before it spends anything — an

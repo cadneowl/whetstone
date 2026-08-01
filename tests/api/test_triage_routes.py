@@ -371,11 +371,140 @@ def test_read_only_blocks_every_mutation(
 
 def test_batch_route_reports_the_promoted_set(client: TestClient, repo: Path) -> None:
     empty = client.get("/api/candidates/batch").json()
-    assert empty == {"count": 0, "skills": []}
+    assert empty == {"count": 0, "skills": [], "cases": []}
 
     client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
     batch = client.get("/api/candidates/batch").json()
-    assert batch == {"count": 1, "skills": ["rust-errors"]}
+    assert batch["count"] == 1
+    assert batch["skills"] == ["rust-errors"]
+
+
+def test_the_batch_lists_what_each_case_is_not_merely_how_many(client: TestClient) -> None:
+    """A count told an operator that cases existed and nothing about them — not what they assert,
+    not which skill they belong to, and no handle to act on one. A batch is the thing being decided
+    about, so it has to be readable."""
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+
+    case = client.get("/api/candidates/batch").json()["cases"][0]
+    assert case["skill_id"] == "rust-errors"
+    assert case["case_id"] == "812-t0"
+    assert case["kind"] in ("should_catch", "should_not_flag")
+    # The candidate that wrote it, so removing the case can put that candidate back in the queue.
+    assert case["candidate_id"] == "812-t0"
+    assert case["provenance"]["human_signal"]
+
+
+def test_a_promoted_case_can_be_rewritten_in_place(client: TestClient, repo: Path) -> None:
+    """A promoted case is a *draft* of an eval case — getting the wording right is the whole reason
+    it waits in `promoted_cases/`. It could only be created and destroyed, so fixing a typo meant
+    removing it, finding its candidate again, and promoting a second time.
+    """
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    before = client.get("/api/candidates/batch").json()["cases"][0]
+
+    edits = {**_edits(client, "812-t0"), "semantic": "a much clearer expectation"}
+    response = client.put("/api/candidates/batch/rust-errors/812-t0", json={"edits": edits})
+    assert response.status_code == 200, response.text
+
+    after = client.get("/api/candidates/batch").json()["cases"][0]
+    assert after["semantic"] == "a much clearer expectation"
+    assert after["semantic"] != before["semantic"]
+    assert client.get("/api/candidates/batch").json()["count"] == 1  # still one case, not two
+    # Still promoted: an edit is not an undo, so the candidate does not come back to the queue.
+    assert client.get("/api/candidates").json()["counts"]["promoted"] == 1
+
+
+def test_editing_a_promoted_case_is_validated_like_the_promotion_was(client: TestClient) -> None:
+    """Re-derived from the candidate rather than patched onto the YAML, so an edit cannot write a
+    case the loader would later refuse — the one way to get a corpus that fails to load."""
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    edits = {**_edits(client, "812-t0"), "path": "src/not/in/the/diff.rs"}
+
+    response = client.put("/api/candidates/batch/rust-errors/812-t0", json={"edits": edits})
+    assert response.status_code == 422
+    assert "does not change" in response.json()["message"]
+    # ...and the case on disk is untouched by the rejected edit.
+    assert client.get("/api/candidates/batch").json()["count"] == 1
+
+
+def test_renaming_a_promoted_case_leaves_no_orphan(client: TestClient, repo: Path) -> None:
+    """The decision can only name one case id, so an orphaned folder could never be removed from
+    the console again."""
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    edits = {**_edits(client, "812-t0"), "case_id": "renamed-case"}
+
+    assert client.put(
+        "/api/candidates/batch/rust-errors/812-t0", json={"edits": edits}
+    ).status_code == 200
+    batch = client.get("/api/candidates/batch").json()
+    assert batch["count"] == 1
+    assert batch["cases"][0]["case_id"] == "renamed-case"
+    assert not (repo / "skills" / "rust-errors" / "promoted_cases" / "812-t0").exists()
+    # The decision follows the rename, so removal still works on the new id.
+    assert client.delete("/api/candidates/batch/rust-errors/renamed-case").status_code == 200
+    assert client.get("/api/candidates").json()["counts"] == {
+        "pending": 2, "promoted": 0, "rejected": 0
+    }
+
+
+def test_editing_a_case_with_no_traceable_candidate_says_why(
+    client: TestClient, repo: Path
+) -> None:
+    """A case written by the CLI or by hand has no candidate to re-validate against. Refused with
+    the path to edit rather than silently doing something partial."""
+    # Promote one, then rename its folder on disk — the shape a CLI promotion or a hand edit
+    # leaves: a real case with no decision in the queue naming it.
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    promoted = repo / "skills" / "rust-errors" / "promoted_cases"
+    (promoted / "812-t0").rename(promoted / "hand-written")
+    response = client.put(
+        "/api/candidates/batch/rust-errors/hand-written",
+        json={"edits": _edits(client, "812-t0")},
+    )
+    assert response.status_code == 422
+    assert "cannot be re-derived" in response.json()["message"]
+    assert "case.yaml" in response.json()["message"]
+
+
+def test_removing_a_promoted_case_returns_its_candidate_to_the_queue(
+    client: TestClient, repo: Path
+) -> None:
+    """Both halves or the state lies: deleting only the folder leaves a candidate marked "promoted"
+    pointing at nothing, so it stays out of the queue and the signal it came from is lost."""
+    client.post("/api/candidates/812-t0/promote", json={"edits": _edits(client, "812-t0")})
+    assert client.get("/api/candidates").json()["counts"]["promoted"] == 1
+    assert (repo / "skills" / "rust-errors" / "promoted_cases" / "812-t0").is_dir()
+
+    response = client.delete("/api/candidates/batch/rust-errors/812-t0")
+    assert response.status_code == 200, response.text
+    assert response.json()["count"] == 0
+
+    assert not (repo / "skills" / "rust-errors" / "promoted_cases" / "812-t0").exists()
+    queue = client.get("/api/candidates").json()
+    assert queue["counts"] == {"pending": 2, "promoted": 0, "rejected": 0}
+    assert "812-t0" in [i["entry"]["candidate"]["id"] for i in queue["items"]]
+
+
+def test_removing_a_promoted_case_that_is_not_there_is_404(client: TestClient) -> None:
+    assert client.delete("/api/candidates/batch/rust-errors/nope").status_code == 404
+
+
+def test_a_removal_cannot_escape_the_promoted_folder(client: TestClient, repo: Path) -> None:
+    """These segments reach the filesystem and this route *deletes*, so the corpus next door has to
+    stay out of reach however the id is spelled."""
+    corpus = repo / "skills" / "rust-errors" / "eval_cases"
+    assert corpus.is_dir()
+
+    for skill_id, case_id in (
+        ("rust-errors", "..%2F..%2Feval_cases"),  # normalized away by routing
+        ("rust-errors", "%2e%2e"),
+        ("..", "812-t0"),
+        ("rust-errors", "-leading-dash"),  # reaches the handler; refused by the name guard
+    ):
+        response = client.delete(f"/api/candidates/batch/{skill_id}/{case_id}")
+        assert response.status_code != 200, (skill_id, case_id, response.text)
+
+    assert corpus.is_dir()  # nothing next door was touched
 
 
 def test_traversal_in_edits_is_422_not_500(client: TestClient) -> None:

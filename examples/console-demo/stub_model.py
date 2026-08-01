@@ -120,6 +120,17 @@ RULES: tuple[Rule, ...] = (
         message="the running release still reads this column, so dropping it breaks the rollback.",
         severity="error",
     ),
+    # --- Go ---
+    # `asks_for` names the *construct*, not the topic, which is what makes the agent skill's story
+    # work: its v1 guidance talks about deadlines in general and never names `context.Background()`,
+    # so it misses — and the improve step's job is to add the specific rule.
+    Rule(
+        rule_id="G1",
+        trigger=re.compile(r"context\.Background\(\)"),
+        asks_for=("context.background",),
+        message="this call is made with no deadline, so a hung gateway blocks the worker forever.",
+        severity="error",
+    ),
 )
 
 # Phrases that make the stub treat test code as exempt. Any test token plus any exemption token —
@@ -168,12 +179,28 @@ class ParsedDiff:
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
+# The reviewer prompt puts each line's new-file line number in a left gutter (`llm_reviewer
+# .number_diff`), because models cannot reliably add up hunk offsets while reading. The gutter is
+# stripped here so the stub reads the diff underneath.
+#
+# Missing this was silent and total: with the gutter in place no line starts with `+`, so the stub
+# found no added lines, produced no findings, and every skill in the demo scored 0.00 — while the
+# README went on describing a 0.33 baseline rising to 1.00. Nothing failed; the demo just quietly
+# stopped demonstrating anything. Tolerating both shapes is what keeps that from recurring the next
+# time the prompt is reworked.
+_GUTTER = re.compile(r"^\s*\d*\s\|\s")
+
+
+def strip_gutter(line: str) -> str:
+    return _GUTTER.sub("", line, count=1)
+
 
 def parse_diff(text: str) -> ParsedDiff:
     """Added lines with their new-file line numbers. Enough for a stub, not a diff library."""
     out = ParsedDiff()
     path, line_no = "", 0
-    for raw in text.splitlines():
+    for gutted in text.splitlines():
+        raw = strip_gutter(gutted)
         if raw.startswith("+++ "):
             path = raw[4:].strip().removeprefix("b/")
             out.context.setdefault(path, [])
@@ -348,6 +375,15 @@ PATCHES: tuple[Patch, ...] = (
             "every existing row, so the migration cannot run on a populated table."
         ),
     ),
+    Patch(
+        when=re.compile(r"MISSED.*?context\.Background\(\)", re.S),
+        already="context.background",
+        text=(
+            "- **G1 — name the construct, not the principle.** An outbound call built on "
+            "`context.Background()` has no deadline at all. Use `context.WithTimeout` and pass the "
+            "derived context, so a hung dependency fails in seconds rather than holding the worker."
+        ),
+    ),
 )
 
 _GUIDANCE_SECTION = re.compile(r"^## Current guidance\s*\n(.*?)(?=^## )", re.S | re.M)
@@ -463,6 +499,154 @@ def respond_to(system: str, user: str) -> dict[str, Any]:
     raise ValueError("the stub was asked for a schema it does not know")
 
 
+# --- running a skill as an agent ---------------------------------------------------
+#
+# The single-shot path above is not how a skill runs in real code. A skill is a *folder*, and
+# `agent: enabled` runs it the way an agent runtime would: `SKILL.md` as the instruction set, its
+# companion pages fetched on demand with `read_skill_file`, source files through `read_file`/`grep`,
+# the skill's own scripts as tools, and a terminal tool it must call to answer.
+#
+# Without tool support here the demo could only ever exercise the single-shot reviewer — so the one
+# thing a user most needs to satisfy themselves about, that the loop improves skills *as they will
+# actually run*, was the one thing the demo could not show. The stub therefore holds a real
+# tool-calling conversation: it investigates first (reading a page, exactly as the harness intends)
+# and then calls the terminal tool.
+
+# The terminal tool of each kind of step, in the order they are checked. Whichever one is on offer
+# tells the stub what it is being asked to produce.
+TERMINALS = ("submit_findings", "submit_guidance", "submit_expectation", "submit_work")
+
+# `read_skill_file`'s description ends "Available pages: a.md, b.md" (see `agent.builtins`), which
+# is how the stub learns what there is to read without being told the skill's layout.
+_PAGES = re.compile(r"Available pages:\s*(.+)")
+
+
+def available_pages(description: str) -> list[str]:
+    found = _PAGES.search(description)
+    return [p.strip() for p in found.group(1).split(",") if p.strip()] if found else []
+
+
+def _offered(tools: list[dict[str, Any]]) -> dict[str, str]:
+    """Tool name → description, from the OpenAI `tools` array."""
+    out: dict[str, str] = {}
+    for tool in tools:
+        function = tool.get("function") or {}
+        name = function.get("name")
+        if name:
+            out[str(name)] = str(function.get("description") or "")
+    return out
+
+
+def _already_called(messages: list[dict[str, Any]]) -> set[str]:
+    return {
+        str((call.get("function") or {}).get("name") or "")
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+    }
+
+
+def _first_user(messages: list[dict[str, Any]]) -> str:
+    return next((str(m.get("content") or "") for m in messages if m.get("role") == "user"), "")
+
+
+def guidance_of(system: str) -> str:
+    """The skill's own instructions out of an agent system prompt.
+
+    `SkillAgent._system` puts the body under `# Your instructions` and appends its own sections
+    after it. Taking the whole prompt instead would let the runtime preamble's vocabulary — it
+    mentions tools, findings and files — read as rules the skill asked for, and the stub would fire
+    rules no guidance requested.
+    """
+    if "# Your instructions" not in system:
+        return system
+    body = system.split("# Your instructions", 1)[1]
+    for heading in ("\n# This skill's other files", "\n# Context you were given", "\n# The source"):
+        body = body.split(heading, 1)[0]
+    return body
+
+
+def pages_read(messages: list[dict[str, Any]]) -> str:
+    """Everything the agent fetched with `read_skill_file`, concatenated.
+
+    Folded into the guidance the stub reviews with, and that is the whole point of the harness
+    rather than a flourish: a skill is a folder, `SKILL.md` links to its reference pages, and a rule
+    that lives on a page only reaches the review because the agent went and read it. If the stub
+    reviewed with the body alone, reading a page would change nothing and the demo would show an
+    agent going through the motions.
+    """
+    return "\n".join(
+        str(m.get("content") or "") for m in messages if m.get("role") == "tool"
+    )
+
+
+def _answer(terminal: str, system: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """What to hand the terminal tool — the same functions the single-shot path uses."""
+    task = _first_user(messages)
+    if terminal == "submit_findings":
+        guidance = guidance_of(system) + "\n" + pages_read(messages)
+        return {"findings": review(guidance, task)}
+    if terminal == "submit_guidance":
+        return draft(task)
+    if terminal == "submit_expectation":
+        return draft_expectation(task)
+    # `submit_work`: the stub cannot write a program. Saying so is the honest answer — a made-up
+    # summary would be graded by a real test run and fail anyway, but confusingly.
+    return {
+        "summary": (
+            "the demo stub cannot do task work — it is a handful of regexes. Point WHETSTONE_LLM "
+            "at a real backend to run task skills."
+        ),
+        "files_written": [],
+    }
+
+
+def converse(
+    system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]], forced: str
+) -> dict[str, Any]:
+    """One turn of a tool-calling conversation, as an assistant chat-completions message.
+
+    Deliberately investigates before answering. A stub that went straight to the terminal tool
+    would still make the loop *run*, but every trajectory would read as "answered immediately" —
+    and the trajectory is load-bearing: a gate compares what each side looked at, and the console
+    shows it. A demo whose agents never read anything would make that machinery look inert.
+    """
+    offered = _offered(tools)
+    terminal = next((name for name in TERMINALS if name in offered), "")
+    called = _already_called(messages)
+
+    if forced:
+        # `tool_choice` — the harness has run out of steps and is making the agent answer.
+        return _tool_message(forced, _answer(forced if forced in TERMINALS else terminal,
+                                             system, messages))
+
+    if "read_skill_file" in offered and "read_skill_file" not in called:
+        # The description carries the available pages; read the first, which is what a skill whose
+        # SKILL.md links to a reference page would do.
+        pages = available_pages(offered["read_skill_file"])
+        if pages:
+            return _tool_message("read_skill_file", {"path": pages[0]})
+
+    if terminal:
+        return _tool_message(terminal, _answer(terminal, system, messages))
+    # No terminal tool on offer at all: say so as text rather than calling something at random.
+    return {"role": "assistant", "content": "the demo stub was offered no tool it recognises"}
+
+
+def _tool_message(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": f"call_{name}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        ],
+    }
+
+
 def _between(text: str, start: str, end: str) -> str:
     if start not in text:
         return ""
@@ -482,8 +666,22 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             messages = body.get("messages", [])
             system = next((m["content"] for m in messages if m["role"] == "system"), "")
-            user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-            payload = respond_to(system, user)
+            tools = body.get("tools") or []
+            if tools:
+                # A tool-calling request: the skill is being *run*, not prompted. Decided by the
+                # request rather than by the system prompt, because that is what actually differs.
+                choice = body.get("tool_choice")
+                forced = ""
+                if isinstance(choice, dict):
+                    forced = str((choice.get("function") or {}).get("name") or "")
+                message = converse(system, messages, tools, forced)
+                finish = "tool_calls" if message.get("tool_calls") else "stop"
+            else:
+                user = next(
+                    (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
+                )
+                message = {"role": "assistant", "content": json.dumps(respond_to(system, user))}
+                finish = "stop"
         except Exception as exc:  # noqa: BLE001 - a stub must answer, not take the console down
             self._send(500, {"error": {"message": f"{type(exc).__name__}: {exc}"}})
             return
@@ -493,13 +691,7 @@ class Handler(BaseHTTPRequestHandler):
                 "id": "chatcmpl-demo",
                 "object": "chat.completion",
                 "model": MODEL_NAME,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": json.dumps(payload)},
-                        "finish_reason": "stop",
-                    }
-                ],
+                "choices": [{"index": 0, "message": message, "finish_reason": finish}],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             },
         )

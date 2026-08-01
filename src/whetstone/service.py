@@ -67,6 +67,12 @@ from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_re
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
 from whetstone.sampling import holdout_report, partition_of, sample_cases
 from whetstone.steps import JudgePolicy, SamplePolicy
+from whetstone.taskruns import (
+    TaskGateRecord,
+    TaskRunRecord,
+    new_task_gate_id,
+    new_task_run_id,
+)
 from whetstone.tasks import TaskCase, TaskGateResult, TaskScore, gate_tasks
 from whetstone.verify.base import Verifier
 from whetstone.wiki import SkillWiki, WikiLimits
@@ -830,6 +836,11 @@ class CaseSummary(BaseModel):
     last_recall: float | None = None
     last_fp_rate: float | None = None
     flaky: bool = False
+    # In the holdout partition — scored on every run, never shown to the improve drafter, and a
+    # change may not claim to fix it. Carried for the same reason `PendingCase` carries it: without
+    # it the console cannot build a gate's targeted set without risking a refusal, so it sent none
+    # at all, and a gate that names no cases proves only that nothing broke.
+    holdout: bool = False
 
 
 class PendingCase(BaseModel):
@@ -1338,14 +1349,161 @@ def gate_task_skills(
     tolerance: float = 0.0,
     targeted: list[str] | None = None,
     cancel: threading.Event | None = None,
+    on_base: TaskSink | None = None,
+    on_candidate: TaskSink | None = None,
 ) -> TaskGateResult:
     """Gate a task skill: score both sides over the same cases, and compare.
 
     One executor serves both sides, for the same reason one reviewer does — the instrument is held
     fixed so the guidance is the only thing that varied.
+
+    Two sinks rather than one, matching `gate_skills`: base and candidate run the same cases, so a
+    single stream would report every case twice with no way to tell which side produced what — the
+    one distinction a gate exists to draw.
     """
-    base_score = record_task_eval(base, cases, executor, verifier, cancel=cancel)
-    candidate_score = record_task_eval(candidate, cases, executor, verifier, cancel=cancel)
+    base_score = record_task_eval(
+        base, cases, executor, verifier, cancel=cancel, on_case=on_base
+    )
+    candidate_score = record_task_eval(
+        candidate, cases, executor, verifier, cancel=cancel, on_case=on_candidate
+    )
     return gate_tasks(
         base_score, candidate_score, tolerance=tolerance, targeted=targeted
     )
+
+
+def record_task_run(
+    skill: Skill,
+    cases: list[TaskCase],
+    executor: TaskExecutor,
+    verifier: Verifier,
+    *,
+    backend: str = "",
+    model: str = "",
+    executor_identity: str = "",
+    llm_calls: int = 0,
+    practice_mode: bool = False,
+    principal: str = "",
+    git_ref: str = "",
+    now: datetime | None = None,
+    on_case: TaskSink | None = None,
+    cancel: threading.Event | None = None,
+    keep_workspaces: Path | None = None,
+) -> TaskRunRecord:
+    """Score a task skill and return a storable record of the pass.
+
+    The task counterpart of `record_eval`, and here for the same reason: a score that is printed and
+    discarded cannot be compared with the next one, so a skill measured that way has no history and
+    therefore no answer to whether it is improving. `record_task_eval` remains the projection down
+    to the bare score, for callers that genuinely want one.
+
+    Both instruments are captured — the executor that produced the work and the verifier that graded
+    it — because a task score read without them is a number whose meaning is unknown.
+    """
+    started_at = now or datetime.now(UTC)
+    clock = time.perf_counter()
+    score = record_task_eval(
+        skill,
+        cases,
+        executor,
+        verifier,
+        on_case=on_case,
+        cancel=cancel,
+        keep_workspaces=keep_workspaces,
+    )
+    duration = time.perf_counter() - clock
+    return TaskRunRecord(
+        id=new_task_run_id(skill.id, started_at),
+        created_at=started_at,
+        principal=principal,
+        skill_id=skill.id,
+        skill_version=skill.version,
+        skill_hash=skill_hash(skill),
+        guidance_hash=guidance_hash(skill),
+        backend=backend,
+        model=model,
+        executor=executor_identity,
+        verifier=verifier_identity(verifier),
+        practice_mode=practice_mode,
+        duration_s=duration,
+        llm_calls=llm_calls,
+        git_ref=git_ref,
+        workspaces=str(keep_workspaces) if keep_workspaces else "",
+        score=score,
+    )
+
+
+def record_task_gate(
+    base: Skill,
+    candidate: Skill,
+    cases: list[TaskCase],
+    executor: TaskExecutor,
+    verifier: Verifier,
+    *,
+    tolerance: float = 0.0,
+    targeted: list[str] | None = None,
+    base_ref: str = "",
+    candidate_ref: str = "",
+    backend: str = "",
+    model: str = "",
+    executor_identity: str = "",
+    llm_calls: int = 0,
+    practice_mode: bool = False,
+    principal: str = "",
+    now: datetime | None = None,
+    on_base: TaskSink | None = None,
+    on_candidate: TaskSink | None = None,
+    cancel: threading.Event | None = None,
+) -> TaskGateRecord:
+    """Gate a task skill and return the record C6 reads before its change may be published.
+
+    `candidate_hash` is the skill as it stands, hashed exactly as `record_gate` hashes its own — so
+    a task skill's evidence is matched to publishable content by the same rule, and a task skill is
+    held to the same standard rather than to a looser one nobody wrote down.
+    """
+    started_at = now or datetime.now(UTC)
+    clock = time.perf_counter()
+    result = gate_task_skills(
+        base,
+        candidate,
+        cases,
+        executor,
+        verifier,
+        tolerance=tolerance,
+        targeted=targeted,
+        cancel=cancel,
+        on_base=on_base,
+        on_candidate=on_candidate,
+    )
+    duration = time.perf_counter() - clock
+    candidate_hash = skill_hash(candidate)
+    return TaskGateRecord(
+        id=new_task_gate_id(candidate.id, candidate_hash, started_at),
+        created_at=started_at,
+        principal=principal,
+        skill_id=candidate.id,
+        base_ref=base_ref,
+        candidate_ref=candidate_ref,
+        base_hash=skill_hash(base),
+        candidate_hash=candidate_hash,
+        backend=backend,
+        model=model,
+        executor=executor_identity,
+        verifier=verifier_identity(verifier),
+        practice_mode=practice_mode,
+        duration_s=duration,
+        llm_calls=llm_calls,
+        tolerance=tolerance,
+        targeted_cases=list(targeted or []),
+        result=result,
+    )
+
+
+def verifier_identity(verifier: Verifier | None) -> str:
+    """How a record should name the grader. Falls back to the class for a custom one.
+
+    A task score means nothing without this: the same skill graded by a different `verify:` command
+    is a different measurement, exactly as a review score judged by a different judge is.
+    """
+    identity = getattr(verifier, "identity", None)
+    return str(identity) if isinstance(identity, str) else type(verifier).__name__

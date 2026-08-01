@@ -1,0 +1,35 @@
+# The improve step, as an agent — the same runtime the evaluate step uses.
+#
+# Without `agent:` this is one call: a failure digest in, rewritten guidance out, with every
+# companion page pasted into the prompt. That drafter is being asked to fix rules about code it has
+# never read, which is the asymmetry running the whole skill as an agent removes.
+#
+# With it, the drafter greps the same source the reviewer just reviewed against, opens
+# references/panics.md only if it needs it, and answers by calling `submit_guidance`.
+
+description: Rewrite the guidance from the failures, having read the code behind them.
+
+prompt: prompt.md
+
+agent:
+  enabled: true
+  # Fewer than the reviewer's: a rewrite is bounded work — read the failing cases, check two or
+  # three functions, write. The plan prices this at 9 (8 + one forced answer).
+  max_steps: 8
+  # The same checkout the evaluate step reads. Declared again rather than inherited: a step says
+  # what it needs, and one that quietly acquired another step's access would be the surprising one.
+  source: { env: PANIC_GUARD_AGENT_SOURCE, required: true }
+  tools:
+    - name: owner_of
+      description: >
+        Return the team that owns a module, given its path in the source tree. Use it when a rule
+        is about a specific module and you want the guidance to name who to ask.
+      run: ["python", "tools/owner_of.py"]
+      input_schema:
+        type: object
+        properties:
+          module: { type: string, description: "path relative to the source root" }
+        required: [module]
+
+context:
+  owners: { file: ./owners.json }

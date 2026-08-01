@@ -19,7 +19,13 @@ from whetstone.candidates import store_candidates
 from whetstone.config import Config, load_config
 from whetstone.context import ContextError
 from whetstone.core.gate import GateConfig
-from whetstone.core.loader import SkillLoadError, load_skill, load_skills
+from whetstone.core.loader import (
+    PROMOTED_CASES_DIR,
+    SkillLoadError,
+    load_eval_cases,
+    load_skill,
+    load_skills,
+)
 from whetstone.corpus.builder import (
     DEFAULT_MAX_CLEAN_FILES,
     DEFAULT_MAX_DEFECT_FILES,
@@ -28,7 +34,7 @@ from whetstone.corpus.builder import (
 )
 from whetstone.corpus.model import CandidateCase
 from whetstone.domain.change import CodeChange, parse_unified_diff
-from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE
+from whetstone.domain.eval_model import EVIDENCE_CONFIRMED, EVIDENCE_SILENCE, EvalCase
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import MergeRequestRef
 from whetstone.domain.run import RunEvent, RunRecord, guidance_hash
@@ -46,7 +52,7 @@ from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
 from whetstone.providers.registry import available_providers
 from whetstone.report import render_run_html, render_run_text
-from whetstone.reviewer.factory import ReviewerChoice, reviewer_from_step
+from whetstone.reviewer.factory import ReviewerChoice, reviewer_from_step, step_agent
 from whetstone.reviews import ReviewSource, ReviewStore, ReviewUpload, build_review
 from whetstone.runs import RunStore, stale_version_ids
 from whetstone.scaffold import write_scaffold
@@ -1469,6 +1475,188 @@ def skills_list(
 SkillDirOpt = Annotated[Path, typer.Option("--skill", help="Path to a skill folder")]
 
 
+@skills_app.command("cases")
+def skills_cases(
+    skill: SkillDirOpt,
+    promoted_only: Annotated[
+        bool,
+        typer.Option("--promoted", help="Only the promoted set, not the graduated corpus"),
+    ] = False,
+    runs_dir: RunsDirOpt = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """List a skill's cases — the graduated corpus *and* the promoted set waiting behind it.
+
+    Promoted cases were the blind spot. Promotion writes them to `promoted_cases/`, deliberately
+    apart from `eval_cases/` so an unvetted case never joins the corpus a gate is measured against —
+    but that meant an afternoon of triage produced a folder no command would name. The console grew
+    a list for them; the CLI had none, so the terminal reported a skill as having strictly fewer
+    cases than the operator had just curated for it.
+
+    The last run's outcome is shown per case where one exists. A promoted case usually has none —
+    that is the honest unscored state, not a zero, and it is the cue to score the promoted set.
+    """
+    sk = load_skill(skill)
+    promoted = _promoted_on_disk(skill, sk.id)
+    graduated = {c.id for c in sk.eval_cases}
+    waiting = [c for c in promoted if c.id not in graduated]
+
+    latest = _store(runs_dir).latest(sk.id)
+    rows = (
+        []
+        if promoted_only
+        else [_case_row(c, latest, "graduated", c.tier) for c in sk.eval_cases]
+    )
+    rows += [_case_row(c, latest, "promoted", "") for c in waiting]
+
+    if json_out:
+        typer.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        typer.echo(
+            f"{sk.id} has no cases. Promote some from triage — nothing gates a change "
+            f"to this skill until it does."
+        )
+        return
+    for row in rows:
+        mark = "·" if row["state"] == "graduated" else "+"
+        tier = f"  [{row['tier']}]" if row["tier"] == "archive" else ""
+        metric = (
+            f"recall {row['recall']:.2f}" if row["kind"] == "should_catch"
+            else f"fp {row['fp_rate']:.2f}"
+        ) if row["recall"] is not None else "unscored"
+        typer.echo(
+            f"{mark} {row['id']:<34} {row['kind']:<15} {metric:<14} {row['path']}{tier}"
+        )
+    if waiting and not promoted_only:
+        typer.echo(
+            f"\n{len(waiting)} case(s) marked + are promoted, not graduated: they live under "
+            f"{skill / 'promoted_cases'} and gate nothing until they are graduated into "
+            f"{skill / 'eval_cases'}."
+        )
+    if latest is None:
+        typer.echo("\nno run has scored this skill yet, so every outcome above reads 'unscored'")
+
+
+def _promoted_on_disk(skill_dir: Path, skill_id: str) -> list[EvalCase]:
+    """The promoted set, read straight from the folder — no config and no git.
+
+    Deliberately not `staging.promoted_cases`: that resolves the folder through a `Config`, and this
+    command is handed a path. Reading the directory keeps `--skill ../elsewhere/my-skill` working,
+    which is how every other `skills` command is invoked.
+    """
+    directory = skill_dir / PROMOTED_CASES_DIR
+    if not directory.is_dir():
+        return []
+    try:
+        return load_eval_cases(directory, skill_id)
+    except (SkillLoadError, OSError) as exc:
+        typer.echo(f"warning: {directory} could not be read: {exc}", err=True)
+        return []
+
+
+def _case_row(
+    case: EvalCase, latest: RunRecord | None, state: str, tier: str
+) -> dict[str, object]:
+    run = latest.case(case.id) if latest else None
+    return {
+        "id": case.id,
+        "kind": case.kind,
+        "state": state,
+        "tier": tier or case.tier,
+        "path": case.change.files[0].path if case.change.files else "",
+        "recall": run.confusion.recall if run else None,
+        "fp_rate": run.confusion.fp_rate if run else None,
+        "scored_by": latest.id if run else "",
+    }
+
+
+@skills_app.command("trend")
+def skills_trend(
+    skill: Annotated[
+        str, typer.Option("--skill", help="Skill id (as it appears in `whetstone skills list`)")
+    ],
+    window: Annotated[int, typer.Option(min=2, max=100, help="How many runs back to read")] = 10,
+    runs_dir: RunsDirOpt = None,
+    gates_dir: GatesDirOpt = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Is this skill getting sharper — and what is that claim resting on?
+
+    Whetstone's purpose is sharpening skills, and nothing in it could answer this. `runs list` shows
+    snapshots and `eval gate` shows one verdict; neither says whether ten iterations went anywhere.
+
+    Two things are reported, and they are not the same strength of evidence. The **trend** is weak:
+    the score over time, cut wherever the judge, the model or the case set moved, because a delta
+    across any of those is a comparison of two different exams. The **ledger** is strong: a gate
+    holds all three fixed, so a case it recorded as going from failing to passing genuinely
+    improved. That is why a skill can be sharpening while its recall falls — the healthy loop
+    promotes exactly the cases the skill got wrong.
+    """
+    from whetstone.sharpening import sharpening_report
+    from whetstone.taskruns import TaskGateStore, TaskRunStore
+
+    config = load_config()
+    report = sharpening_report(
+        skill,
+        _store(runs_dir),
+        _gates(gates_dir),
+        task_runs=TaskRunStore(config.task_runs_dir),
+        task_gates=TaskGateStore(config.task_gates_dir),
+        window=window,
+    )
+    if json_out:
+        typer.echo(report.model_dump_json(indent=2))
+        return
+
+    typer.echo(f"{skill}: {report.verdict}\n")
+    for point in report.points:
+        seams = ", ".join(
+            name
+            for flag, name in (
+                (point.judge_changed, "judge changed"),
+                (point.reviewer_changed, "model changed"),
+                (point.corpus_changed, f"corpus changed (+{len(point.cases_added)})"),
+            )
+            if flag
+        )
+        holdout = (
+            f"  holdout {point.holdout_recall:.3f}" if point.holdout_recall is not None else ""
+        )
+        typer.echo(
+            f"  {point.created_at.strftime('%Y-%m-%d %H:%M')}  recall {point.recall:.3f}  "
+            f"fp {point.fp_rate:.3f}{holdout}  ({point.cases} case(s))"
+            + (f"   ⟂ {seams}" if seams else "")
+        )
+    for point in report.task_points:
+        typer.echo(
+            f"  {point.created_at.strftime('%Y-%m-%d %H:%M')}  pass {point.pass_rate:.3f}  "
+            f"mean {point.mean_score:.3f}  ({point.cases} task case(s))"
+            + ("   ⟂ grader changed" if point.verifier_changed else "")
+        )
+
+    if report.recall_delta is not None:
+        typer.echo(
+            f"\nrecall {report.recall_delta:+.3f} across the longest unbroken stretch "
+            f"({report.comparable_runs} run(s)) — not across the whole history above"
+        )
+    typer.echo(
+        f"\nledger: {report.gates_run} gate(s), {report.gates_passed} passed, "
+        f"{len(report.proven_fixes)} case(s) proven fixed, {report.fixes_that_stuck} still passing"
+    )
+    for fix in report.proven_fixes:
+        state = (
+            "still passes"
+            if fix.still_holds
+            else ("REGRESSED" if fix.still_holds is False else "not re-measured since")
+        )
+        typer.echo(f"  fixed {fix.case_id:<32} {state}  (gate {fix.gate_id})")
+    for case_id in report.regressions:
+        typer.echo(f"  regressed at some point: {case_id}")
+    for caveat in report.caveats:
+        typer.echo(f"\n  ⚠ {caveat}")
+
+
 @skills_app.command("scaffold")
 def skills_scaffold(
     skill: SkillDirOpt,
@@ -1638,6 +1826,15 @@ def skills_improve(
 
     client = None
     effort = spec.model.effort or "high"
+    # The same resolver the console and the scoring path use, so a skill that improves as an agent
+    # does so identically from either entry point.
+    plan_agent = step_agent(spec, skill)
+    if plan_agent is not None and plan_agent.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in plan_agent.context.missing)
+        raise typer.BadParameter(f"the improve step needs context that is not set: {names}")
+    if plan_agent is not None and plan_agent.problems:
+        raise typer.BadParameter("the improve step cannot run: " + "; ".join(plan_agent.problems))
+    agent = None
     if spec.calls_a_model:
         # The step's own `model:` block is the default; a flag on the command line overrides it.
         pick = (llm or spec.model.llm, model or spec.model.model, base_url or spec.model.base_url)
@@ -1645,22 +1842,30 @@ def skills_improve(
         plan = plan_calls(
             "skills improve",
             backend,
-            calls=1,
-            basis="one call: the guidance rewrite",
+            calls=plan_agent.max_calls if plan_agent else 1,
+            basis=(
+                f"up to {plan_agent.max_calls} calls: the skill drafts its own change as an agent "
+                f"({plan_agent.max_steps} investigation steps + one forced answer)"
+                if plan_agent
+                else "one call: the guidance rewrite"
+            ),
             details=[
                 f"digest: up to {spec.inputs.failures.max} clustered failure(s)",
+                *([f"reviewer: {plan_agent.identity}"] if plan_agent else []),
                 *(["steered by --instruction"] if instruction else []),
             ],
         )
         _preflight(plan, yes)
         client = _client(*pick, api_key_env)
+        agent = plan_agent.build(client) if plan_agent else None
     else:
         typer.echo(f"running {' '.join(spec.run)} — Whetstone is not calling a model; "
                    f"what your program does is its own business", err=True)
 
     try:
         result = propose(
-            spec, sk, record, client=client, effort=effort, instruction=instruction or ""
+            spec, sk, record, client=client, effort=effort,
+            instruction=instruction or "", agent=agent,
         )
     except StepError as exc:
         typer.echo(str(exc), err=True)

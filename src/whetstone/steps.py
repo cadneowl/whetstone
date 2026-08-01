@@ -44,6 +44,10 @@ from whetstone.wiki import WikiEntry, WikiLimits
 
 StepKind = Literal["evaluate", "improve", "update", "triage"]
 STEP_KINDS: tuple[StepKind, ...] = ("evaluate", "improve", "update", "triage")
+# Steps that can run the skill as an agent — every kind whose work is *the skill thinking*, which
+# is all of them except `update`. An update step generates a wiki by invoking a program the
+# deployment owns; there is no skill judgement in it to give tools to.
+AGENT_KINDS: tuple[StepKind, ...] = ("evaluate", "improve", "triage")
 STEP_FILE = "step.yaml"
 
 # Annotated so the default factory below carries the Literal type rather than plain `str`.
@@ -419,23 +423,27 @@ def _validate(spec: StepSpec, path: Path) -> None:
             f"harness's. To plug in your own reviewer, set 'run:' instead: it receives the "
             f"guidance, the diff and the resolved context on stdin and returns findings on stdout."
         )
-    # `context:` feeds something that takes extra inputs: a reviewer program, or a skill running as
-    # an agent (its declared tools receive the bag on stdin, which is how a token reaches Jira
-    # without being committed). Declared with none of those it would be resolved — a secret read, a
-    # file loaded — and then silently dropped, because the built-in reviewer takes no extra inputs.
+    # `context:` feeds something that takes extra inputs: a program the step runs, or the step
+    # running as an agent (its declared tools receive the bag on stdin, which is how a token reaches
+    # Jira without being committed). Declared with neither it would be resolved — a secret read, a
+    # file loaded — and then silently dropped, because a plain prompt step takes no extra inputs.
     # So refuse it there rather than let it read as configured-but-ignored.
-    takes_context = spec.kind == "evaluate" and bool(
-        spec.run or spec.agent.enabled or spec.task.enabled
-    )
+    #
+    # Not evaluate-only. It was, which meant an improve step could not be given the source root the
+    # evaluate step had just reviewed against: the drafter was asked to fix guidance for failures in
+    # code it was forbidden from reading. A skill is run one way everywhere or it is two things.
+    takes_context = bool(spec.run or spec.agent.enabled or spec.task.enabled)
     if spec.context and not takes_context:
         raise StepError(
-            f"{path}: 'context:' supplies the inputs a reviewer program or an agent needs, so it "
-            f"has no effect without 'run:', 'agent:' or 'task:' on an evaluate step (the built-in "
-            f"reviewer takes no extra inputs)"
+            f"{path}: 'context:' supplies the inputs a program or an agent needs, so it has no "
+            f"effect without 'run:' or 'agent:' on this step (a plain prompt step takes no extra "
+            f"inputs)"
         )
-    if spec.agent.enabled and spec.kind != "evaluate":
+    if spec.agent.enabled and spec.kind not in AGENT_KINDS:
         raise StepError(
-            f"{path}: 'agent:' configures how a skill is scored, so it belongs on an evaluate step"
+            f"{path}: 'agent:' runs this step as an agent, which {spec.kind} steps do not do — "
+            f"it belongs on {', '.join(AGENT_KINDS)} (an update step invokes your generator "
+            f"with 'run:')"
         )
     if spec.task.enabled and spec.kind != "evaluate":
         raise StepError(

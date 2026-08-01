@@ -21,7 +21,7 @@ import pytest
 from whetstone.agent.builtins import BuiltinTools
 from whetstone.core.loader import load_skill
 from whetstone.llm.tools import ToolCall
-from whetstone.reviewer.factory import reviewer_from_step
+from whetstone.reviewer.factory import reviewer_from_step, step_agent
 from whetstone.steps import load_step
 
 _ROOT = Path(__file__).resolve().parents[2] / "examples" / "agent-skill"
@@ -107,6 +107,23 @@ def test_the_agent_can_reach_the_evidence_its_instructions_send_it_to() -> None:
     # ...and the safe function is genuinely safe, which is what the should_not_flag case rests on.
     body = tools.dispatch(ToolCall("3", "read_file", {"path": "ledger.py"}))
     assert "Never raises" in body.content
+
+
+def test_the_example_improves_the_same_way_it_scores(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The point of the example as much as the reviewing is: both steps resolve to the same runtime
+    with the same access, so the drafter reads the code the reviewer just reviewed against."""
+    monkeypatch.setenv(_ENV, str(_SOURCE))
+    spec = load_step(_SKILL_DIR, "improve", skill_id="panic-guard-agent")
+    assert spec is not None and spec.prompt  # the task framing; the skill body is the instructions
+
+    plan = step_agent(spec, _SKILL_DIR)
+    assert plan is not None and plan.problems == []
+    assert plan.source_root == str(_SOURCE)  # the same tree the evaluate step reads
+    assert [t.name for t in plan.tools] == ["owner_of"]
+    assert plan.max_calls == 9  # 8 steps + the forced answer, and the plan says so
+    # The token-shaped context reaches the tool, never the prompt — as on the evaluate step.
+    assert "@payments-guild" in plan.context.values["owners"]
+    assert plan.shown == {"owners": "<file:./owners.json>"}
 
 
 def test_the_example_corpus_discriminates() -> None:

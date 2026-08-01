@@ -172,7 +172,9 @@ function Row({ row }: { row: Attention }) {
             next step per skill on purpose, but "score it again" is the thing you want after every
             guidance edit, and a home screen that could only offer it to skills that had never been
             measured was hiding it from exactly the people who needed it most. */}
-        {row.action.kind !== 'score' && row.total_cases > 0 && (
+        {/* Never for a task skill: `Run evals` is the review path, which refuses one. Its own
+            "run the tasks" is the row's headline action, so there is nothing missing here. */}
+        {row.action.kind !== 'score' && row.total_cases > 0 && !row.is_task && (
           <LaunchButton kind="eval" request={{ skill_id: row.skill_id }} label="Run evals" />
         )}
       </div>
@@ -263,7 +265,28 @@ function Action({ row }: { row: Attention }) {
     return <LaunchButton kind="eval" request={{ skill_id: row.skill_id }} label={label} />
   }
   if (kind === 'gate') {
-    return <LaunchButton kind="gate" request={{ skill_id: row.skill_id }} label={label} />
+    // A task skill is gated over its task cases; the review gate refuses it outright, so this row
+    // used to offer a button whose only possible outcome was a 422.
+    return (
+      <LaunchButton
+        kind={row.is_task ? 'task-gate' : 'gate'}
+        request={{ skill_id: row.skill_id }}
+        label={label}
+      />
+    )
+  }
+  if (kind === 'task') {
+    // With cases, run them from here; without, the Tasks tab is where you find out what to add.
+    return row.task_cases > 0 ? (
+      <LaunchButton kind="task-eval" request={{ skill_id: row.skill_id }} label={label} />
+    ) : (
+      <Link
+        to={`/skills/${encodeURIComponent(row.skill_id)}?tab=tasks`}
+        className="inline-block rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10"
+      >
+        {label} →
+      </Link>
+    )
   }
   if (kind === 'improve') {
     // The Improve tab is the loop: score the failing cases, draft a change (by hand on the branch
@@ -314,6 +337,7 @@ function ActionBadge({ kind }: { kind: ActionKind }) {
     drift: 'warn',
     curate: 'neutral',
     cadence: 'neutral',
+    task: 'warn',
     nothing: 'neutral',
   } as const
   return <Badge tone={tone[kind]}>{kind}</Badge>

@@ -35,7 +35,8 @@ from pydantic import BaseModel, Field
 from whetstone.drift import DRIFT_ALARM
 
 ActionKind = Literal[
-    "propose", "gate", "triage", "score", "improve", "drift", "curate", "cadence", "nothing"
+    "propose", "gate", "triage", "score", "improve", "drift", "curate", "cadence", "task",
+    "nothing",
 ]
 
 
@@ -95,6 +96,12 @@ class Attention(BaseModel):
     staged: bool = False
     can_propose: bool = False
     blocked_reason: str = ""
+    # Scored on work it produces rather than findings it reports. The console reads this to send the
+    # row's button to the task routes: the review gate refuses a task skill outright, so a row that
+    # did not carry this offered a button whose only possible outcome was a 422.
+    is_task: bool = False
+    # Task cases carried, so the row can offer to run them rather than link to a tab to find none.
+    task_cases: int = 0
     # Cases whose gate history says they stopped discriminating — see `curation.py`. Carried with
     # their evidence so confirming one is a decision made on the row, not after a hunt.
     retirements: list[Retirement] = Field(default_factory=list)
@@ -138,6 +145,9 @@ _RANK: dict[ActionKind, int] = {
     # Below improvement — a failing case is a known defect, drift a growing blind spot — but above
     # housekeeping: a corpus that stopped resembling what ships makes every score above suspect,
     # while an unretired solved case only wastes budget.
+    # A task skill's "score it" and "it is failing cases" both land here — the same urgency as a
+    # review skill's `score`/`improve`, and one kind because the Tasks tab is where both are done.
+    "task": 3,
     "drift": 5,
     "curate": 6,
     # Last before idle: an overdue routine pass matters — it is the only pressure entropy ever
@@ -162,6 +172,10 @@ def decide(
     saturated: int = 0,
     drift_uncovered: float | None = None,
     cadence_due: list[str] | None = None,
+    is_task: bool = False,
+    task_cases: int = 0,
+    task_scored: bool = False,
+    task_failing: int = 0,
 ) -> NextAction:
     """The next action for one skill.
 
@@ -169,6 +183,15 @@ def decide(
     the operator is derived from the same facts the buttons are enabled by — rather than being a
     second opinion that can disagree with them.
     """
+    if is_task:
+        return _task_decision(
+            staged=staged,
+            can_propose=can_propose,
+            blocked_reason=blocked_reason,
+            cases=task_cases,
+            scored=task_scored,
+            failing=task_failing,
+        )
     if staged and can_propose:
         return _action(
             "propose",
@@ -245,6 +268,59 @@ def decide(
             + " — routine upkeep on a clock, because entropy never fails loudly enough to ask",
         )
     return _action("nothing", "", "passing every case it has, with nothing new waiting")
+
+
+def _task_decision(
+    *,
+    staged: bool,
+    can_propose: bool,
+    blocked_reason: str,
+    cases: int,
+    scored: bool,
+    failing: int,
+) -> NextAction:
+    """The next action for a skill scored on work it produces.
+
+    Its own branch rather than flags threaded through `decide`, because almost every fact `decide`
+    reasons about is the wrong one here: a task skill has no eval corpus, so "no eval cases, so
+    nothing can tell a better rule from a worse one" is both true and useless, and the triage queue
+    it points at holds review candidates a task skill can never use. Before this the inbox read a
+    task skill as an unmeasured review skill and offered it the review gate — a button whose only
+    possible outcome was a refusal.
+    """
+    if staged and can_propose:
+        return _action(
+            "propose",
+            "Ready to commit",
+            "a gate-proven change is on disk — commit and push it with your git",
+        )
+    if staged and cases:
+        return _action(
+            "gate",
+            "Run the gate",
+            blocked_reason or "an uncommitted change is on disk but unproven — gate it first",
+        )
+    if not cases:
+        return _action(
+            "task",
+            "Add task cases",
+            "no task cases, so nothing measures whether the work this skill produces is any good",
+        )
+    if not scored:
+        return _action(
+            "task",
+            "Run the tasks",
+            "never run, so there is no baseline to improve on — each case gets a workspace, and "
+            "its own verify: command grades what the skill wrote",
+        )
+    if failing:
+        plural = "s" if failing != 1 else ""
+        return _action(
+            "task",
+            f"Fix {failing} failing case{plural}",
+            f"the work it produced failed {failing} case{plural} when the grader ran it",
+        )
+    return _action("nothing", "", "passing every task case it has")
 
 
 def _action(kind: ActionKind, label: str, why: str) -> NextAction:

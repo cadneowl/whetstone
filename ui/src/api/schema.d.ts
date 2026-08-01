@@ -30,12 +30,55 @@ export interface paths {
         };
         /**
          * Get Batch
-         * @description The cases promoted and waiting on disk, and for which skills.
+         * @description The cases promoted and waiting on disk, what each one is, and for which skills.
          */
         get: operations["get_batch_api_candidates_batch_get"];
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/candidates/batch/{skill_id}/{case_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Edit Promoted
+         * @description Rewrite a promoted case — the expectation, the region, the kind, the tier.
+         *
+         *     A promoted case is a *draft* of an eval case; getting the wording right is the whole reason it
+         *     waits in `promoted_cases/` instead of joining the corpus. Until now it could only be created and
+         *     (since a moment ago) destroyed: an expectation with a typo, or one that turned out to describe
+         *     the wrong line, meant removing the case, finding its candidate again in the queue, and promoting
+         *     it a second time. That is not an edit, it is a re-do.
+         *
+         *     Re-prepared from the original candidate rather than patched on disk, so an edit passes exactly
+         *     the validation the promotion did — the region must still be one the diff touches, the rule must
+         *     still exist. Hand-patching the YAML is the one way to get a case the loader will later refuse.
+         */
+        put: operations["edit_promoted_api_candidates_batch__skill_id___case_id__put"];
+        post?: never;
+        /**
+         * Remove Promoted
+         * @description Drop a promoted case, and return the candidate that wrote it to the queue.
+         *
+         *     Both halves, or the state lies. The folder is the case; the candidate's decision is the record
+         *     that it was promoted. Deleting only the folder leaves a candidate marked "promoted" pointing at
+         *     nothing — it stays out of the queue, so the signal it came from is silently lost, which is worse
+         *     than never having promoted it. `undo` already does this pair keyed by candidate; this is the
+         *     same operation keyed by the thing the operator is actually looking at.
+         *
+         *     Nothing here is committed or graduated, so there is nothing downstream to unwind — which is the
+         *     whole reason `promoted_cases/` is separate from the corpus.
+         */
+        delete: operations["remove_promoted_api_candidates_batch__skill_id___case_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -672,6 +715,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/task-eval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Task Eval
+         * @description Score a task skill on the work it produces, and store the record.
+         */
+        post: operations["launch_task_eval_api_jobs_task_eval_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/task-eval/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Task Eval Job */
+        post: operations["plan_task_eval_job_api_jobs_task_eval_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/task-gate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Task Gate
+         * @description Compare the on-disk task skill against the last committed version — its C6 evidence.
+         */
+        post: operations["launch_task_gate_api_jobs_task_gate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/task-gate/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Task Gate Job */
+        post: operations["plan_task_gate_job_api_jobs_task_gate_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/update": {
         parameters: {
             query?: never;
@@ -1017,9 +1134,39 @@ export interface paths {
         };
         /** Get Case */
         get: operations["get_case_api_skills__skill_id__cases__case_id__get"];
-        put?: never;
+        /**
+         * Edit Case
+         * @description Rewrite a graduated eval case's expectation.
+         *
+         *     Until now a case became permanent the moment it graduated: the console could read it, flip its
+         *     tier and nothing else. A typo in an expectation — or one that turned out to describe the wrong
+         *     line — could only be archived, never corrected, which is a strange thing for the corpus a skill
+         *     is *measured against* to be. The wording of an expectation is the measurement.
+         *
+         *     A full round-trip rather than the surgical edit `retier_yaml` does, and deliberately: a tier
+         *     flip is mechanical and may be proposed by the console itself, so surprising a hand-written file
+         *     with a rewrite would be wrong. This is an explicit "edit this case", and the operator asking for
+         *     it is better served by a file in the canonical shape than by a refusal on unusual formatting.
+         *
+         *     Changes `skill_hash`, so the gate verdict is retracted until a fresh gate covers the edited
+         *     corpus — the same discipline graduating and archiving already get.
+         */
+        put: operations["edit_case_api_skills__skill_id__cases__case_id__put"];
         post?: never;
-        delete?: never;
+        /**
+         * Delete Case
+         * @description Remove a graduated eval case from the corpus.
+         *
+         *     The escape hatch archiving is not. `tier: archive` keeps a case drawing at low weight because it
+         *     is still evidence; a case that was simply *wrong* — the expectation describes behaviour the team
+         *     decided it does not want — is not evidence of anything and should leave. Without this the only
+         *     way out of the corpus was to edit the folder on disk, which the console otherwise never asks
+         *     anyone to do.
+         *
+         *     Deletes the case folder, nothing else. Runs that scored it keep their records: they are what
+         *     happened, and a corpus change does not rewrite history.
+         */
+        delete: operations["delete_case_api_skills__skill_id__cases__case_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1182,6 +1329,55 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/sharpening": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sharpening
+         * @description Is this skill getting sharper — and what is that claim actually resting on?
+         *
+         *     The one question the console could not answer. It showed a run and it showed a gate; neither is
+         *     an answer, because a run is a snapshot and a gate is a verdict about one edit. See
+         *     `whetstone.sharpening` for why the obvious trend line is a trap and what is reported instead.
+         */
+        get: operations["get_sharpening_api_skills__skill_id__sharpening_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Tasks
+         * @description The task cases a skill carries, its instruments, and its run history.
+         *
+         *     Never raises for a review skill: `is_task` is false and the rest is empty, so the console can
+         *     ask this of every skill and render the Tasks tab only where there is one. A *task* skill that
+         *     cannot currently run reports `problem` rather than a 422 — the cases and the history are still
+         *     worth showing to the person who has to fix it.
+         */
+        get: operations["get_tasks_api_skills__skill_id__tasks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1223,6 +1419,11 @@ export interface components {
             failing_cases: number;
             /** Fp Rate */
             fp_rate?: number | null;
+            /**
+             * Is Task
+             * @default false
+             */
+            is_task: boolean;
             /**
              * Last Run At
              * @default
@@ -1268,6 +1469,11 @@ export interface components {
              * @default false
              */
             stale_run: boolean;
+            /**
+             * Task Cases
+             * @default 0
+             */
+            task_cases: number;
             /**
              * Total Cases
              * @default 0
@@ -1325,8 +1531,18 @@ export interface components {
          *     Promotion writes each case to `skills/<id>/promoted_cases/` on disk, so this is a folder scan,
          *     not a branch. The console reads it to offer scoring the promoted set and to point graduation at
          *     the skills that have something to graduate.
+         *
+         *     `cases` is the batch itself. It used to report only a count, which told an operator that seven
+         *     cases existed and nothing whatever about them — not what they assert, not which skill they are
+         *     for, and no way to drop one that should not have been promoted short of finding its candidate
+         *     again in the decided list.
          */
         BatchView: {
+            /**
+             * Cases
+             * @default []
+             */
+            cases: components["schemas"]["PromotedCase"][];
             /**
              * Count
              * @default 0
@@ -1451,6 +1667,31 @@ export interface components {
             history: components["schemas"]["CaseHistoryEntry"][];
             /** Skill Id */
             skill_id: string;
+        };
+        /**
+         * CaseEditRequest
+         * @description The parts of a graduated case a person can put right without leaving the console.
+         */
+        CaseEditRequest: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "should_catch" | "should_not_flag";
+            /** Line Range */
+            line_range?: [
+                number,
+                number
+            ] | null;
+            /** Semantic */
+            semantic: string;
+            severity_min?: components["schemas"]["Severity"] | null;
+            /**
+             * Tier
+             * @default active
+             * @enum {string}
+             */
+            tier: "active" | "archive";
         };
         /**
          * CaseEdits
@@ -1586,6 +1827,11 @@ export interface components {
              * @default false
              */
             flaky: boolean;
+            /**
+             * Holdout
+             * @default false
+             */
+            holdout: boolean;
             /** Id */
             id: string;
             /**
@@ -1615,6 +1861,23 @@ export interface components {
              * @enum {string}
              */
             tier: "active" | "archive";
+        };
+        /** CaseWriteResult */
+        CaseWriteResult: {
+            /** Case Id */
+            case_id: string;
+            /**
+             * Needs Gate
+             * @default true
+             */
+            needs_gate: boolean;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Written
+             * @default
+             */
+            written: string;
         };
         /** CodeChange */
         CodeChange: {
@@ -2065,6 +2328,13 @@ export interface components {
              */
             history: components["schemas"]["DriftPoint"][];
             report: components["schemas"]["DriftReport"];
+        };
+        /**
+         * EditPromotedRequest
+         * @description New edits for a case already on the batch.
+         */
+        EditPromotedRequest: {
+            edits: components["schemas"]["CaseEdits"];
         };
         /**
          * EscalationStats
@@ -2736,7 +3006,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize" | "index";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize" | "index" | "task-eval" | "task-gate";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -2992,7 +3262,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "propose" | "gate" | "triage" | "score" | "improve" | "drift" | "curate" | "cadence" | "nothing";
+            kind: "propose" | "gate" | "triage" | "score" | "improve" | "drift" | "curate" | "cadence" | "task" | "nothing";
             /** Label */
             label: string;
             /** Rank */
@@ -3220,6 +3490,69 @@ export interface components {
             promoted: number;
         };
         /**
+         * PromotedCase
+         * @description One case waiting under `promoted_cases/`, as the batch view lists it.
+         *
+         *     Enough to decide its fate without opening it: what it asserts, where it came from, and which
+         *     candidate wrote it — so removing it can put that candidate back in the queue rather than
+         *     stranding it as decided-about-nothing.
+         */
+        PromotedCase: {
+            /**
+             * Candidate Id
+             * @default
+             */
+            candidate_id: string;
+            /** Case Id */
+            case_id: string;
+            /**
+             * Expectation Id
+             * @default e1
+             */
+            expectation_id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "should_catch" | "should_not_flag";
+            /** Line Range */
+            line_range?: [
+                number,
+                number
+            ] | null;
+            /**
+             * Path
+             * @default
+             */
+            path: string;
+            /**
+             * @default {
+             *       "semantic_drafted_by": "",
+             *       "source": "manual"
+             *     }
+             */
+            provenance: components["schemas"]["Provenance"];
+            /**
+             * Rule Id
+             * @default
+             */
+            rule_id: string;
+            /**
+             * Semantic
+             * @default
+             */
+            semantic: string;
+            severity_min?: components["schemas"]["Severity"] | null;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Tier
+             * @default active
+             * @enum {string}
+             */
+            tier: "active" | "archive";
+        };
+        /**
          * Proposal
          * @description The state of a skill's on-disk guidance, and whether a passing gate covers it.
          */
@@ -3252,6 +3585,29 @@ export interface components {
             verdict: components["schemas"]["Verdict"];
             /** Version */
             version: number;
+        };
+        /**
+         * ProvenFix
+         * @description A case a gate demonstrated went from failing to passing — the strong evidence.
+         *
+         *     `still_holds` is what turns a fix into sharpening rather than a moment. A case fixed in March
+         *     that has been failing since April was not a lasting improvement, and a ledger that counted it
+         *     forever would be a monument to a regression nobody noticed.
+         */
+        ProvenFix: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Case Id */
+            case_id: string;
+            /** Gate Id */
+            gate_id: string;
+            /** Last Seen At */
+            last_seen_at?: string | null;
+            /** Still Holds */
+            still_holds?: boolean | null;
         };
         /**
          * Provenance
@@ -4054,6 +4410,59 @@ export interface components {
          */
         Severity: 10 | 20 | 30;
         /**
+         * SharpeningReport
+         * @description What Whetstone can and cannot demonstrate about one skill's progress.
+         */
+        SharpeningReport: {
+            /** Caveats */
+            caveats?: string[];
+            /**
+             * Comparable Runs
+             * @description How many runs the delta above is computed over — the size of its evidence.
+             */
+            readonly comparable_runs: number;
+            /** Fixes That Stuck */
+            readonly fixes_that_stuck: number;
+            /**
+             * Gates Passed
+             * @default 0
+             */
+            gates_passed: number;
+            /**
+             * Gates Proving Nothing
+             * @default 0
+             */
+            gates_proving_nothing: number;
+            /**
+             * Gates Run
+             * @default 0
+             */
+            gates_run: number;
+            /** Points */
+            points?: components["schemas"]["TrendPoint"][];
+            /** Proven Fixes */
+            proven_fixes?: components["schemas"]["ProvenFix"][];
+            /**
+             * Recall Delta
+             * @description Change in recall across the longest unbroken comparable run of points, or None.
+             *
+             *     Deliberately not first-to-last: that subtraction spans every seam in the history and is the
+             *     number this module exists to stop people from quoting.
+             */
+            readonly recall_delta: number | null;
+            /** Regressions */
+            regressions?: string[];
+            /** Skill Id */
+            skill_id: string;
+            /** Task Points */
+            task_points?: components["schemas"]["TaskTrendPoint"][];
+            /**
+             * Verdict
+             * @default
+             */
+            verdict: string;
+        };
+        /**
          * Signal
          * @description One thing that happened in a real review, waiting to become an eval case.
          *
@@ -4540,6 +4949,352 @@ export interface components {
             /** Skill Id */
             skill_id: string;
         };
+        /**
+         * TaskCaseRun
+         * @description One case, executed and graded — the task-shaped analogue of `CaseRun`.
+         */
+        TaskCaseRun: {
+            /** Case Id */
+            case_id: string;
+            /**
+             * Error
+             * @default
+             */
+            error: string;
+            outcome: components["schemas"]["VerifyOutcome"];
+            /**
+             * @default {
+             *       "files_written": [],
+             *       "summary": ""
+             *     }
+             */
+            output: components["schemas"]["TaskOutput"];
+            /** Trace */
+            trace?: string[];
+        };
+        /**
+         * TaskCaseSummary
+         * @description One task case as the console lists it, with how it last fared.
+         */
+        TaskCaseSummary: {
+            /**
+             * Files
+             * @default []
+             */
+            files: string[];
+            /** Id */
+            id: string;
+            /**
+             * Instruction
+             * @default
+             */
+            instruction: string;
+            /**
+             * Last Detail
+             * @default
+             */
+            last_detail: string;
+            /** Last Passed */
+            last_passed?: boolean | null;
+            /** Last Score */
+            last_score?: number | null;
+            /**
+             * Tier
+             * @default active
+             * @enum {string}
+             */
+            tier: "active" | "archive";
+            /**
+             * Verify
+             * @default
+             */
+            verify: string;
+        };
+        /**
+         * TaskEvalRequest
+         * @description Run a task skill over its task cases and record the result.
+         *
+         *     The console's whole task surface used to be an error message telling you to go and use the CLI.
+         *     Everything below is the same code path `whetstone eval task` takes — one resolver, one executor,
+         *     one verifier — so the two cannot disagree about what running this skill means.
+         */
+        TaskEvalRequest: {
+            /** Cases */
+            cases?: string[];
+            /**
+             * Keep Workspaces
+             * @default false
+             */
+            keep_workspaces: boolean;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Skill Id */
+            skill_id: string;
+        };
+        /**
+         * TaskGateRequest
+         * @description Gate a task skill's on-disk work against the last committed version.
+         */
+        TaskGateRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Skill Id */
+            skill_id: string;
+            /** Targeted */
+            targeted?: string[];
+            /**
+             * Tolerance
+             * @default 0
+             */
+            tolerance: number;
+        };
+        /**
+         * TaskOutput
+         * @description What the skill produced. The files themselves live in the workspace; this is the manifest.
+         */
+        TaskOutput: {
+            /** Files Written */
+            files_written?: string[];
+            /**
+             * Summary
+             * @default
+             */
+            summary: string;
+        };
+        /**
+         * TaskRunRecord
+         * @description One scoring pass over a skill's task cases.
+         */
+        TaskRunRecord: {
+            /**
+             * Backend
+             * @default
+             */
+            backend: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Duration S
+             * @default 0
+             */
+            duration_s: number;
+            /**
+             * Executor
+             * @default
+             */
+            executor: string;
+            /**
+             * Git Ref
+             * @default
+             */
+            git_ref: string;
+            /**
+             * Guidance Hash
+             * @default
+             */
+            guidance_hash: string;
+            /** Id */
+            id: string;
+            /**
+             * K
+             * @default 1
+             */
+            k: number;
+            /**
+             * Llm Calls
+             * @default 0
+             */
+            llm_calls: number;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Practice Mode
+             * @default false
+             */
+            practice_mode: boolean;
+            /**
+             * Principal
+             * @default
+             */
+            principal: string;
+            score: components["schemas"]["TaskScore"];
+            /**
+             * Skill Hash
+             * @default
+             */
+            skill_hash: string;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Skill Version
+             * @default 1
+             */
+            skill_version: number;
+            /**
+             * Verifier
+             * @default
+             */
+            verifier: string;
+            /**
+             * Workspaces
+             * @default
+             */
+            workspaces: string;
+        };
+        /**
+         * TaskScore
+         * @description A skill's score over task cases.
+         *
+         *     Two numbers rather than one because they answer different questions. `pass_rate` is what a
+         *     person asks — how many did it get right? `mean_score` is what a *gate* needs, because verifiers
+         *     that express partial credit move it before a whole case flips, and a gate that can only see
+         *     whole-case flips is blind to most real progress.
+         */
+        TaskScore: {
+            /** Cases */
+            cases?: components["schemas"]["TaskCaseRun"][];
+            /**
+             * Errors
+             * @description Cases the skill could not be run on at all — never silently scored as failures.
+             */
+            readonly errors: number;
+            /** Mean Score */
+            readonly mean_score: number;
+            /** Pass Rate */
+            readonly pass_rate: number;
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
+        };
+        /**
+         * TaskTrendPoint
+         * @description One task run. Same idea, different numbers — work produced rather than findings reported.
+         */
+        TaskTrendPoint: {
+            /**
+             * Cases
+             * @default 0
+             */
+            cases: number;
+            /** Comparable */
+            readonly comparable: boolean;
+            /**
+             * Corpus Changed
+             * @default false
+             */
+            corpus_changed: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Errors
+             * @default 0
+             */
+            errors: number;
+            /**
+             * Executor Changed
+             * @default false
+             */
+            executor_changed: boolean;
+            /**
+             * Guidance Changed
+             * @default false
+             */
+            guidance_changed: boolean;
+            /** Mean Score */
+            mean_score: number;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /** Pass Rate */
+            pass_rate: number;
+            /** Run Id */
+            run_id: string;
+            /** Skill Version */
+            skill_version: number;
+            /**
+             * Verifier Changed
+             * @default false
+             */
+            verifier_changed: boolean;
+        };
+        /**
+         * TaskView
+         * @description Everything the console needs to drive a task skill.
+         *
+         *     `is_task` is the field that mattered most: without it the console showed a task skill as a
+         *     review skill with an empty corpus — "Eval cases (0)", a Run evals button that 422s, and no hint
+         *     anywhere on the page that the skill is scored a completely different way.
+         */
+        TaskView: {
+            /**
+             * Cases
+             * @default []
+             */
+            cases: components["schemas"]["TaskCaseSummary"][];
+            /**
+             * Executor
+             * @default
+             */
+            executor: string;
+            /**
+             * Is Task
+             * @default false
+             */
+            is_task: boolean;
+            /**
+             * Max Calls
+             * @default 0
+             */
+            max_calls: number;
+            /**
+             * Problem
+             * @default
+             */
+            problem: string;
+            /**
+             * Runs
+             * @default []
+             */
+            runs: components["schemas"]["TaskRunRecord"][];
+            /** Skill Id */
+            skill_id: string;
+            /**
+             * Verifier
+             * @default
+             */
+            verifier: string;
+        };
         /** TierRequest */
         TierRequest: {
             /**
@@ -4564,6 +5319,84 @@ export interface components {
              * @default
              */
             written: string;
+        };
+        /**
+         * TrendPoint
+         * @description One run, and every reason it may not be comparable with the one before it.
+         *
+         *     The flags are the point of this model. A bare (date, recall) pair invites a subtraction that is
+         *     very often meaningless, so each point carries what changed since its predecessor and the
+         *     console renders a seam rather than a line.
+         */
+        TrendPoint: {
+            /**
+             * Cases
+             * @default 0
+             */
+            cases: number;
+            /** Cases Added */
+            cases_added?: string[];
+            /** Cases Removed */
+            cases_removed?: string[];
+            /**
+             * Comparable
+             * @description Whether a delta against the previous point means anything at all.
+             */
+            readonly comparable: boolean;
+            /**
+             * Corpus Changed
+             * @default false
+             */
+            corpus_changed: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Divergence */
+            divergence?: number | null;
+            /**
+             * Errors
+             * @default 0
+             */
+            errors: number;
+            /** F2 */
+            f2: number;
+            /** Fp Rate */
+            fp_rate: number;
+            /**
+             * Guidance Changed
+             * @default false
+             */
+            guidance_changed: boolean;
+            /** Holdout Recall */
+            holdout_recall?: number | null;
+            /**
+             * Judge Changed
+             * @default false
+             */
+            judge_changed: boolean;
+            /**
+             * K
+             * @default 1
+             */
+            k: number;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /** Recall */
+            recall: number;
+            /**
+             * Reviewer Changed
+             * @default false
+             */
+            reviewer_changed: boolean;
+            /** Run Id */
+            run_id: string;
+            /** Skill Version */
+            skill_version: number;
         };
         /**
          * TrialRecord
@@ -4683,6 +5516,28 @@ export interface components {
         VerdictResponse: {
             candidate: components["schemas"]["CandidateCase"];
             record: components["schemas"]["ReviewRecord"];
+        };
+        /**
+         * VerifyOutcome
+         * @description One case's verdict. `score` is what the gate compares; everything else explains it.
+         */
+        VerifyOutcome: {
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /** Metrics */
+            metrics?: {
+                [key: string]: number;
+            };
+            /** Passed */
+            passed: boolean;
+            /**
+             * Score
+             * @default 0
+             */
+            score: number;
         };
         /**
          * WatchState
@@ -4819,6 +5674,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BatchView"];
+                };
+            };
+        };
+    };
+    edit_promoted_api_candidates_batch__skill_id___case_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditPromotedRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromoteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_promoted_api_candidates_batch__skill_id___case_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -5842,6 +6765,138 @@ export interface operations {
             };
         };
     };
+    launch_task_eval_api_jobs_task_eval_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskEvalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_task_eval_job_api_jobs_task_eval_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskEvalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_task_gate_api_jobs_task_gate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskGateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_task_gate_job_api_jobs_task_gate_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskGateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     launch_update_api_jobs_update_post: {
         parameters: {
             query?: never;
@@ -6466,6 +7521,74 @@ export interface operations {
             };
         };
     };
+    edit_case_api_skills__skill_id__cases__case_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CaseEditRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaseWriteResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_case_api_skills__skill_id__cases__case_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+                case_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaseWriteResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     graduate_case_api_skills__skill_id__cases__case_id__graduate_post: {
         parameters: {
             query?: never;
@@ -6688,6 +7811,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Proposal"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sharpening_api_skills__skill_id__sharpening_get: {
+        parameters: {
+            query?: {
+                window?: number;
+            };
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SharpeningReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_tasks_api_skills__skill_id__tasks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskView"];
                 };
             };
             /** @description Validation Error */

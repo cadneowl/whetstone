@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   useSkill,
+  useTasks,
   type CaseSummary,
   type PendingCase,
   type SkillDetail as Detail,
@@ -13,11 +14,23 @@ import { HealthPanel } from '@/components/HealthPanel'
 import { ImproveWorkspace } from '@/components/ImproveWorkspace'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
+import { SharpeningPanel } from '@/components/SharpeningPanel'
 import { SourceBadge } from '@/components/signals'
+import { TasksPanel } from '@/components/TasksPanel'
 
 // The tab keys, in strip order. An unknown `?tab=` value coerces to the first — a blank content
 // pane under a full tab strip reads as a broken page, and a bad link should land somewhere real.
-const TAB_KEYS = ['guidance', 'edit', 'improve', 'cases', 'runs', 'health', 'meta'] as const
+const TAB_KEYS = [
+  'guidance',
+  'edit',
+  'improve',
+  'cases',
+  'tasks',
+  'runs',
+  'sharpening',
+  'health',
+  'meta',
+] as const
 
 function activeTab(raw: string | null): string {
   return raw && (TAB_KEYS as readonly string[]).includes(raw) ? raw : 'guidance'
@@ -27,6 +40,9 @@ export function SkillDetail() {
   const { skillId = '' } = useParams()
   const [params, setParams] = useSearchParams()
   const { data, isLoading, error } = useSkill(skillId)
+  // Asked of every skill: a review skill answers `is_task: false` with everything else empty, so
+  // the tab appears only where there is one and no second round trip is needed to find out.
+  const { data: tasks } = useTasks(skillId)
 
   if (isLoading) return <Loading />
   if (error) return <ErrorNote error={error} />
@@ -34,6 +50,7 @@ export function SkillDetail() {
 
   const { skill, cases, runs } = data
   const tab = activeTab(params.get('tab'))
+  const isTask = tasks?.is_task ?? false
 
   return (
     <div>
@@ -55,7 +72,7 @@ export function SkillDetail() {
             whole loop — you re-run it after every guidance edit — and it used to live behind the
             History tab, which is named for the records it produces rather than the thing it does.
             Here it is reachable from whichever tab you are on, Edit above all. */}
-        <EvalLauncher detail={data} activeTab={tab} />
+        <EvalLauncher detail={data} activeTab={tab} isTask={isTask} />
       </header>
 
       {/* The tab lives in the URL so the inbox can send you straight to the step it named, and
@@ -80,9 +97,13 @@ export function SkillDetail() {
           <Trigger value="edit">Edit</Trigger>
           <Trigger value="improve">Improve</Trigger>
           <Trigger value="cases">Eval cases ({cases.length})</Trigger>
+          {/* Only for a skill that actually has a `task:` step. A tab offering to run task cases on
+              a review skill would be an invitation to a 422. */}
+          {isTask && <Trigger value="tasks">Tasks ({tasks?.cases.length ?? 0})</Trigger>}
           {/* "History", not "Runs": the top nav already has a Runs, and two screens by that name —
               only one of which could start a run — is how someone ends up on the wrong one. */}
           <Trigger value="runs">History ({runs.length})</Trigger>
+          <Trigger value="sharpening">Sharpening</Trigger>
           <Trigger value="health">Health</Trigger>
           <Trigger value="meta">Metadata</Trigger>
         </Tabs.List>
@@ -137,6 +158,16 @@ export function SkillDetail() {
               anything until graduated, but they are scorable now — via "Promoted cases" in the
               header — and a cases tab that omits them names strictly less than the skill is held to. */}
           {data.pending_cases.length > 0 && <PendingCaseList cases={data.pending_cases} />}
+        </Tabs.Content>
+
+        <Tabs.Content value="tasks">
+          <TabIntro>
+            This skill <em>makes</em> something rather than reporting on a change, so it is scored
+            on the work it produces: each case gets a fresh workspace, the skill writes into it, and
+            the case's own <code className="font-mono">verify:</code> command grades the result.
+            There is no judge — the tests either pass or they do not.
+          </TabIntro>
+          <TasksPanel skillId={skill.id} />
         </Tabs.Content>
 
         <Tabs.Content value="runs">
@@ -194,6 +225,17 @@ export function SkillDetail() {
               })}
             </ul>
           )}
+        </Tabs.Content>
+
+        <Tabs.Content value="sharpening">
+          <TabIntro>
+            The question the whole tool exists for: <em>is this skill actually getting sharper?</em>{' '}
+            The ledger comes first because it is the strong evidence — a gate holds the case set and
+            the judge fixed, so a case it recorded going from failing to passing genuinely improved.
+            The chart is the weak evidence: it moves whenever the corpus, the judge or the model
+            moves, and a healthy loop moves the corpus every week.
+          </TabIntro>
+          <SharpeningPanel skillId={skill.id} />
         </Tabs.Content>
 
         <Tabs.Content value="health">
@@ -265,12 +307,23 @@ type FrontScope = 'working' | 'promoted'
  * the working-tree scope there — "how does this skill do on disk" is a different question from "did
  * my staged change help", which the tab answers.
  */
-function EvalLauncher({ detail, activeTab }: { detail: Detail; activeTab: string }) {
+function EvalLauncher({
+  detail,
+  activeTab,
+  isTask,
+}: {
+  detail: Detail
+  activeTab: string
+  isTask: boolean
+}) {
   const pending = detail.pending_cases.length
   const merged = detail.cases.length
   const onImproveTab = activeTab === 'improve'
 
   const scopes: { id: FrontScope; label: string; count: number; hint: string }[] = []
+  // A task skill is scored on work it produces, and the review path refuses it outright — so this
+  // button could only ever 422. Its runs live on the Tasks tab, which knows how to start one.
+  if (isTask) return null
   // Promoted first, so it is the default: a page with pending cases is a page reached straight from
   // promoting them. Suppressed on the Improve tab, which owns promoted-case scoring.
   if (pending > 0 && !onImproveTab)

@@ -221,6 +221,21 @@ class Config(BaseModel):
         return self._resolve(self.gate.dir)
 
     @property
+    def task_runs_dir(self) -> Path:
+        """Where task skills' run records live — beside the review ones, not among them.
+
+        A separate directory rather than a `kind:` field on `RunRecord`, because the two records
+        genuinely differ: one carries findings judged against expectations, the other carries work
+        graded by running it. Mixing them would put two incomparable scores in one listing, which is
+        the thing every seam in the trend exists to prevent.
+        """
+        return self.runs_dir.parent / "task-runs"
+
+    @property
+    def task_gates_dir(self) -> Path:
+        return self.gates_dir.parent / "task-gates"
+
+    @property
     def reviews_dir(self) -> Path:
         return self._resolve(self.reviews.dir)
 

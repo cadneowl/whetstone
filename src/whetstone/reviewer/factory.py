@@ -111,15 +111,7 @@ class ReviewerChoice:
         program that fetches a Jira issue needs the token. It arrives on stdin, which is why the
         model's prompt can be given the redacted view instead.
         """
-        if not declared:
-            return None
-        from whetstone.agent.skilltools import SkillTools
-
-        return SkillTools(
-            declared=list(declared),
-            cwd=skill_dir,
-            context=dict(self.context.values) if self.context else {},
-        )
+        return _skill_tools_for(declared, skill_dir, self.context)
 
 
 @dataclass
@@ -202,6 +194,87 @@ def reviewer_from_step(spec: StepSpec | None, skill_dir: str | Path) -> Reviewer
         wiki_limits=spec.inputs.wiki,
     )
     return ReviewerChoice(reviewer=reviewer, context=resolved, identity=reviewer.identity)
+
+
+@dataclass
+class StepAgent:
+    """An `improve` or `triage` step that runs as an agent, resolved and ready for a client.
+
+    The same three things `AgentPlan` carries, kept as its own type because these steps are not
+    reviewers: nothing about them fits `ReviewerChoice`, whose whole vocabulary is about what will
+    score a skill. `build` produces the runner once a client exists, exactly as the reviewer path
+    does, so the two are resolved on the same schedule and validated by the same code.
+    """
+
+    skill_dir: Path
+    max_steps: int
+    context: ResolvedContext
+    source_root: str | None = None
+    shown: dict[str, Any] | None = None
+    tools: list[Any] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+
+    @property
+    def max_calls(self) -> int:
+        """Model calls one run can cost — the step budget plus the one forced answer."""
+        return self.max_steps + 1
+
+    @property
+    def identity(self) -> str:
+        root = " +source" if self.source_root else ""
+        extra = f" +{len(self.tools)} tool(s)" if self.tools else ""
+        return f"agent: {self.max_steps} steps{root}{extra}"
+
+    def build(self, client: Any) -> Any:
+        from whetstone.agent.step import AgentStep
+
+        return AgentStep(
+            client,
+            source_root=self.source_root,
+            max_steps=self.max_steps,
+            context=self.shown,
+            skill_tools=_skill_tools_for(self.tools, self.skill_dir, self.context),
+        )
+
+
+def step_agent(spec: StepSpec | None, skill_dir: str | Path) -> StepAgent | None:
+    """The agent an `improve` or `triage` step declares, or None when it is a plain prompt step.
+
+    One resolver for every step kind that can run as an agent, so "how does Whetstone run a skill"
+    has a single answer wherever it is asked. The scoring path went through `reviewer_from_step`
+    and the drafting path went through nothing at all, which is how `improve` ended up unable to
+    read the source that `evaluate` had just reviewed against.
+    """
+    if spec is None or not spec.agent.enabled:
+        return None
+    directory = Path(skill_dir)
+    resolved, root, shown, problems = _agent_context(spec, spec.agent.source, directory)
+    return StepAgent(
+        skill_dir=directory,
+        max_steps=spec.agent.max_steps,
+        context=resolved,
+        source_root=root,
+        shown=shown,
+        tools=list(spec.agent.tools),
+        problems=problems,
+    )
+
+
+def _skill_tools_for(declared: list[Any], skill_dir: Path, resolved: ResolvedContext | None) -> Any:
+    """A `SkillTools` dispatcher, or None when the step declared no tools.
+
+    Shared by the reviewer path and the step path so a skill's own tools cannot behave differently
+    depending on which step is running them — the whole point of unifying this.
+    """
+    if not declared:
+        return None
+    from whetstone.agent.skilltools import SkillTools
+
+    return SkillTools(
+        declared=list(declared),
+        cwd=skill_dir,
+        context=dict(resolved.values) if resolved else {},
+    )
 
 
 def _agent_context(

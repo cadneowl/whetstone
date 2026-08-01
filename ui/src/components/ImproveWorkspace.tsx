@@ -115,6 +115,18 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const heldSelected = pending.filter((c) => selected.has(c.id) && c.holdout)
   const targetable = pending.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
 
+  // Corpus cases the last run got wrong — exactly what the no-batch improve step drafts from, so
+  // exactly what a gate on that draft should be made to prove. Holdout cases are excluded: a change
+  // may not claim to fix a case the improve loop was never shown, and the gate refuses such a claim.
+  const failedLastRun = detail.cases
+    .filter((c) =>
+      c.kind === 'should_catch'
+        ? c.last_recall != null && c.last_recall < 1
+        : c.last_fp_rate != null && c.last_fp_rate > 0,
+    )
+    .filter((c) => !c.holdout)
+    .map((c) => c.id)
+
   // A strict subset scores just those cases — the cheap, targeted check. All (or none) selected
   // scores the whole promoted set, so a regression on a case you did not pick still shows.
   // `scoreKey` resets the launch button's cost plan whenever the selection changes.
@@ -378,10 +390,21 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               improve loop never sees).
             </p>
           )}
+          {/* Without a batch this used to send no targets at all, so the commonest sharpening loop
+              — improve from what the last run failed, then gate — proved only that nothing broke.
+              A gate that claims nothing is a rot guard; naming the cases is what makes it evidence
+              of an improvement. */}
+          {!hasBatch && failedLastRun.length > 0 && (
+            <p className="mb-2 text-xs text-muted">
+              Targeting the {failedLastRun.length} case(s) the last run failed — they must pass, so
+              this gate proves the change fixed something rather than merely broke nothing.
+            </p>
+          )}
           <div className="flex flex-wrap items-center gap-3">
             <LaunchButton
+              key={(hasBatch ? targetable : failedLastRun).join(',')}
               kind="gate"
-              request={{ skill_id: skillId, targeted: targetable }}
+              request={{ skill_id: skillId, targeted: hasBatch ? targetable : failedLastRun }}
               label="Run the gate"
             />
             {proposal?.verdict.can_propose ? (

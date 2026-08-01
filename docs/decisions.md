@@ -734,6 +734,8 @@ files and optionally a change — enough for every task described so far), task 
 and mining task cases from production signal. Each needs a real skill to design against rather than
 a guess, and guessing here is what produced the wrong abstraction the first time.
 
+> Superseded in part by ADR-027: task cases now have a console surface. The other two hold.
+
 ## ADR-025 — An agent that fails must fail visibly, and one that succeeds must be affordable
 
 **Context.** ADR-023 made a skill folder something Whetstone *runs*. A code review of that work
@@ -795,3 +797,50 @@ quietly leaving out of every review.
 **What is deliberately not built.** Driving task skills from the console: the review console is
 built around recall/fp_rate and a run drill-down, and giving task runs a first-class surface is a
 feature, not a fix. The CLI runs them and both the console and the CLI refuse to pretend otherwise.
+
+> Superseded by ADR-027, which builds that surface.
+
+## ADR-027 — Measure the sharpening, and give task skills the same instruments
+
+**Context.** Whetstone's purpose is sharpening skills, and nothing in it could say whether that was
+happening. The console showed one run and one gate; neither is an answer, because a run is a
+snapshot and a gate is a verdict about a single edit. Separately, task skills were runnable only
+from the CLI, so half the product's surface treated them as skills that did not exist.
+
+**The obvious trend line is a trap, so the report says what it is resting on.** Plotting recall over
+time and reading the slope is wrong three ways. The corpus changes underneath it — and the healthy
+loop promotes exactly the cases the skill got *wrong*, so a skill doing its job shows **falling**
+recall while a skill whose corpus was frozen a month ago shows a flattering flat line. The judge
+changes, which re-scores history. The reviewer changes, which moves the number with no guidance
+edit at all.
+
+So `sharpening.py` reports two things and is explicit that they are not the same strength of
+evidence. The **trend** is weak: the score over time, cut into comparable segments, with every seam
+named, and a delta computed only across the longest unbroken stretch — never first-to-last. The
+**ledger** is strong: a gate holds the case set, the judge and the reviewer fixed across both sides,
+so a case it recorded going from failing to passing genuinely improved and no corpus churn explains
+it away. Each proven fix is then re-checked against the newest run — `still passes`, `REGRESSED`, or
+`not re-measured since`. That third state is deliberate: a ledger that counted a March fix forever
+would be a monument to an April regression nobody noticed.
+
+The verdict is written to be quotable and to be *true*, which mostly means declining to claim
+sharpening on evidence that does not support it. A skill with gates but no proven fixes is told
+plainly that what is proven is that it has not rotted.
+
+**Task skills get the same instruments, not lesser ones.** Task runs and task gates are now
+recorded (`taskruns.py`), so a task skill has a history, a trend and a C6 verdict like any other.
+Two things fell out of building it. `gate_tasks` computed which targeted cases a change fixed and
+then threw the answer away, so a task gate could never demonstrate an improvement — the same disease
+diagnosed for review gates, in a second place. And the C6 verdict is now one function
+(`gates.verdict_over`) over a minimal `GateLike` shape, because two copies of a publish rule is how
+a task skill quietly ends up held to a weaker standard than a review one.
+
+Records name **two** instruments, not one: the executor that produced the work and the verifier that
+graded it. A task score without both is uninterpretable — the same skill graded by a different
+`verify:` command is a different measurement, exactly as a review score judged by a different judge
+is — so a changed grader breaks a task trend the way a changed judge breaks a review one.
+
+**What is deliberately not built.** A `TaskGateRecord` that fits in the review `GateStore`: five of
+`GateResult`'s nine fields are meaningful for a task gate and four are not, and putting a recall of
+zero next to a task score would be a number that was never measured sitting in front of the person
+deciding whether to ship.

@@ -22,14 +22,15 @@ Delete `workspace/` (or just re-run without `--keep`) to start over.
 
 ## What you get
 
-Three skills, parked at three different points in the loop — which is also the order the inbox
-puts them in:
+Four skills, parked at different points in the loop — which is also the order the inbox puts them
+in:
 
 | skill | state | next action |
 |---|---|---|
 | `python-service-errors` | three signals mined from merge requests, nobody has ruled on them | **triage** |
 | `sql-migration-safety` | never measured | **score** |
 | `rust-error-handling` | measured, failing 3 of 4 cases | **improve** |
+| `go-timeout-guard` | an **agent** skill, missing the one case it exists for | **improve** |
 
 Plus one signal that matches no skill's `triggers.paths` (a Go file), so the unrouted counter has
 something in it, and one review of a live merge request with two findings and no rulings yet.
@@ -54,6 +55,33 @@ check describe something that actually happened.
    Promote one and watch it land in `eval_cases/` as a case the gate will enforce from then on.
 6. **Reviews.** The skill's own output on a live merge request, two findings, neither ruled on. Mark
    one wrong and it mints a triage candidate — the loop closing from the other direction.
+
+## The one that matters: sharpening a skill *as it actually runs*
+
+`go-timeout-guard` sets `agent: enabled`, so Whetstone **runs the folder** rather than pasting it
+into a prompt — `SKILL.md` is the instruction set, `references/timeouts.md` is fetched on demand with
+`read_skill_file`, and the skill answers by calling `submit_findings`. That is the shape a skill has
+inside a real agent runtime, and its `evaluate`, `improve` *and* `triage` steps all run that way. A
+skill scored as an agent but improved through one-shot prompts would be tuned against a reviewer
+that only exists inside Whetstone.
+
+The whole loop, on one skill, in about a minute:
+
+1. **Triage → `mr-1918-background-context`.** A real review outcome the skill missed. *draft it*
+   reads "demo-stub · 4 calls" — the triage step is an agent too, and the banner prices it.
+   **Promote**.
+2. **Its Improve tab → Score the promoted batch.** The plan says *up to 7 model calls per review
+   (6 steps + one forced answer)*. Afterwards the run's trajectory reads
+   `2× read_skill_file(references/timeouts.md)` — the agent went and read its own page.
+3. **Improve from selected.** The drafter is shown the promoted case's diff and adds the rule the
+   guidance was missing: v1 states the principle (*"every outbound call needs a deadline"*) and
+   never names `context.Background()`, which is exactly the sort of rule that reads well and catches
+   nothing.
+4. **Apply to disk → Run the gate.** Base misses both Go cases; the candidate catches them. **PASS**.
+5. **Sharpening tab.** *"sharpening, demonstrably: 1 case went from failing to passing under a gate
+   that held the corpus and the judge fixed."* Note what it refuses to say: recall over the two runs
+   went nowhere, because promoting a case the skill got wrong makes the line fall. The ledger is the
+   evidence; the chart is not.
 
 Everything that touches the model shows what it will cost before it starts, and the banner is
 honest about this endpoint: *demo-stub — Whetstone cannot tell whether this bills*. It cannot,
@@ -84,6 +112,18 @@ What it keys on, so the reactions are predictable rather than magic:
 | `S1` | `CREATE INDEX` without `CONCURRENTLY` | `concurrently` / `lock` / `index` |
 | `S2` | `ADD COLUMN … NOT NULL` without `DEFAULT` | `not null` / `default` / `backfill` |
 | `S3` | `DROP COLUMN` | `drop column` / `still reads` / `expand` |
+| `G1` | `context.Background()` | `context.background` |
+
+`G1` names the *construct* rather than the topic on purpose: it is what makes `go-timeout-guard`
+miss until the improve step adds the specific rule, which is the whole shape of the walkthrough
+above.
+
+**It calls tools.** When Whetstone runs a skill as an agent the request carries a `tools` array, and
+the stub answers it as a real backend would: it reads a reference page first, then calls the
+terminal tool (`submit_findings`, `submit_guidance`, `submit_expectation`). Pages it reads are
+folded into the guidance it reviews with — so a rule that lives on a page fires *because* the agent
+fetched it, and the harness is doing something rather than going through the motions. It cannot do
+task work (`submit_work`); it says so instead of inventing a summary a real test run would fail.
 
 Rules marked test-exempt (`R1`) go quiet in test code — `*_test.rs`, `tests/`, anything containing
 `#[test]` — but only once the guidance says test code is exempt: it needs a test token (`test code`,

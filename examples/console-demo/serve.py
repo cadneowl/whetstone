@@ -99,12 +99,20 @@ def main() -> int:
 
 
 _WHAT_TO_TRY = """
-Start on the inbox. Three skills, three different next actions:
+Start on the inbox. Four skills, four different next actions:
 
-  1. rust-error-handling is failing 3 of 4 cases. Draft a change, read the diff, stage it,
-     run the gate, and watch Propose MR turn on once the gate passes.
+  1. rust-error-handling is failing 3 of 4 cases. Draft a change, read the diff, apply it,
+     run the gate, and watch the proposal turn green once the gate passes.
   2. sql-migration-safety has never been measured. Run evals and see what it misses.
   3. python-service-errors has three mined signals waiting. Triage them into eval cases.
+  4. go-timeout-guard is an AGENT skill: `agent: enabled`, so Whetstone runs the folder the
+     way real code would — SKILL.md as instructions, references/timeouts.md fetched on demand,
+     the answer given by calling a tool. Its evaluate, improve and triage steps all run that
+     way, so the skill you sharpen is the skill that ships.
+
+     The whole loop on one skill: Triage -> promote mr-1918-background-context ->
+     its Improve tab -> Score the promoted batch (watch the trajectory say what it read) ->
+     Improve from selected -> Apply -> Run the gate -> Sharpening tab.
 
 Every launch shows what it will cost before it starts. Nothing here bills, and the banner
 says so honestly: it reports the endpoint as one it cannot vouch for.

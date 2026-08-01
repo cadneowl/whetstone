@@ -1,5 +1,14 @@
-import { Link, useParams } from 'react-router-dom'
-import { useCase } from '@/api/client'
+import { useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import {
+  useCase,
+  useConsoleConfig,
+  useDeleteCase,
+  useEditCase,
+  type CaseDetail as CaseDetailData,
+  type CaseTier,
+  type EvalKind,
+} from '@/api/client'
 import { DiffView, type Overlay } from '@/components/diff/DiffView'
 import {
   Badge,
@@ -15,6 +24,9 @@ import {
 export function CaseDetail() {
   const { skillId = '', caseId = '' } = useParams()
   const { data, isLoading, error } = useCase(skillId, caseId)
+  const { data: config } = useConsoleConfig()
+  const [editing, setEditing] = useState(false)
+  const readOnly = Boolean(config?.read_only)
 
   if (isLoading) return <Loading />
   if (error) return <ErrorNote error={error} />
@@ -87,7 +99,25 @@ export function CaseDetail() {
 
         <aside className="space-y-5">
           <section>
-            <h2 className="mb-2 text-xs tracking-wide text-muted uppercase">Expectations</h2>
+            <div className="mb-2 flex items-baseline justify-between">
+              <h2 className="text-xs tracking-wide text-muted uppercase">Expectations</h2>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => setEditing(!editing)}
+                  className="text-xs text-accent hover:underline"
+                >
+                  {editing ? 'close' : 'edit'}
+                </button>
+              )}
+            </div>
+            {editing && (
+              <CaseEditor
+                skillId={skillId}
+                evalCase={evalCase}
+                onDone={() => setEditing(false)}
+              />
+            )}
             <ul className="space-y-2">
               {evalCase.expect.map((e) => (
                 <li key={e.id} className="rounded-lg border border-line bg-surface px-3 py-2">
@@ -134,6 +164,135 @@ export function CaseDetail() {
           </section>
         </aside>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Correct or remove a case that has already graduated.
+ *
+ * A case became permanent the moment it entered the corpus: the console could show it, flip its
+ * tier, and nothing else. But the wording of an expectation *is* the measurement — a typo in one
+ * is a wrong measurement, and "archive it" is not a fix, it is a smaller wrong measurement.
+ *
+ * Both actions change `skill_hash`, which retracts the gate verdict. Said on the panel rather than
+ * left to be discovered when Propose refuses.
+ */
+function CaseEditor({
+  skillId,
+  evalCase,
+  onDone,
+}: {
+  skillId: string
+  evalCase: CaseDetailData['case']
+  onDone: () => void
+}) {
+  const first = evalCase.expect[0]
+  const edit = useEditCase(skillId, evalCase.id)
+  const remove = useDeleteCase(skillId)
+  const navigate = useNavigate()
+  const [semantic, setSemantic] = useState(first?.semantic ?? '')
+  const [kind, setKind] = useState<EvalKind>(evalCase.kind)
+  const [tier, setTier] = useState<CaseTier>(evalCase.tier ?? 'active')
+  const [confirming, setConfirming] = useState(false)
+
+  return (
+    <div className="mb-3 space-y-2 rounded-lg border border-accent/30 bg-accent/5 p-3">
+      <label className="block text-xs text-muted">
+        Expectation — the ground truth every finding is judged against
+        <textarea
+          value={semantic}
+          onChange={(e) => setSemantic(e.target.value)}
+          rows={4}
+          className="mt-1 w-full rounded border border-line bg-canvas px-2 py-1 text-sm text-ink outline-none focus:border-accent/60"
+        />
+      </label>
+      <div className="flex flex-wrap items-end gap-3 text-xs text-muted">
+        <label>
+          Kind
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as EvalKind)}
+            className="ml-2 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          >
+            <option value="should_catch">should catch</option>
+            <option value="should_not_flag">should not flag</option>
+          </select>
+        </label>
+        <label title="Archive keeps the case as regression insurance but draws it at low weight">
+          Tier
+          <select
+            value={tier}
+            onChange={(e) => setTier(e.target.value as CaseTier)}
+            className="ml-2 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          >
+            <option value="active">active</option>
+            <option value="archive">archive</option>
+          </select>
+        </label>
+        <span className="ml-auto flex gap-2">
+          <button
+            type="button"
+            disabled={edit.isPending || !semantic.trim()}
+            onClick={() =>
+              edit.mutate(
+                {
+                  semantic,
+                  kind,
+                  tier,
+                  severity_min: first?.severity_min ?? null,
+                  line_range: first?.where.line_range ?? null,
+                },
+                { onSuccess: onDone },
+              )
+            }
+            className="rounded border border-accent/50 px-2 py-1 text-accent transition-colors hover:bg-accent/10 disabled:opacity-40"
+          >
+            {edit.isPending ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" onClick={onDone} className="px-2 py-1 hover:text-ink">
+            Cancel
+          </button>
+        </span>
+      </div>
+      <p className="text-xs text-warn">
+        Editing changes what this skill is measured against, so the gate verdict is retracted —
+        re-gate before proposing.
+      </p>
+      <div className="flex items-center gap-2 border-t border-line pt-2 text-xs">
+        {confirming ? (
+          <>
+            <span className="text-warn">
+              Remove this case from the corpus? Archive instead if it is still evidence.
+            </span>
+            <button
+              type="button"
+              disabled={remove.isPending}
+              onClick={() =>
+                remove.mutate(evalCase.id, {
+                  onSuccess: () => navigate(`/skills/${encodeURIComponent(skillId)}`),
+                })
+              }
+              className="rounded border border-bad/50 px-2 py-0.5 text-bad transition-colors hover:bg-bad/10 disabled:opacity-40"
+            >
+              {remove.isPending ? 'Removing…' : 'Yes, remove'}
+            </button>
+            <button type="button" onClick={() => setConfirming(false)} className="text-muted">
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirming(true)}
+            className="text-muted transition-colors hover:text-bad"
+          >
+            Remove this case from the corpus
+          </button>
+        )}
+      </div>
+      {edit.error != null && <ErrorNote error={edit.error} />}
+      {remove.error != null && <ErrorNote error={remove.error} />}
     </div>
   )
 }
