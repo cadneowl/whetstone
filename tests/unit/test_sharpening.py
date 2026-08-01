@@ -319,6 +319,61 @@ def test_a_widening_holdout_gap_is_called_out(tmp_path: Path) -> None:
     assert any("its own exam" in c for c in report.caveats)
 
 
+def test_a_holdout_too_small_to_read_does_not_accuse_the_guidance(tmp_path: Path) -> None:
+    """The alarm used to fire at `divergence > 0.2` regardless of how few cases produced it.
+
+    Three holdout cases move in thirds, so a gap of 0.23 is indistinguishable from one case landing
+    either way. Calling that "the guidance learning its own exam" is an accusation the evidence
+    cannot support — and this report is the one an operator consults to decide whether the loop is
+    working at all.
+    """
+    _run(tmp_path / "runs", at=AT, caught={"a": False, "b": True})
+    _run(
+        tmp_path / "runs",
+        at=AT + timedelta(hours=1),
+        caught={"a": True, "b": True},
+        holdout=HoldoutReport(
+            fraction=0.2,
+            train_cases=12,
+            train_recall=0.90,
+            train_fp_rate=0.0,
+            holdout_cases=3,
+            holdout_recall=0.67,
+            holdout_fp_rate=0.0,
+        ),
+    )
+    report = _report(tmp_path)
+
+    assert not any("its own exam" in c for c in report.caveats)
+    # But not silence either: recall rose, and nothing here can yet say whether that generalises.
+    assert report.recall_delta is not None and report.recall_delta > 0
+    unconfirmed = [c for c in report.caveats if "unconfirmed" in c]
+    assert unconfirmed, report.caveats
+    assert "graduating ~7 more case(s)" in unconfirmed[0]
+
+
+def test_a_run_with_no_holdout_at_all_says_the_alarm_is_not_connected(tmp_path: Path) -> None:
+    """A skill whose every case is learnable-from has no overfitting alarm, and should be told so
+    rather than left reading a rising line as though something were checking it."""
+    _run(tmp_path / "runs", at=AT, caught={"a": False})
+    _run(
+        tmp_path / "runs",
+        at=AT + timedelta(hours=1),
+        caught={"a": True},
+        holdout=HoldoutReport(
+            fraction=0.2,
+            train_cases=6,
+            train_recall=1.0,
+            train_fp_rate=0.0,
+            holdout_cases=0,
+            holdout_recall=0.0,
+            holdout_fp_rate=0.0,
+        ),
+    )
+    report = _report(tmp_path)
+    assert any("No case was held out" in c for c in report.caveats), report.caveats
+
+
 # --- gates that prove nothing -----------------------------------------------------
 
 

@@ -43,6 +43,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, computed_field
 
 from whetstone.core.gate import GateConfig
+from whetstone.domain.score import DIVERGENCE_FLOOR
 from whetstone.gates import GateStore
 from whetstone.runs import RunStore
 from whetstone.taskruns import TaskGateStore, TaskRunStore
@@ -77,6 +78,13 @@ class TrendPoint(BaseModel):
     # memorization rather than sharpening — which looks identical to progress on the aggregate.
     holdout_recall: float | None = None
     divergence: float | None = None
+    # How many cases that gap is measured over, and what the run's own report made of it. Carried
+    # rather than recomputed here: whether an alarm is sounding has one definition
+    # (`HoldoutReport.diverging`), and a second opinion about it is how two thresholds — 0.1 in the
+    # console and 0.2 here — came to disagree about the same number in the first place.
+    holdout_cases: int | None = None
+    holdout_reading: str = ""
+    diverging: bool = False
 
     # --- seams: each is a reason not to subtract this point from the previous one ---
     judge_changed: bool = False
@@ -288,6 +296,9 @@ def _review_points(skill_id: str, runs: RunStore, window: int) -> list[TrendPoin
                 errors=0,
                 holdout_recall=holdout.holdout_recall if holdout else None,
                 divergence=holdout.divergence if holdout else None,
+                holdout_cases=holdout.holdout_cases if holdout else None,
+                holdout_reading=holdout.reading if holdout else "",
+                diverging=bool(holdout and holdout.diverging),
                 judge_changed=before is not None and s.judge_hash != before.judge_hash,
                 reviewer_changed=before is not None and s.model != before.model,
                 corpus_changed=previous_cases is not None
@@ -420,11 +431,24 @@ def _caveats(report: SharpeningReport) -> list[str]:
                 f"loop looks like — read the ledger, not the line."
             )
     latest = points[-1] if points else None
-    if latest and latest.divergence is not None and latest.divergence > 0.2:
+    if latest and latest.diverging:
+        notes.append(f"On the latest run, {latest.holdout_reading}.")
+    elif latest and latest.holdout_cases is not None and not latest.diverging:
+        # The unarmed case is worth saying only where it undercuts a claim being made above: a
+        # trend that is climbing is a claim about the skill, and a holdout too small to read is
+        # the reason nobody can yet tell whether that claim is about capability or about memory.
+        # Silence here was the old behaviour, and it read as endorsement.
+        rising = report.recall_delta is not None and report.recall_delta > 0
+        if rising and latest.divergence is not None and latest.divergence >= DIVERGENCE_FLOOR:
+            notes.append(
+                f"Recall is up across this window, and {latest.holdout_reading}. Treat the rise "
+                f"as unconfirmed until then."
+            )
+    if latest and latest.holdout_cases == 0:
         notes.append(
-            f"train recall leads holdout by {latest.divergence:.2f} on the latest run. The improve "
-            f"loop never sees holdout cases, so a gap this wide is the guidance learning its own "
-            f"exam rather than the pattern behind it."
+            "No case was held out of the improve loop on the latest run, so nothing here "
+            "distinguishes a skill that generalises from one that has memorised its corpus. "
+            "Graduating cases is what arms it."
         )
     if latest and latest.errors:
         notes.append(

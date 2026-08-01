@@ -60,9 +60,6 @@ function Section({
   )
 }
 
-/** Matches the drill-down's alarm: a run whose train side leads holdout by this much is suspect. */
-const DIVERGENCE_ALARM = 0.1
-
 function ScoreSection({ health }: { health: SkillHealth }) {
   const s = health.score
   if (!s) {
@@ -99,8 +96,8 @@ function ScoreSection({ health }: { health: SkillHealth }) {
             <span className="text-xs text-muted">({h.holdout_cases})</span>
           </span>
           <span className="tabular text-muted">divergence {score(h.divergence, 2)}</span>
-          {h.divergence > DIVERGENCE_ALARM && (
-            <Badge tone="warn" title="Train runs well ahead of holdout — the guidance may be memorizing its exam">
+          {h.diverging && (
+            <Badge tone="warn" title={h.reading}>
               overfitting?
             </Badge>
           )}
@@ -109,6 +106,12 @@ function ScoreSection({ health }: { health: SkillHealth }) {
         <p className="mt-2 border-t border-line pt-2 text-xs text-muted italic">
           No holdout cases scored in this run.
         </p>
+      )}
+      {/* The reading, not a number: on this panel the useful thing is whether the alarm can fire
+          at all. A gap the holdout is too small to resolve reads here as what it is, along with
+          how many more graduated cases would make it readable. */}
+      {h && h.holdout_cases > 0 && (
+        <p className="mt-2 text-xs text-muted">{h.reading}.</p>
       )}
     </Section>
   )

@@ -2834,13 +2834,42 @@ export interface components {
          *     two numbers answer different questions: train recall is "did the drafting work?", holdout
          *     recall is "did the *skill* get better, or just better at its own exam?". A widening gap is
          *     the earliest signal that guidance is memorizing cases rather than learning patterns.
+         *
+         *     Whether that gap can be *read* is a separate question from what it is, and it used not to be
+         *     asked. Two call sites compared `divergence` against two different constants, and both fired on
+         *     a holdout of one case: a single unseen case failing put "diverging — possible overfitting"
+         *     across the console and "the guidance is learning its own exam" into the sharpening report. One
+         *     case is the whole of a one-case holdout's recall, so that gap was never a measurement. This
+         *     module already declines to report at all over *zero* holdout cases — "noise wearing the costume
+         *     of a number" — and the same argument does not stop at zero.
          */
         HoldoutReport: {
+            /**
+             * Conclusive
+             * @description Whether this holdout can support a fine reading *in either direction*.
+             *
+             *     The mirror of the alarm, and the half that is easy to forget. Suppressing a false warning
+             *     while leaving the all-clear in place just swaps one unearned verdict for another: a
+             *     one-case holdout that happens to pass cannot show that a skill "performs on cases the
+             *     improve loop has never seen" any more than a one-case failure shows overfitting. Below the
+             *     resolution needed to express the floor, this holdout says nothing either way — except in
+             *     the one case a small sample genuinely can carry, an overwhelming gap, which `diverging`
+             *     still reports at any size.
+             */
+            readonly conclusive: boolean;
             /**
              * Divergence
              * @description Train minus holdout recall — positive and growing means overfitting.
              */
             readonly divergence: number;
+            /**
+             * Diverging
+             * @description Whether the gap is both large enough to matter and larger than this holdout can fake.
+             *
+             *     The single definition of the overfitting alarm, so the skills index, the status page and
+             *     the sharpening report cannot disagree about whether one is sounding.
+             */
+            readonly diverging: boolean;
             /** Fraction */
             fraction: number;
             /** Holdout Cases */
@@ -2849,12 +2878,41 @@ export interface components {
             holdout_fp_rate: number;
             /** Holdout Recall */
             holdout_recall: number;
+            /**
+             * Reading
+             * @description What this holdout is currently able to tell you — including "not yet, and here is why".
+             *
+             *     A silenced alarm with nothing in its place is its own kind of dishonest: the operator is
+             *     left reading a rising train score with no idea that the number meant to check it is not
+             *     yet connected. So every unarmed state names what would arm it, which is also the thing
+             *     that actually sharpens a skill — more graduated cases.
+             */
+            readonly reading: string;
+            /**
+             * Resolution
+             * @description The smallest recall gap this holdout can express: one case is 1/n of its score.
+             *
+             *     Derived rather than configured, and it is why there is no minimum corpus size anywhere in
+             *     this design. A flat cutoff would silence a holdout of four cases that all failed — which is
+             *     a real and alarming signal — while a resolution scales: four cases can report a gap of 0.75
+             *     and cannot report one of 0.10, which is exactly the truth about four cases.
+             */
+            readonly resolution: number;
             /** Train Cases */
             train_cases: number;
             /** Train Fp Rate */
             train_fp_rate: number;
             /** Train Recall */
             train_recall: number;
+            /**
+             * Unreadable
+             * @description A gap worth caring about that this holdout is too small to confirm.
+             *
+             *     Its own state rather than a client-side subtraction, so no surface has to keep a copy of
+             *     the floor to work out which reading to show. This is the one an operator acts on: the alarm
+             *     is not silent because all is well, it is silent because it cannot hear.
+             */
+            readonly unreadable: boolean;
         };
         /** ImproveRequest */
         ImproveRequest: {
@@ -5363,6 +5421,11 @@ export interface components {
             /** Divergence */
             divergence?: number | null;
             /**
+             * Diverging
+             * @default false
+             */
+            diverging: boolean;
+            /**
              * Errors
              * @default 0
              */
@@ -5376,6 +5439,13 @@ export interface components {
              * @default false
              */
             guidance_changed: boolean;
+            /** Holdout Cases */
+            holdout_cases?: number | null;
+            /**
+             * Holdout Reading
+             * @default
+             */
+            holdout_reading: string;
             /** Holdout Recall */
             holdout_recall?: number | null;
             /**

@@ -319,10 +319,7 @@ function SkillRow({ skill }: { skill: SkillSummary }) {
               FP {score(skill.latest.fp_rate, 2)}
             </span>
             {skill.holdout && (
-              <span
-                className="tabular text-xs text-muted"
-                title="holdout recall — the slice the improve loop never sees"
-              >
+              <span className="tabular text-xs text-muted" title={skill.holdout.reading}>
                 hold {score(skill.holdout.holdout_recall, 2)}
               </span>
             )}

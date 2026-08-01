@@ -77,20 +77,27 @@ export function SkillsIndex() {
                       <span className="tabular" title="false-positive rate">
                         FP {score(skill.latest.fp_rate, 2)}
                       </span>
-                      {/* The overfitting light: the latest run's train-vs-holdout pair. Green
-                          means the skill performs on cases the improve loop has never seen;
-                          a warn badge means the sharpening may be memorization. */}
+                      {/* The overfitting light: the latest run's train-vs-holdout pair. The
+                          reading is the server's — `HoldoutReport.reading` — so this badge, the
+                          status page and the sharpening report cannot disagree about whether an
+                          alarm is sounding, and none of them fires on a gap smaller than the
+                          holdout can resolve. */}
                       {skill.holdout && (
-                        <span
-                          className="tabular text-xs text-muted"
-                          title={`train ${score(skill.holdout.train_recall, 2)} vs holdout ${score(skill.holdout.holdout_recall, 2)} — the slice the improve loop never sees`}
-                        >
+                        <span className="tabular text-xs text-muted" title={skill.holdout.reading}>
                           hold {score(skill.holdout.holdout_recall, 2)}
                         </span>
                       )}
-                      {skill.holdout && skill.holdout.divergence > 0.1 && (
-                        <Badge tone="warn" title="Train runs well ahead of holdout — possible overfitting">
+                      {skill.holdout?.diverging && (
+                        <Badge tone="warn" title={skill.holdout.reading}>
                           diverging
+                        </Badge>
+                      )}
+                      {/* Not an alarm and not silence: a holdout too small to read is a reason the
+                          rising line above is unconfirmed, and saying so is what points at the
+                          fix — graduate more cases. */}
+                      {skill.holdout?.unreadable && (
+                        <Badge tone="neutral" title={skill.holdout.reading}>
+                          too few to call
                         </Badge>
                       )}
                       <span className="text-accent">
