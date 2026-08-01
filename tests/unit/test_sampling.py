@@ -96,6 +96,29 @@ def _spec(**sample: object) -> object:
     )
 
 
+# Fields the two resolvers below are proven to carry from a skill's `step.yaml` to a run.
+CARRIED_SAMPLE_FIELDS = {"max_cases", "seed", "stratify", "holdout_fraction", "archive_weight"}
+
+
+def test_every_sample_policy_field_is_proven_to_reach_a_run() -> None:
+    """`_sample` and `_sample_policy` rebuilt this model from three of its fields.
+
+    Nothing failed when it grew to five: the object still validated, and `holdout_fraction` and
+    `archive_weight` simply arrived at their defaults on every run in both the console and the CLI.
+    A sixth field would land the same way, so the guard is over `model_fields` rather than over the
+    fields anyone happened to think of.
+    """
+    from whetstone.steps import SamplePolicy as Policy
+
+    uncovered = set(Policy.model_fields) - CARRIED_SAMPLE_FIELDS
+    assert not uncovered, (
+        f"{sorted(uncovered)} is new on SamplePolicy and no test proves it survives "
+        f"`_sample`/`_sample_policy`. Both rebuild the policy, so a field they do not name is "
+        f"reset to its default before any run can read it — silently, which is how "
+        f"holdout_fraction spent its whole life doing nothing."
+    )
+
+
 def test_a_configured_holdout_fraction_reaches_the_run() -> None:
     """The knob was inert on every scoring path, in both the console and the CLI.
 

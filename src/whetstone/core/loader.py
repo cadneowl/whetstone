@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from whetstone.caseindex import INDEX_DIR, CaseIndexError, load_index
 from whetstone.domain.change import parse_unified_diff
@@ -220,13 +220,8 @@ def _load_eval_case(case_dir: Path, skill_id: str) -> EvalCase:
         head_ref=str(raw.get("head_ref", "")),
     )
 
-    expectations = [_load_expectation(e) for e in raw.get("expect", [])]
-    prov_raw = raw.get("provenance", {})
-    provenance = Provenance(
-        source=str(prov_raw.get("source", "manual")),
-        ref=prov_raw.get("ref"),
-        human_signal=prov_raw.get("human_signal"),
-    )
+    expectations = [_load_expectation(e, case_dir) for e in raw.get("expect", [])]
+    provenance = _validated(Provenance, raw.get("provenance", {}), case_dir, "provenance")
     return EvalCase(
         id=str(raw["id"]),
         kind=raw["kind"],
@@ -241,13 +236,28 @@ def _load_eval_case(case_dir: Path, skill_id: str) -> EvalCase:
     )
 
 
-def _load_expectation(e: dict[str, Any]) -> Expectation:
-    where = e["where"]
-    line_range = where.get("line_range")
-    region = Region(
-        path=where["path"],
-        line_range=tuple(line_range) if line_range else None,
-    )
+def _validated[M: BaseModel](model: type[M], raw: Any, case_dir: Path, field: str) -> M:
+    """Build `model` from the whole of `raw`, rather than from the fields someone remembered.
+
+    Enumerating fields at a load boundary loses data the moment the model grows one, and loses it
+    in silence: the object still validates, the types still check, and the value that was on disk
+    is simply not there. It has cost this corpus three fields — `tier`, `partition`, and
+    `semantic_drafted_by`, which `promote.py` writes into every LLM-drafted case and which nothing
+    has ever read back.
+
+    Where the file's shape *is* the model's shape, as it is for `Provenance` and `Region`, there is
+    no reason to enumerate and this closes the hole permanently. `EvalCase` and `Expectation` are
+    genuinely different — a diff filename is not a `CodeChange`, a severity name is not a
+    `Severity` — so those stay explicit and are guarded by a coverage test instead.
+    """
+    try:
+        return model.model_validate(raw or {})
+    except ValidationError as exc:
+        raise SkillLoadError(f"{case_dir}: invalid {field}: {exc}") from exc
+
+
+def _load_expectation(e: dict[str, Any], case_dir: Path) -> Expectation:
+    region = _validated(Region, e.get("where", {}), case_dir, "expectation region")
     sev = e.get("severity_min")
     return Expectation(
         id=str(e["id"]),
