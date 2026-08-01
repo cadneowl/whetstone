@@ -1,0 +1,7 @@
+diff --git a/app/worker.py b/app/worker.py
+--- a/app/worker.py
++++ b/app/worker.py
+@@ -1,2 +1,3 @@
+ def run_batch():
++    ledger = open_ledger()
+     return None

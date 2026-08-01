@@ -152,7 +152,14 @@ def build_llm_client(
     if backend.kind == "anthropic":
         from whetstone.llm.anthropic_client import AnthropicClient
 
-        return AnthropicClient(backend.model)
+        # Forwarded, not dropped: an Anthropic-shaped gateway is reached by base URL, and silently
+        # discarding it would send billed traffic to the public endpoint instead. With neither set
+        # the SDK falls back to its own environment lookup, which is the unchanged default path.
+        return AnthropicClient(
+            backend.model,
+            base_url=backend.base_url,
+            api_key=api_key or _resolve_key(api_key_env, backend.preset),
+        )
 
     from whetstone.llm.openai_client import OpenAICompatibleClient
 
@@ -203,7 +210,10 @@ def resolve_backend(
             name=name,
             kind="anthropic",
             model=resolved_model or DEFAULT_MODEL,
-            base_url=None,
+            # Kept when one was given: Claude is reached directly *or* through a gateway that
+            # speaks the Anthropic API, and the run record has to say which. None means the
+            # public endpoint, exactly as before.
+            base_url=resolved_base,
             preset=preset,
         )
 

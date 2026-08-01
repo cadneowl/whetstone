@@ -26,7 +26,7 @@ import json
 import re
 import subprocess
 from collections import defaultdict
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -34,6 +34,7 @@ from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
+from whetstone.llm.tools import ToolSpec
 from whetstone.steps import FailureInputs, StepError, StepSpec
 from whetstone.wiki import retrieve
 
@@ -381,8 +382,14 @@ def propose(
     effort: Effort = "high",
     instruction: str = "",
     only: set[str] | None = None,
+    agent: Any = None,
 ) -> ProposalResult:
     """Run a skill's improve step and return the guidance change it proposes.
+
+    `agent` is an `AgentStep` when the step declares `agent: enabled` — the skill drafts its own
+    change with the source, its own pages and its declared tools in reach, the same way it reviews.
+    None keeps the single structured call, which is still the default and still what most skills
+    want: a rewrite grounded in a failure digest needs no investigation to be good.
 
     `instruction` is a one-off steer for this run — "focus on false positives", "R3 is too broad".
     It reaches the prompt whether or not the template mentions `{{instruction}}`, because an
@@ -412,6 +419,22 @@ def propose(
         # there is no template text it could be quoting back.
         proposal = _run_subprocess(spec, digest)
         calls = 0
+    elif agent is not None:
+        # The skill drafting its own change, with the same access it has when it reviews: the
+        # source the failures are about, its own pages read on demand rather than pasted, and
+        # whatever tools it declared. Everything after this is identical to the single-call path —
+        # the same echo-stripping, the same page filtering, the same targeted-case checks — because
+        # what changed is how the answer was reached, not what an improve step returns.
+        prompt = render_step_prompt(spec, digest)
+        answer, trace = agent.run(skill, prompt, _SUBMIT_GUIDANCE)
+        proposal = _proposal_from(answer)
+        quoted = [skill.body, *digest.pages.values()]
+        proposal.body = strip_prompt_echo(proposal.body, prompt, quoted)
+        proposal.pages = {
+            path: strip_prompt_echo(text, prompt, quoted)
+            for path, text in proposal.pages.items()
+        }
+        calls = trace.llm_calls
     else:
         if client is None:
             raise StepError("this improve step calls a model, but no LLM client was provided")
@@ -550,6 +573,62 @@ def render_step_prompt(spec: StepSpec, digest: Digest) -> str:
             f"{digest.instruction}\n"
         )
     return text
+
+
+SUBMIT_GUIDANCE = "submit_guidance"
+
+_SUBMIT_GUIDANCE = ToolSpec(
+    name=SUBMIT_GUIDANCE,
+    description=(
+        "Submit the rewritten guidance and finish. Call this exactly once, when you have "
+        "investigated enough to be sure the change is right. `body` is the COMPLETE new guidance, "
+        "not a diff. Include a page in `pages` only if you rewrote it."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "body": {"type": "string", "description": "the complete new SKILL.md guidance body"},
+            "pages": {
+                "type": "object",
+                "description": (
+                    "companion pages you rewrote, keyed by the path you read them from; omit any "
+                    "you did not change"
+                ),
+                "additionalProperties": {"type": "string"},
+            },
+            "rationale": {"type": "string", "description": "what you changed, and why"},
+            "targeted_cases": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "eval case ids this change is meant to fix",
+            },
+        },
+        "required": ["body"],
+    },
+)
+
+
+def _proposal_from(answer: dict[str, Any]) -> GuidanceProposal:
+    """Map the terminal tool's arguments onto the model every other improve path returns.
+
+    Tolerant in the same way `AgentReviewer._findings` is: a model that returns the page map with a
+    non-string value, or targeted ids as something other than a list, has still done the work, and
+    losing a whole guidance rewrite to a validation error would be a poor trade for strictness.
+    """
+    pages = answer.get("pages")
+    targeted = answer.get("targeted_cases")
+    return GuidanceProposal(
+        body=str(answer.get("body") or ""),
+        pages=(
+            {str(k): str(v) for k, v in pages.items() if isinstance(v, str)}
+            if isinstance(pages, dict)
+            else {}
+        ),
+        rationale=str(answer.get("rationale") or ""),
+        targeted_cases=(
+            [str(c) for c in targeted if isinstance(c, str)] if isinstance(targeted, list) else []
+        ),
+    )
 
 
 _SYSTEM = (

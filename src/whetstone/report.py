@@ -143,8 +143,25 @@ def render_run_text(record: RunRecord) -> str:
         f"  trials   k={record.k}   llm calls {record.llm_calls}   {record.duration_s:.1f}s",
         f"  score    recall {score.recall:.3f}   fp_rate {score.fp_rate:.3f}   "
         f"precision {score.precision:.3f}   F2 {score.f_beta():.3f}",
-        "  cases:",
     ]
+    if record.reviewer:
+        lines.append(f"  reviewer {record.reviewer}")
+    # What the agent actually opened. Recorded since the agent runtime landed but shown nowhere,
+    # which made it evidence only someone reading raw JSON could reach — and the whole argument for
+    # keeping it is that a reader can see why a score moved.
+    if record.reviewer_trace:
+        lines.append("  read     " + "; ".join(record.reviewer_trace))
+    if score.errors:
+        # "over the rest" is only honest while there *is* a rest. With none, the metrics above are
+        # an artifact of empty confusions — recall 1.000 over nothing — and saying so is the whole
+        # job of this line.
+        rest = (
+            f"recall is over the remaining {score.scorable}"
+            if score.scorable
+            else "NOTHING was measured, so the score above is meaningless — fix the reviewer"
+        )
+        lines.append(f"  errors   {score.errors} case(s) could not be scored — {rest}")
+    lines.append("  cases:")
     for case in record.cases:
         tag = "catch " if case.kind == "should_catch" else "noflag"
         metric = (
@@ -152,6 +169,9 @@ def render_run_text(record: RunRecord) -> str:
             if case.kind == "should_catch"
             else f"fp_rate {case.confusion.fp_rate:.2f}"
         )
+        if case.error:
+            lines.append(f"    [error ] {case.case_id:<32} {case.error[:60]}")
+            continue
         flag = "  ⚠ flaky" if case.flaky else ""
         lines.append(f"    [{tag}] {case.case_id:<32} {metric}{flag}")
     return "\n".join(lines)

@@ -898,6 +898,76 @@ That warning is not cosmetic: `fp_rate` averages over every `should_not_flag` ca
 from a clean merge establishes only that nobody said anything. See
 [precision evidence](#precision-evidence-that-isnt-just-silence).
 
+### `whetstone skills cases`
+
+List a skill's cases — the graduated corpus **and** the promoted set waiting behind it.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--skill PATH` | *(required)* | Skill folder. |
+| `--promoted` | off | Only the promoted set, not the graduated corpus. |
+| `--runs-dir PATH` | config | Where run records live, for the last outcome per case. |
+| `--json` | off | Machine-readable rows. |
+
+```bash
+whetstone skills cases --skill skills/python-service-errors
+# · logged-and-reraised     should_not_flag  fp 0.00      src/services/payout.py
+# · reraise-without-chaining should_catch    recall 0.00  src/services/settlement.py
+# + mr-1902-chaining         should_catch    unscored     src/services/settlement.py
+#
+# 1 case(s) marked + are promoted, not graduated: they live under promoted_cases/ and
+# gate nothing until they are graduated into eval_cases/.
+```
+
+Promotion writes to `promoted_cases/`, deliberately apart from the corpus so an unvetted case never
+joins the set a gate is measured against — which meant an afternoon of triage produced a folder no
+command would name. A promoted case usually reads `unscored`: that is the honest state, not a zero,
+and it is the cue to score the promoted set.
+
+### `whetstone skills trend`
+
+**Is this skill getting sharper, and what is that claim resting on?**
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--skill ID` | *(required)* | Skill id, as in `whetstone skills list`. |
+| `--window N` | 10 | How many runs back to read. |
+| `--runs-dir PATH` | config | Where run records live. |
+| `--gates-dir PATH` | config | Where gate records live. |
+| `--json` | off | The full `SharpeningReport`. |
+
+```bash
+whetstone skills trend --skill rust-error-handling
+# rust-error-handling: sharpening, demonstrably: 2 case(s) went from failing to passing
+# under a gate that held the corpus and the judge fixed, and all of them still pass on the
+# latest run.
+#
+#   2026-07-31 22:42  recall 0.333  fp 1.000  holdout 1.000  (4 case(s))
+#   2026-07-31 22:44  recall 1.000  fp 1.000  holdout 1.000  (4 case(s))
+#
+# recall +0.667 across the longest unbroken stretch (2 run(s)) — not across the whole history
+#
+# ledger: 1 gate(s), 1 passed, 2 case(s) proven fixed, 2 still passing
+#   fixed expect-in-handler   still passes  (gate 20260731T224308Z-…)
+#   fixed swallowed-error     still passes  (gate 20260731T224308Z-…)
+```
+
+Two answers, of very different strength.
+
+The **trend** is the weak one. Recall over time moves for three reasons that have nothing to do
+with the skill: the corpus changes (and a healthy loop promotes exactly the cases the skill got
+*wrong*, so doing the right thing makes recall **fall**), the judge changes, or the model changes.
+Every such seam is marked `⟂` and the delta is computed only across the longest unbroken stretch —
+never first-to-last, which is the subtraction this command exists to stop people quoting.
+
+The **ledger** is the strong one. A gate scores both sides itself, over one case set, with one
+judge, so a case it recorded going from failing to passing genuinely improved and no amount of
+corpus churn explains it away. Each fix is then re-checked against the newest run: `still passes`,
+`REGRESSED`, or `not re-measured since` — never silently assumed to have held.
+
+A skill with gates but no proven fixes gets the honest verdict: *what is proven is that this skill
+has not rotted.* Name the cases a change should fix when you gate it (`--targeted`) to get more.
+
 ### `whetstone skills scaffold`
 
 Write starter `evaluate/`, `improve/` and `update/` steps into a skill folder. The generated files

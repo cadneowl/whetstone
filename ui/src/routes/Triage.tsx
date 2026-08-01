@@ -4,14 +4,18 @@ import {
   useBatch,
   useConsoleConfig,
   useDraftPlan,
+  useEditPromoted,
   useDraftSemantic,
   usePreview,
   usePromote,
   useQueue,
   useReject,
+  useRemovePromoted,
   useSkills,
+  type Batch,
   type CaseEdits,
   type EvalKind,
+  type PromotedCase,
   type QueueItem,
 } from '@/api/client'
 import { DiffView, type Overlay, type Selection } from '@/components/diff/DiffView'
@@ -48,10 +52,8 @@ const TRIAGE_INTRO = (
 export function Triage() {
   const { data: queue, isLoading, error } = useQueue()
   const { data: batch } = useBatch()
-  // A batch can hold cases for more than one skill. Offer the score button only when it is
-  // unambiguous; with several, the Skills page is the place to pick one.
-  const skillOnBatch = batch?.skills?.length === 1 ? batch.skills[0] : null
   const { data: config } = useConsoleConfig()
+  const readOnly = Boolean(config?.read_only)
   const { data: skills } = useSkills()
 
   const [rawIndex, setIndex] = useState(0)
@@ -203,35 +205,15 @@ export function Triage() {
             {queue.counts.rejected} rejected
           </span>
           {batch && batch.count > 0 && (
-            <span className="ml-auto flex items-center gap-3 text-sm">
-              {/* Promoting writes cases to `promoted_cases/` on disk. Score them here to see what
-                  the skill misses before graduating the ones that earn a place in the eval corpus —
-                  testing against a case is the reason to promote it. This scores the whole set; to
-                  pick specific cases, the skill's Improve tab lists them with checkboxes that scope
-                  the score. */}
-              <span className="text-xs text-muted">
-                {batch.count} promoted · waiting to graduate
-              </span>
-              {skillOnBatch && (
-                <span className="flex items-center gap-2">
-                  <LaunchButton
-                    kind="eval"
-                    request={{ skill_id: skillOnBatch, scope: 'promoted' }}
-                    label="Score all promoted"
-                  />
-                  <Link
-                    to={`/skills/${encodeURIComponent(skillOnBatch)}?tab=improve`}
-                    className="text-xs text-accent underline"
-                  >
-                    pick cases →
-                  </Link>
-                </span>
-              )}
+            <span className="ml-auto text-xs text-muted">
+              {batch.count} promoted · waiting to graduate
             </span>
           )}
         </div>
         <Intro>{TRIAGE_INTRO}</Intro>
       </header>
+
+      {batch && batch.count > 0 && <PromotedBatch batch={batch} readOnly={readOnly} />}
 
       <SignalFilter items={all} hidden={hidden} onToggle={setHidden} />
 
@@ -336,6 +318,294 @@ export function Triage() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * The promoted batch: what is waiting under `promoted_cases/`, and what you can do about it.
+ *
+ * This used to be a count and a Score button — seven cases exist, and nothing about what they are.
+ * A batch is the thing you are deciding *about*: which of these deserve to constrain the guidance,
+ * which were promoted in error. That needs them listed, selectable, and removable, and the only
+ * removal there was keyed on finding the originating candidate again in the decided list.
+ *
+ * Removing is a genuine undo, not a delete: the server also returns the candidate to the queue, so
+ * a case dropped here can be triaged again rather than being lost with the signal it came from.
+ */
+function PromotedBatch({ batch, readOnly }: { batch: Batch; readOnly: boolean }) {
+  const cases = batch.cases ?? []
+  const remove = useRemovePromoted()
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
+  const [confirming, setConfirming] = useState(false)
+  const [editing, setEditing] = useState<string | null>(null)
+
+  const key = (c: PromotedCase) => `${c.skill_id}/${c.case_id}`
+  // Selection is over ids that may vanish under it — a removal, or another tab promoting. Anything
+  // no longer in the batch is dropped rather than sent in a request the server would refuse.
+  const live = new Set(cases.map(key))
+  const picked = [...selected].filter((k) => live.has(k))
+  const chosen = cases.filter((c) => picked.includes(key(c)))
+
+  // Scoring runs per skill, so a selection spanning two skills has no single request to make.
+  const skillsChosen = [...new Set(chosen.map((c) => c.skill_id))]
+  const skillsAll = [...new Set(cases.map((c) => c.skill_id))]
+  const scoreSkill = chosen.length ? (skillsChosen.length === 1 ? skillsChosen[0] : null) : (skillsAll.length === 1 ? skillsAll[0] : null)
+
+  const toggle = (c: PromotedCase) => {
+    const next = new Set(picked)
+    const k = key(c)
+    if (next.has(k)) next.delete(k)
+    else next.add(k)
+    setSelected(next)
+    setConfirming(false)
+  }
+
+  const removeChosen = async () => {
+    for (const c of chosen) {
+      await remove.mutateAsync({ skillId: c.skill_id, caseId: c.case_id })
+    }
+    setSelected(new Set())
+    setConfirming(false)
+  }
+
+  return (
+    <section className="mb-4 rounded-lg border border-line bg-surface p-4">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <h2 className="text-sm font-medium">
+          Promoted, waiting to graduate ({picked.length} of {cases.length} selected)
+        </h2>
+        <div className="flex gap-3 text-xs text-muted">
+          <button type="button" onClick={() => setSelected(new Set(cases.map(key)))}>
+            all
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSelected(new Set())
+              setConfirming(false)
+            }}
+          >
+            none
+          </button>
+        </div>
+      </div>
+      <p className="mb-3 text-xs text-muted">
+        These live in <code className="font-mono">skills/&lt;id&gt;/promoted_cases/</code> on disk —
+        additive test data, never the guidance and never a branch. Score the skill against them to
+        see what it misses, then <strong>Graduate</strong> the ones that earn a place in the eval
+        corpus from the skill&rsquo;s Improve tab. Removing one here puts its candidate back in the
+        queue.
+      </p>
+
+      <ul className="space-y-1.5">
+        {cases.map((c) => (
+          <li key={key(c)} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+            <input
+              type="checkbox"
+              checked={picked.includes(key(c))}
+              onChange={() => toggle(c)}
+              aria-label={`select ${c.case_id}`}
+            />
+            <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
+              {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
+            </Badge>
+            <Link
+              to={`/skills/${encodeURIComponent(c.skill_id)}?tab=improve`}
+              className="font-mono text-xs hover:text-accent"
+            >
+              {c.case_id}
+            </Link>
+            <SignalBadge id={c.provenance.human_signal} />
+            {c.path && <span className="font-mono text-xs text-muted">{c.path}</span>}
+            <span className="ml-auto flex items-center gap-2 text-xs text-muted">
+              <span className="font-mono">{c.skill_id}</span>
+              <button
+                type="button"
+                disabled={readOnly}
+                onClick={() => setEditing(editing === key(c) ? null : key(c))}
+                title="Rewrite this case's expectation before it graduates"
+                className="rounded border border-line px-2 py-0.5 transition-colors hover:border-accent/50 hover:text-accent disabled:opacity-40"
+              >
+                {editing === key(c) ? 'Close' : 'Edit'}
+              </button>
+              <button
+                type="button"
+                disabled={readOnly || remove.isPending}
+                onClick={() => remove.mutate({ skillId: c.skill_id, caseId: c.case_id })}
+                title="Drop this case and return its candidate to the queue"
+                className="rounded border border-line px-2 py-0.5 transition-colors hover:border-bad/50 hover:text-bad disabled:opacity-40"
+              >
+                Remove
+              </button>
+            </span>
+            {editing === key(c) && (
+              <PromotedEditor promoted={c} onDone={() => setEditing(null)} readOnly={readOnly} />
+            )}
+          </li>
+        ))}
+      </ul>
+
+      <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-line pt-3">
+        {scoreSkill ? (
+          <LaunchButton
+            // Re-plans when the selection changes, so the cost shown is the cost of what is ticked.
+            key={picked.join(',') || 'all'}
+            kind="eval"
+            request={{
+              skill_id: scoreSkill,
+              scope: 'promoted',
+              ...(chosen.length ? { cases: chosen.map((c) => c.case_id) } : {}),
+            }}
+            label={chosen.length ? `Score ${chosen.length} selected` : 'Score all promoted'}
+          />
+        ) : (
+          <p className="text-xs text-muted">
+            {chosen.length
+              ? 'Selection spans more than one skill — scoring runs per skill, so pick cases from one.'
+              : 'This batch spans more than one skill. Tick cases from one to score them.'}
+          </p>
+        )}
+        {chosen.length > 0 &&
+          (confirming ? (
+            <span className="flex items-center gap-2 text-xs">
+              <span className="text-warn">Remove {chosen.length} case(s)?</span>
+              <button
+                type="button"
+                onClick={removeChosen}
+                disabled={remove.isPending}
+                className="rounded border border-bad/50 px-2 py-0.5 text-bad transition-colors hover:bg-bad/10 disabled:opacity-40"
+              >
+                {remove.isPending ? 'Removing…' : 'Yes, remove'}
+              </button>
+              <button type="button" onClick={() => setConfirming(false)} className="text-muted">
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={() => setConfirming(true)}
+              className="rounded border border-line px-2 py-1 text-xs transition-colors hover:border-bad/50 hover:text-bad disabled:opacity-40"
+            >
+              Remove {chosen.length} selected
+            </button>
+          ))}
+        {scoreSkill && (
+          <Link
+            to={`/skills/${encodeURIComponent(scoreSkill)}?tab=improve`}
+            className="text-xs text-accent underline"
+          >
+            graduate them →
+          </Link>
+        )}
+      </div>
+      {remove.error != null && <ErrorNote error={remove.error} />}
+    </section>
+  )
+}
+
+/**
+ * Rewrite a promoted case in place.
+ *
+ * The gap this closes: a promoted case could be created and destroyed and nothing else. An
+ * expectation with a typo, or one that turned out to describe the wrong line, meant removing the
+ * case, finding its candidate again in the queue, and promoting it a second time — which is not an
+ * edit, it is a re-do, and it is the state `promoted_cases/` exists to make cheap.
+ *
+ * The server re-derives the case from its original candidate rather than patching the YAML, so an
+ * edit is validated exactly as the promotion was: the region has to be one the diff actually
+ * touches. That is why this form does not need to check anything itself.
+ */
+function PromotedEditor({
+  promoted,
+  onDone,
+  readOnly,
+}: {
+  promoted: PromotedCase
+  onDone: () => void
+  readOnly: boolean
+}) {
+  const edit = useEditPromoted()
+  const [semantic, setSemantic] = useState(promoted.semantic ?? '')
+  const [kind, setKind] = useState<EvalKind>(promoted.kind)
+  const [tier, setTier] = useState(promoted.tier ?? 'active')
+
+  const save = () =>
+    edit.mutate(
+      {
+        skillId: promoted.skill_id,
+        caseId: promoted.case_id,
+        edits: {
+          skill_id: promoted.skill_id,
+          case_id: promoted.case_id,
+          kind,
+          semantic,
+          path: promoted.path,
+          line_range: promoted.line_range ?? null,
+          severity_min: promoted.severity_min ?? null,
+          tier,
+          // Carried, not re-derived: `expectation_id` keys the rulings already recorded against
+          // this case, and the other two are provenance the edit must not quietly erase.
+          expectation_id: promoted.expectation_id || 'e1',
+          rule_id: promoted.rule_id ?? '',
+          semantic_drafted_by: promoted.provenance.semantic_drafted_by ?? '',
+        },
+      },
+      { onSuccess: onDone },
+    )
+
+  return (
+    <div className="mt-2 w-full space-y-2 rounded border border-accent/30 bg-accent/5 p-3">
+      <label className="block text-xs text-muted">
+        Expectation — what the reviewer should say about this change
+        <textarea
+          value={semantic}
+          onChange={(e) => setSemantic(e.target.value)}
+          rows={3}
+          className="mt-1 w-full rounded border border-line bg-canvas px-2 py-1 text-sm text-ink outline-none focus:border-accent/60"
+        />
+      </label>
+      <div className="flex flex-wrap items-end gap-3 text-xs text-muted">
+        <label>
+          Kind
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as EvalKind)}
+            className="ml-2 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          >
+            <option value="should_catch">should catch</option>
+            <option value="should_not_flag">should not flag</option>
+          </select>
+        </label>
+        <label title="Archive keeps the case as regression insurance but draws it less often">
+          Tier
+          <select
+            value={tier}
+            onChange={(e) => setTier(e.target.value as 'active' | 'archive')}
+            className="ml-2 rounded border border-line bg-canvas px-2 py-1 text-ink"
+          >
+            <option value="active">active</option>
+            <option value="archive">archive</option>
+          </select>
+        </label>
+        <span className="font-mono">{promoted.path}</span>
+        <span className="ml-auto flex gap-2">
+          <button
+            type="button"
+            disabled={readOnly || edit.isPending || !semantic.trim()}
+            onClick={save}
+            className="rounded border border-accent/50 px-2 py-1 text-accent transition-colors hover:bg-accent/10 disabled:opacity-40"
+          >
+            {edit.isPending ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" onClick={onDone} className="px-2 py-1 hover:text-ink">
+            Cancel
+          </button>
+        </span>
+      </div>
+      {edit.error != null && <ErrorNote error={edit.error} />}
     </div>
   )
 }
@@ -472,8 +742,13 @@ function DraftButton({
   if (plan.data) {
     return (
       <span className="ml-auto flex items-center gap-2 normal-case">
+        {/* The estimate, not a hardcoded "1 call". A triage step that runs the skill as an agent
+            spends a turn per investigation step and then one more to force the answer — so the
+            fixed label under-reported a four-call draft by three, on the one banner whose entire
+            job is to say what a click costs before it happens. */}
         <span className="text-[11px] text-warn" title={plan.data.estimate?.basis}>
-          {plan.data.backend} · 1 call
+          {plan.data.backend} · {plan.data.estimate?.calls ?? 1} call
+          {(plan.data.estimate?.calls ?? 1) === 1 ? '' : 's'}
         </span>
         <button
           type="button"

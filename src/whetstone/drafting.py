@@ -38,11 +38,36 @@ itself.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from whetstone.candidates import CandidateEntry
+from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
+from whetstone.llm.tools import ToolSpec
 from whetstone.steps import DraftInputs, StepError, StepSpec
+
+SUBMIT_EXPECTATION = "submit_expectation"
+
+_SUBMIT_EXPECTATION = ToolSpec(
+    name=SUBMIT_EXPECTATION,
+    description=(
+        "Submit the expectation this candidate should become, and finish. Call this exactly once, "
+        "when you have read enough to be sure what the reviewer was objecting to."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "semantic": {
+                "type": "string",
+                "description": "the expectation, in one sentence, as a reviewer would state it",
+            },
+            "rationale": {"type": "string", "description": "why this wording, in one line"},
+        },
+        "required": ["semantic"],
+    },
+)
 
 
 class SemanticDraft(BaseModel):
@@ -140,17 +165,33 @@ def draft_semantic(
     *,
     client: LLMClient | None = None,
     effort: Effort = "medium",
+    agent: Any = None,
+    skill: Skill | None = None,
 ) -> SemanticDraft:
-    """Run a skill's triage step over one candidate and return the expectation it proposes."""
+    """Run a skill's triage step over one candidate and return the expectation it proposes.
+
+    `agent` is an `AgentStep` when the step declares `agent: enabled`, and `skill` is then required
+    — the agent *is* the skill, so it needs the folder whose instructions it follows. Writing the
+    expectation is where reading the source pays most: "what did this reviewer actually object to"
+    is often a question about the surrounding code, which the candidate's diff does not contain.
+    """
     context = build_context(entry, spec.inputs.draft)
 
     if spec.is_subprocess:
         return _run_subprocess(spec, context)
-    if client is None:
-        raise StepError("this triage step calls a model, but no LLM client was provided")
-    draft = client.structured(
-        _SYSTEM, spec.render_prompt(context.prompt_values()), SemanticDraft, effort=effort
-    )
+    prompt = spec.render_prompt(context.prompt_values())
+    if agent is not None:
+        if skill is None:
+            raise StepError("running a triage step as an agent needs the skill it belongs to")
+        answer, _ = agent.run(skill, prompt, _SUBMIT_EXPECTATION)
+        draft = SemanticDraft(
+            semantic=str(answer.get("semantic") or ""),
+            rationale=str(answer.get("rationale") or ""),
+        )
+    else:
+        if client is None:
+            raise StepError("this triage step calls a model, but no LLM client was provided")
+        draft = client.structured(_SYSTEM, prompt, SemanticDraft, effort=effort)
     draft.semantic = draft.semantic.strip()
     if not draft.semantic:
         raise StepError("the triage step returned an empty expectation")

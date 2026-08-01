@@ -117,6 +117,215 @@ model:
   effort: high
 ```
 
+### Skills that produce work, not findings
+
+Everything above scores a skill by what it *reports* about a change. A skill that writes tests,
+drafts a migration or refactors a module produces **work**, and is graded by checking that work —
+running the tests, applying the migration — not by asking a judge whether two sentences mean the
+same thing. Turn that on with `task:`:
+
+```yaml
+task:
+  enabled: true
+  max_steps: 20
+  verify:                                        # how every case is graded, by default
+    command: ["{python}", "-m", "pytest", "-q"]
+```
+
+The corpus moves from `eval_cases/` to `task_cases/`, laid out the same way:
+
+```
+task_cases/covers-refund-error/
+  case.yaml      id, instruction, and this case's own `verify:` (overrides the default)
+  files/         the workspace this case starts from — real source, not YAML-embedded strings
+  change.diff    optional: the change the task is about
+```
+
+Each case runs in a **fresh workspace** seeded from `files/`. The agent gets `write_file`,
+`read_workspace_file` and `list_workspace` on top of its usual tools, and finishes by calling
+`submit_work`. Files it did not write do not exist — describing a change is not making one.
+
+**Grading.** `command:` runs in the workspace and its exit code is the verdict. `run:` instead hands
+grading to a program the skill ships, for quality an exit code cannot express (stdin gets the case,
+workspace path and output; stdout returns `{passed, score, metrics, detail}`).
+
+`{python}` expands to the interpreter Whetstone is running under, and `{workspace}` to the case
+directory — a committed command line otherwise depends on whatever `python` happens to mean on the
+machine.
+
+**Partial credit matters.** A command may print a trailing JSON object (`{"score": 0.8, "metrics":
+{…}}`) to report *degree*. The exit code still owns the verdict, so a grader cannot pass itself by
+printing `1.0` — but without a degree a gate can only see whole cases flip, and most real progress
+is smaller than that.
+
+**Scoring and gating.** `pass_rate` is what a person asks; `mean_score` is what the gate compares,
+with the same discipline as the review gate — a tolerance, and `targeted` cases that must actually
+be fixed rather than merely not broken. A case whose *executor* crashes is recorded with its error
+and scores zero, so one malformed case cannot lose a corpus of two hundred; a case whose *grader*
+crashes stops the run, because scoring it as a failure would blame the skill for a broken grader.
+
+**Running one.** Task skills have their own commands, because the review path cannot score them:
+
+```
+whetstone eval task --skill skills/test-writer            # score; --keep to inspect workspaces
+whetstone eval task-gate --base <dir> --candidate <dir>   # regression gate, --targeted <case-id>
+```
+
+`whetstone eval run` **refuses** a task skill rather than scoring its (empty) `eval_cases/` — that
+path would report a flawless run over nothing.
+
+In the console, a task skill grows a **Tasks** tab: the cases with what each starts from and how it
+is graded, buttons to run or gate them, and the run history. It names both instruments separately —
+the agent that does the work and the verifier that grades it — because a task score means nothing
+without both. The inbox routes such a skill to its own actions rather than to the review gate, and
+the header's *Run evals* is suppressed there: it could only ever be refused.
+
+**Records.** A task run lands in `.whetstone/task-runs/` and a task gate in `.whetstone/task-gates/`
+— beside the review ones, never among them, so two incomparable kinds of score never share a
+listing. The gate record is what C6 reads before a task skill's change may be published, computed
+by the same verdict function the review gates use. `whetstone skills trend --skill <id>` reads both.
+
+`task:` and `agent:` are mutually exclusive — a skill is scored one way.
+
+### Run the skill as an agent
+
+A skill is a folder, and `SKILL.md` refers to the rest of it the way a person would — *"see
+[principles.md](references/principles.md)"*. The built-in reviewer cannot follow a link, so it
+concatenates: every markdown file in the folder goes into one prompt, on every case, whatever the
+change touches. Turn this on instead and the folder is **run**:
+
+```yaml
+agent:
+  enabled: true
+  max_steps: 12                                     # investigation budget per review
+  source: { env: SERVICE_REPO, required: true }     # optional: read the code too
+  tools:                                            # optional: whatever else it needs
+    - name: jira_issue
+      description: "Fetch a Jira issue by key."
+      run: ["python", "tools/jira.py"]
+      input_schema:
+        type: object
+        properties: { key: { type: string } }
+```
+
+What changes:
+
+- **`SKILL.md` becomes instructions**, not prompt filler.
+- **The other pages are read on demand.** The agent is told they exist and fetches one with
+  `read_skill_file` when its own instructions point at it. A `README.md` written for humans stops
+  being fed to the model as rules.
+- **`source:` adds `read_file`, `grep` and `list_dir`**, read-only and sandboxed to that root —
+  every path resolved and checked to be inside it, symlinks included. A root that is set but is not
+  a directory is refused at the plan, because every tool would answer "no such file" and the agent
+  would review having opened nothing while the run looked normal. `grep` prunes dot-directories and
+  the usual vendor/build trees (`node_modules`, `target`, `dist`, `__pycache__`, …), skips binaries
+  and files over 1 MB, and caps the walk — an unpruned search of a real checkout took 42s per call.
+- **`tools:` are programs the skill brings.** Whetstone offers them to the model and runs them on
+  request; it never learns what any of them do. They get `{"arguments": …, "context": …}` on stdin
+  and their stdout goes back to the model. A tool that fails returns its error *to the model*,
+  which can then try something else.
+
+**Configuration: the `context:` block.** Anything a skill needs and Whetstone knows nothing about —
+a token, an API base URL, a schema file — is declared alongside `agent:` (or `task:`) and resolved
+the same three ways as a reviewer program's context (`env:` / `file:` / a literal):
+
+```yaml
+agent:
+  enabled: true
+  tools:
+    - { name: jira_issue, description: "Fetch an issue.", run: ["python", "tools/jira.py"] }
+context:
+  jira_token: { env: JIRA_TOKEN, required: true }   # never committed; never shown to the model
+  jira_base: https://jira.internal
+```
+
+The resolved bag reaches the skill's **tools** on stdin, secrets included — that is what a script
+calling Jira needs. What the *model* is shown is the redacted view, so `jira_token` appears in the
+prompt as `<env:JIRA_TOKEN>` and the credential never enters a prompt or a transcript. A required
+variable that is unset is reported at the plan, before anything is spent.
+
+**It cannot get stuck waiting for a person.** A skill written for interactive use will say things
+like "ask clarifying questions"; there is nobody to ask. Four guards, each independently tested: no
+tool exists for asking, the runtime preamble says so, a turn that calls no tool costs a step and
+gets nudged, and at `max_steps` the answer is *forced* with only the terminal tool on offer. The
+agent finishes by calling `submit_findings` — the sole way to end — so nothing has to parse prose.
+
+**Nor can one bad case lose a run.** A reviewer that cannot answer a case at all — a model that
+refuses even when forced, a backend that rejects tools — is recorded as an *unscorable case* and the
+run continues. It contributes no confusion counts, so recall is computed over the cases that were
+actually measured; `errors` and `scorable` report how many of each there were.
+
+Three rules keep that from becoming a lie, because an empty confusion reads as `recall 1.0` — the
+right convention for "there was nothing to catch here" and the worst possible one for "we never
+found out":
+
+- an unscorable case never counts as **passed**, so a `--targeted` case that could not be run is
+  reported as unfixed rather than as fixed, and a case that stopped being scorable reads as a
+  regression;
+- the gate refuses outright when *either* side scored no cases at all, rather than comparing two
+  perfect-looking scores computed over nothing;
+- the gate blocks a candidate that produced more unscorable cases than its base.
+
+**Cost.** Unlike a reviewer program, an agent spends *your* backend: up to `max_steps` investigation
+calls per review **plus one forced answer**, so the plan states `(max_steps + 1) × cases × trials ×
+sides` as a ceiling. Agents normally answer well short of it. Those calls are counted on the run and
+on the gate record, not just estimated.
+
+**Determinism.** An agent is a less fixed instrument than one call. Both gate sides share one
+instance, and each run records its **trajectory** — what it actually opened. `whetstone runs show`
+prints it, a gate prints both sides, and when they differ (`trace_diverged`, on the record and in
+the console) the delta is flagged as not purely the guidance.
+
+`agent:` and `run:` are mutually exclusive: one runs the skill inside Whetstone, the other hands
+reviewing to your program.
+
+### The same everywhere: improve and triage run as agents too
+
+`agent:` is **not** an evaluate-step setting. It is valid on every step whose work is the skill
+thinking — `evaluate`, `improve` and `triage` — and it means the same thing on each: `SKILL.md` is
+the instructions, the folder's other pages are fetched on demand, `source:` and `tools:` are in
+reach, and the step finishes by calling a terminal tool.
+
+This matters most on `improve`. The drafter is asked to rewrite guidance so a set of failures stops
+recurring, and until it could run as an agent it was a single call that had never read the code
+those failures were about, could not open the ticket the case came from, and was handed every
+companion page pasted into its prompt — the exact treatment `agent:` exists to replace. A skill
+that is a folder on one step and a wall of text on the next is two different things.
+
+```yaml
+# improve/step.yaml — the prompt is still required, and now means something different
+prompt: prompt.md
+agent:
+  enabled: true
+  source: { env: SERVICE_REPO, required: true }
+  tools:
+    - { name: jira_issue, description: "Fetch an issue.", run: ["python", "tools/jira.py"] }
+context:
+  jira_token: { env: JIRA_TOKEN, required: true }
+```
+
+**The prompt is the task; the skill body is the instructions.** Same split the reviewer has: its
+`SKILL.md` becomes the system prompt, and the step's rendered prompt — the failure digest, or the
+candidate's diff — is what it is being asked to do. So an agent step still needs its `prompt:`.
+
+| step | terminal tool | what it returns |
+| --- | --- | --- |
+| `evaluate` | `submit_findings` | located findings, judged as always |
+| `evaluate` + `task:` | `submit_work` | files in a workspace, graded by a verifier |
+| `improve` | `submit_guidance` | the complete new body, plus any pages it rewrote |
+| `triage` | `submit_expectation` | the expectation a candidate should become |
+
+`update` is the one exclusion: it invokes the wiki generator your deployment owns via `run:`, so
+there is no skill judgement in it to give tools to.
+
+Everything downstream of the answer is unchanged — the same echo-stripping, the same dropping of
+targeted case ids the drafter was never shown, the same page filtering. What changes is how the
+answer was reached.
+
+**Cost.** An agent improve step costs up to `max_steps + 1` calls instead of one, and every plan
+says so before you spend. `agent:` is opt-in, so a step without it keeps the single call it has
+today.
+
 ### Bring your own reviewer
 
 The built-in reviewer is one structured model call: guidance and wiki in, findings out, no tools. It

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from helpers import AT, make_record
@@ -190,3 +191,87 @@ def test_broken_skill_reports_the_offending_file(client: TestClient, skills_root
     body = response.json()
     assert "missing diff file" in body["message"]
     assert body["path"].endswith("broken")  # so the console can point at the right case
+
+
+# --- editing and removing a graduated case ---------------------------------------
+
+
+def test_a_graduated_case_can_be_corrected(client: TestClient, skills_root: Path) -> None:
+    """A case became permanent the moment it graduated: readable, tier-flippable, and nothing else.
+    The wording of an expectation *is* the measurement, so a typo in one could only be archived —
+    never fixed — which is a strange property for the corpus a skill is scored against.
+    """
+    before = client.get("/api/skills/rust-errors/cases/unwrap-in-handler").json()
+    assert "can panic on a normal error path" in before["case"]["expect"][0]["semantic"]
+
+    response = client.put(
+        "/api/skills/rust-errors/cases/unwrap-in-handler",
+        json={
+            "semantic": "unwrap on the DB result panics when the row is missing",
+            "kind": "should_catch",
+            "line_range": [40, 45],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["needs_gate"] is True  # a corpus change retracts the verdict
+
+    after = client.get("/api/skills/rust-errors/cases/unwrap-in-handler").json()
+    expect = after["case"]["expect"][0]
+    assert expect["semantic"] == "unwrap on the DB result panics when the row is missing"
+    assert expect["must"] == "appear"  # derived from kind, never asked for
+    assert expect["where"]["line_range"] == [40, 45]
+    # Evidence is not editable and must survive the rewrite.
+    assert after["case"]["provenance"]["ref"] == "acme/payments!812"
+
+
+def test_flipping_kind_rewrites_the_expectation_it_implies(client: TestClient) -> None:
+    """A `should_not_flag` case whose expectation still says `appear` is incoherent — it would
+    assert the reviewer must report the thing the case exists to prove it stays quiet about."""
+    client.put(
+        "/api/skills/rust-errors/cases/unwrap-in-handler",
+        json={"semantic": "this pattern is fine", "kind": "should_not_flag"},
+    )
+    case = client.get("/api/skills/rust-errors/cases/unwrap-in-handler").json()["case"]
+    assert case["kind"] == "should_not_flag"
+    assert case["expect"][0]["must"] == "not_appear"
+
+
+def test_an_edit_that_would_break_the_corpus_is_refused(client: TestClient) -> None:
+    """The console is the last place that should be able to write a case the loader then refuses:
+    every subsequent run of that skill would fail to load its corpus."""
+    response = client.put(
+        "/api/skills/rust-errors/cases/unwrap-in-handler",
+        json={"semantic": "", "kind": "should_catch"},
+    )
+    # Either refused outright, or written and still loadable — never a corpus that will not load.
+    assert client.get("/api/skills/rust-errors/cases/unwrap-in-handler").status_code == 200
+    assert response.status_code in (200, 422)
+
+
+def test_a_graduated_case_can_be_removed(client: TestClient, skills_root: Path) -> None:
+    """`tier: archive` keeps a case drawing at low weight because it is still evidence. A case that
+    was simply wrong is not evidence of anything, and archiving is the wrong tool for it."""
+    folder = skills_root / "rust-errors" / "eval_cases" / "unwrap-in-handler"
+    assert folder.is_dir()
+
+    response = client.delete("/api/skills/rust-errors/cases/unwrap-in-handler")
+    assert response.status_code == 200, response.text
+    assert not folder.exists()
+    assert client.get("/api/skills/rust-errors/cases/unwrap-in-handler").status_code == 404
+    # ...and the skill still loads, with the case gone from its corpus.
+    detail = client.get("/api/skills/rust-errors").json()
+    assert "unwrap-in-handler" not in [c["id"] for c in detail["cases"]]
+
+
+def test_case_writes_cannot_escape_the_corpus(client: TestClient, skills_root: Path) -> None:
+    """These segments reach the filesystem and one of them deletes."""
+    for case_id in ("%2e%2e", "-leading-dash", "nope"):
+        assert client.delete(f"/api/skills/rust-errors/cases/{case_id}").status_code != 200
+        assert (
+            client.put(
+                f"/api/skills/rust-errors/cases/{case_id}",
+                json={"semantic": "x", "kind": "should_catch"},
+            ).status_code
+            != 200
+        )
+    assert (skills_root / "rust-errors" / "eval_cases" / "unwrap-in-handler").is_dir()

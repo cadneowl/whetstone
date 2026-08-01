@@ -86,6 +86,47 @@ def billing_of(backend: Backend) -> Billing:
     return "unknown"
 
 
+def plan_tasks(
+    backend: Backend,
+    *,
+    cases: int,
+    calls_per_case: int,
+    action: str = "eval task",
+    sides: int = 1,
+    verifier: str = "",
+) -> Plan:
+    """What running a skill over task cases will cost.
+
+    Its own function rather than a flag on `plan_eval`, because the arithmetic has no judge in it: a
+    task skill is graded by running something, so the only model calls are the agent's own. Stating
+    that plainly is the point — an operator who saw a judge term here would rightly wonder what it
+    was judging.
+    """
+    calls = cases * calls_per_case * sides
+    plan = Plan(
+        action=action,
+        backend=backend.name,
+        model=backend.model,
+        base_url=backend.base_url,
+        billing=billing_of(backend),
+        estimate=Estimate(
+            calls=calls,
+            basis=(
+                f"{cases} task case(s) x {calls_per_case} agent call(s) each"
+                + (f" x {sides} sides" if sides > 1 else "")
+                + "; no judge — the work is graded by running it"
+            ),
+        ),
+    )
+    if verifier:
+        plan.details.append(f"graded by: {verifier}")
+    plan.details.append(
+        "each case runs in a fresh workspace; the agent's files are the answer, and only files it "
+        "writes exist"
+    )
+    return plan
+
+
 def plan_eval(
     skill: Skill,
     backend: Backend,
@@ -96,6 +137,7 @@ def plan_eval(
     wiki_limits: WikiLimits | None = None,
     judge_cascade: bool = False,
     host_reviews: bool = True,
+    calls_per_review: int = 1,
 ) -> Plan:
     """The plan for scoring `skill`. `cases` overrides the count when a sample will be used.
 
@@ -115,11 +157,14 @@ def plan_eval(
     judge_factor = 2 if judge_cascade else 1
     # One review per case-trial, plus at most one judge call per expectation on it (two with the
     # cascade: the pairwise verdict, then the grounded re-judge on low confidence).
-    reviews_per_case = 1 if host_reviews else 0
+    # `calls_per_review` is above 1 for an agent reviewer, which spends the run's own backend once
+    # per investigation step rather than once per review. The ceiling, not the likely cost — an
+    # agent normally answers well before it runs out of steps.
+    reviews_per_case = calls_per_review if host_reviews else 0
     calls = int(
         round(total * trials * (reviews_per_case + per_case_expectations * judge_factor))
     )
-    review_term = "1 review + " if host_reviews else ""
+    review_term = f"{reviews_per_case} review call(s) + " if host_reviews else ""
     plan = Plan(
         action=action,
         backend=backend.name,

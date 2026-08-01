@@ -21,6 +21,7 @@ from whetstone.jobs import JobStore
 from whetstone.llm.factory import ModelSelection
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
+from whetstone.taskruns import TaskGateStore, TaskRunStore
 from whetstone.ui.errors import NotFound, install_handlers
 from whetstone.ui.routers import authoring, candidates, meta, runs, skills
 from whetstone.ui.routers import health as health_router
@@ -54,6 +55,8 @@ def create_app(
     store: RunStore | None = None,
     gates: GateStore | None = None,
     reviews: ReviewStore | None = None,
+    task_runs: TaskRunStore | None = None,
+    task_gates: TaskGateStore | None = None,
     serve_console: bool = True,
 ) -> FastAPI:
     """Build the console app.
@@ -74,6 +77,10 @@ def create_app(
     app.state.store = store or RunStore(resolved.runs_dir)
     app.state.gates = gates or GateStore(resolved.gates_dir)
     app.state.reviews = reviews or ReviewStore(resolved.reviews_dir)
+    # Task skills keep their own records: a task score is work graded by running it, not findings
+    # judged against expectations, and the two must never share a listing.
+    app.state.task_runs = task_runs or TaskRunStore(resolved.task_runs_dir)
+    app.state.task_gates = task_gates or TaskGateStore(resolved.task_gates_dir)
     app.state.drift = DriftStore(resolved.drift_dir)
     app.state.cadence = CadenceStore(resolved.cadence_dir)
     # One runner per server. In memory by design: see `jobs.py`.

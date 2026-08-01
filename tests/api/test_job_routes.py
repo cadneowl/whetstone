@@ -351,6 +351,69 @@ def test_improve_accepts_a_run_of_the_on_disk_draft(
     assert not any("different version" in w for w in plan["warnings"]), plan["warnings"]
 
 
+# Named so it lands in the train partition (`sampling.partition_of` hashes the id): a holdout case
+# is withheld from the drafter by design, which would make this test pass for the wrong reason.
+PROMOTED_ID = "promoted-settle-panic"
+
+PROMOTED_CASE = f"""id: {PROMOTED_ID}
+kind: should_catch
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: src/handlers/settle.rs
+    semantic: "unwrap on the settlement lookup panics on a normal error path"
+"""
+
+PROMOTED_DIFF = """diff --git a/src/handlers/settle.rs b/src/handlers/settle.rs
+--- a/src/handlers/settle.rs
++++ b/src/handlers/settle.rs
+@@ -10,2 +10,3 @@
+ fn settle(id: Id) {
++    let row = db.settle(id).unwrap();
+ }
+"""
+
+
+def test_improve_shows_the_drafter_a_promoted_cases_diff(
+    client: TestClient, steps: Path, skills_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The path the whole loop is built around: promote a case, score it, sharpen against it.
+
+    The digest attaches each failure's **diff** by looking the case up by id, and a case still under
+    `promoted_cases/` is not in `eval_cases/`. Without the promoted set overlaid the drafter was
+    handed "MISSED - case `x` ... Reviewer said: nothing" with no code beneath it, and asked to fix
+    a miss it could not see. It failed silently, because a prompt missing a diff is still a valid
+    prompt.
+    """
+    case = skills_root / "rust-errors" / "promoted_cases" / PROMOTED_ID
+    case.mkdir(parents=True)
+    (case / "case.yaml").write_text(PROMOTED_CASE, encoding="utf-8")
+    (case / "change.diff").write_text(PROMOTED_DIFF, encoding="utf-8")
+
+    scored = client.post(
+        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "promoted"}
+    ).json()
+    assert _await(client, scored["id"])["state"] == "done"
+
+    seen: list[str] = []
+
+    def capture(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        if schema is GuidanceProposal:
+            seen.append(user)
+        return _handler(system, user, schema)
+
+    monkeypatch.setattr(
+        "whetstone.ui.routers.jobs.build_llm_client", lambda *a, **k: FakeLLMClient(capture)
+    )
+    assert _improve(client, cases=[PROMOTED_ID])["state"] == "done"
+
+    [prompt] = seen
+    assert PROMOTED_ID in prompt
+    # The diff itself, not merely the case id: this is the line the drafter needs to see.
+    assert "db.settle(id).unwrap()" in prompt
+
+
 def test_an_instruction_clears_that_warning(client: TestClient, steps: Path) -> None:
     _score(client)
     plan = client.post(

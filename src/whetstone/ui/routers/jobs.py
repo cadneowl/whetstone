@@ -54,9 +54,16 @@ from whetstone.llm.factory import (
 )
 from whetstone.llm.transcript import RecordingClient, Transcript, transcript_path
 from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
-from whetstone.preflight import Estimate, Plan, check_budget, plan_calls, plan_eval
+from whetstone.preflight import (
+    Estimate,
+    Plan,
+    check_budget,
+    plan_calls,
+    plan_eval,
+    plan_tasks,
+)
 from whetstone.providers.base import ConnectorError
-from whetstone.reviewer.factory import ReviewerChoice, reviewer_for
+from whetstone.reviewer.factory import ReviewerChoice, reviewer_for, step_agent
 from whetstone.sampling import sample_cases
 from whetstone.service import record_eval, record_gate, record_review, strip_guidance
 from whetstone.steps import StepError, StepSpec, load_step
@@ -69,6 +76,8 @@ from whetstone.ui.deps import (
     SelectionDep,
     SkillsRootDep,
     StoreDep,
+    TaskGatesDep,
+    TaskRunsDep,
     Writable,
 )
 from whetstone.ui.errors import Conflict, NotFound, Unprocessable
@@ -249,19 +258,22 @@ def launch_eval(
                 handle.progress(event.completed_cases, event.total_cases, event.case_id)
                 handle.log(*transcript(event))
 
+        # A retry is the usual reason a run looks stuck: each attempt gets its own timeout, and
+        # there are two nested loops of them. Put in the log the operator is already watching,
+        # rather than left to be inferred from the clock. Bound to a name because an agent reviewer
+        # is built from this same backend — one client, so its calls and the judge's are counted
+        # against the same budget.
+        client = _client(
+            config,
+            spec,
+            selection,
+            label=f"eval-{skill.id}",
+            on_retry=lambda note: handle.log(LogLine(text=f"retry: {note}")),
+        )
         try:
             record = record_eval(
                 skill,
-                # A retry is the usual reason a run looks stuck: each attempt gets its own timeout,
-                # and there are two nested loops of them. Put in the log the operator is already
-                # watching, rather than left to be inferred from the clock.
-                _client(
-                    config,
-                    spec,
-                    selection,
-                    label=f"eval-{skill.id}",
-                    on_retry=lambda note: handle.log(LogLine(text=f"retry: {note}")),
-                ),
+                client,
                 trials=trials,
                 backend=backend.name,
                 model=backend.model,
@@ -275,7 +287,7 @@ def launch_eval(
                 precedent_limits=spec.inputs.precedents if spec else None,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
-                reviewer=choice.reviewer,
+                reviewer=choice.build(client),
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -361,11 +373,12 @@ def launch_gate(
 
             return sink
 
+        client = _client(config, spec, selection, label=f"gate-{candidate.id}")
         try:
             record = record_gate(
                 base,
                 candidate,
-                _client(config, spec, selection, label=f"gate-{candidate.id}"),
+                client,
                 cfg=cfg,
                 trials=trials,
                 base_ref=config.git.default_base,
@@ -380,7 +393,7 @@ def launch_gate(
                 on_base=side("base", config.git.default_base),
                 on_candidate=side("cand", candidate_ref),
                 cancel=handle.cancel_event,
-                reviewer=choice.reviewer,
+                reviewer=choice.build(client),
             )
         except RunCancelled as exc:
             # Nothing is saved: half a gate is not a verdict, and a record of one would be evidence
@@ -393,6 +406,10 @@ def launch_gate(
             "passed": record.result.passed,
             "reasons": list(record.result.reasons),
             "llm_calls": record.llm_calls,
+            # A gate blames a delta on the guidance, which holds only if both sides saw the same
+            # things. When an agent investigated differently the verdict is still the verdict —
+            # but the operator reading it deserves to know, and this was recorded nowhere they look.
+            "trace_diverged": record.trace_diverged,
         }
 
     return _launch(jobs, "gate", candidate.id, work, plan)
@@ -425,13 +442,33 @@ def plan_improve_job(
         if request.cases
         else f"digest: up to {spec.inputs.failures.max} clustered failure(s)"
     )
+    # An improve step that runs as an agent spends the same way a reviewer one does: a budget of
+    # investigation turns and then a forced answer. Pricing it at one call would understate a
+    # thirteen-call step by twelve.
+    agent = _step_agent(root, skill, spec)
     plan = plan_calls(
         "improve",
         _backend(selection, spec),
-        calls=1,
-        basis="one call: the guidance rewrite",
+        calls=agent.max_calls if agent else 1,
+        basis=(
+            f"up to {agent.max_calls} calls: the skill drafts its own change as an agent "
+            f"({agent.max_steps} investigation steps + one forced answer)"
+            if agent
+            else "one call: the guidance rewrite"
+        ),
         details=[scope],
     )
+    if agent is not None:
+        plan.details.append(
+            f"reviewer: {agent.identity} — the drafter reads its own pages on demand"
+            + (", and the declared source tree" if agent.source_root else "")
+        )
+        if agent.tools:
+            names = ", ".join(t.name for t in agent.tools)
+            plan.details.append(f"skill-provided tools: {names} — run as programs by this skill")
+        if agent.context.redacted:
+            shown = ", ".join(f"{k}={v}" for k, v in agent.context.redacted.items())
+            plan.details.append(f"step context: {shown}")
     _warn_if_nothing_to_learn(plan, store, skill, request)
     return plan
 
@@ -485,21 +522,30 @@ def launch_improve(
     plan = plan_improve_job(request, config, root, store, selection)
     record = _run_for(store, skill, request)
 
+    step = _step_agent(root, skill, spec)
+
     def work(handle: JobHandle) -> dict[str, Any]:
         handle.progress(0, 1, "assembling the digest")
         handle.check()
+        client = (
+            _client(config, spec, selection, label=f"improve-{skill.id}")
+            if spec.calls_a_model
+            else None
+        )
+        # The agent shares the run's backend, exactly as the reviewer one does — one client, so its
+        # calls and any others are counted against the same budget.
+        agent = step.build(client) if step is not None else None
+        if agent is not None:
+            agent.bind_cancel(handle.cancel_event)
         result = propose(
             spec,
             skill,
             record,
-            client=(
-                _client(config, spec, selection, label=f"improve-{skill.id}")
-                if spec.calls_a_model
-                else None
-            ),
+            client=client,
             effort=spec.model.effort or "high",
             instruction=request.instruction,
             only=set(request.cases) or None,
+            agent=agent,
         )
         handle.progress(1, 1, "done")
         return {
@@ -521,6 +567,317 @@ def launch_improve(
         }
 
     return _launch(jobs, "improve", skill.id, work, plan)
+
+
+# --- task skills -----------------------------------------------------------------
+
+
+class TaskEvalRequest(BaseModel):
+    """Run a task skill over its task cases and record the result.
+
+    The console's whole task surface used to be an error message telling you to go and use the CLI.
+    Everything below is the same code path `whetstone eval task` takes — one resolver, one executor,
+    one verifier — so the two cannot disagree about what running this skill means.
+    """
+
+    skill_id: str
+    # Score only these case ids. Empty is every case, which is what a plain run means.
+    cases: list[str] = Field(default_factory=list)
+    # Keep each case's workspace on disk instead of a temp dir. The work the skill produced is the
+    # evidence behind a failure, and a run that discarded it leaves only an exit code to argue with.
+    keep_workspaces: bool = False
+    provider: str = ""
+    model: str = ""
+
+
+class TaskGateRequest(BaseModel):
+    """Gate a task skill's on-disk work against the last committed version."""
+
+    skill_id: str
+    targeted: list[str] = Field(default_factory=list)
+    tolerance: float = 0.0
+    provider: str = ""
+    model: str = ""
+
+
+def _task_setup(config: Config, root: Path, skill_id: str) -> tuple[Skill, Any, list[Any], Any]:
+    """The skill, its resolved task plan, its cases and its verifier — or a 422 saying why not.
+
+    The console twin of the CLI's `_task_setup`, refusing at the plan for the same three reasons:
+    not a task skill, context that is not set, and configuration that resolved to something
+    unusable. Discovering any of them mid-run means an agent has already been paid for.
+    """
+    from whetstone.taskloader import load_task_cases, verifier_for
+
+    skill = _skill(root, skill_id)
+    choice = _task_choice(config, skill)
+    skill_dir = root / skill_id
+    try:
+        cases = load_task_cases(skill_dir)
+    except SkillLoadError as exc:
+        raise Unprocessable(str(exc)) from exc
+    if not cases:
+        raise Unprocessable(
+            f"{skill.id} has no task cases — add one under task_cases/<id>/case.yaml"
+        )
+    try:
+        verifier = verifier_for(choice.task.verify, skill_dir)
+    except (ValueError, OSError) as exc:
+        raise Unprocessable(f"this skill's verify: block cannot be used: {exc}") from exc
+    return skill, choice, cases, verifier
+
+
+def _task_choice(config: Config, skill: Skill) -> ReviewerChoice:
+    try:
+        choice = reviewer_for(config.skills_root, skill)
+    except (StepError, ContextError) as exc:
+        raise Unprocessable(str(exc)) from exc
+    if choice.task is None:
+        raise Unprocessable(
+            f"{skill.id!r} is not a task skill — it is scored on findings it reports, not work "
+            f"it produces. Set `task: enabled: true` in evaluate/step.yaml, or use Run evals."
+        )
+    if choice.context and choice.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in choice.context.missing)
+        raise Unprocessable(
+            f"the task step for {skill.id!r} needs context that is not set: {names} — set the "
+            f"environment variable(s), or add them to .env, and try again"
+        )
+    if choice.problems:
+        raise Unprocessable(
+            f"the task step for {skill.id!r} cannot run: " + "; ".join(choice.problems)
+        )
+    return choice
+
+
+def _task_plan(
+    config: Config,
+    selection: ModelSelection,
+    choice: ReviewerChoice,
+    verifier: Any,
+    *,
+    cases: int,
+    action: str = "eval task",
+    sides: int = 1,
+) -> Plan:
+    from whetstone.service import verifier_identity
+
+    plan = plan_tasks(
+        _backend(selection, None),
+        cases=cases,
+        calls_per_case=choice.task.max_calls,
+        action=action,
+        sides=sides,
+        # The *verifier's* identity, never the executor's: naming the thing under test as its own
+        # examiner is the one thing a grading line must not say.
+        verifier=verifier_identity(verifier),
+    )
+    plan.details.append(
+        f"the skill runs as an agent: {choice.identity} — up to {choice.task.max_calls} call(s) "
+        f"per case ({choice.task.max_steps} steps + one forced answer)"
+    )
+    if choice.context and choice.context.redacted:
+        shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
+        plan.details.append(f"step context: {shown}")
+    check_budget(plan, config.runs.max_llm_calls_per_run)
+    return plan
+
+
+def _narrow(cases: list[Any], wanted: list[str], skill_id: str) -> list[Any]:
+    if not wanted:
+        return cases
+    keep = set(wanted)
+    narrowed = [c for c in cases if c.id in keep]
+    if not narrowed:
+        raise Unprocessable(
+            f"none of the selected case(s) exist in {skill_id!r} — reload the skill and pick again"
+        )
+    return narrowed
+
+
+@router.post("/task-eval/plan", response_model=Plan)
+def plan_task_eval_job(
+    request: TaskEvalRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
+    selection = _pick(request.provider, request.model, selection)
+    skill, choice, cases, verifier = _task_setup(config, root, request.skill_id)
+    picked = _narrow(cases, request.cases, skill.id)
+    return _task_plan(config, selection, choice, verifier, cases=len(picked))
+
+
+@router.post("/task-eval", response_model=Job, dependencies=[Writable])
+def launch_task_eval(
+    request: TaskEvalRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    task_runs: TaskRunsDep,
+    jobs: JobsDep,
+    selection: SelectionDep,
+) -> Job:
+    """Score a task skill on the work it produces, and store the record."""
+    from whetstone.service import record_task_run
+
+    selection = _pick(request.provider, request.model, selection)
+    skill, choice, cases, verifier = _task_setup(config, root, request.skill_id)
+    picked = _narrow(cases, request.cases, skill.id)
+    plan = _task_plan(config, selection, choice, verifier, cases=len(picked))
+    backend = _backend(selection, None)
+    keep = (config.runs_dir.parent / "workspaces" / skill.id) if request.keep_workspaces else None
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, len(picked), "starting")
+        client = _client(config, None, selection, label=f"task-{skill.id}")
+        executor = choice.build_executor(client)
+        done = 0
+
+        def on_case(run: Any) -> None:
+            nonlocal done
+            done += 1
+            handle.progress(done, len(picked), run.case_id)
+            handle.log(
+                LogLine(
+                    text=f"[{done}/{len(picked)}] {run.case_id} — "
+                    + ("passed" if run.outcome.passed else "FAILED")
+                    + f" (score {run.outcome.score:.2f})",
+                    tone="ok" if run.outcome.passed else "bad",
+                )
+            )
+            # The grader's own words. A task failure is diagnosed from what the test run said, and
+            # a bare "FAILED" sends the operator to a terminal to find out what this already knows.
+            for line in (run.error or run.outcome.detail).strip().splitlines()[-6:]:
+                if line.strip():
+                    handle.log(LogLine(group=run.case_id, text=f"    {line}", tone="said"))
+            for step in run.trace:
+                handle.log(LogLine(group=run.case_id, text=f"    did: {step}", tone="said"))
+
+        try:
+            record = record_task_run(
+                skill,
+                picked,
+                executor.execute,
+                verifier,
+                backend=backend.name,
+                model=backend.model,
+                executor_identity=choice.identity,
+                llm_calls=getattr(executor, "llm_calls", 0),
+                on_case=on_case,
+                cancel=handle.cancel_event,
+                keep_workspaces=keep,
+            )
+        except RunCancelled as exc:
+            raise Cancelled from exc
+        # Read after the run: an executor's spend is only known once it has spent it.
+        record = record.model_copy(update={"llm_calls": getattr(executor, "llm_calls", 0)})
+        task_runs.save(record)
+        handle.progress(len(picked), len(picked), "done")
+        return {
+            "run_id": record.id,
+            "pass_rate": record.score.pass_rate,
+            "mean_score": record.score.mean_score,
+            "errors": record.score.errors,
+            "llm_calls": record.llm_calls,
+            "graded_by": record.verifier,
+            "workspaces": record.workspaces,
+        }
+
+    return _launch(jobs, "task-eval", skill.id, work, plan)
+
+
+@router.post("/task-gate/plan", response_model=Plan)
+def plan_task_gate_job(
+    request: TaskGateRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
+    selection = _pick(request.provider, request.model, selection)
+    skill, choice, cases, verifier = _task_setup(config, root, request.skill_id)
+    plan = _task_plan(
+        config, selection, choice, verifier, cases=len(cases), action="task gate", sides=2
+    )
+    if not request.targeted:
+        plan.warnings.append(
+            "no case is named as one this change should fix, so a pass will prove only that "
+            "nothing broke — a rot guard, not evidence of sharpening"
+        )
+    return plan
+
+
+@router.post("/task-gate", response_model=Job, dependencies=[Writable])
+def launch_task_gate(
+    request: TaskGateRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    task_gates: TaskGatesDep,
+    jobs: JobsDep,
+    selection: SelectionDep,
+) -> Job:
+    """Compare the on-disk task skill against the last committed version — its C6 evidence."""
+    from whetstone.service import record_task_gate
+
+    selection = _pick(request.provider, request.model, selection)
+    skill, choice, cases, verifier = _task_setup(config, root, request.skill_id)
+    plan = plan_task_gate_job(request, config, root, selection)
+    committed = staging.committed_skill(config, skill.id)
+    # A task skill not yet committed has no prior guidance to regress from; the naked model is the
+    # right baseline, and asks the right question — does this guidance beat no guidance at all?
+    base = committed[0] if committed is not None else strip_guidance(skill)
+    backend = _backend(selection, None)
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, 1, "running base and candidate")
+        client = _client(config, None, selection, label=f"task-gate-{skill.id}")
+        # One executor for both sides, exactly as the review gate uses one reviewer: the instrument
+        # is held fixed so a score difference is the guidance rather than the tooling.
+        executor = choice.build_executor(client)
+
+        def side(label: str) -> Any:
+            def sink(run: Any) -> None:
+                handle.progress(0, 1, f"{label}: {run.case_id}")
+                handle.log(
+                    LogLine(
+                        group=f"{label}:{run.case_id}",
+                        text=f"{label} {run.case_id} — "
+                        + ("passed" if run.outcome.passed else "FAILED"),
+                        tone="ok" if run.outcome.passed else "bad",
+                    )
+                )
+
+            return sink
+
+        try:
+            record = record_task_gate(
+                base,
+                skill,
+                cases,
+                executor.execute,
+                verifier,
+                tolerance=request.tolerance,
+                targeted=list(request.targeted),
+                base_ref=config.git.default_base,
+                candidate_ref="working tree",
+                backend=backend.name,
+                model=backend.model,
+                executor_identity=choice.identity,
+                on_base=side("base"),
+                on_candidate=side("cand"),
+                cancel=handle.cancel_event,
+            )
+        except RunCancelled as exc:
+            # Nothing is saved: half a gate is not a verdict, and a record of one would be evidence
+            # C6 could match against content that was never fully measured.
+            raise Cancelled from exc
+        record = record.model_copy(update={"llm_calls": getattr(executor, "llm_calls", 0)})
+        task_gates.save(record)
+        handle.progress(1, 1, "done")
+        return {
+            "gate_id": record.id,
+            "passed": record.result.passed,
+            "reasons": list(record.result.reasons),
+            "fixed_cases": list(record.result.fixed_cases),
+            "regressed_cases": list(record.result.regressed_cases),
+            "delta": record.result.delta,
+            "llm_calls": record.llm_calls,
+        }
+
+    return _launch(jobs, "task-gate", skill.id, work, plan)
 
 
 class StageProposalRequest(BaseModel):
@@ -571,22 +928,35 @@ def plan_review_job(
     selection = _pick(request.provider, request.model, selection)
     skill = _skill(root, request.skill_id)
     choice = _reviewer_choice(config, skill)
+    # Three reviewers, three costs — and an agent is the one that spends *this* backend. It was
+    # lumped in with the reviewer program on `choice.custom`, so the banner said "up to 0 LLM
+    # call(s) — no Whetstone calls" directly above a note that the same run would make up to 13.
+    # A zero estimate is not merely wrong reading: `check_budget` reads it, so an agent review
+    # could never trip `max_llm_calls_per_run` however large its ceiling.
+    agent = choice.agent
+    if agent is not None:
+        calls, basis = agent.max_calls, (
+            f"up to {agent.max_calls} calls: this skill runs as an agent over this change "
+            f"({agent.max_steps} investigation steps + one forced answer). No judge — there is "
+            f"nothing to judge yet"
+        )
+    elif choice.custom:
+        calls, basis = 0, "no Whetstone calls: your reviewer program runs the review"
+    else:
+        calls, basis = 1, (
+            "one call: the reviewer over this change. No judge — there is nothing to judge yet"
+        )
     plan = plan_calls(
         "review",
         _backend(selection, _step(root, skill, "evaluate")),
-        # A reviewer program makes that one call itself, on its own backend, so Whetstone's own
-        # count is zero — and there is no judge on a live review to add one back.
-        calls=0 if choice.custom else 1,
-        basis=(
-            "no Whetstone calls: your reviewer program runs the review"
-            if choice.custom
-            else "one call: the reviewer over this change. No judge — there is nothing to judge yet"
-        ),
+        calls=calls,
+        basis=basis,
         details=["the findings are stored unruled; you decide which are right"],
     )
     if not skill.body.strip():
         plan.warnings.append("this skill has no guidance, so the reviewer is being sent no rules")
-    _annotate_reviewer(plan, choice, invocations=1)
+    _annotate_reviewer(plan, choice, invocations=1, judged=False)
+    check_budget(plan, config.runs.max_llm_calls_per_run)
     return plan
 
 
@@ -615,17 +985,18 @@ def launch_review(
     def work(handle: JobHandle) -> dict[str, Any]:
         handle.progress(0, 1, f"reviewing {ref or 'the change'}")
         handle.check()
+        client = _client(config, spec, selection, label=f"review-{skill.id}")
         record = record_review(
             skill,
             change,
-            _client(config, spec, selection, label=f"review-{skill.id}"),
+            client,
             source=source,
             ref=ref,
             url=url,
             title=title,
             backend=backend.name,
             model=backend.model,
-            reviewer=choice.reviewer,
+            reviewer=choice.build(client),
         )
         reviews.save(record)
         handle.log(
@@ -785,7 +1156,8 @@ def plan_baseline_job(
         cases=len(naked.eval_cases),
         wiki_limits=None,
         judge_cascade=bool(spec and spec.judge.enabled),
-        host_reviews=not choice.custom,
+        host_reviews=choice.agent is not None or not choice.custom,
+        calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     plan.action = "baseline"
     plan.details.append(
@@ -839,17 +1211,18 @@ def launch_baseline(
             elif event.kind == "case_started":
                 handle.progress(event.completed_cases, event.total_cases, f"{event.case_id}…")
 
+        client = _client(config, spec, selection, label=f"baseline-{skill.id}")
         try:
             record = record_baseline(
                 skill,
-                _client(config, spec, selection, label=f"baseline-{skill.id}"),
+                client,
                 backend=backend.name,
                 model=backend.model,
                 on_event=on_event,
                 cancel=handle.cancel_event,
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
-                reviewer=choice.reviewer,
+                reviewer=choice.build(client),
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -1511,13 +1884,29 @@ def _skill_to_score(config: Config, root: Path, request: EvalRequest) -> tuple[S
 
 
 def _skill_being_edited(config: Config, root: Path, skill_id: str) -> Skill:
-    """The skill the console's improve step works on: the on-disk guidance.
+    """The skill the console's improve step works on: the on-disk guidance, plus the promoted cases.
 
     The console edits in place, so what is on disk *is* the draft — "fix these failures" acts on the
     version the operator is looking at, which is the working tree. `_load_one` addresses a skill by
     folder name and also finds one whose `SKILL.md` declares an `id` that differs from its folder.
+
+    The promoted cases are overlaid for one reason: the improve digest looks each failure's case up
+    by id to attach its **diff**, and a case still under `promoted_cases/` is not in `eval_cases/`.
+    Without the overlay the drafter was handed "MISSED — case `x` … Reviewer said: nothing", with no
+    code beneath it — asked to fix a miss it could not see, on precisely the path the whole loop is
+    built around: promote a case from triage, score it, sharpen against it. It failed quietly, since
+    a prompt with a missing diff is still a valid prompt.
+
+    `overlay_cases` is the same seam the eval and the gate already use, which is what makes "with
+    the promoted cases" mean one thing across the three of them.
     """
-    return _skill(root, skill_id)
+    skill = _skill(root, skill_id)
+    try:
+        return staging.overlay_cases(skill, staging.promoted_cases(config, skill_id))
+    except (staging.StagingError, OSError):
+        # Best-effort, like every other read of this folder: a malformed promoted case must not
+        # take down the improve step, which can still work from the graduated corpus.
+        return skill
 
 
 def _gate_sides(config: Config, root: Path, skill_id: str) -> tuple[Skill, Skill]:
@@ -1544,8 +1933,32 @@ def _gate_sides(config: Config, root: Path, skill_id: str) -> tuple[Skill, Skill
     )
 
 
+def _step_agent(root: Path, skill: Skill, spec: StepSpec | None) -> Any:
+    """The agent an `improve` or `triage` step declares, refused at the plan if it cannot run.
+
+    The same three refusals the reviewer path makes, for the same reasons — an unset required var
+    and a source root that is set but wrong are both worse discovered mid-run, and a step that
+    resolved to something unusable would investigate nothing while looking like it worked.
+    """
+    agent = step_agent(spec, root / skill.id)
+    if agent is None:
+        return None
+    if agent.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in agent.context.missing)
+        raise Unprocessable(
+            f"the {spec.kind if spec else ''} step for {skill.id!r} needs context that is not "
+            f"set: {names} — set the environment variable(s), or add them to .env, and try again"
+        )
+    if agent.problems:
+        raise Unprocessable(
+            f"the {spec.kind if spec else ''} step for {skill.id!r} cannot run: "
+            + "; ".join(agent.problems)
+        )
+    return agent
+
+
 def _reviewer_choice(config: Config, skill: Skill) -> ReviewerChoice:
-    """The reviewer this skill scores with — the built-in one, or its own `run:` program.
+    """The reviewer this skill scores with — the built-in one, its own `run:` program, or an agent.
 
     A required context var that is unset is refused here, at the plan, so a run never dies partway
     through because a source location the reviewer needs was never provided — the same discipline
@@ -1561,11 +1974,23 @@ def _reviewer_choice(config: Config, skill: Skill) -> ReviewerChoice:
             f"the reviewer for {skill.id!r} needs context that is not set: {names} — set the "
             f"environment variable(s), or add them to .env, and try again"
         )
+    if choice.problems:
+        raise Unprocessable(
+            f"the reviewer for {skill.id!r} cannot run: " + "; ".join(choice.problems)
+        )
+    if choice.task is not None:
+        # The review path would score this skill's (empty) `eval_cases/` and report a flawless run
+        # over nothing, which is worse than any error message.
+        raise Unprocessable(
+            f"{skill.id!r} is a task skill (`task: enabled` in evaluate/step.yaml): it is scored "
+            f"on work it produces, not findings it reports, so the review path cannot run it. Open "
+            f"its Tasks tab to run or gate it, or use `whetstone eval task --skill <folder>`."
+        )
     return choice
 
 
 def _annotate_reviewer(
-    plan: Plan, choice: ReviewerChoice, *, invocations: int, gate: bool = False
+    plan: Plan, choice: ReviewerChoice, *, invocations: int, gate: bool = False, judged: bool = True
 ) -> None:
     """Say, in the cost plan, that a custom reviewer will run — what it gets, and how often.
 
@@ -1573,19 +1998,50 @@ def _annotate_reviewer(
     What it cannot price is the program's own spend, so it prices what it can and *counts* what it
     cannot: the invocation volume is the one number the operator needs to multiply by their own
     per-call cost, and a plan that hid it would understate the run to the point of dishonesty.
+
+    `judged=False` for a live review, which has no judge — there is nothing to judge until a human
+    rules on the findings. Saying "plus the judge" there described a call that never happens, in the
+    same banner whose built-in wording already says the opposite.
     """
     if not choice.custom:
         return
-    plan.details.append(
-        f"reviewer: {choice.identity} — your program reads the diff and the context and returns "
-        f"findings; Whetstone calls no model for the review (the judge still runs on the backend "
-        f"above, and the estimate counts only that)"
-    )
-    plan.details.append(
-        f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot price "
-        f"those calls, only count them, so the cost of the run is this many invocations at "
-        f"whatever each one spends"
-    )
+    if choice.agent is not None:
+        # An agent *does* spend Whetstone's backend — it is the one custom reviewer whose calls are
+        # ours, so they are priced rather than merely counted, at the step ceiling.
+        # `max_calls`, not `max_steps`: the budget buys that many investigation turns and then one
+        # more forced turn to make it answer. Pricing the ceiling at `max_steps` understates every
+        # review by exactly one call.
+        calls = choice.agent.max_calls
+        plan.details.append(
+            f"reviewer: {choice.identity} — this skill runs as an agent. Its SKILL.md is the "
+            f"instruction set, its other pages are read on demand, and it investigates before "
+            f"answering."
+        )
+        plan.details.append(
+            f"up to {calls} model call(s) per review ({choice.agent.max_steps} steps + one forced "
+            f"answer) x {invocations} review(s) = up to {calls * invocations} calls on the backend "
+            f"above{', plus the judge' if judged else ' (there is no judge on a live review)'}. An "
+            f"agent usually stops well short of its step ceiling, so this is an upper bound, not "
+            f"an estimate."
+        )
+        if choice.agent.source_root:
+            plan.details.append(
+                "the agent can read the declared source tree (read-only, sandboxed to its root)"
+            )
+        if choice.agent.tools:
+            names = ", ".join(t.name for t in choice.agent.tools)
+            plan.details.append(f"skill-provided tools: {names} — run as programs by this skill")
+    else:
+        plan.details.append(
+            f"reviewer: {choice.identity} — your program reads the diff and the context and "
+            f"returns findings; Whetstone calls no model for the review (the judge still runs on "
+            f"the backend above, and the estimate counts only that)"
+        )
+        plan.details.append(
+            f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot "
+            f"price those calls, only count them, so the cost of the run is this many invocations "
+            f"at whatever each one spends"
+        )
     if choice.context and choice.context.redacted:
         shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
         plan.details.append(f"reviewer context: {shown}")
@@ -1724,8 +2180,9 @@ def _eval_plan(
         cases=scored,
         wiki_limits=spec.inputs.wiki if spec else None,
         judge_cascade=bool(spec and spec.judge.enabled),
-        # A skill with its own reviewer program spends none of Whetstone's calls on the review.
-        host_reviews=not choice.custom,
+        # A reviewer *program* spends none of Whetstone's calls; an agent spends one per step.
+        host_reviews=choice.agent is not None or not choice.custom,
+        calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     if sides > 1 and plan.estimate:
         # Doubled *before* the budget check: a warning computed against one half of a gate is the

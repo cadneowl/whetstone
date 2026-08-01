@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   useConsoleConfig,
   useProposal,
@@ -125,26 +125,15 @@ function Editor({
         no branch, no commit. Commit and push with your own git when a change is gate-proven.
       </p>
 
-      {/* Pending cases count here too. They are what the last run scored in the flow this panel
-          exists for, so leaving them out made it announce "never scored, run the evals first"
-          directly above a link to the run that had just scored them. */}
-      <ImprovePanel
-        skillId={skillId}
+      {/* This tab used to carry its own LLM drafter, under a different name ("Draft a change") for
+          the same job the Improve tab calls "Improve from selected" — two front doors to one loop,
+          and a reader had to work out which. The Improve tab's version is strictly the better one:
+          it scopes the draft to the cases you ticked and takes a steering instruction. So the door
+          stays, as a pointer, and this tab keeps what is unique to it — the editor. */}
+      <SharpenPointer
         cases={[...detail.cases, ...detail.pending_cases]}
-        onDrafted={(body, pages) => {
-          // Lands in the editor, uncommitted, exactly as a hand edit would.
-          setDrafts((d) => ({ ...d, ...(body ? { [SKILL_FILE]: body } : {}), ...pages }))
-          // Show the file it actually rewrote. A draft that only touched a page leaves `SKILL.md`
-          // looking untouched, so staying here reads as "nothing happened" — and the response
-          // carries a `body` either way, so its presence says nothing about what changed.
-          const changedBody = !!body && body.trim() !== proposal.body.trim()
-          const firstPage = Object.keys(pages)[0]
-          if (!changedBody && firstPage) setActive(firstPage)
-        }}
         stale={outcomesAreStale}
-        staged={false}
         base={proposal.base}
-        viaBatch={detail.pending_cases.length > 0}
       />
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -357,28 +346,25 @@ function FileTabs({
  * the ordinary path — apply to disk, gate — so nothing about a machine-written rule can skip a
  * step a hand-written one has to pass.
  */
-function ImprovePanel({
-  skillId,
+/**
+ * Where the LLM sharpen lives, and what it would have to learn from.
+ *
+ * Not a launcher: the same job under a second name was the single most confusing thing about this
+ * screen. It keeps the part that was worth having — the honest summary of whether there is anything
+ * to learn from at all — and sends you to the one place that runs it.
+ */
+function SharpenPointer({
   cases,
-  onDrafted,
   stale,
-  staged,
   base,
-  viaBatch,
 }: {
-  skillId: string
-  // Both kinds: the fields this panel reads — id, kind, and the two outcomes — are the ones a
-  // pending case carries as well.
+  // Both kinds: the fields this reads — id, kind, and the two outcomes — are the ones a pending
+  // case carries as well.
   cases: (CaseSummary | PendingCase)[]
-  onDrafted: (body: string, pages: Record<string, string>) => void
   stale: boolean
-  staged: boolean
   base: string
-  viaBatch: boolean
 }) {
-  const [instruction, setInstruction] = useState('')
-  const [note, setNote] = useState('')
-
+  const improve = useImproveSearch()
   const scored = cases.filter((c) => c.last_recall !== null || c.last_fp_rate !== null)
   const failing = scored.filter((c) =>
     c.kind === 'should_catch' ? (c.last_recall ?? 1) < 1 : (c.last_fp_rate ?? 0) > 0,
@@ -404,69 +390,24 @@ function ImprovePanel({
   return (
     <section className="rounded-lg border border-line bg-surface/50 p-3">
       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="text-sm font-medium">Draft a change from the last run</h3>
-        <span className="text-xs text-muted">loads into the editor; commits nothing</span>
+        <h3 className="text-sm font-medium">Sharpen with the LLM</h3>
+        <Link to={{ search: improve }} className="text-xs text-accent underline">
+          on the Improve tab →
+        </Link>
       </div>
-      {/* A button with no stated reason to press it is what made this panel read as noise. */}
-      {summary && <p className="mb-2 text-xs text-muted">{summary}</p>}
-      {/* "Run the evals first" with a draft staged used to point only at the header's Run evals,
-          which scores the working tree — everything except the change being worked on. Staleness
-          cannot be detected with no run to compare against, so the offer hangs off the draft
-          existing at all. */}
-      {!scored.length && staged && (
-        <div className="mb-2">
-          <ScoreTheDraft
-            skillId={skillId}
-            viaBatch={viaBatch}
-            note="Not scored yet — score the guidance on disk to see how the edit does."
-          />
-        </div>
-      )}
-      {/* The server refuses this outright — `_run_for` rejects a run that scored different content
-          than the working tree. Said here as well, because being told before the click why the
-          button will not work is the difference between a guard rail and a wall, and because the
-          failures it would learn from are ones the staged edit may already have fixed. */}
+      {/* A pointer with no stated reason to follow it would be the same noise the launcher was. */}
+      {summary && <p className="text-xs text-muted">{summary}</p>}
       {stale && (
-        <div className="mb-2 space-y-2 rounded border border-warn/40 bg-warn/5 px-2.5 py-2">
-          <p className="text-xs text-warn">
-            The last run scored the guidance on <code className="font-mono">{base}</code>, not what
-            you have staged, so this would draft from failures your edit may already have fixed —
-            and the server refuses it for that reason. Score the draft first, then the failures it
-            learns from are the ones you actually still have.
-          </p>
-          <ScoreTheDraft skillId={skillId} viaBatch={viaBatch} />
-        </div>
+        <p className="mt-2 rounded border border-warn/40 bg-warn/5 px-2.5 py-2 text-xs text-warn">
+          The last run scored the guidance on <code className="font-mono">{base}</code>, not what is
+          on disk now, so a draft would learn from failures your edit may already have fixed. Score
+          it again first — the Improve tab does that as its step 1.
+        </p>
       )}
-      <LaunchButton
-        kind="improve"
-        request={{ skill_id: skillId, instruction }}
-        label="Draft a change"
-        onDone={(job) => {
-          const r = job.result as Record<string, unknown>
-          const body = String(r.body ?? '')
-          // Pages only where the step rewrote one, which is where the rule lived.
-          const pages = (r.pages ?? {}) as Record<string, string>
-          if (!body && !Object.keys(pages).length) return
-          onDrafted(body, pages)
-          const touched = Object.keys(pages)
-          setNote(
-            `Drafted from ${String(r.total_failures)} failure(s)` +
-              (touched.length ? `, rewriting ${touched.join(', ')}` : '') +
-              `. ${String(r.rationale ?? '')}`,
-          )
-        }}
-      >
-        <label className="block text-xs text-muted">
-          Steer this run (optional)
-          <input
-            value={instruction}
-            onChange={(e) => setInstruction(e.target.value)}
-            placeholder="e.g. focus on false positives in test files"
-            className="mt-1 w-full rounded border border-line bg-surface px-2 py-1 text-sm text-ink outline-none focus:border-accent/60"
-          />
-        </label>
-      </LaunchButton>
-      {note && <p className="mt-2 text-xs text-muted">{note}</p>}
+      <p className="mt-2 text-xs text-muted">
+        Drafting happens there, where it can be scoped to the cases you pick and steered with an
+        instruction. It writes to the same files this editor does.
+      </p>
     </section>
   )
 }
@@ -792,20 +733,44 @@ function PinnedCases({
               </li>
             ))}
           </ul>
-          <ScoreTheBatch skillId={skillId} />
+          <ScoreTheBatch />
         </div>
       )}
     </section>
   )
 }
 
-/** Score the skill against the promoted cases waiting under `promoted_cases/`. */
-function ScoreTheBatch({ skillId }: { skillId: string }) {
+/**
+ * Where the promoted batch is scored.
+ *
+ * A pointer, not a launcher: the Improve tab runs the identical job as its step 1 and called it
+ * "Score the promoted batch", so the two screens named one action two ways. Its version can also
+ * score a subset, which is the thing you actually want once a batch is more than a couple of cases.
+ */
+function ScoreTheBatch() {
+  const improve = useImproveSearch()
   return (
-    <LaunchButton
-      kind="eval"
-      request={{ skill_id: skillId, scope: 'promoted' }}
-      label="Score these pending cases"
-    />
+    <p className="text-xs text-muted">
+      Score these on the{' '}
+      <Link to={{ search: improve }} className="text-accent underline">
+        Improve tab
+      </Link>{' '}
+      — all of them, or just the ones you tick.
+    </p>
   )
+}
+
+/**
+ * The query that lands on the Improve tab **keeping the workspace state**.
+ *
+ * These two pointers used to link to a bare `?tab=improve`, which threw away the ticked cases and
+ * the scored run — the very state `SkillDetail`'s tab strip was fixed to preserve. Which of two
+ * adjacent links you clicked decided whether your selection survived, which is worse than either
+ * behaviour on its own.
+ */
+function useImproveSearch(): string {
+  const [params] = useSearchParams()
+  const next = new URLSearchParams(params)
+  next.set('tab', 'improve')
+  return `?${next.toString()}`
 }

@@ -52,6 +52,9 @@ export type FindingVerdict = Schemas['FindingVerdict']
 export type PreparedCase = Schemas['PreparedCase']
 export type PromoteResponse = Schemas['PromoteResponse']
 export type Batch = Schemas['BatchView']
+export type PromotedCase = Schemas['PromotedCase']
+export type CaseEditRequest = Schemas['CaseEditRequest']
+export type CaseWriteResult = Schemas['CaseWriteResult']
 export type GraduateResult = Schemas['GraduateResult']
 export type EvalKind = CaseEdits['kind']
 export type SkillEdit = Schemas['SkillEdit']
@@ -72,6 +75,13 @@ export type Signal = Schemas['Signal']
 export type WatchState = Schemas['WatchState']
 export type Sweep = Schemas['Sweep']
 export type DraftResponse = Schemas['DraftResponse']
+export type SharpeningReport = Schemas['SharpeningReport']
+export type TrendPoint = Schemas['TrendPoint']
+export type TaskTrendPoint = Schemas['TaskTrendPoint']
+export type ProvenFix = Schemas['ProvenFix']
+export type TaskView = Schemas['TaskView']
+export type TaskCaseSummary = Schemas['TaskCaseSummary']
+export type TaskRunRecord = Schemas['TaskRunRecord']
 /** The union of every job kind's request body. Each route validates its own shape server-side. */
 export type JobRequest = {
   /** Absent only for judge-eval, which measures the deployment-wide judge rather than a skill. */
@@ -105,6 +115,10 @@ export type JobRequest = {
    * Empty/absent means the step's default (for eval, every promoted case).
    */
   cases?: string[]
+  /** task-eval only: keep each case's workspace on disk instead of a temp dir. */
+  keep_workspaces?: boolean
+  /** task-gate only: how far the mean score may fall before the gate fails. */
+  tolerance?: number
 }
 
 /** The shape the API returns for a handled failure — see `ui/errors.py`. */
@@ -165,6 +179,8 @@ export const keys = {
   skills: ['skills'] as const,
   skill: (id: string) => ['skill', id] as const,
   case: (skillId: string, caseId: string) => ['case', skillId, caseId] as const,
+  sharpening: (id: string) => ['sharpening', id] as const,
+  tasks: (id: string) => ['tasks', id] as const,
   runs: (skillId?: string) => ['runs', skillId ?? 'all'] as const,
   run: (id: string) => ['run', id] as const,
   disputes: (runId: string) => ['disputes', runId] as const,
@@ -221,6 +237,34 @@ export function useSkill(id: string) {
   return useQuery({
     queryKey: keys.skill(id),
     queryFn: () => get<SkillDetail>(`/api/skills/${encodeURIComponent(id)}`),
+  })
+}
+
+/**
+ * Whether this skill is getting sharper, and what that claim rests on.
+ *
+ * Two answers of very different strength — see `whetstone/sharpening.py`. Read the ledger, not the
+ * line: the trend moves whenever the corpus, the judge or the model moves, and the healthy loop
+ * moves the corpus every week.
+ */
+export function useSharpening(skillId: string) {
+  return useQuery({
+    queryKey: keys.sharpening(skillId),
+    queryFn: () =>
+      get<SharpeningReport>(`/api/skills/${encodeURIComponent(skillId)}/sharpening`),
+  })
+}
+
+/**
+ * The task cases a skill carries, its instruments, and its run history.
+ *
+ * Safe to ask of any skill: a review skill answers `is_task: false` with everything else empty, so
+ * the Tasks tab can be rendered conditionally without a second round trip to find out.
+ */
+export function useTasks(skillId: string) {
+  return useQuery({
+    queryKey: keys.tasks(skillId),
+    queryFn: () => get<TaskView>(`/api/skills/${encodeURIComponent(skillId)}/tasks`),
   })
 }
 
@@ -301,6 +345,47 @@ export function useSetTier(skillId: string) {
       void client.invalidateQueries({ queryKey: keys.proposal(skillId) })
       void client.invalidateQueries({ queryKey: keys.inbox })
     },
+  })
+}
+
+/**
+ * Correct or remove a graduated eval case.
+ *
+ * Both change `skill_hash`, so both retract the gate verdict — which is why they invalidate the
+ * proposal query alongside the case itself.
+ */
+function invalidateCorpus(client: ReturnType<typeof useQueryClient>, skillId: string) {
+  void client.invalidateQueries({ queryKey: keys.skill(skillId) })
+  void client.invalidateQueries({ queryKey: keys.health(skillId) })
+  void client.invalidateQueries({ queryKey: keys.proposal(skillId) })
+  void client.invalidateQueries({ queryKey: keys.inbox })
+}
+
+export function useEditCase(skillId: string, caseId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (edit: CaseEditRequest) =>
+      send<CaseWriteResult>(
+        'PUT',
+        `/api/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(caseId)}`,
+        edit,
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: keys.case(skillId, caseId) })
+      invalidateCorpus(client, skillId)
+    },
+  })
+}
+
+export function useDeleteCase(skillId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (caseId: string) =>
+      send<CaseWriteResult>(
+        'DELETE',
+        `/api/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(caseId)}`,
+      ),
+    onSuccess: () => invalidateCorpus(client, skillId),
   })
 }
 
@@ -423,6 +508,51 @@ export function useUndoDecision() {
   return useMutation({
     mutationFn: (id: string) =>
       send<unknown>('DELETE', `/api/candidates/${encodeURIComponent(id)}/decision`),
+    onSuccess: () => invalidateTriage(client),
+  })
+}
+
+/**
+ * Rewrite a promoted case — its expectation, region, kind or tier.
+ *
+ * The server re-derives it from the original candidate, so the edit passes the same validation the
+ * promotion did rather than being patched onto the YAML on disk.
+ */
+export function useEditPromoted() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      skillId,
+      caseId,
+      edits,
+    }: {
+      skillId: string
+      caseId: string
+      edits: CaseEdits
+    }) =>
+      send<PromoteResponse>(
+        'PUT',
+        `/api/candidates/batch/${encodeURIComponent(skillId)}/${encodeURIComponent(caseId)}`,
+        { edits },
+      ),
+    onSuccess: () => invalidateTriage(client),
+  })
+}
+
+/**
+ * Drop a promoted case from the batch.
+ *
+ * The server also returns the candidate that wrote it to the queue, so this is a genuine undo of
+ * the promotion rather than a delete — which is why it invalidates the queue as well.
+ */
+export function useRemovePromoted() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ skillId, caseId }: { skillId: string; caseId: string }) =>
+      send<Batch>(
+        'DELETE',
+        `/api/candidates/batch/${encodeURIComponent(skillId)}/${encodeURIComponent(caseId)}`,
+      ),
     onSuccess: () => invalidateTriage(client),
   })
 }

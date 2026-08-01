@@ -44,6 +44,10 @@ from whetstone.wiki import WikiEntry, WikiLimits
 
 StepKind = Literal["evaluate", "improve", "update", "triage"]
 STEP_KINDS: tuple[StepKind, ...] = ("evaluate", "improve", "update", "triage")
+# Steps that can run the skill as an agent — every kind whose work is *the skill thinking*, which
+# is all of them except `update`. An update step generates a wiki by invoking a program the
+# deployment owns; there is no skill judgement in it to give tools to.
+AGENT_KINDS: tuple[StepKind, ...] = ("evaluate", "improve", "triage")
 STEP_FILE = "step.yaml"
 
 # Annotated so the default factory below carries the Literal type rather than plain `str`.
@@ -131,6 +135,76 @@ class Tier1Backend(BaseModel):
         return bool(self.llm or self.model)
 
 
+class AgentTool(BaseModel):
+    """A tool the skill brings: a program Whetstone offers to the model and runs on request.
+
+    This is how a skill reaches things Whetstone knows nothing about — a tracker, an internal
+    search, a schema registry. The contract is the one `improve`/`update` already use: JSON on
+    stdin (`{"arguments": …, "context": …}`), whatever the model should see on stdout.
+    """
+
+    name: str
+    description: str = ""
+    run: list[str] = Field(default_factory=list)
+    # JSON Schema for the arguments. Free-form: it is passed to the model, not interpreted here.
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    timeout_s: int = Field(default=60, ge=1)
+
+
+class AgentPolicy(BaseModel):
+    """Run this skill as an agent: `SKILL.md` as instructions, its pages readable on demand, tools.
+
+    Off by default, and off is the whole of the old behaviour — the built-in reviewer sends one
+    prompt and takes one answer. Turning it on changes what a skill *is* to the harness: not text to
+    paste, but instructions to follow, with a budget for looking things up before answering.
+
+        agent:
+          enabled: true
+          max_steps: 12
+          source: { env: SERVICE_REPO, required: true }
+
+    `source` takes the same three value forms as `context:` (env / file / literal), so a checkout
+    path stays machine-local and uncommitted. Without it the agent can still read the skill's own
+    pages; with it, it can read the code as well.
+    """
+
+    enabled: bool = False
+    # Investigation budget per review. The ceiling on cost *and* on how long a case can take: the
+    # agent is forced to answer when it runs out, so this is a bound, never a hang.
+    max_steps: int = Field(default=12, ge=1, le=100)
+    # Where the source tree is. A context directive, resolved like any other.
+    source: Any = None
+    # Tools this skill brings. Whetstone offers them to the model and runs them; it never needs to
+    # know what any of them do.
+    tools: list[AgentTool] = Field(default_factory=list)
+
+
+class TaskPolicy(BaseModel):
+    """Score this skill on *task* cases — work it produces — rather than on findings.
+
+    A skill that writes tests is not graded by asking a judge whether two sentences mean the same
+    thing; it is graded by running the tests. Turning this on switches the corpus from
+    `eval_cases/` to `task_cases/` and the grader from the judge to whatever `verify` names.
+
+        task:
+          enabled: true
+          verify: { command: ["python", "-m", "pytest", "-q"] }   # the default for every case
+          max_steps: 20
+
+    A case may override `verify` for itself. `run:` instead of `command:` hands grading to a program
+    the skill ships, for work whose quality an exit code cannot express.
+    """
+
+    enabled: bool = False
+    max_steps: int = Field(default=20, ge=1, le=100)
+    # Default grading for every case; a case's own `verify:` block wins key by key.
+    verify: dict[str, Any] = Field(default_factory=dict)
+    # Where the source tree is, if the skill needs to read code while working.
+    source: Any = None
+    # Tools the skill brings, exactly as for a review agent.
+    tools: list[AgentTool] = Field(default_factory=list)
+
+
 class JudgePolicy(BaseModel):
     """How this skill's verdicts are judged — the cascade knobs, in `evaluate/step.yaml`.
 
@@ -192,6 +266,10 @@ class StepSpec(BaseModel):
     # (`context.resolve_context`) and forwards the bag without interpreting the keys. Empty for the
     # built-in reviewer, which takes no extra inputs.
     context: dict[str, Any] = Field(default_factory=dict)
+    # `evaluate` only: run the skill as an agent rather than as one prompt. See `AgentPolicy`.
+    agent: AgentPolicy = AgentPolicy()
+    # `evaluate` only: score on work produced rather than findings reported. See `TaskPolicy`.
+    task: TaskPolicy = TaskPolicy()
     # Exactly one of these is set for a model step; `run` alone for a subprocess step.
     prompt: str | None = None
     run: list[str] = Field(default_factory=list)
@@ -204,7 +282,9 @@ class StepSpec(BaseModel):
     # A key whose every sub-line is commented out parses as None, which is an easy thing to do
     # while editing a scaffold and produces a baffling "should be a valid dictionary" otherwise.
     # An empty block plainly means "defaults", so read it that way.
-    @field_validator("model", "inputs", "sample", "judge", "context", mode="before")
+    @field_validator(
+        "model", "inputs", "sample", "judge", "context", "agent", "task", mode="before"
+    )
     @classmethod
     def _empty_block_is_default(cls, value: object) -> object:
         return {} if value is None else value
@@ -343,13 +423,41 @@ def _validate(spec: StepSpec, path: Path) -> None:
             f"harness's. To plug in your own reviewer, set 'run:' instead: it receives the "
             f"guidance, the diff and the resolved context on stdin and returns findings on stdout."
         )
-    # `context:` feeds a custom reviewer program. Declared without one, it would be resolved (a
-    # secret read, a file loaded) and then silently dropped, because the built-in reviewer takes no
-    # extra inputs — so refuse it rather than let it read as configured-but-ignored.
-    if spec.context and not (spec.kind == "evaluate" and spec.run):
+    # `context:` feeds something that takes extra inputs: a program the step runs, or the step
+    # running as an agent (its declared tools receive the bag on stdin, which is how a token reaches
+    # Jira without being committed). Declared with neither it would be resolved — a secret read, a
+    # file loaded — and then silently dropped, because a plain prompt step takes no extra inputs.
+    # So refuse it there rather than let it read as configured-but-ignored.
+    #
+    # Not evaluate-only. It was, which meant an improve step could not be given the source root the
+    # evaluate step had just reviewed against: the drafter was asked to fix guidance for failures in
+    # code it was forbidden from reading. A skill is run one way everywhere or it is two things.
+    takes_context = bool(spec.run or spec.agent.enabled or spec.task.enabled)
+    if spec.context and not takes_context:
         raise StepError(
-            f"{path}: 'context:' only feeds a reviewer program — it has no effect without 'run:' "
-            f"on an evaluate step (the built-in reviewer takes no extra inputs)"
+            f"{path}: 'context:' supplies the inputs a program or an agent needs, so it has no "
+            f"effect without 'run:' or 'agent:' on this step (a plain prompt step takes no extra "
+            f"inputs)"
+        )
+    if spec.agent.enabled and spec.kind not in AGENT_KINDS:
+        raise StepError(
+            f"{path}: 'agent:' runs this step as an agent, which {spec.kind} steps do not do — "
+            f"it belongs on {', '.join(AGENT_KINDS)} (an update step invokes your generator "
+            f"with 'run:')"
+        )
+    if spec.task.enabled and spec.kind != "evaluate":
+        raise StepError(
+            f"{path}: 'task:' configures how a skill is scored, so it belongs on an evaluate step"
+        )
+    if spec.task.enabled and spec.agent.enabled:
+        raise StepError(
+            f"{path}: a skill is scored one way — 'agent:' grades findings on eval cases, 'task:' "
+            f"grades work produced on task cases"
+        )
+    if spec.agent.enabled and spec.run:
+        raise StepError(
+            f"{path}: choose one reviewer — 'agent: enabled' runs the skill as an agent inside "
+            f"Whetstone, 'run:' hands reviewing to your own program"
         )
 
 

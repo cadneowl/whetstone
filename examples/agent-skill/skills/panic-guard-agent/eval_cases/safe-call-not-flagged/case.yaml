@@ -1,0 +1,17 @@
+# The case that makes the skill a *measurement* rather than a detector. Without it, guidance that
+# says "flag every call" scores perfect recall — so this is what stops the gate rewarding noise.
+id: safe-call-not-flagged
+kind: should_not_flag
+repo: "local:hub-backend"
+change: change.diff
+provenance:
+  source: manual
+  human_signal: "hand-written example"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: app/worker.py
+    semantic: >
+      safe_get never raises and balance_of raises a catchable LookupError, so neither is a panic
+      and neither call is a finding

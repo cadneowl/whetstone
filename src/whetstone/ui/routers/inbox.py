@@ -22,6 +22,7 @@ from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
 from whetstone.inbox import Attention, Inbox, Retirement, Signal, decide
 from whetstone.runs import CorruptRecord, RunStore
+from whetstone.taskruns import TaskRunStore
 from whetstone.ui.deps import (
     CadenceDep,
     ConfigDep,
@@ -29,6 +30,7 @@ from whetstone.ui.deps import (
     GatesDep,
     SkillsRootDep,
     StoreDep,
+    TaskRunsDep,
     WatcherDep,
     Writable,
 )
@@ -60,13 +62,16 @@ def get_inbox(
     drift: DriftDep,
     cadence: CadenceDep,
     watcher: WatcherDep,
+    task_runs: TaskRunsDep,
 ) -> InboxView:
     from whetstone.ui.routers.skills import _load_all
 
     skills = _load_all(root)
     pending = _pending_by_skill(config)
     rows = [
-        _attention(config, store, gates, drift, cadence, skill, pending.get(skill.id, []))
+        _attention(
+            config, store, gates, drift, cadence, skill, pending.get(skill.id, []), task_runs
+        )
         for skill in skills
     ]
     rows.sort(key=lambda a: (a.action.rank, -a.new_signals, a.skill_id))
@@ -111,8 +116,11 @@ def _attention(
     cadence: CadenceStore,
     skill: Skill,
     pending: list[CandidateEntry],
+    task_runs: TaskRunStore,
 ) -> Attention:
     record = _latest(store, skill.id)
+    is_task, task_cases = _task_state(config, skill)
+    task_record = task_runs.latest(skill.id) if is_task else None
     # Read once and merged into both the working tree and the staged draft below: two reads would
     # cost twice the git for every skill on this page, and could disagree if a promotion lands
     # between them.
@@ -163,8 +171,16 @@ def _attention(
         saturated=len(saturated),
         drift_uncovered=drift_uncovered,
         cadence_due=cadence_due,
+        is_task=is_task,
+        task_cases=task_cases,
+        task_scored=task_record is not None,
+        task_failing=0
+        if task_record is None
+        else sum(1 for c in task_record.score.cases if not c.outcome.passed),
     )
     return Attention(
+        is_task=is_task,
+        task_cases=task_cases,
         skill_id=skill.id,
         name=skill.name or skill.id,
         new_signals=len(pending),
@@ -186,6 +202,27 @@ def _attention(
         cadence_due=cadence_due,
         action=action,
     )
+
+
+def _task_state(config: Config, skill: Skill) -> tuple[bool, int]:
+    """Whether this skill is scored on work it produces, and how many task cases it carries.
+
+    Best-effort by design: this runs once per skill on the console's home screen, and a skill with a
+    broken step file must degrade to "not a task skill" rather than taking the whole inbox down.
+    The Tasks tab reports the breakage properly, with the room to explain it.
+    """
+    from whetstone.context import ContextError
+    from whetstone.core.loader import SkillLoadError
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.steps import StepError
+    from whetstone.taskloader import load_task_cases
+
+    try:
+        if reviewer_for(config.skills_root, skill).task is None:
+            return False, 0
+        return True, len(load_task_cases(config.skills_root / skill.id))
+    except (StepError, ContextError, SkillLoadError, OSError):
+        return False, 0
 
 
 def _signal(entry: CandidateEntry) -> Signal:

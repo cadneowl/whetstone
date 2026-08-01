@@ -1,0 +1,6 @@
+id: covers-refund-error
+instruction: >
+  Write unit tests for refund.py. It must cover both a successful refund and the
+  error raised when the amount exceeds the original charge.
+verify:
+  command: ["{python}", "-m", "pytest", "-q"]

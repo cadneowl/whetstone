@@ -1,0 +1,8 @@
+diff --git a/app/worker.py b/app/worker.py
+--- a/app/worker.py
++++ b/app/worker.py
+@@ -1,2 +1,4 @@
+ def run_batch():
++    flag = safe_get("batch_enabled")
++    total = balance_of("acct-1")
+     return None

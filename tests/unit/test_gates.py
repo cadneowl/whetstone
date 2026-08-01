@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from whetstone.core.gate import GateConfig, GateResult
-from whetstone.domain.score import SkillScore
+from whetstone.core.gate import GateConfig, GateResult, gate
+from whetstone.domain.score import CaseScore, Confusion, SkillScore
 from whetstone.gates import GateRecord, GateStore, new_gate_id
 
 HASH_A = "a" * 64
@@ -200,14 +200,14 @@ def test_a_pass_after_a_failure_carries_no_caveat(tmp_path: Path) -> None:
 
     verdict = store.verdict_for("rust-errors", HASH_A)
     assert verdict.can_propose is True
-    assert verdict.caveat == ""
+    assert "a later gate" not in verdict.caveat
 
 
 def test_a_later_practice_run_is_not_a_contradiction(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.save(_record(passed=True, at=AT))
     store.save(_record(passed=False, practice=True, at=AT + timedelta(hours=1)))
-    assert store.verdict_for("rust-errors", HASH_A).caveat == ""
+    assert "a later gate" not in store.verdict_for("rust-errors", HASH_A).caveat
 
 
 def test_an_unreadable_record_is_named_not_merely_missing(tmp_path: Path) -> None:
@@ -221,3 +221,55 @@ def test_an_unreadable_record_is_named_not_merely_missing(tmp_path: Path) -> Non
     store.path_for(record.id).write_text("{ truncated", encoding="utf-8")
     with pytest.raises(CorruptRecord, match="unreadable"):
         store.load(record.id)
+
+def test_a_gate_that_claims_nothing_says_so(tmp_path: Path) -> None:
+    """The difference between what Whetstone claims and what it enforces.
+
+    The claim is that no skill change ships without evidence it is an *improvement*. The rule is
+    that a gate passed — and a gate passes when nothing regressed. So a reworded rule, a reordered
+    section, an LLM draft that changed prose and nothing else all clear it. That is a rot guard,
+    which is worth having; it is just not sharpening, and the verdict must not imply otherwise.
+    """
+    store = GateStore(tmp_path)
+    same = SkillScore(
+        skill_id="s", version=1, k=1,
+        cases=[CaseScore(case_id="a", kind="should_catch", trials=[Confusion(tp=1)])],
+    )
+    store.save(
+        GateRecord(
+            id=new_gate_id("s", "b", AT), created_at=AT, skill_id="s",
+            base_hash="a", candidate_hash="b",
+            base_score=same, candidate_score=same, result=gate(same, same),
+        )
+    )
+
+    verdict = store.verdict_for("s", "b")
+    assert verdict.can_propose is True  # a rot guard is still evidence, and still publishable
+    assert "breaks nothing, not that it improves anything" in verdict.caveat
+
+
+def test_a_gate_that_fixed_a_named_case_carries_no_such_caveat(tmp_path: Path) -> None:
+    """The claim is made good: a case that was failing now passes, and was named up front."""
+    store = GateStore(tmp_path)
+    before = SkillScore(
+        skill_id="s", version=1, k=1,
+        cases=[CaseScore(case_id="a", kind="should_catch", trials=[Confusion(fn=1)])],
+    )
+    after = SkillScore(
+        skill_id="s", version=1, k=1,
+        cases=[CaseScore(case_id="a", kind="should_catch", trials=[Confusion(tp=1)])],
+    )
+    result = gate(before, after, GateConfig(targeted_cases=["a"]))
+    assert result.fixed_cases == ["a"]
+    store.save(
+        GateRecord(
+            id=new_gate_id("s", "c", AT), created_at=AT, skill_id="s",
+            base_hash="a", candidate_hash="c",
+            base_score=before, candidate_score=after, result=result,
+            config=GateConfig(targeted_cases=["a"]),
+        )
+    )
+
+    verdict = store.verdict_for("s", "c")
+    assert verdict.can_propose is True
+    assert "breaks nothing" not in verdict.caveat

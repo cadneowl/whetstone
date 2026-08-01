@@ -1,0 +1,9 @@
+description: Score this skill by running the tests it writes.
+
+task:
+  enabled: true
+  max_steps: 12
+  # Every case is graded the same way: the tests it wrote must pass.
+  verify:
+    command: ["{python}", "-m", "pytest", "-q"]
+    timeout_s: 120

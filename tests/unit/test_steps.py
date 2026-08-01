@@ -69,17 +69,68 @@ def test_evaluate_step_may_not_have_a_prompt(tmp_path: Path) -> None:
         load_step(tmp_path, "evaluate")
 
 
-def test_context_needs_a_reviewer_program(tmp_path: Path) -> None:
-    """context: feeds a run: reviewer; declared without one it would be resolved then dropped."""
+def test_context_needs_something_that_consumes_it(tmp_path: Path) -> None:
+    """context: feeds a program or an agent; with neither it would be resolved — a secret read, a
+    file loaded — and then silently dropped, because a plain prompt step takes no inputs.
+    """
     _write(tmp_path, "evaluate", "context:\n  source_root: { env: X }\n")
-    with pytest.raises(StepError, match="only feeds a reviewer program"):
+    with pytest.raises(StepError, match="has no effect without 'run:' or 'agent:'"):
         load_step(tmp_path, "evaluate")
-
-
-def test_context_is_rejected_on_a_non_evaluate_step(tmp_path: Path) -> None:
-    _write(tmp_path, "improve", 'run: ["echo", "hi"]\ncontext:\n  a: 1\n')
-    with pytest.raises(StepError, match="only feeds a reviewer program"):
+    _write(tmp_path, "improve", "prompt: prompt.md\ncontext:\n  a: 1\n", "rewrite it")
+    with pytest.raises(StepError, match="has no effect without 'run:' or 'agent:'"):
         load_step(tmp_path, "improve")
+
+
+def test_a_non_evaluate_step_may_declare_context_for_what_consumes_it(tmp_path: Path) -> None:
+    """It could not, and that was the seam that made a skill two different things: the evaluate step
+    could be given the source root and the Jira token, and the improve step that rewrites the very
+    guidance those failures came from was forbidden them.
+    """
+    _write(tmp_path, "improve", 'run: ["echo", "hi"]\ncontext:\n  a: 1\n')
+    assert load_step(tmp_path, "improve").context == {"a": 1}
+
+    # An agent step still needs its prompt: the skill body becomes the agent's *instructions*, and
+    # the step prompt is the *task* — which candidate, which diff. Same split the reviewer has.
+    _write(
+        tmp_path,
+        "triage",
+        "prompt: prompt.md\nagent:\n  enabled: true\ncontext:\n  jira_token: { env: JIRA_TOKEN }\n",
+        "Draft it: {{diff}}",
+    )
+    spec = load_step(tmp_path, "triage")
+    assert spec is not None and spec.agent.enabled
+    assert spec.context == {"jira_token": {"env": "JIRA_TOKEN"}}
+
+
+def test_an_update_step_cannot_run_as_an_agent(tmp_path: Path) -> None:
+    """It invokes the deployment's wiki generator — there is no skill judgement in it to give tools
+    to, and `run:` is already required."""
+    _write(tmp_path, "update", 'run: ["echo", "hi"]\nagent:\n  enabled: true\n')
+    with pytest.raises(StepError, match="update steps do not do"):
+        load_step(tmp_path, "update")
+
+
+def test_an_agent_may_declare_context_for_the_tools_it_brings(tmp_path: Path) -> None:
+    """The whole point of the tools seam: a skill that ships a Jira script needs a token, and the
+    token has to be named in the step rather than committed. It used to be rejected outright —
+    `context:` demanded `run:`, which `agent:` forbids, so the documented path could not be taken.
+    """
+    _write(
+        tmp_path,
+        "evaluate",
+        "agent:\n  enabled: true\ncontext:\n  jira_token: { env: JIRA_TOKEN }\n",
+    )
+    spec = load_step(tmp_path, "evaluate")
+    assert spec is not None
+    assert spec.context == {"jira_token": {"env": "JIRA_TOKEN"}}
+
+
+def test_a_task_skill_may_declare_context_too(tmp_path: Path) -> None:
+    _write(
+        tmp_path, "evaluate", "task:\n  enabled: true\ncontext:\n  api: https://internal\n"
+    )
+    spec = load_step(tmp_path, "evaluate")
+    assert spec is not None and spec.context == {"api": "https://internal"}
 
 
 def test_run_as_a_string_is_rejected_with_a_reason(tmp_path: Path) -> None:

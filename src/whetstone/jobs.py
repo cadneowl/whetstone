@@ -46,6 +46,11 @@ JobKind = Literal[
     "drift",
     "synthesize",
     "index",
+    # Task skills: scored on work they produce rather than findings they report. Their own kinds
+    # rather than a flag on "eval"/"gate", because the two produce different records and land in
+    # different stores — a job list that blurred them would invite comparing incomparable scores.
+    "task-eval",
+    "task-gate",
 ]
 JobState = Literal["running", "done", "failed", "cancelled"]
 

@@ -28,6 +28,7 @@ from whetstone.jobs import JobStore
 from whetstone.llm.factory import ModelSelection
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
+from whetstone.taskruns import TaskGateStore, TaskRunStore
 from whetstone.ui.errors import Misconfigured
 from whetstone.watch import Watcher
 
@@ -59,6 +60,16 @@ def get_store(request: Request) -> RunStore:
 def get_gates(request: Request) -> GateStore:
     gates: GateStore = request.app.state.gates
     return gates
+
+
+def get_task_runs(request: Request) -> TaskRunStore:
+    store: TaskRunStore = request.app.state.task_runs
+    return store
+
+
+def get_task_gates(request: Request) -> TaskGateStore:
+    store: TaskGateStore = request.app.state.task_gates
+    return store
 
 
 def get_jobs(request: Request) -> JobStore:
@@ -139,6 +150,8 @@ def require_writable(request: Request) -> None:
 ConfigDep = Annotated[Config, Depends(get_config)]
 StoreDep = Annotated[RunStore, Depends(get_store)]
 GatesDep = Annotated[GateStore, Depends(get_gates)]
+TaskRunsDep = Annotated[TaskRunStore, Depends(get_task_runs)]
+TaskGatesDep = Annotated[TaskGateStore, Depends(get_task_gates)]
 JobsDep = Annotated[JobStore, Depends(get_jobs)]
 WatcherDep = Annotated[Watcher, Depends(get_watcher)]
 ReviewsDep = Annotated[ReviewStore, Depends(get_reviews)]

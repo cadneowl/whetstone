@@ -506,6 +506,14 @@ function JobResult({ job }: { job: Job }) {
             {reason}
           </p>
         ))}
+        {Boolean(r.trace_diverged) && (
+          <p
+            className="mt-1 text-warn"
+            title="This skill runs as an agent, and an agent chooses what to open. The two sides of this gate did not read the same things, so part of the difference may be how it investigated rather than the guidance itself. Open the gate record to compare the trajectories."
+          >
+            the two sides investigated differently — read this delta with that in mind
+          </p>
+        )}
         {Boolean(r.passed) && <p className="mt-1 text-muted">This content may now be proposed.</p>}
       </div>
     )

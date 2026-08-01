@@ -5,19 +5,23 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import yaml
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from whetstone import staging
 from whetstone.config import Config
+from whetstone.context import ContextError
 from whetstone.core.loader import (
     EVAL_CASES_DIR,
     PROMOTED_CASES_DIR,
+    SkillLoadError,
     load_skill,
     load_skills,
 )
 from whetstone.curation import CurationError, retier_yaml
-from whetstone.domain.eval_model import CaseTier
+from whetstone.domain.enums import Severity
+from whetstone.domain.eval_model import CaseTier, EvalKind
 from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.naming import describe_unsafe, is_safe_segment
@@ -31,12 +35,18 @@ from whetstone.service import (
     skill_detail,
     skill_summaries,
 )
+from whetstone.sharpening import DEFAULT_WINDOW, SharpeningReport, sharpening_report
+from whetstone.steps import StepError
+from whetstone.taskruns import TaskRunRecord
 from whetstone.ui.deps import (
     CadenceDep,
     ConfigDep,
     DriftDep,
+    GatesDep,
     SkillsRootDep,
     StoreDep,
+    TaskGatesDep,
+    TaskRunsDep,
     Writable,
 )
 from whetstone.ui.errors import NotFound, Unprocessable
@@ -62,6 +72,11 @@ def get_skill(
     # one can never report from different runs on one screen.
     latest = store.load(detail.runs[0].id) if detail.runs else None
     detail.pending_cases = _promoted_but_unmerged(config, skill, latest)
+    # The same partition the eval and the gate will use, so a targeted set the console builds from
+    # this list is one the gate will accept rather than refuse.
+    fraction = _holdout_fraction(config, skill.id)
+    for case in detail.cases:
+        case.holdout = partition_of(case.id, fraction) == "holdout"
     return detail
 
 
@@ -118,6 +133,145 @@ def _holdout_fraction(config: Config, skill_id: str) -> float:
     except StepError:
         spec = None
     return spec.sample.holdout_fraction if spec else SamplePolicy().holdout_fraction
+
+
+@router.get("/{skill_id}/sharpening", response_model=SharpeningReport)
+def get_sharpening(
+    skill_id: str,
+    root: SkillsRootDep,
+    store: StoreDep,
+    gates: GatesDep,
+    task_runs: TaskRunsDep,
+    task_gates: TaskGatesDep,
+    window: int = DEFAULT_WINDOW,
+) -> SharpeningReport:
+    """Is this skill getting sharper — and what is that claim actually resting on?
+
+    The one question the console could not answer. It showed a run and it showed a gate; neither is
+    an answer, because a run is a snapshot and a gate is a verdict about one edit. See
+    `whetstone.sharpening` for why the obvious trend line is a trap and what is reported instead.
+    """
+    _load_one(root, skill_id)  # 404 for a skill that does not exist, before reading any store
+    return sharpening_report(
+        skill_id,
+        store,
+        gates,
+        task_runs=task_runs,
+        task_gates=task_gates,
+        window=max(2, min(window, 100)),
+    )
+
+
+class TaskCaseSummary(BaseModel):
+    """One task case as the console lists it, with how it last fared."""
+
+    id: str
+    instruction: str = ""
+    tier: CaseTier = "active"
+    # The workspace it starts from, and how it is graded — a task case is unreadable without both.
+    files: list[str] = []
+    verify: str = ""
+    last_passed: bool | None = None
+    last_score: float | None = None
+    last_detail: str = ""
+
+
+class TaskView(BaseModel):
+    """Everything the console needs to drive a task skill.
+
+    `is_task` is the field that mattered most: without it the console showed a task skill as a
+    review skill with an empty corpus — "Eval cases (0)", a Run evals button that 422s, and no hint
+    anywhere on the page that the skill is scored a completely different way.
+    """
+
+    skill_id: str
+    is_task: bool = False
+    # Why it cannot be driven, when it cannot — an unset context var, a missing verifier, no cases.
+    problem: str = ""
+    cases: list[TaskCaseSummary] = []
+    # How the work is done and how it is graded. Both named, because a task score without them is a
+    # number whose meaning is unknown.
+    executor: str = ""
+    verifier: str = ""
+    max_calls: int = 0
+    runs: list[TaskRunRecord] = []
+
+
+@router.get("/{skill_id}/tasks", response_model=TaskView)
+def get_tasks(
+    skill_id: str, root: SkillsRootDep, config: ConfigDep, task_runs: TaskRunsDep
+) -> TaskView:
+    """The task cases a skill carries, its instruments, and its run history.
+
+    Never raises for a review skill: `is_task` is false and the rest is empty, so the console can
+    ask this of every skill and render the Tasks tab only where there is one. A *task* skill that
+    cannot currently run reports `problem` rather than a 422 — the cases and the history are still
+    worth showing to the person who has to fix it.
+    """
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.taskloader import load_task_cases, verifier_for
+
+    skill = _load_one(root, skill_id)
+    view = TaskView(skill_id=skill_id, runs=task_runs.list(skill_id=skill_id, limit=20))
+    try:
+        choice = reviewer_for(config.skills_root, skill)
+    except (StepError, ContextError) as exc:
+        view.problem = str(exc)
+        return view
+    if choice.task is None:
+        return view
+
+    view.is_task = True
+    view.executor = choice.identity
+    view.max_calls = choice.task.max_calls
+    if choice.context and choice.context.missing:
+        names = ", ".join(f"{name} ({env})" for name, env in choice.context.missing)
+        view.problem = f"this skill needs context that is not set: {names}"
+    elif choice.problems:
+        view.problem = "; ".join(choice.problems)
+
+    skill_dir = root / skill_id
+    try:
+        cases = load_task_cases(skill_dir)
+        view.verifier = _verifier_identity(verifier_for(choice.task.verify, skill_dir))
+    except (SkillLoadError, OSError, ValueError) as exc:
+        view.problem = view.problem or str(exc)
+        return view
+    if not cases:
+        view.problem = view.problem or (
+            f"{skill_id} has no task cases — add one under task_cases/<id>/case.yaml"
+        )
+
+    latest = task_runs.latest(skill_id)
+    by_id = {c.case_id: c for c in latest.score.cases} if latest else {}
+    view.cases = [
+        TaskCaseSummary(
+            id=case.id,
+            instruction=case.instruction,
+            tier=case.tier,
+            files=sorted(case.files),
+            verify=_verify_label(case.verify),
+            last_passed=by_id[case.id].outcome.passed if case.id in by_id else None,
+            last_score=by_id[case.id].outcome.score if case.id in by_id else None,
+            last_detail=by_id[case.id].outcome.detail[:400] if case.id in by_id else "",
+        )
+        for case in cases
+    ]
+    return view
+
+
+def _verify_label(verify: dict[str, object]) -> str:
+    """How a case says it is graded, in one line — the command, or whatever else it named."""
+    command = verify.get("command")
+    if isinstance(command, list) and command:
+        return " ".join(str(part) for part in command)
+    return ", ".join(f"{k}={v}" for k, v in sorted(verify.items())) if verify else ""
+
+
+def _verifier_identity(verifier: object) -> str:
+    from whetstone.service import verifier_identity
+
+    return verifier_identity(verifier)  # type: ignore[arg-type]
 
 
 @router.get("/{skill_id}/cases/{case_id}", response_model=CaseDetail)
@@ -178,6 +332,138 @@ def set_case_tier(
 
     staging.write_in_place(config, {case_path: edited})
     return TierResult(skill_id=skill_id, case_id=case_id, tier=request.tier, written=case_path)
+
+
+class CaseEditRequest(BaseModel):
+    """The parts of a graduated case a person can put right without leaving the console."""
+
+    semantic: str
+    kind: EvalKind
+    severity_min: Severity | None = None
+    line_range: tuple[int, int] | None = None
+    tier: CaseTier = "active"
+
+
+class CaseWriteResult(BaseModel):
+    skill_id: str
+    case_id: str
+    # The file rewritten or removed on disk, so the console can say what changed.
+    written: str = ""
+    # Every corpus change retracts the gate verdict; stated in the response so no caller has to
+    # remember it.
+    needs_gate: bool = True
+
+
+@router.put(
+    "/{skill_id}/cases/{case_id}", response_model=CaseWriteResult, dependencies=[Writable]
+)
+def edit_case(
+    skill_id: str, case_id: str, request: CaseEditRequest, config: ConfigDep
+) -> CaseWriteResult:
+    """Rewrite a graduated eval case's expectation.
+
+    Until now a case became permanent the moment it graduated: the console could read it, flip its
+    tier and nothing else. A typo in an expectation — or one that turned out to describe the wrong
+    line — could only be archived, never corrected, which is a strange thing for the corpus a skill
+    is *measured against* to be. The wording of an expectation is the measurement.
+
+    A full round-trip rather than the surgical edit `retier_yaml` does, and deliberately: a tier
+    flip is mechanical and may be proposed by the console itself, so surprising a hand-written file
+    with a rewrite would be wrong. This is an explicit "edit this case", and the operator asking for
+    it is better served by a file in the canonical shape than by a refusal on unusual formatting.
+
+    Changes `skill_hash`, so the gate verdict is retracted until a fresh gate covers the edited
+    corpus — the same discipline graduating and archiving already get.
+    """
+    on_disk, rel = _case_file(config, skill_id, case_id)
+    payload = yaml.safe_load(on_disk.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise Unprocessable(f"{rel} is not a mapping — edit it by hand")
+
+    expect = payload.get("expect") or []
+    if not isinstance(expect, list) or not expect or not isinstance(expect[0], dict):
+        raise Unprocessable(
+            f"{rel} has no expectation to edit — a case with none is not scoring anything"
+        )
+    first = expect[0]
+    first["semantic"] = request.semantic
+    # Derived, never asked for: a should_catch case whose expectation says not_appear is incoherent.
+    first["must"] = "appear" if request.kind == "should_catch" else "not_appear"
+    where = first.get("where")
+    if isinstance(where, dict):
+        if request.line_range is None:
+            where.pop("line_range", None)
+        else:
+            where["line_range"] = list(request.line_range)
+    if request.severity_min is None:
+        first.pop("severity_min", None)
+    else:
+        first["severity_min"] = Severity(request.severity_min).name.lower()
+    payload["kind"] = request.kind
+    payload["tier"] = request.tier
+
+    text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    # Parsed back through the real loader before anything is written: an edit that produces a case
+    # the corpus cannot load would break every subsequent run, and the console is the last place
+    # that should be able to do it.
+    _validate_case(text, rel)
+    staging.write_in_place(config, {rel: text})
+    return CaseWriteResult(skill_id=skill_id, case_id=case_id, written=rel)
+
+
+@router.delete(
+    "/{skill_id}/cases/{case_id}", response_model=CaseWriteResult, dependencies=[Writable]
+)
+def delete_case(skill_id: str, case_id: str, config: ConfigDep) -> CaseWriteResult:
+    """Remove a graduated eval case from the corpus.
+
+    The escape hatch archiving is not. `tier: archive` keeps a case drawing at low weight because it
+    is still evidence; a case that was simply *wrong* — the expectation describes behaviour the team
+    decided it does not want — is not evidence of anything and should leave. Without this the only
+    way out of the corpus was to edit the folder on disk, which the console otherwise never asks
+    anyone to do.
+
+    Deletes the case folder, nothing else. Runs that scored it keep their records: they are what
+    happened, and a corpus change does not rewrite history.
+    """
+    on_disk, rel = _case_file(config, skill_id, case_id)
+    shutil.rmtree(on_disk.parent, ignore_errors=True)
+    return CaseWriteResult(skill_id=skill_id, case_id=case_id, written=rel)
+
+
+def _case_file(config: Config, skill_id: str, case_id: str) -> tuple[Path, str]:
+    """The case's `case.yaml` on disk and its repo-relative path, or a 404/422 saying why not."""
+    if not is_safe_segment(skill_id):
+        raise NotFound(describe_unsafe(skill_id, "skill id"))
+    if not is_safe_segment(case_id):
+        raise NotFound(describe_unsafe(case_id, "case id"))
+    try:
+        rel = f"{staging.skill_path(config, skill_id)}/{EVAL_CASES_DIR}/{case_id}/case.yaml"
+    except staging.StagingError as exc:
+        raise Unprocessable(str(exc)) from exc
+    on_disk = config.skills_repo / rel
+    if not on_disk.is_file():
+        raise NotFound(f"no eval case {case_id!r} in skill {skill_id!r}")
+    return on_disk, rel
+
+
+def _validate_case(text: str, rel: str) -> None:
+    """Refuse an edit that would produce a case the corpus cannot load.
+
+    The *expectations*, not the whole case: `change` comes from the sibling `change.diff` at load
+    time and is not part of what an edit here can break. Fabricating a stand-in change to satisfy
+    `EvalCase` would only test the stand-in.
+    """
+    from whetstone.domain.eval_model import Expectation
+
+    try:
+        payload = yaml.safe_load(text)
+        for raw in payload.get("expect") or []:
+            Expectation.model_validate(raw)
+    except (yaml.YAMLError, AttributeError, ValueError) as exc:
+        raise Unprocessable(f"that edit would make {rel} unloadable: {exc}") from exc
+    if not (payload.get("expect") or []):
+        raise Unprocessable(f"that edit would leave {rel} with no expectation to score")
 
 
 class GraduateResult(BaseModel):
