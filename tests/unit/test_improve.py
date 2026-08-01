@@ -448,3 +448,40 @@ def test_a_template_that_places_a_variable_gets_no_appendix_for_it(tmp_path: Pat
     digest = digest_for(spec, _skill([_case("c1")]), None, instruction="focus on false positives")
 
     assert appendices(spec, digest) == []
+
+
+# --- why {{wiki}} is empty ---------------------------------------------------------
+
+
+def _wiki_digest(skill, record, tmp_path: Path):
+    from whetstone.improve import digest_for
+
+    return digest_for(_spec(tmp_path), skill, record).prompt_values()["wiki"]
+
+
+def test_a_skill_with_no_wiki_folder_says_exactly_that(tmp_path: Path) -> None:
+    assert "no wiki/ folder" in _wiki_digest(_skill([_case("c1")]), None, tmp_path)
+
+
+def test_an_unscored_run_says_the_wiki_is_there_but_nothing_was_retrieved(tmp_path: Path) -> None:
+    """The message that was wrong, and confidently so.
+
+    Retrieval is keyed to the source paths a scored run's cases touch, so a skill with a perfectly
+    good `wiki/` retrieves nothing until it has been scored. Reporting that as "this skill has no
+    wiki/ folder" sends an operator looking for a folder that is already there with pages in it.
+    """
+    text = _wiki_digest(_wiki_skill([_case("c1")]), None, tmp_path)
+
+    assert "no wiki/ folder" not in text
+    assert "indexes 1 wiki page(s)" in text
+    assert "no run was scored" in text
+
+
+def test_globs_that_match_nothing_point_at_the_index(tmp_path: Path) -> None:
+    """Files no `paths:` entry covers mean a mis-indexed wiki, not a missing one."""
+    skill = _wiki_skill([_case("c1", path="unmatched/elsewhere.py")])
+
+    text = _wiki_digest(skill, _record([_miss("c1", path="unmatched/elsewhere.py")]), tmp_path)
+
+    assert "wiki/index.yaml" in text
+    assert "no run was scored" not in text

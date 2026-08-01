@@ -102,6 +102,11 @@ class Digest(BaseModel):
     holdout_withheld: int = 0
     clusters: list[Cluster] = Field(default_factory=list)
     wiki: str = ""
+    # Pages the skill's `wiki/index.yaml` names, whether or not any were retrieved. Carried purely
+    # so an empty `{{wiki}}` can say *which* empty it is: a skill with no `wiki/` folder and a skill
+    # whose globs matched nothing are different problems with different fixes, and one message for
+    # both sent an operator looking for a folder that was already there.
+    wiki_indexed: int = 0
     recall: float | None = None
     fp_rate: float | None = None
     # A one-off steer from the operator (`--instruction`). Empty for a plain run. Kept on the
@@ -145,6 +150,31 @@ class Digest(BaseModel):
             f"### {path}\n\n{text.strip()}" for path, text in sorted(self.pages.items())
         )
 
+    def _no_wiki(self) -> str:
+        """Why `{{wiki}}` is empty — the reason, not the symptom.
+
+        Read as a variable that failed to fill, which is the one thing it never is. There are three
+        distinct causes and they need three different actions, so a single message for all of them
+        is worse than useless: it sent an operator looking for a `wiki/` folder that was already
+        there, with two pages in it.
+
+        Retrieval is keyed to the source paths a run's cases touch (`wiki.retrieve`), so a skill
+        with a perfectly good wiki and no scored run retrieves nothing at all — the commonest way to
+        see this, and the one least likely to be guessed.
+        """
+        if not self.wiki_indexed:
+            return "(this skill has no wiki/ folder, so no repo context is injected)"
+        if not self.scored_cases:
+            return (
+                f"(this skill indexes {self.wiki_indexed} wiki page(s), but repo context is "
+                "retrieved for the files a scored run's cases touch and no run was scored — "
+                "run the eval first and the pages covering those files will appear here)"
+            )
+        return (
+            f"(this skill indexes {self.wiki_indexed} wiki page(s), none of whose path globs match "
+            "the files these cases touch — check the `paths:` entries in wiki/index.yaml)"
+        )
+
     def prompt_values(self, *, served_by_tools: bool = False) -> dict[str, str]:
         """Every `{{variable}}` an improve prompt may use.
 
@@ -168,10 +198,7 @@ class Digest(BaseModel):
             "cases_scored": str(self.scored_cases),
             "recall": "n/a" if self.recall is None else f"{self.recall:.3f}",
             "fp_rate": "n/a" if self.fp_rate is None else f"{self.fp_rate:.3f}",
-            # Spelled out because it was read as a variable that failed to fill. It is not: a
-            # `wiki/` folder is optional, most skills have none, and an agent with a source root
-            # reads the repository itself rather than a pre-baked summary of it.
-            "wiki": self.wiki or "(this skill has no wiki/ folder, so no repo context is injected)",
+            "wiki": self.wiki or self._no_wiki(),
             "instruction": self.instruction,
         }
 
@@ -256,6 +283,7 @@ def build_digest(
         holdout_withheld=0 if record is None else _withheld(record, inputs),
         clusters=clusters,
         wiki=wiki_text,
+        wiki_indexed=len(skill.wiki.pages),
         recall=None if record is None else record.score.recall,
         fp_rate=None if record is None else record.score.fp_rate,
         instruction=instruction.strip(),
