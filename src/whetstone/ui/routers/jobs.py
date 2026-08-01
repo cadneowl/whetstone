@@ -64,7 +64,7 @@ from whetstone.preflight import (
 )
 from whetstone.providers.base import ConnectorError
 from whetstone.reviewer.factory import ReviewerChoice, reviewer_for, step_agent
-from whetstone.sampling import partition_of, sample_cases
+from whetstone.sampling import partition_for, pinned_partitions, sample_cases
 from whetstone.service import record_eval, record_gate, record_review, strip_guidance
 from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step
 from whetstone.ui.deps import (
@@ -363,7 +363,10 @@ def _check_targets(
     if not request.targeted:
         return
     spec = _step(root, candidate, "evaluate")
-    fraction = (_sample(spec, request.sample) or SamplePolicy()).holdout_fraction
+    fraction = _sample(spec, request.sample).holdout_fraction
+    # `candidate` is the union the gate will score, promoted cases included, so a case stating its
+    # own partition is read here exactly as `gate_skills` will read it.
+    pinned = pinned_partitions(candidate.eval_cases)
     known = {c.id for c in candidate.eval_cases}
 
     unknown = sorted(c for c in request.targeted if c not in known)
@@ -373,7 +376,9 @@ def _check_targets(
             f"would score everything and then fail on them. Reload the skill and pick again — they "
             f"may have been graduated or removed since."
         )
-    leaked = sorted(c for c in request.targeted if partition_of(c, fraction) == "holdout")
+    leaked = sorted(
+        c for c in request.targeted if partition_for(c, fraction, pinned) == "holdout"
+    )
     if leaked:
         raise Unprocessable(
             f"targeted case(s) {', '.join(leaked)} are in the holdout partition — the improve loop "
@@ -600,11 +605,12 @@ def _narrowed_scope(store: Any, skill: Skill, spec: StepSpec, request: ImproveRe
         )
     raise Unprocessable(
         f"none of the {len(wanted)} selected case{plural} reach the drafter: {reasons}. "
-        f"Nothing would reach the drafter, so this would spend a model call to change nothing. "
-        f"Pick a case the last run failed outside the holdout, or — if this corpus is too small "
-        f"for a holdout to measure anything — set `sample.holdout_fraction: 0` in this skill's "
-        f"evaluate step.yaml and score again, which trades the overfitting alarm for being able "
-        f"to sharpen against every case."
+        f"This would spend a model call to change nothing. Pick a case the last run failed "
+        f"outside the holdout — cases still waiting under promoted_cases/ are always available, "
+        f"because the exam is the graduated corpus. A graduated case in the holdout stays out on "
+        f"purpose: its score is the only evidence that a rising recall is capability rather than "
+        f"memorisation. If you mean to spend it anyway, say so in that case's file with "
+        f"`partition: train` and it will never be counted as an unseen pass again."
     )
 
 
@@ -682,6 +688,24 @@ def launch_improve(
             only=set(request.cases) or None,
             agent=agent,
         )
+        # The model has now read these cases. Recording it is what stops a promoted case that was
+        # sharpened against from being handed back to the hash at graduation and counted as an
+        # exam question it passed unseen. Written on the draft rather than on the apply: the
+        # contamination is the model having read the case, and discarding the wording it produced
+        # does not unread it.
+        evaluate = _step(root, skill, "evaluate")
+        pinned = staging.pin_shown_to_train(
+            config,
+            skill.id,
+            improve.shown_cases(result.digest),
+            _sample(evaluate, None).holdout_fraction,
+        )
+        for case_id in pinned:
+            handle.log(
+                LogLine(
+                    text=f"  {case_id}: recorded partition: train — the drafter has now seen it"
+                )
+            )
         handle.progress(1, 1, "done")
         return {
             "body": result.proposal.body,
@@ -695,6 +719,7 @@ def launch_improve(
             # Selected cases the drafter never saw (unscored, passing, or holdout) — named so a
             # narrowed improve never looks like it acted on cases it did not.
             "selected_missing": result.selected_missing,
+            "pinned_to_train": pinned,
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
             "holdout_withheld": result.digest.holdout_withheld,

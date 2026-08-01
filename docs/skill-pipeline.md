@@ -461,6 +461,27 @@ to promote fresh cases rather than polish further.
 Membership is an unseeded hash of the case id: stable forever, on every machine, with deliberately
 no way to re-roll it — a seed would offer exactly the workaround the partition exists to prevent.
 
+**The exam is the graduated corpus.** A case waiting under `promoted_cases/` is on the train side
+while it waits, whatever its id hashes to. That folder is where an operator decides whether a mined
+case has earned a place — scoring it, sharpening against it, rewriting its expectation — and every
+one of those is a use the blindfold forbids. Applying the hash there meant that a fifth of
+everything ever mined could never be sharpened against, permanently and at random, when sharpening
+against it is the entire reason to promote it. The only escape was setting `holdout_fraction: 0`,
+which switches the alarm off for the whole skill to unblock one case.
+
+**A case the drafter has read is recorded as such.** When an improve step is actually shown a case
+whose id hashes to the holdout, `partition: train` is written into its `case.yaml`. That survives
+graduation, which is a folder move — without it, a case the model has read would go back to the
+hash on graduation and be counted as an exam question it passed unseen, *flattering* the one number
+whose job is to be unflattering. You can write the same line by hand to say "this case is for
+teaching": it is the one exception to a partition nobody can re-roll, and it is deliberately a
+visible line in a reviewable diff rather than a setting. It is also one-way in practice — nothing
+un-reads a case.
+
+`partition` is excluded from `skill_hash`: both sides of a gate score a case whichever side it is
+on, so it changes nothing a gate measures, and including it would revoke every stored gate verdict
+the moment the field landed.
+
 ### Case tiers: active and archive
 
 A corpus mined from a live MR stream only grows, and deterministic sampling gives every case an

@@ -8,8 +8,10 @@ graduated into the eval corpus. Rejections are recorded with a reason rather tha
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from typing import Annotated, Any
 
+import yaml
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, StringConstraints
 
@@ -17,9 +19,9 @@ from whetstone import drafting, staging
 from whetstone.candidates import CandidateEntry, CandidateStore, Decision, new_decision
 from whetstone.config import Config
 from whetstone.core.loader import PROMOTED_CASES_DIR, SkillLoadError, load_skill
-from whetstone.curation import SimilarCase, similar_cases
+from whetstone.curation import CurationError, SimilarCase, repartition_yaml, similar_cases
 from whetstone.domain.enums import Severity
-from whetstone.domain.eval_model import CaseTier, EvalKind, Provenance
+from whetstone.domain.eval_model import CaseTier, EvalKind, Partition, Provenance
 from whetstone.domain.skill import Skill
 from whetstone.drafting import SemanticDraft
 from whetstone.llm.base import LLMClient
@@ -278,16 +280,47 @@ def edit_promoted(
         )
     entry = _load(config, candidate_id)
     prepared = prepare_promotion(config, entry, request.edits)
+    # A recorded `partition` says the improve drafter has read this case. That is a fact about what
+    # the model has seen, not part of the case's content, and re-deriving from the candidate — which
+    # never had one — would erase it. The case would then graduate with its partition back in the
+    # hash's hands and could be counted as an exam question the model passed unseen. Carried across
+    # explicitly; everything else about an edited case is meant to be re-derived.
+    stated = _stated_partition(existing / "case.yaml")
     # The same write path a first promotion takes — files plus the decision record, which now points
     # at the edited case. Re-using it is what keeps an edited case indistinguishable from one
     # promoted correctly the first time.
     response = commit_promotion(config, principal, candidate_id=candidate_id, prepared=prepared)
+    if stated:
+        _restate_partition(
+            config.skills_root / skill_id / PROMOTED_CASES_DIR / prepared.case_id / "case.yaml",
+            stated,
+        )
     # A rename leaves the old folder behind, which would read as two cases from one candidate — and
     # the decision can only name one of them, so the orphan could never be removed from the console.
     if prepared.case_id != case_id:
         shutil.rmtree(existing, ignore_errors=True)
         response.promoted = len(staging.promoted_cases(config, skill_id))
     return response
+
+
+def _stated_partition(case_file: Path) -> Partition | None:
+    """The partition a case file states outright, or None. Best-effort: an unreadable file simply
+    has nothing to carry across, and an edit must not fail over it."""
+    try:
+        raw = yaml.safe_load(case_file.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    stated = raw.get("partition") if isinstance(raw, dict) else None
+    return stated if stated in ("train", "holdout") else None
+
+
+def _restate_partition(case_file: Path, partition: Partition) -> None:
+    """Put a carried-across partition back, without disturbing anything else in the file."""
+    try:
+        text = case_file.read_text(encoding="utf-8")
+        case_file.write_text(repartition_yaml(text, partition), encoding="utf-8")
+    except (OSError, CurationError):
+        return
 
 
 @router.delete("/batch/{skill_id}/{case_id}", dependencies=[Writable], response_model=BatchView)

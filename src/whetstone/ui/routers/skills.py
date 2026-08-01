@@ -25,7 +25,7 @@ from whetstone.domain.eval_model import CaseTier, EvalKind
 from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.naming import describe_unsafe, is_safe_segment
-from whetstone.sampling import partition_of
+from whetstone.sampling import partition_for, pinned_partitions
 from whetstone.service import (
     CaseDetail,
     PendingCase,
@@ -75,8 +75,9 @@ def get_skill(
     # The same partition the eval and the gate will use, so a targeted set the console builds from
     # this list is one the gate will accept rather than refuse.
     fraction = _holdout_fraction(config, skill.id)
+    pinned = pinned_partitions(skill.eval_cases)
     for case in detail.cases:
-        case.holdout = partition_of(case.id, fraction) == "holdout"
+        case.holdout = partition_for(case.id, fraction, pinned) == "holdout"
     return detail
 
 
@@ -102,6 +103,9 @@ def _promoted_but_unmerged(
     # agrees with the partition the gate actually enforces. Best-effort: a missing or malformed
     # evaluate step falls back to the default, never an error on a detail page.
     fraction = _holdout_fraction(config, skill.id)
+    # `promoted_cases` stamps the train side onto anything that does not state a partition, so a
+    # case waiting to graduate reads here as what it is: available to sharpen against.
+    pinned = pinned_partitions(promoted)
 
     graduated = {case.id for case in skill.eval_cases}
     pending = []
@@ -118,7 +122,7 @@ def _promoted_but_unmerged(
                 provenance=case.provenance,
                 last_recall=run.confusion.recall if run else None,
                 last_fp_rate=run.confusion.fp_rate if run else None,
-                holdout=partition_of(case.id, fraction) == "holdout",
+                holdout=partition_for(case.id, fraction, pinned) == "holdout",
             )
         )
     return pending

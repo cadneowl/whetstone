@@ -427,10 +427,90 @@ expect:
 """
 
 
+def _write_case(directory: Path, case_id: str, body: str) -> Path:
+    case = directory / case_id
+    case.mkdir(parents=True)
+    (case / "case.yaml").write_text(body, encoding="utf-8")
+    (case / "change.diff").write_text(PROMOTED_DIFF, encoding="utf-8")
+    return case
+
+
+def test_a_promoted_case_is_sharpenable_even_when_its_id_hashes_to_holdout(
+    client: TestClient, steps: Path, skills_root: Path
+) -> None:
+    """Promote a case, score it, watch it miss, sharpen against it. That has to work every time.
+
+    It used to work four times in five. The partition is an unseeded hash of the case id, so a
+    fifth of everything mined landed in the holdout and could never be drafted from — and a case is
+    mined precisely because production missed it, with sharpening as the whole reason to promote
+    it. The only escape was `sample.holdout_fraction: 0`, which switches the alarm off for the
+    entire skill to unblock one case.
+
+    `promoted_cases/` is the staging area where an operator decides what earns a place: scoring,
+    sharpening and rewriting all happen there, and all of them are uses the blindfold forbids. So a
+    promoted case is on the train side while it is promoted. The exam is the graduated corpus.
+    """
+    from whetstone.sampling import partition_of
+    from whetstone.steps import SamplePolicy
+
+    assert partition_of(HELD_ID, SamplePolicy().holdout_fraction) == "holdout"
+    _write_case(skills_root / "rust-errors" / "promoted_cases", HELD_ID, HELD_CASE)
+
+    scored = client.post(
+        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "promoted"}
+    ).json()
+    assert _await(client, scored["id"])["state"] == "done"
+
+    plan = client.post(
+        "/api/jobs/improve/plan", json={"skill_id": "rust-errors", "cases": [HELD_ID]}
+    )
+    assert plan.status_code == 200, plan.text
+    assert "drafting from 1 selected case" in " ".join(plan.json()["details"])
+
+
+def test_drafting_from_a_promoted_case_records_that_the_model_has_seen_it(
+    client: TestClient, steps: Path, skills_root: Path
+) -> None:
+    """The integrity half, without which the previous test would be a hole in the holdout.
+
+    A promoted case is train while promoted, so it can be drafted from. Graduating it is a folder
+    move, which would hand the decision back to the hash — and a case the model has read would
+    reappear as an exam question, scored as if it had never seen it. Every one of those *flatters*
+    the holdout, the one number whose job is to be unflattering.
+
+    So the draft records `partition: train` in the case file, where it survives the move and shows
+    up in the diff of the corpus change.
+    """
+    import yaml
+
+    _write_case(skills_root / "rust-errors" / "promoted_cases", HELD_ID, HELD_CASE)
+    scored = client.post(
+        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "promoted"}
+    ).json()
+    assert _await(client, scored["id"])["state"] == "done"
+
+    case_file = skills_root / "rust-errors" / "promoted_cases" / HELD_ID / "case.yaml"
+    assert "partition" not in yaml.safe_load(case_file.read_text(encoding="utf-8"))
+
+    job = _improve(client, cases=[HELD_ID])
+    assert job["state"] == "done", job
+    assert job["result"]["pinned_to_train"] == [HELD_ID]
+    assert yaml.safe_load(case_file.read_text(encoding="utf-8"))["partition"] == "train"
+
+    # And it holds through graduation, which is the moment it was there to survive.
+    assert client.post(f"/api/skills/rust-errors/cases/{HELD_ID}/graduate").status_code == 200
+    graduated = skills_root / "rust-errors" / "eval_cases" / HELD_ID / "case.yaml"
+    assert yaml.safe_load(graduated.read_text(encoding="utf-8"))["partition"] == "train"
+
+    detail = client.get("/api/skills/rust-errors").json()
+    held = next(c for c in detail["cases"] if c["id"] == HELD_ID)
+    assert held["holdout"] is False, "a case the drafter has read is not an exam question"
+
+
 def test_improve_plan_refuses_a_selection_the_drafter_may_never_see(
     client: TestClient, steps: Path, skills_root: Path
 ) -> None:
-    """Promote one case, score it, watch it miss, sharpen against it — and get nothing.
+    """A *graduated* holdout case is still withheld — that is the alarm doing its job.
 
     The failure this pins was silent in the worst way: every stage was individually truthful. The
     case is scored and misses; the plan priced "drafting from 1 selected case(s)"; the drafter is
@@ -441,19 +521,9 @@ def test_improve_plan_refuses_a_selection_the_drafter_may_never_see(
     `_warn_if_nothing_to_learn` could not catch it — it asks whether the *run* had failures, and it
     did. The only one was on the case being withheld.
     """
-    from whetstone.sampling import partition_of
-    from whetstone.steps import SamplePolicy
+    _write_case(skills_root / "rust-errors" / "eval_cases", HELD_ID, HELD_CASE)
 
-    assert partition_of(HELD_ID, SamplePolicy().holdout_fraction) == "holdout"
-
-    case = skills_root / "rust-errors" / "promoted_cases" / HELD_ID
-    case.mkdir(parents=True)
-    (case / "case.yaml").write_text(HELD_CASE, encoding="utf-8")
-    (case / "change.diff").write_text(PROMOTED_DIFF, encoding="utf-8")
-
-    scored = client.post(
-        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "promoted"}
-    ).json()
+    scored = client.post("/api/jobs/eval", json={"skill_id": "rust-errors"}).json()
     assert _await(client, scored["id"])["state"] == "done"
 
     response = client.post(
@@ -464,7 +534,8 @@ def test_improve_plan_refuses_a_selection_the_drafter_may_never_see(
     assert HELD_ID in message
     assert "holdout partition" in message
     # A refusal that only says no leaves the operator exactly as stuck as the silent draft did.
-    assert "sample.holdout_fraction: 0" in message
+    assert "promoted_cases/" in message
+    assert "partition: train" in message
 
 
 def test_improve_plan_says_how_much_of_a_mixed_selection_is_eligible(
@@ -476,14 +547,12 @@ def test_improve_plan_says_how_much_of_a_mixed_selection_is_eligible(
     case, just quieter: the draft comes back having ignored half the request and looks like it
     honoured all of it.
     """
-    for case_id, body in ((PROMOTED_ID, PROMOTED_CASE), (HELD_ID, HELD_CASE)):
-        case = skills_root / "rust-errors" / "promoted_cases" / case_id
-        case.mkdir(parents=True)
-        (case / "case.yaml").write_text(body, encoding="utf-8")
-        (case / "change.diff").write_text(PROMOTED_DIFF, encoding="utf-8")
+    _write_case(skills_root / "rust-errors" / "promoted_cases", PROMOTED_ID, PROMOTED_CASE)
+    _write_case(skills_root / "rust-errors" / "eval_cases", HELD_ID, HELD_CASE)
 
     scored = client.post(
-        "/api/jobs/eval", json={"skill_id": "rust-errors", "scope": "promoted"}
+        "/api/jobs/eval",
+        json={"skill_id": "rust-errors", "scope": "promoted", "with_corpus": True},
     ).json()
     assert _await(client, scored["id"])["state"] == "done"
 

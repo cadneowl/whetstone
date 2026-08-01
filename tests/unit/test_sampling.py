@@ -133,6 +133,41 @@ def test_a_case_cap_does_not_reset_the_rest_of_the_policy() -> None:
         assert resolved.stratify is False
 
 
+def test_a_stated_partition_wins_over_the_hash() -> None:
+    from whetstone.sampling import partition_for, partition_of, pinned_partitions
+
+    held = "case-held-back"
+    assert partition_of(held, 0.2) == "holdout"  # the hash, unchanged
+
+    cases = _cases(1)
+    stated = cases[0].model_copy(update={"id": held, "partition": "train"})
+    pinned = pinned_partitions([stated])
+    assert partition_for(held, 0.2, pinned) == "train"
+    # A case saying nothing is still the hash's to decide — the override is the exception.
+    assert partition_for(held, 0.2, pinned_partitions(cases)) == "holdout"
+
+
+def test_landing_the_partition_field_does_not_re_hash_a_corpus() -> None:
+    """Adding a field to `EvalCase` re-hashes every case in every skill unless it is excluded.
+
+    `skill_hash` is what a stored gate verdict is keyed on, so a changed hash revokes the right to
+    propose everywhere until each skill is gated again. The partition governs who may *learn* from
+    a case, never what gets measured — both sides of a gate score it either way — so it is excluded
+    and landing this invalidates nothing.
+    """
+    from whetstone.domain.run import skill_hash
+    from whetstone.domain.skill import Skill
+
+    cases = _cases(3)
+    plain = Skill(id="s", body="rules", eval_cases=cases)
+    stated = Skill(
+        id="s",
+        body="rules",
+        eval_cases=[c.model_copy(update={"partition": "train"}) for c in cases],
+    )
+    assert skill_hash(plain) == skill_hash(stated)
+
+
 def test_an_explicit_seed_still_wins_over_the_spec() -> None:
     from whetstone.cli import _sample_policy
 

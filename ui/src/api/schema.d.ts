@@ -2377,6 +2377,8 @@ export interface components {
              * @enum {string}
              */
             kind: "should_catch" | "should_not_flag";
+            /** Partition */
+            partition?: ("train" | "holdout") | null;
             /**
              * @default {
              *       "semantic_drafted_by": "",

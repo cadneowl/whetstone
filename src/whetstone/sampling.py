@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from pydantic import BaseModel
 
-from whetstone.domain.eval_model import EvalCase
+from whetstone.domain.eval_model import EvalCase, Partition
 from whetstone.domain.score import Confusion, HoldoutReport, SkillScore
 from whetstone.steps import SamplePolicy
 
@@ -161,7 +161,7 @@ def _rank(case_id: str, seed: int) -> str:
 # --- the holdout partition ------------------------------------------------------
 
 
-def partition_of(case_id: str, fraction: float) -> str:
+def partition_of(case_id: str, fraction: float) -> Partition:
     """Which partition a case belongs to: `train` (the improve loop may learn from it) or
     `holdout` (it may only ever be scored).
 
@@ -183,7 +183,36 @@ def partition_of(case_id: str, fraction: float) -> str:
     return "holdout" if bucket < fraction else "train"
 
 
-def holdout_report(score: SkillScore, fraction: float) -> HoldoutReport | None:
+def pinned_partitions(cases: Iterable[EvalCase]) -> dict[str, Partition]:
+    """The cases that state their own partition instead of leaving it to the hash.
+
+    Built once per request and threaded to everything that asks which side a case is on, so the
+    skill page's badge, the improve blindfold, the gate's target check and the holdout report
+    cannot come to different answers about the same case — the failure mode that made the earlier
+    `holdout_fraction` bug invisible for so long.
+    """
+    return {case.id: case.partition for case in cases if case.partition is not None}
+
+
+def partition_for(
+    case_id: str, fraction: float, pinned: Mapping[str, Partition] | None = None
+) -> Partition:
+    """Which partition a case belongs to, honouring a recorded decision over the hash.
+
+    The hash is still the rule (see `partition_of`); `pinned` is the recorded exception, written
+    when a case has been shown to the improve drafter and so can never honestly serve as an exam
+    question again. Resolution lives here, in one function, rather than at each call site.
+    """
+    if pinned:
+        stated = pinned.get(case_id)
+        if stated is not None:
+            return stated
+    return partition_of(case_id, fraction)
+
+
+def holdout_report(
+    score: SkillScore, fraction: float, pinned: Mapping[str, Partition] | None = None
+) -> HoldoutReport | None:
     """Per-partition metrics for a scored run, or None when there is nothing to compare.
 
     None rather than a report full of zeros: a divergence computed over zero holdout cases is
@@ -195,7 +224,7 @@ def holdout_report(score: SkillScore, fraction: float) -> HoldoutReport | None:
     parts: dict[str, list[Confusion]] = {"train": [], "holdout": []}
     counts = {"train": 0, "holdout": 0}
     for case in score.cases:
-        part = partition_of(case.case_id, fraction)
+        part = partition_for(case.case_id, fraction, pinned)
         parts[part].append(case.confusion)
         counts[part] += 1
     if not counts["holdout"]:

@@ -20,15 +20,25 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
+
+import yaml
 
 from whetstone.authoring import SKILL_FILE, frontmatter_version
 from whetstone.config import Config
-from whetstone.core.loader import PROMOTED_CASES_DIR, load_eval_cases, load_skill
+from whetstone.core.loader import (
+    EVAL_CASES_DIR,
+    PROMOTED_CASES_DIR,
+    load_eval_cases,
+    load_skill,
+)
+from whetstone.curation import CurationError, repartition_yaml
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.skill import Skill
 from whetstone.gitio import Author, GitError, branch_name, read_at, ref_exists, write_and_commit
 from whetstone.naming import describe_unsafe, is_safe_segment
+from whetstone.sampling import partition_of
 from whetstone.vcs import export_tree
 
 # One branch per skill, so a session of guidance edits accumulates into a single proposal rather
@@ -150,12 +160,71 @@ def promoted_cases(config: Config, skill_id: str) -> list[EvalCase]:
     against. Reading them is a folder read, independent of any git state — which is what makes a
     skill authored in the working tree but not yet committed work exactly like a committed one.
 
+    **A promoted case is on the train side while it is promoted.** `promoted_cases/` is the staging
+    area where an operator decides whether a mined case has earned a place — scoring it, sharpening
+    against it, rewriting its expectation. Every one of those is a use the holdout blindfold
+    forbids, so a hash that put a fifth of everything mined out of reach made the folder's own
+    purpose unreachable at random. The exam is the *graduated* corpus, which is what a gate scores
+    and what a rising recall is a claim about.
+
+    Stamped in memory only: nothing is written to the case file, so graduating a case it was never
+    drafted from leaves the hash to decide, and the holdout goes on filling with cases the drafter
+    has genuinely never seen. A case that *was* drafted from carries an explicit `partition: train`
+    written at draft time, which survives graduation because that is a folder move.
+
     Best-effort: no folder means no promoted cases.
     """
     directory = config.skills_root / skill_id / PROMOTED_CASES_DIR
     if not directory.is_dir():
         return []
-    return load_eval_cases(directory, skill_id)
+    return [
+        case if case.partition is not None else case.model_copy(update={"partition": "train"})
+        for case in load_eval_cases(directory, skill_id)
+    ]
+
+
+def pin_shown_to_train(
+    config: Config, skill_id: str, case_ids: Iterable[str], fraction: float
+) -> list[str]:
+    """Record `partition: train` on cases the improve drafter has actually been shown.
+
+    The integrity half of `EvalCase.partition`. A promoted case is on the train side while it is
+    promoted, so it can be — and routinely is — drafted from. Graduating it moves the folder and
+    nothing else, which hands the decision back to the hash: a fifth of everything ever sharpened
+    against would silently reappear as an exam question, scored as though the model had never seen
+    it. Every such case then *flatters* the holdout, which is the one number that exists to be
+    unflattering. That is worse than having no holdout at all.
+
+    Only where the record is needed: a case already stating a partition is left alone, and one the
+    hash puts in `train` anyway needs no line in its file. So the write is confined to exactly the
+    cases whose recorded answer would otherwise change under them, and every other case file stays
+    byte for byte as it was.
+
+    Best-effort, and deliberately not fatal: a draft that succeeded must not be reported as failed
+    because a case file could not be rewritten. Returns the ids actually pinned, so the caller can
+    say what it did.
+    """
+    root = config.skills_root / skill_id
+    pinned: list[str] = []
+    for case_id in sorted(set(case_ids)):
+        if not is_safe_segment(case_id):
+            continue
+        if partition_of(case_id, fraction) != "holdout":
+            continue  # the hash already agrees; no need to state it
+        for folder in (PROMOTED_CASES_DIR, EVAL_CASES_DIR):
+            path = root / folder / case_id / "case.yaml"
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+                if yaml.safe_load(text).get("partition"):
+                    break  # already stated, by this or by a person
+                path.write_text(repartition_yaml(text, "train"), encoding="utf-8")
+            except (OSError, yaml.YAMLError, CurationError, AttributeError):
+                break
+            pinned.append(case_id)
+            break
+    return pinned
 
 
 def promoted_skill(config: Config, skill_id: str) -> Skill | None:

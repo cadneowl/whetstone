@@ -353,11 +353,12 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                   {heldSelected.map((c) => c.id).join(', ')}{' '}
                   {heldSelected.length === 1 ? 'is the only ticked case, and it is' : 'are all'}{' '}
                   holdout — scored on every run, never shown to the drafter, so there is nothing
-                  here to sharpen from. Tick a case outside the holdout, or, if this corpus is too
-                  small for a holdout to measure anything, set{' '}
-                  <code className="font-mono">sample.holdout_fraction: 0</code> in this
-                  skill&rsquo;s evaluate <code className="font-mono">step.yaml</code> and score
-                  again.
+                  here to sharpen from. Cases still waiting under{' '}
+                  <code className="font-mono">promoted_cases/</code> are always available — the
+                  exam is the graduated corpus — so tick one of those, or a graduated case outside
+                  the holdout. To spend a graduated holdout case anyway, record{' '}
+                  <code className="font-mono">partition: train</code> in its case file; it then
+                  counts as taught rather than as an unseen pass.
                 </p>
               )}
               <LaunchButton
