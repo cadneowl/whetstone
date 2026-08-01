@@ -901,6 +901,17 @@ def improve_prompt(
     refusal = improve.would_paste_the_folder(spec, skill)
     if refusal:
         warnings.append(f"{refusal} Launching is blocked until then; this is what it would send.")
+    # The exact figure, because this is the one place that has actually rendered the prompt. The
+    # skill page warns from the guidance alone, which is a floor; here the digest and the repo
+    # context are in it too, so a skill that stays under the limit on paper can still trip this.
+    limit = config.runs.large_prompt_chars
+    if limit > 0 and not spec.agent.enabled and len(text) >= limit:
+        warnings.append(
+            f"this prompt is {len(text):,} characters, over the [runs] large_prompt_chars of "
+            f"{limit:,}. Nothing is truncated to fit — dropping rules to shrink a prompt would "
+            f"have the drafter rewrite guidance it saw a fraction of. Raise the limit if this is "
+            f"expected, or set `agent: enabled: true` so the step fetches what it needs instead."
+        )
 
     return ImprovePrompt(
         skill_id=skill.id,
@@ -1309,7 +1320,10 @@ def plan_review_job(
     )
     if not skill.body.strip():
         plan.warnings.append("this skill has no guidance, so the reviewer is being sent no rules")
-    annotate_reviewer(plan, choice, invocations=1, judged=False, skill=skill)
+    annotate_reviewer(
+        plan, choice, invocations=1, judged=False, skill=skill,
+        large_prompt_chars=config.runs.large_prompt_chars,
+    )
     check_budget(plan, config.runs.max_llm_calls_per_run)
     return plan
 
@@ -1522,7 +1536,10 @@ def plan_baseline_job(
         "scores every active case with the guidance stripped — a should_catch case the naked "
         "model passes never measured the guidance"
     )
-    annotate_reviewer(plan, choice, invocations=len(naked.eval_cases), skill=naked)
+    annotate_reviewer(
+        plan, choice, invocations=len(naked.eval_cases), skill=naked,
+        large_prompt_chars=config.runs.large_prompt_chars,
+    )
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if choice.custom:
         plan.warnings.append(
@@ -2572,7 +2589,8 @@ def _eval_plan(
         plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * sides})
         plan.details.append("both base and candidate are scored, so this is doubled")
     annotate_reviewer(
-        plan, choice, invocations=scored * trials * sides, gate=sides > 1, skill=skill
+        plan, choice, invocations=scored * trials * sides, gate=sides > 1, skill=skill,
+        large_prompt_chars=config.runs.large_prompt_chars,
     )
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if spec and spec.judge.tier1.configured:

@@ -480,7 +480,10 @@ def eval_run(
         host_reviews=choice.agent is not None or not choice.custom,
         calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
-    annotate_reviewer(plan, choice, invocations=(scored or len(sk.eval_cases)) * trials, skill=sk)
+    annotate_reviewer(
+        plan, choice, invocations=(scored or len(sk.eval_cases)) * trials, skill=sk,
+        large_prompt_chars=load_config().runs.large_prompt_chars,
+    )
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
 
@@ -770,7 +773,10 @@ def eval_baseline(
         calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     plan.action = "baseline"
-    annotate_reviewer(plan, choice, invocations=len(naked.eval_cases), skill=naked)
+    annotate_reviewer(
+        plan, choice, invocations=len(naked.eval_cases), skill=naked,
+        large_prompt_chars=load_config().runs.large_prompt_chars,
+    )
     if choice.custom and choice.agent is None:
         plan.warnings.append(
             "this skill's reviewer is a program that reads the source, not the guidance — so "
@@ -910,7 +916,8 @@ def eval_gate(
             plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * 2})
             plan.details.append("both base and candidate are scored, so this is doubled")
         annotate_reviewer(
-            plan, choice, invocations=scored * gate_trials * 2, gate=True, skill=candidate_skill
+            plan, choice, invocations=scored * gate_trials * 2, gate=True, skill=candidate_skill,
+            large_prompt_chars=load_config().runs.large_prompt_chars,
         )
         check_budget(plan, load_config().runs.max_llm_calls_per_run)
         _preflight(plan, yes)

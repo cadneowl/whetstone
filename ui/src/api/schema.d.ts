@@ -5047,8 +5047,10 @@ export interface components {
          *     not on the editor. An operator had to already know the setting existed to go looking for it, and
          *     the symptom when it was off was a prompt quietly carrying a whole folder.
          *
-         *     `mode` is the one-word answer. `note` is the sentence under it, and `problem` is set when the
-         *     step will refuse — so the screen says what is wrong before the button does.
+         *     `mode` is the one-word answer and `note` is the sentence under it. The other two are separate
+         *     states, not degrees of one: `problem` means the step will refuse, `warning` means it will run
+         *     and you should probably look at it. Collapsing them would either make a warning stop the loop
+         *     or make a refusal look advisory.
          */
         StepRuntime: {
             /** Kind */
@@ -5074,6 +5076,11 @@ export interface components {
              * @default
              */
             problem: string;
+            /**
+             * Warning
+             * @default
+             */
+            warning: string;
         };
         /**
          * Sweep

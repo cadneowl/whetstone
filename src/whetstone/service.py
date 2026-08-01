@@ -955,8 +955,10 @@ class StepRuntime(BaseModel):
     not on the editor. An operator had to already know the setting existed to go looking for it, and
     the symptom when it was off was a prompt quietly carrying a whole folder.
 
-    `mode` is the one-word answer. `note` is the sentence under it, and `problem` is set when the
-    step will refuse — so the screen says what is wrong before the button does.
+    `mode` is the one-word answer and `note` is the sentence under it. The other two are separate
+    states, not degrees of one: `problem` means the step will refuse, `warning` means it will run
+    and you should probably look at it. Collapsing them would either make a warning stop the loop
+    or make a refusal look advisory.
     """
 
     kind: str
@@ -964,6 +966,7 @@ class StepRuntime(BaseModel):
     mode: Literal["agent", "prompt", "program", "task", "none"] = "none"
     note: str = ""
     problem: str = ""
+    warning: str = ""
 
 
 class SkillDetail(BaseModel):
@@ -1215,7 +1218,9 @@ def skill_detail(skill: Skill, store: RunStore, *, runs: int = 20) -> SkillDetai
     )
 
 
-def step_runtimes(skill: Skill, skill_dir: Path) -> list[StepRuntime]:
+def step_runtimes(
+    skill: Skill, skill_dir: Path, *, large_prompt_chars: int = 0
+) -> list[StepRuntime]:
     """How each of this skill's steps runs, for a screen rather than for a YAML reader.
 
     Best-effort by design: a step file that will not parse becomes a `problem` on its row instead of
@@ -1262,8 +1267,34 @@ def step_runtimes(skill: Skill, skill_dir: Path) -> list[StepRuntime]:
             out.append(StepRuntime(
                 kind=kind, mode="prompt", note=_pasted_note(skill, kind),
                 problem=would_paste_the_folder(spec, skill) if kind == "improve" else "",
+                warning=_large_prompt(skill, kind, large_prompt_chars),
             ))
     return out
+
+
+def _large_prompt(skill: Skill, kind: str, limit: int) -> str:
+    """Whether this non-agent step's guidance alone is already a large prompt.
+
+    Guidance only — not the diff, the failure digest or the wiki, which vary per case and per run.
+    It is the floor rather than the total, and that is the point: a floor this size means every
+    prompt the step ever sends is at least this big, before any of the material the step is actually
+    about. An estimate that tried to include the variable parts would be wrong in both directions
+    and could not be checked by looking at the folder.
+
+    `triage` is exempt: it is never shown the guidance, so a skill being large changes nothing
+    there.
+    """
+    if limit <= 0 or kind == "triage":
+        return ""
+    chars = len(skill.body) + sum(len(page.text) for page in skill.pages)
+    if chars < limit:
+        return ""
+    return (
+        f"this step is not an agent, so its guidance is pasted into every prompt — {chars:,} "
+        f"characters before the change, the failures or the repo context are added, against a "
+        f"[runs] large_prompt_chars of {limit:,}. Running it as an agent sends `SKILL.md` and "
+        f"fetches the rest only when the guidance points at it."
+    )
 
 
 def _pasted_note(skill: Skill, kind: str) -> str:

@@ -283,8 +283,8 @@ def test_the_steps_of_a_renamed_skill_are_still_found(tmp_path: Path) -> None:
 def test_the_paste_note_is_per_step_not_one_sentence_for_all_three(tmp_path: Path) -> None:
     """The guidance does not reach the three steps alike, so one sentence is wrong on two of them.
 
-    `improve` pastes under no cap at all — quoting the reviewer's would describe a limit it does not
-    have — and `triage` is never shown the guidance, so a skill being a folder changes nothing there.
+    `improve` pastes under no cap at all — quoting the reviewer's would describe a limit it does
+    not have — and `triage` never sees the guidance, so a folder changes nothing about its prompt.
     """
     (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
     (tmp_path / "references").mkdir()
@@ -303,3 +303,81 @@ def test_the_paste_note_is_per_step_not_one_sentence_for_all_three(tmp_path: Pat
     assert "size cap drops" in rows["evaluate"].note, "only the reviewer has that cap"
     assert "size cap drops" not in rows["improve"].note, "improve has no cap; it is refused"
     assert rows["triage"].note == "one prompt, one answer", "triage never sees the guidance"
+
+
+# --- the large-prompt warning ------------------------------------------------------
+
+
+def _big_skill(tmp_path: Path, *, agent: bool) -> Path:
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n" + "x" * 50_000, encoding="utf-8")
+    for kind in ("evaluate", "improve"):
+        (tmp_path / kind).mkdir()
+        body = "description: x\n" + ("prompt: p.md\n" if kind == "improve" else "")
+        if agent:
+            body += "agent:\n  enabled: true\n"
+        (tmp_path / kind / "step.yaml").write_text(body, encoding="utf-8")
+    (tmp_path / "improve" / "p.md").write_text("{{guidance}}", encoding="utf-8")
+    return tmp_path
+
+
+def test_a_large_pasted_prompt_is_warned_about_not_truncated(tmp_path: Path) -> None:
+    """A cap that shrinks a prompt by discarding rules makes the model rewrite guidance it saw a
+    fraction of — a worse failure than a large prompt, and a much quieter one. So this warns."""
+    from whetstone.service import step_runtimes
+
+    skill_dir = _big_skill(tmp_path, agent=False)
+    rows = {
+        s.kind: s
+        for s in step_runtimes(load_skill(skill_dir), skill_dir, large_prompt_chars=40_000)
+    }
+
+    assert "large_prompt_chars" in rows["evaluate"].warning
+    assert "50,0" in rows["evaluate"].warning, "say the size, not just that it is over"
+    assert not rows["evaluate"].problem, "a warning is not a refusal"
+
+
+def test_an_agent_step_is_not_warned_about_prompt_size(tmp_path: Path) -> None:
+    """It does not paste the guidance, so its size is not a prompt-size problem."""
+    from whetstone.service import step_runtimes
+
+    skill_dir = _big_skill(tmp_path, agent=True)
+    rows = {
+        s.kind: s
+        for s in step_runtimes(load_skill(skill_dir), skill_dir, large_prompt_chars=40_000)
+    }
+
+    assert rows["evaluate"].mode == "agent"
+    assert not rows["evaluate"].warning
+
+
+def test_the_threshold_is_configurable_and_can_be_switched_off(tmp_path: Path) -> None:
+    from whetstone.config import RunsConfig
+    from whetstone.service import step_runtimes
+
+    skill_dir = _big_skill(tmp_path, agent=False)
+    skill = load_skill(skill_dir)
+
+    off = {s.kind: s for s in step_runtimes(skill, skill_dir, large_prompt_chars=0)}
+    high = {s.kind: s for s in step_runtimes(skill, skill_dir, large_prompt_chars=500_000)}
+    low = {s.kind: s for s in step_runtimes(skill, skill_dir, large_prompt_chars=100)}
+
+    assert not off["evaluate"].warning, "0 switches it off"
+    assert not high["evaluate"].warning
+    assert low["evaluate"].warning
+    assert RunsConfig().large_prompt_chars == 40_000, "the documented default"
+
+
+def test_the_cost_preflight_warns_on_the_same_threshold(tmp_path: Path) -> None:
+    """The skill page is where you look; the preflight is where you are about to spend."""
+    from whetstone.llm.factory import resolve_backend
+    from whetstone.preflight import annotate_reviewer, plan_eval
+    from whetstone.reviewer.factory import reviewer_from_step
+    from whetstone.steps import load_step
+
+    skill_dir = _big_skill(tmp_path, agent=False)
+    skill = load_skill(skill_dir)
+    choice = reviewer_from_step(load_step(skill_dir, "evaluate", skill_id=skill.id), skill_dir)
+    plan = plan_eval(skill, resolve_backend("anthropic"))
+    annotate_reviewer(plan, choice, invocations=1, skill=skill, large_prompt_chars=40_000)
+
+    assert any("large_prompt_chars" in w for w in plan.warnings)

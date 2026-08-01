@@ -76,7 +76,9 @@ def get_skill(
     # name differs from its declared id, and addressing the steps by id would have reported "no step
     # file" for every step of a renamed skill — a screen whose whole job is saying how a skill runs,
     # quietly saying it does not run at all.
-    detail.steps = step_runtimes(skill, _skill_dir(root, skill))
+    detail.steps = step_runtimes(
+        skill, _skill_dir(root, skill), large_prompt_chars=config.runs.large_prompt_chars
+    )
     # The same record `skill_detail` read the on-disk outcomes from, so a pending case and a merged
     # one can never report from different runs on one screen.
     latest = store.load(detail.runs[0].id) if detail.runs else None

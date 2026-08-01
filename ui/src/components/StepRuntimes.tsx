@@ -28,20 +28,36 @@ export function StepRuntimes({ steps }: { steps: Runtime[] }) {
   )
 }
 
+/**
+ * Three states, not two degrees of one. `problem` means the step refuses; `warning` means it runs
+ * and you should look at it. Rendering a warning as a refusal stops people trusting the refusals,
+ * and rendering a refusal as a warning gets it ignored until the button fails.
+ *
+ * `bad`/`warn`, not `danger`: the palette is canvas/surface/line/ink/muted/good/bad/warn/accent,
+ * and Tailwind emits a utility only for a token that exists. `text-danger` compiled to nothing, so
+ * the one row that most needed to look like a warning rendered in body colour.
+ */
 function Row({ step }: { step: Runtime }) {
   const broken = Boolean(step.problem)
-  // `bad`, not `danger`: the palette is canvas/surface/line/ink/muted/good/bad/warn/accent, and
-  // Tailwind emits a utility only for a token that exists. `text-danger` compiled to nothing, so
-  // the one row that most needed to look like a warning rendered in body colour.
+  const warned = !broken && Boolean(step.warning)
+  const tone = broken ? 'text-bad' : warned ? 'text-warn' : ''
   return (
-    <span className="flex items-baseline gap-1.5" title={step.problem || step.note}>
+    <span
+      className="flex items-baseline gap-1.5"
+      title={step.problem || step.warning || step.note}
+    >
       <span className="font-mono text-muted">{step.kind}</span>
-      <span className={broken ? 'font-medium text-bad' : 'font-medium'}>
-        {broken ? '⚠ ' : ''}
+      <span className={`font-medium ${tone}`}>
+        {broken || warned ? '⚠ ' : ''}
         {label(step)}
       </span>
       {step.note && !broken && <span className="text-muted">· {step.note}</span>}
-      {broken && <span className="text-bad">· {step.mode === 'none' ? 'see the file' : 'refuses to run'}</span>}
+      {broken && (
+        <span className="text-bad">
+          · {step.mode === 'none' ? 'see the file' : 'refuses to run'}
+        </span>
+      )}
+      {warned && <span className="text-warn">· large prompt</span>}
     </span>
   )
 }
