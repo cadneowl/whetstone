@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from whetstone.llm.factory import ModelSelection, build_llm_client
@@ -86,6 +88,106 @@ def test_bad_timeout_env_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WHETSTONE_LLM_TIMEOUT", "slow")
     with pytest.raises(ValueError, match="WHETSTONE_LLM_TIMEOUT"):
         build_llm_client("ollama", model="qwen2.5-coder:7b")
+
+
+# --- the output cap ------------------------------------------------------------
+#
+# It had no knob at all: 4096 tokens, hardcoded in a constructor default, never passed by the
+# factory. An improve step whose contract is "return the COMPLETE new guidance body" therefore had
+# a ceiling nothing in the product could raise, and hitting it read as the model failing to produce
+# valid JSON four times over.
+
+
+def test_the_output_cap_can_be_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WHETSTONE_LLM_MAX_TOKENS", "32000")
+    assert build_llm_client("ollama", model="qwen2.5-coder:7b")._max_tokens == 32000
+
+
+def test_a_configured_cap_is_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`[llm] max_tokens` in whetstone.toml — the deployment's setting, passed by both callers."""
+    monkeypatch.delenv("WHETSTONE_LLM_MAX_TOKENS", raising=False)
+    assert build_llm_client("ollama", model="q", max_tokens=20000)._max_tokens == 20000
+
+
+def test_the_environment_overrides_the_configured_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`envfile.py` documents the order — environment, then whetstone.toml, then the default — and
+    a setting that inverted it would make one command's override impossible to explain."""
+    monkeypatch.setenv("WHETSTONE_LLM_MAX_TOKENS", "50000")
+    assert build_llm_client("ollama", model="q", max_tokens=20000)._max_tokens == 50000
+
+
+def test_the_cap_reaches_the_anthropic_client_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same call is the longest one on either backend."""
+    monkeypatch.setenv("WHETSTONE_LLM_MAX_TOKENS", "20000")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-used")
+    assert build_llm_client("anthropic")._max_tokens == 20000
+
+
+def test_the_anthropic_client_holds_its_own_ceiling_below_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The product default is chosen for the improve step; the SDK refuses a non-streaming request
+    that large before sending it. The clamp is what lets one default serve both backends."""
+    from whetstone.llm.anthropic_client import NONSTREAMING_CEILING
+
+    monkeypatch.setenv("WHETSTONE_LLM_MAX_TOKENS", "64000")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-used")
+    assert build_llm_client("anthropic")._max_tokens == NONSTREAMING_CEILING
+    # The OpenAI-compatible path has no such rule and gets the whole of it.
+    assert build_llm_client("ollama", model="q")._max_tokens == 64000
+
+
+def test_an_unset_cap_leaves_each_client_its_own_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whetstone.llm.base import DEFAULT_MAX_TOKENS
+
+    monkeypatch.delenv("WHETSTONE_LLM_MAX_TOKENS", raising=False)
+    assert build_llm_client("ollama", model="q")._max_tokens == DEFAULT_MAX_TOKENS
+
+
+def test_both_entry_points_apply_the_configured_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The console and the CLI, from one `whetstone.toml`.
+
+    The reason this is worth a test of its own: the other three fields in `[llm]` seed a picker the
+    console changes at runtime and the CLI never reads, so "it is in the config" does not by itself
+    mean both see it. A cap that applied to the console and silently not to
+    `whetstone skills improve` would have the same skill drafting differently — succeeding from one
+    entry point and failing as truncated from the other — with nothing on either screen to say why.
+    """
+    monkeypatch.delenv("WHETSTONE_LLM_MAX_TOKENS", raising=False)
+    (tmp_path / "whetstone.toml").write_text(
+        "[llm]\nprovider = 'ollama'\nmodel = 'q'\nmax_tokens = 30000\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    from whetstone.cli import _client as cli_client
+    from whetstone.config import load_config
+    from whetstone.llm.factory import ModelSelection
+    from whetstone.ui.routers.jobs import _client as console_client
+
+    config = load_config(start=tmp_path)
+    console = console_client(config, None, ModelSelection(provider="ollama", model="q"))
+    cli = cli_client("ollama", "q", None, None)
+
+    assert console._max_tokens == 30000
+    assert cli._max_tokens == 30000
+
+
+def test_a_cap_that_is_not_a_number_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refused, not ignored: this is the knob a truncation error sends you to, and the one outcome
+    worse than the original failure is setting it, seeing the same error, and never learning why."""
+    monkeypatch.setenv("WHETSTONE_LLM_MAX_TOKENS", "lots")
+    with pytest.raises(ValueError, match="WHETSTONE_LLM_MAX_TOKENS"):
+        build_llm_client("ollama", model="q")
+
+
+def test_a_cap_of_zero_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WHETSTONE_LLM_MAX_TOKENS", "0")
+    with pytest.raises(ValueError, match="at least 1"):
+        build_llm_client("ollama", model="q")
 
 
 def test_openai_compatible_requires_a_model(monkeypatch: pytest.MonkeyPatch) -> None:

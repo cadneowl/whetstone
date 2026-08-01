@@ -123,7 +123,9 @@ export function ErrorNote({ error }: { error: unknown }) {
   const path = (error as { problem?: { path?: string } })?.problem?.path
   return (
     <div className="rounded-lg border border-bad/40 bg-bad/5 px-4 py-3 text-sm">
-      <p className="text-bad">{message}</p>
+      {/* Kept as written: these messages explain a refusal and name the fix, sometimes over more
+          than one paragraph, and a `<p>` collapsing the newlines buries the second half. */}
+      <p className="text-bad break-words whitespace-pre-wrap">{message}</p>
       {path && <p className="mt-1 font-mono text-xs text-muted">{path}</p>}
     </div>
   )

@@ -6,6 +6,7 @@ the real stores — everything except the network.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -349,6 +350,168 @@ def test_improve_accepts_a_run_of_the_on_disk_draft(
 
     plan = client.post("/api/jobs/improve/plan", json={"skill_id": "rust-errors"}).json()
     assert not any("different version" in w for w in plan["warnings"]), plan["warnings"]
+
+
+# --- showing the drafter's prompt -------------------------------------------------
+#
+# The one step in the loop whose input was invisible. A run is a score you can drill into, a gate is
+# a verdict with reasons, a draft is a rewrite you read line by line — and the prompt behind the
+# draft could only be inspected by reading `improve.py`.
+
+
+def _prompt(client: TestClient, **extra: object) -> dict:
+    response = client.post(
+        "/api/jobs/improve/prompt", json={"skill_id": "rust-errors", **extra}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _failing_run(store: RunStore, run_id: str = "run-missed") -> str:
+    """A stored run the fixture's fake reviewer never produces: it always catches the case."""
+    from helpers import make_record
+
+    store.save(make_record(run_id, recall_tp=False))
+    return run_id
+
+
+def test_the_prompt_is_shown_with_its_variables_filled(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    body = _prompt(client, run_id=_failing_run(store))
+
+    assert "{{" not in body["text"], "a variable left unfilled is the one thing this must not show"
+    assert "R1 — no unchecked panics" in body["text"], "the guidance being rewritten"
+    assert "MISSED" in body["text"] and "unwrap-in-handler" in body["text"], "the failure digest"
+    assert body["from_run"] == "run-missed"
+    assert body["total_failures"] == 1
+    assert body["shown"] == 1
+    assert body["source"] == "skills/rust-errors/improve/prompt.md", "named as the console names it"
+    assert body["system"], "the system prompt is half of what the drafter reads"
+
+
+def test_it_says_which_variables_the_template_actually_places(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    """An unused variable renders as an absence, so nothing errors and nothing is missing."""
+    body = _prompt(client, run_id=_failing_run(store))
+    used = {v["name"]: v["used"] for v in body["variables"]}
+
+    assert used["guidance"] is True and used["failures"] is True
+    assert used["wiki"] is False, "the fixture template never places it"
+    # Every variable the digest offers, not the ones someone remembered to list.
+    from whetstone.improve import Digest
+
+    assert set(used) == set(
+        Digest(skill_id="s", guidance="", total_cases=0, scored_cases=0, total_failures=0)
+        .prompt_values()
+    )
+
+
+def test_the_prompt_renders_where_the_launch_would_refuse(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    """The refusals are the moment the diagnostic is most wanted.
+
+    Narrowing to a case that did not fail is refused at the plan — correctly, since the call could
+    only return the guidance unchanged. But "why does the drafter not see my case?" is answered by
+    looking at what it *does* see, so this still renders, and shows an empty failure section.
+    """
+    run = _failing_run(store)
+    plan = client.post(
+        "/api/jobs/improve/plan",
+        json={"skill_id": "rust-errors", "run_id": run, "cases": ["unwrap-in-test"]},
+    )
+    assert plan.status_code == 422, "the spend is still refused"
+
+    body = _prompt(client, run_id=run, cases=["unwrap-in-test"])
+    assert "No failures in the last run." in body["text"]
+    assert body["shown"] == 0
+
+
+def test_a_stale_run_is_shown_with_the_reason_rather_than_refused(
+    client: TestClient, steps: Path, repo: Path
+) -> None:
+    """"Its failures describe a reviewer that no longer exists" is a claim about the failures —
+    checkable by reading them, which is exactly what refusing here would prevent."""
+    _score(client)
+    _edit_guidance(steps)
+
+    assert client.post("/api/jobs/improve", json={"skill_id": "rust-errors"}).status_code == 422
+    body = _prompt(client)
+    assert any("no longer exists" in w for w in body["warnings"]), body["warnings"]
+    assert body["text"], "and the prompt itself is still shown"
+
+
+def test_a_template_that_never_shows_the_failures_is_called_out(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    """The failure mode this route exists to make visible: it renders, it costs a call, and the
+    drafter is asked to fix failures it was never shown."""
+    (steps / "improve" / "prompt.md").write_text("Rewrite {{guidance}}.", encoding="utf-8")
+
+    body = _prompt(client, run_id=_failing_run(store))
+
+    assert any("{{failures}}" in w for w in body["warnings"]), body["warnings"]
+
+
+def test_an_unknown_placeholder_is_refused_by_name(client: TestClient, steps: Path) -> None:
+    """`render_template` refuses a typo rather than rendering it literally, and its message lists
+    what is available — which is the question this route was opened to ask."""
+    (steps / "improve" / "prompt.md").write_text("Rewrite {{failurs}}.", encoding="utf-8")
+
+    response = client.post("/api/jobs/improve/prompt", json={"skill_id": "rust-errors"})
+
+    assert response.status_code == 422
+    assert "failurs" in response.json()["message"]
+    assert "failures" in response.json()["message"], "and what it should have said"
+
+
+def test_a_subprocess_step_shows_the_digest_it_is_handed(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    """It has no template — the JSON on its stdin *is* the prompt with its variables filled."""
+    (steps / "improve" / "step.yaml").write_text(
+        'description: improve it\nrun: ["my-drafter", "--json"]\n', encoding="utf-8"
+    )
+    (steps / "improve" / "prompt.md").unlink()
+
+    body = _prompt(client, run_id=_failing_run(store))
+
+    assert body["calls_a_model"] is False
+    assert body["source"] == "my-drafter --json"
+    assert json.loads(body["text"])["skill_id"] == "rust-errors"
+    assert body["system"] == "", "no model of ours is called, so there is no system prompt of ours"
+
+
+def test_a_run_id_that_no_longer_exists_is_explained_not_a_500(
+    client: TestClient, steps: Path
+) -> None:
+    """Reachable from an ordinary link: the workspace writes the run it scored into the query
+    string, so a bookmarked or shared URL outlives the run store as soon as one is pruned."""
+    body = {"skill_id": "rust-errors", "run_id": "run-gone"}
+    for path in ("/api/jobs/improve/prompt", "/api/jobs/improve"):
+        response = client.post(path, json=body)
+        assert response.status_code == 422, f"{path} -> {response.status_code}"
+        assert "no longer in the run store" in response.json()["message"]
+
+    # The plan says it as a warning rather than refusing, which is this console's standing rule:
+    # whatever a launch refuses, the banner shown before the click has to have said first.
+    plan = client.post("/api/jobs/improve/plan", json=body)
+    assert plan.status_code == 200
+    assert any("no longer in the run store" in w for w in plan.json()["warnings"])
+
+
+def test_showing_the_prompt_is_allowed_read_only(
+    readonly_client: TestClient, steps: Path
+) -> None:
+    """It spends nothing, writes nothing and calls no model. Launching improve is 403 here."""
+    assert readonly_client.post(
+        "/api/jobs/improve", json={"skill_id": "rust-errors"}
+    ).status_code == 403
+    assert readonly_client.post(
+        "/api/jobs/improve/prompt", json={"skill_id": "rust-errors"}
+    ).status_code == 200
 
 
 # Named so it lands in the train partition (`sampling.partition_of` hashes the id): a holdout case

@@ -67,6 +67,8 @@ export type Job = Schemas['Job']
 export type JobKind = Job['kind']
 export type JobState = Job['state']
 export type Plan = Schemas['Plan']
+export type ImprovePrompt = Schemas['ImprovePrompt']
+export type PromptVariable = Schemas['PromptVariable']
 export type InboxView = Schemas['InboxView']
 export type Attention = Schemas['Attention']
 export type NextAction = Schemas['NextAction']
@@ -202,6 +204,17 @@ export const keys = {
   inbox: ['inbox'] as const,
   jobs: ['jobs'] as const,
   job: (id: string) => ['job', id] as const,
+  // Keyed on the launch it describes, not on the skill: change the run, the selection or the steer
+  // and it is a different prompt, so a cached one under the same key would be the wrong answer to
+  // the question this view exists to answer.
+  improvePrompt: (request: JobRequest) =>
+    [
+      'improve-prompt',
+      request.skill_id ?? '',
+      request.run_id ?? '',
+      [...(request.cases ?? [])].sort().join(','),
+      request.instruction ?? '',
+    ] as const,
 }
 
 export function useConsoleConfig() {
@@ -258,8 +271,7 @@ export function useSkill(id: string) {
 export function useSharpening(skillId: string) {
   return useQuery({
     queryKey: keys.sharpening(skillId),
-    queryFn: () =>
-      get<SharpeningReport>(`/api/skills/${encodeURIComponent(skillId)}/sharpening`),
+    queryFn: () => get<SharpeningReport>(`/api/skills/${encodeURIComponent(skillId)}/sharpening`),
   })
 }
 
@@ -323,10 +335,7 @@ export function useMarkDistill(skillId: string) {
   const client = useQueryClient()
   return useMutation({
     mutationFn: () =>
-      send<CadenceMarked>(
-        'POST',
-        `/api/skills/${encodeURIComponent(skillId)}/cadence/distill`,
-      ),
+      send<CadenceMarked>('POST', `/api/skills/${encodeURIComponent(skillId)}/cadence/distill`),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: keys.health(skillId) })
       void client.invalidateQueries({ queryKey: keys.inbox })
@@ -824,6 +833,20 @@ export function useLaunchJob(kind: JobKind) {
   return useMutation({
     mutationFn: (request: JobRequest) => send<Job>('POST', `/api/jobs/${kind}`, request),
     onSuccess: () => client.invalidateQueries({ queryKey: keys.jobs }),
+  })
+}
+
+/**
+ * The prompt an improve launch would send, filled in — the drafter's input, before it is spent.
+ *
+ * Fetched only while the panel is open (`enabled`), because assembling it walks the run and the
+ * corpus. It calls no model and writes nothing, so a read-only console shows it too.
+ */
+export function useImprovePrompt(request: JobRequest, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.improvePrompt(request),
+    enabled,
+    queryFn: () => send<ImprovePrompt>('POST', '/api/jobs/improve/prompt', request),
   })
 }
 

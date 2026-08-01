@@ -257,3 +257,35 @@ def test_scaffolded_improve_prompt_uses_only_real_variables(tmp_path: Path) -> N
         skill_id="x", guidance="g", total_cases=1, scored_cases=1, total_failures=0
     ).prompt_values()
     spec.render_prompt(values)  # raises StepError on any unknown placeholder
+
+
+def test_a_step_remembers_which_file_its_prompt_came_from(tmp_path: Path) -> None:
+    """The text alone cannot say where to go and edit it.
+
+    Both the render error and the console's prompt view name this file, and both assumed
+    `prompt.md` — so a step declaring `prompt: rewrite.md` sent an operator to a file that does not
+    exist in its folder.
+    """
+    directory = tmp_path / "improve"
+    directory.mkdir()
+    (directory / "step.yaml").write_text("description: d\nprompt: rewrite.md\n", encoding="utf-8")
+    (directory / "rewrite.md").write_text("Fix {{guidance}}", encoding="utf-8")
+
+    spec = load_step(tmp_path, "improve")
+
+    assert spec is not None
+    assert spec.prompt_file == "rewrite.md"
+    assert spec.prompt_path == directory / "rewrite.md"
+
+
+def test_a_placeholder_typo_names_the_file_it_is_actually_in(tmp_path: Path) -> None:
+    directory = tmp_path / "improve"
+    directory.mkdir()
+    (directory / "step.yaml").write_text("description: d\nprompt: rewrite.md\n", encoding="utf-8")
+    (directory / "rewrite.md").write_text("Fix {{failurs}}", encoding="utf-8")
+
+    spec = load_step(tmp_path, "improve")
+
+    assert spec is not None
+    with pytest.raises(StepError, match="rewrite.md"):
+        spec.render_prompt({"failures": "x"})

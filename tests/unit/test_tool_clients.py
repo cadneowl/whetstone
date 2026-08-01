@@ -17,9 +17,11 @@ from typing import Any
 
 import httpx
 import respx
+from pydantic import BaseModel
 
 from whetstone.agent.loop import run_agent
 from whetstone.llm.anthropic_client import AnthropicClient
+from whetstone.llm.base import LLMTruncatedError
 from whetstone.llm.openai_client import OpenAICompatibleClient
 from whetstone.llm.tools import ToolCall, ToolResult, ToolSpec, ToolsUnsupported
 
@@ -279,3 +281,154 @@ def test_ordinary_prose_is_not_mistaken_for_a_tool_call() -> None:
     )
     client = OpenAICompatibleClient("m", BASE, sleep=lambda _: None)
     assert client.converse("s", [], TOOLS).calls == []
+
+
+# --- a structured call that came back cut off --------------------------------------
+
+
+class _ParseOnly:
+    """Just enough SDK for `messages.parse`, which is what `structured` calls."""
+
+    def __init__(self, reply: Any) -> None:
+        self._reply = reply
+        self.calls: list[dict[str, Any]] = []
+
+    def parse(self, **params: Any) -> Any:
+        self.calls.append(params)
+        return self._reply
+
+
+class _Parsed:
+    def __init__(self, parsed_output: Any, stop_reason: str) -> None:
+        self.parsed_output = parsed_output
+        self.stop_reason = stop_reason
+
+
+class _Guidance(BaseModel):
+    body: str
+
+
+def _sdk_returning(parsed: Any, stop_reason: str) -> Any:
+    sdk = _FakeSDK([])
+    sdk.messages = _ParseOnly(_Parsed(parsed, stop_reason))
+    return sdk
+
+
+def test_anthropic_names_the_cap_when_a_reply_is_cut_off() -> None:
+    """`parse` yields None where an object was promised, and the reason is in `stop_reason`.
+
+    Reported as "the model returned nothing" it sends an operator to the model, the prompt and the
+    schema — everywhere except the one number that is actually wrong.
+    """
+    client = AnthropicClient(client=_sdk_returning(None, "max_tokens"), max_tokens=8192)
+    try:
+        client.structured("sys", "rewrite the guidance", _Guidance)
+    except LLMTruncatedError as exc:
+        assert "8192 tokens" in str(exc)
+        assert "`[llm]` in whetstone.toml" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("a truncated structured reply must name the cap")
+
+
+def test_anthropic_does_not_blame_the_cap_for_an_empty_reply() -> None:
+    """A different `stop_reason` is a different problem, and sending it to the token knob would
+    waste the operator's time on the one thing that is not wrong."""
+    client = AnthropicClient(client=_sdk_returning(None, "end_turn"))
+    try:
+        client.structured("sys", "u", _Guidance)
+    except LLMTruncatedError as exc:
+        assert "end_turn" in str(exc)
+        assert "WHETSTONE_LLM_MAX_TOKENS" not in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("expected the empty-output error")
+
+
+def test_anthropic_returns_a_parsed_object_untouched() -> None:
+    client = AnthropicClient(client=_sdk_returning(_Guidance(body="# Rules"), "end_turn"))
+    assert client.structured("sys", "u", _Guidance).body == "# Rules"
+
+
+def test_anthropic_clamps_to_the_limit_the_model_names() -> None:
+    """A cap above the model's ceiling is a 400 on every call, not only on long ones — so a default
+    sized for the improve step would otherwise take down every review on a smaller model."""
+
+    class _RefusesOnce:
+        def __init__(self) -> None:
+            self.caps: list[int] = []
+
+        def parse(self, **params: Any) -> Any:
+            self.caps.append(params["max_tokens"])
+            if params["max_tokens"] > 16384:
+                raise RuntimeError(
+                    "Error code: 400 - max_tokens: 20000 > 16384, which is the maximum "
+                    "allowed number of output tokens for claude-opus-4-8"
+                )
+            return _Parsed(_Guidance(body="# Rules"), "end_turn")
+
+    sdk, calls = _FakeSDK([]), _RefusesOnce()
+    sdk.messages = calls
+    client = AnthropicClient(client=sdk, max_tokens=20000)
+
+    assert client.structured("sys", "u", _Guidance).body == "# Rules"
+    assert calls.caps == [20000, 16384]
+    assert client._max_tokens == 16384, "remembered, so later calls do not pay the refusal again"
+
+
+def test_anthropic_does_not_retry_an_unrelated_failure() -> None:
+    """Only a refusal that names a smaller limit is a cap problem. Retrying anything else at a
+    number scraped from its text would cut capacity for a reason that was never about tokens."""
+
+    class _AlwaysFails:
+        def parse(self, **params: Any) -> Any:
+            raise RuntimeError("Error code: 404 - model 12345 not found")
+
+    sdk = _FakeSDK([])
+    sdk.messages = _AlwaysFails()
+    client = AnthropicClient(client=sdk, max_tokens=20000)
+
+    try:
+        client.structured("sys", "u", _Guidance)
+    except RuntimeError as exc:
+        assert "not found" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("an unrelated failure must propagate")
+    assert client._max_tokens == 20000, "the cap is untouched by a failure that was not about it"
+
+
+def test_the_sdk_non_streaming_ceiling_is_applied_before_the_request() -> None:
+    """`3600 * max_tokens / 128_000 > 600` raises `ValueError` client-side, whatever the timeout —
+    so a product default of 64000 would break every Anthropic call before it left the process."""
+    from whetstone.llm.anthropic_client import NONSTREAMING_CEILING
+    from whetstone.llm.base import DEFAULT_MAX_TOKENS
+
+    sent: list[int] = []
+
+    class _Records:
+        def parse(self, **params: Any) -> Any:
+            sent.append(params["max_tokens"])
+            return _Parsed(_Guidance(body="# Rules"), "end_turn")
+
+    sdk = _FakeSDK([])
+    sdk.messages = _Records()
+    client = AnthropicClient(client=sdk, max_tokens=DEFAULT_MAX_TOKENS)
+    client.structured("sys", "u", _Guidance)
+
+    assert sent == [NONSTREAMING_CEILING]
+    # The real SDK's own arithmetic, so this test fails if that rule ever moves under us.
+    assert 3600 * NONSTREAMING_CEILING / 128_000 <= 600
+
+
+def test_at_the_ceiling_the_error_does_not_send_you_to_a_knob_that_cannot_move() -> None:
+    """Raising `[llm] max_tokens` past the ceiling changes nothing, so saying "raise it" would cost
+    an operator a config edit, a rerun, and no explanation of why nothing happened."""
+    sdk = _FakeSDK([])
+    sdk.messages = _ParseOnly(_Parsed(None, "max_tokens"))
+    client = AnthropicClient(client=sdk, max_tokens=64000)
+
+    try:
+        client.structured("sys", "u", _Guidance)
+    except LLMTruncatedError as exc:
+        assert "non-streaming ceiling, not your configuration" in str(exc)
+        assert "64000" in str(exc), "and what it was actually set to"
+    else:  # pragma: no cover
+        raise AssertionError("expected LLMTruncatedError")

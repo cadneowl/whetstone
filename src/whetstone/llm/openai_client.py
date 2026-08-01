@@ -7,7 +7,15 @@ from typing import Any
 
 import httpx
 
-from whetstone.llm.base import Effort, T
+from whetstone.llm.base import (
+    DEFAULT_MAX_TOKENS,
+    Effort,
+    LLMStructuredError,
+    LLMTruncatedError,
+    T,
+    cap_refused,
+)
+from whetstone.llm.limits import OutputLimit, discover
 from whetstone.llm.tools import (
     Message,
     ToolCall,
@@ -17,13 +25,21 @@ from whetstone.llm.tools import (
     json_arguments,
 )
 
+__all__ = [
+    "LLMStructuredError",
+    "LLMTruncatedError",
+    "OpenAICompatibleClient",
+]
+
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 # Statuses that usually mean "this server doesn't understand response_format" — retry without it.
 _NO_RESPONSE_FORMAT_STATUS = {400, 404, 422, 501}
 
-
-class LLMStructuredError(RuntimeError):
-    """Raised when an OpenAI-compatible endpoint never returns schema-valid JSON."""
+# What a chat-completions endpoint reports when it stopped because the cap was reached rather than
+# because the model had finished. `length` is the OpenAI spelling; gateways fronting Claude often
+# pass Anthropic's `max_tokens` through instead, and one that reports neither is handled by the
+# fallback in `_truncation_hint`.
+_TRUNCATED_FINISH = {"length", "max_tokens", "MAX_TOKENS"}
 
 
 def _extract_json_object(text: str) -> Any:
@@ -47,6 +63,39 @@ def _content_of(data: Any) -> str:
         return data["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as exc:  # pragma: no cover - defensive
         raise LLMStructuredError(f"unexpected chat-completions response shape: {data!r}") from exc
+
+
+def _finish_reason(data: Any) -> str:
+    """Why the endpoint stopped generating — the field that says a reply was cut off.
+
+    Read rather than discarded, which it was. The API states plainly when it hit the cap, and
+    throwing that away left the only evidence of the commonest hard failure in the system being a
+    JSON decoder's complaint about column 9.
+    """
+    try:
+        return str(data["choices"][0].get("finish_reason") or "")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return ""
+
+
+def _looks_truncated(content: str) -> bool:
+    """A reply that began the JSON object and never closed it.
+
+    The fallback for an endpoint that reports no `finish_reason` at all — plenty of gateways and
+    local runners omit it. It claims nothing about *why* the text stopped, only that the object was
+    never finished, which is what every capped reply looks like and what no complete one does.
+
+    Narrow on purpose, in both directions. It requires the reply to *start* with the object, so a
+    model refusing in prose that happens to contain a brace is not diagnosed as a cap problem and
+    sent to the wrong knob; and it tolerates a ```json fence, opening or closing, because a reply
+    cut off mid-object never gets to write the closing one. A truncation this misses is still
+    caught by `finish_reason` wherever the endpoint reports it, and otherwise falls through to the
+    ordinary retry — a missed diagnosis costs attempts, a wrong one costs trust.
+    """
+    text = content.strip().removesuffix("```").strip()
+    if text.startswith("```"):
+        text = text.partition("\n")[2].strip()
+    return text.startswith("{") and not text.endswith("}")
 
 
 def _refuse_text_tool_call(content: str, tools: list[ToolSpec]) -> None:
@@ -151,7 +200,11 @@ class OpenAICompatibleClient:
         api_key: str | None = None,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        max_tokens: int = 4096,
+        # None is **auto**: ask the endpoint what it allows on first use and take that, falling back
+        # to `DEFAULT_MAX_TOKENS` where it does not say. An explicit number is honoured exactly and
+        # suppresses the probe entirely — an operator who wrote a value down is answering this
+        # question, and a client that went and asked anyway could only disagree with them.
+        max_tokens: int | None = None,
         max_retries: int = 3,
         timeout: float = 120.0,
         temperature: float = 0.0,
@@ -164,7 +217,15 @@ class OpenAICompatibleClient:
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = client or httpx.Client(headers=headers, timeout=timeout)
         self._sleep = sleep
-        self._max_tokens = max_tokens
+        # The ceiling in force: the configured number, or the default until discovery replaces it.
+        # Lowered by `cap_refused` when a backend turns out to allow less than we asked for.
+        self._max_tokens = DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
+        # A context window, once discovered — shared between prompt and reply, so it becomes a
+        # budget per call rather than a fixed cap. None means "no window known", which is both the
+        # unprobed state and the state of every endpoint that publishes an output limit instead.
+        self._window: OutputLimit | None = None
+        # Discovery is one attempt per client, whatever it yields. An explicit cap counts as done.
+        self._probed = max_tokens is not None
         self._max_retries = max_retries
         self._temperature = temperature
         self._use_response_format = True
@@ -197,10 +258,24 @@ class OpenAICompatibleClient:
         last_error: Exception | None = None
         self._noted = set()
         for _attempt in range(self._max_retries + 1):
-            content = self._complete(messages)
+            content, finish = self._complete(messages)
             try:
                 return schema.model_validate(_extract_json_object(content))
             except (ValueError, json.JSONDecodeError) as exc:
+                # Was it cut off? Asked *after* parsing rather than before, so a reply that hit the
+                # cap on trailing whitespace and still parsed is not thrown away on a technicality.
+                #
+                # Raised rather than retried, and this is the whole point of telling the two apart.
+                # Retrying a truncated reply generates the same text, stops at the same token and
+                # fails at the same character — four attempts, four full generations, one identical
+                # error. And the one retry that could "succeed" is the dangerous one: the feedback
+                # below asks for a corrected, shorter answer, so an improve step would come back
+                # with guidance deliberately trimmed to fit — rules silently deleted to satisfy a
+                # cap, which is the worst outcome available here.
+                if finish in _TRUNCATED_FINISH or _looks_truncated(content):
+                    raise LLMTruncatedError(
+                        self._truncated(schema, content, finish, exc)
+                    ) from exc
                 last_error = exc
                 # Only while another attempt will actually follow. Saying "asking again" on the
                 # last one and then raising describes something that does not happen; the error
@@ -227,6 +302,37 @@ class OpenAICompatibleClient:
             f"{self._max_retries + 1} attempt(s): {last_error}"
         )
 
+    def _truncated(
+        self, schema: type[T], content: str, finish: str, exc: Exception
+    ) -> str:
+        """Name the cause, the cap, the knob, and show where it stopped.
+
+        The message this replaces was `Unterminated string starting at: line 1 column 9 (char 8)` —
+        the decoder's complaint about the quote that opens `{"body": "`, repeated after four full
+        generations. Everything an operator needed was absent: that the reply was cut short rather
+        than malformed, that the cap was 4096 tokens, that nothing in the product could change it,
+        and that the model had in fact written most of a good rewrite before it was cut off.
+        """
+        evidence = (
+            f"the endpoint reported finish_reason={finish!r}"
+            if finish in _TRUNCATED_FINISH
+            else "the reply stops without ever closing the JSON object"
+        )
+        return (
+            f"{self._model} ran out of output room before it finished the JSON for "
+            f"{schema.__name__}: {evidence}, and parsing then failed at the cut ({exc}). The reply "
+            f"was cut short, not malformed — so this call was NOT retried, because every attempt "
+            f"would generate the same text and stop at the same token.\n\n"
+            f"Fix: raise the output cap, currently {self._max_tokens} tokens. In whetstone.toml:\n"
+            f"    [llm]\n"
+            f"    max_tokens = {self._max_tokens * 4}\n"
+            f"(or WHETSTONE_LLM_MAX_TOKENS for one run, which overrides the file). An improve step "
+            f"must return the COMPLETE new guidance body in one field, so it needs far more room "
+            f"than a review reply or a judge verdict: budget for the whole of this skill's rules, "
+            f"not for the change to them.\n\n"
+            f"It produced {len(content)} character(s) before stopping, ending: …{content[-160:]}"
+        )
+
     # --- tool-calling (`ToolClient`) ------------------------------------------------
 
     def converse(
@@ -244,12 +350,17 @@ class OpenAICompatibleClient:
         reviewed with no access to the source or the skill's own pages, and reported confidently on
         what it could not see. That failure has to be loud.
         """
+        wire = [{"role": "system", "content": system}] + [
+            m for msg in messages for m in _to_openai(msg)
+        ]
         body: dict[str, Any] = {
             "model": self._model,
-            "messages": [{"role": "system", "content": system}]
-            + [m for msg in messages for m in _to_openai(msg)],
+            "messages": wire,
             "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            # An agent turn grows with every tool result it carries, so a context window has to be
+            # re-divided each turn rather than once — the last turn of a long investigation has far
+            # less room left for its answer than the first did.
+            "max_tokens": self._room(sum(len(str(m.get("content") or "")) for m in wire)),
             "tools": [
                 {
                     "type": "function",
@@ -276,15 +387,16 @@ class OpenAICompatibleClient:
                 f"supports tools — reviewing without them would mean reporting on code the model "
                 f"never read."
             )
-        resp.raise_for_status()
+        self._raise_for_status(resp)
         return _turn_of(resp.json(), tools)
 
-    def _complete(self, messages: list[dict[str, str]]) -> str:
+    def _complete(self, messages: list[dict[str, str]]) -> tuple[str, str]:
+        """The reply, and why the endpoint stopped producing it."""
         body: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
+            "max_tokens": self._room(sum(len(m.get("content") or "") for m in messages)),
         }
         if self._use_response_format:
             body["response_format"] = {"type": "json_object"}
@@ -293,8 +405,9 @@ class OpenAICompatibleClient:
             self._use_response_format = False  # remember: this server can't take response_format
             body.pop("response_format", None)
             resp = self._post(body)
-        resp.raise_for_status()
-        return _content_of(resp.json())
+        self._raise_for_status(resp)
+        data = resp.json()
+        return _content_of(data), _finish_reason(data)
 
     def _note(self, kind: str, message: str) -> None:
         if self._on_retry is None or kind in self._noted:
@@ -302,9 +415,17 @@ class OpenAICompatibleClient:
         self._noted.add(kind)
         self._on_retry(message)
 
+    # How many times one request may be re-sent at a smaller cap. Two, because a server can
+    # legitimately need a second correction — vLLM refuses on the whole context window and names it,
+    # so the first clamp lands on a number that is still too large once the prompt is counted. It is
+    # bounded rather than open because "keep shrinking until it is accepted" is a loop whose length
+    # is decided by the far end, and this one runs on a job thread.
+    _MAX_CLAMPS = 2
+
     def _post(self, body: dict[str, Any]) -> httpx.Response:
         url = f"{self._base}/chat/completions"
         attempt = 0
+        clamps = 0
         while True:
             resp = self._client.post(url, json=body)
             if resp.status_code in _RETRY_STATUS and attempt < self._max_retries:
@@ -316,4 +437,81 @@ class OpenAICompatibleClient:
                 )
                 self._sleep(0.2 * attempt)
                 continue
+            # A cap above what this model allows is refused outright, on every call rather than
+            # only on long ones — so a default chosen for the improve step would otherwise take
+            # down every review and every judge verdict on a smaller model. The backend states its
+            # own limit while refusing; take it, remember it for this client's remaining calls, and
+            # carry on. Handled here rather than in `_complete` so `converse` is covered too.
+            #
+            # The status is checked before the body is read: `resp.text` on a success is the whole
+            # reply, and running a regex over every one of those to ask a question that only a 400
+            # can answer would tax the common path for the rare one.
+            if resp.status_code == 400 and clamps < self._MAX_CLAMPS:
+                sent = body.get("max_tokens")
+                limit = cap_refused(resp.text, sent)
+                if limit is not None:
+                    clamps += 1
+                    self._note(
+                        "cap",
+                        f"{self._model} allows at most {limit} output tokens, below the {sent} "
+                        f"asked for; using {limit}. Set `max_tokens = {limit}` under `[llm]` in "
+                        f"whetstone.toml to make that explicit.",
+                    )
+                    self._max_tokens = limit
+                    body = {**body, "max_tokens": limit}
+                    continue
             return resp
+
+    def _room(self, prompt_chars: int) -> int:
+        """How much room to ask for on this call.
+
+        A published *output* limit replaces the ceiling outright — it is the answer to exactly this
+        question. A published *context window* is not: it is shared with the prompt, so it is spent
+        per call, which is the only way to use a large window without hitting the servers (vLLM
+        among them) that refuse a request whose prompt and cap together exceed it.
+
+        A window only ever lowers the ask, never raises it past the default. Context windows run to
+        hundreds of thousands of tokens while the *output* a model will produce in one reply is a
+        fraction of that, so treating a 200k window as licence to request a 200k reply would ask for
+        something no model can do — and be refused for it, on a backend that was working.
+        """
+        self._discover()
+        if self._window is None:
+            return self._max_tokens
+        return min(self._max_tokens, self._window.room_for(prompt_chars))
+
+    def _discover(self) -> None:
+        """Ask the endpoint its limit, once. Silent when it does not say, which is most of them."""
+        if self._probed:
+            return
+        self._probed = True
+        limit = discover(self._client, self._base, self._model)
+        if limit is None:
+            return
+        if limit.kind == "output":
+            self._max_tokens = limit.tokens
+        else:
+            self._window = limit
+        self._note(
+            "limit",
+            f"{self._model} publishes {limit.source}={limit.tokens}; sizing replies from that "
+            f"instead of the {DEFAULT_MAX_TOKENS} default. Set `max_tokens` under `[llm]` in "
+            f"whetstone.toml to pin it yourself.",
+        )
+
+    @staticmethod
+    def _raise_for_status(resp: httpx.Response) -> None:
+        """Fail with what the server actually said.
+
+        `httpx.raise_for_status()` reports the status and the URL and drops the body, which is where
+        every OpenAI-compatible endpoint puts the reason — so a refused request arrived as
+        `Client error '400 Bad Request' for url …` and nothing else. That is the same disease as the
+        truncation this file already fixes: the one line that would explain it, discarded.
+        """
+        if resp.is_success:
+            return
+        detail = (resp.text or "").strip()[:600]
+        raise LLMStructuredError(
+            f"{resp.request.url} answered {resp.status_code}"
+            + (f": {detail}" if detail else " with an empty body")
+        )

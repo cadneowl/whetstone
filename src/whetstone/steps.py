@@ -272,6 +272,11 @@ class StepSpec(BaseModel):
     task: TaskPolicy = TaskPolicy()
     # Exactly one of these is set for a model step; `run` alone for a subprocess step.
     prompt: str | None = None
+    # The file `prompt` was read from, as `step.yaml` named it. Kept because the text alone cannot
+    # say where to go and edit it, and both the render error and the console's prompt view now tell
+    # an operator exactly that — a step declaring `prompt: rewrite.md` was being sent to
+    # `prompt.md`, which is a file that does not exist in its folder.
+    prompt_file: str = "prompt.md"
     run: list[str] = Field(default_factory=list)
     timeout_s: int = Field(default=900, ge=1)
     # `update` only: the path→page mapping, for a generator that emits pages but no index of its
@@ -295,6 +300,11 @@ class StepSpec(BaseModel):
         return [] if value is None else value
 
     @property
+    def prompt_path(self) -> Path:
+        """Where this step's prompt template lives, for anything that names it to a human."""
+        return self.directory / (self.prompt_file or "prompt.md")
+
+    @property
     def is_subprocess(self) -> bool:
         return bool(self.run)
 
@@ -311,7 +321,18 @@ class StepSpec(BaseModel):
         """Fill the prompt template. Unknown placeholders are an error, not an empty string."""
         if self.prompt is None:
             raise StepError(f"{self.directory / STEP_FILE}: this step has no prompt to render")
-        return render_template(self.prompt, values, where=str(self.directory / "prompt.md"))
+        return render_template(self.prompt, values, where=str(self.prompt_path))
+
+
+def placeholders(text: str) -> set[str]:
+    """Every `{{name}}` a template references.
+
+    The parsed answer, not a substring search: `{{pages}}` and `{{ pages }}` are the same variable
+    to `render_template`, and anything deciding "does this template place X itself?" has to agree
+    with the thing that substitutes it, or a template whose braces are spaced gets X twice — once
+    where it asked for it and once appended because it looked absent.
+    """
+    return set(_PLACEHOLDER.findall(text))
 
 
 def render_template(text: str, values: dict[str, str], *, where: str) -> str:
@@ -371,6 +392,7 @@ def load_step(skill_dir: str | Path, kind: StepKind, *, skill_id: str = "") -> S
             skill_id=skill_id or Path(skill_dir).name,
             directory=directory,
             prompt=prompt_text,
+            prompt_file=str(prompt_file) if prompt_file else "prompt.md",
             run=[str(a) for a in run],
             **raw,
         )

@@ -42,7 +42,7 @@ from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
 from whetstone.gitio import GitError
-from whetstone.improve import build_digest, propose, render_step_prompt
+from whetstone.improve import digest_for, propose, render_step_prompt
 from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
@@ -215,12 +215,21 @@ def _client(
     label: str = "run",
 ) -> LLMClient:
     """The model client for a command, recording its prompts when asked to."""
+    # Loaded before the client, not after: `[llm] max_tokens` is a deployment setting, and the CLI
+    # reading it is what stops a cap from applying to the console and silently not to
+    # `whetstone skills improve` — the same skill drafting differently depending on the entry point.
+    config = load_config()
     try:
-        client = build_llm_client(llm, model=model, base_url=base_url, api_key_env=key_env)
+        client = build_llm_client(
+            llm,
+            model=model,
+            base_url=base_url,
+            api_key_env=key_env,
+            max_tokens=config.llm.max_tokens,
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    config = load_config()
     if not (_transcript_flag or config.runs.transcripts):
         return client
 
@@ -1819,9 +1828,10 @@ def skills_improve(
 
     record = _run_to_improve_from(sk, run_id, runs_dir, stale_ok=stale_ok)
     if dry_run:
-        digest = build_digest(
-            sk, record, spec.inputs.failures, instruction=instruction or ""
-        )
+        # `digest_for`, not `build_digest`: this printed a prompt whose `{{wiki}}` said "(no repo
+        # context indexed for this skill)" for skills whose wiki the real run sends, because the
+        # preview rebuilt the digest by hand and forgot the one argument that is not on it already.
+        digest = digest_for(spec, sk, record, instruction=instruction or "")
         typer.echo(
             render_step_prompt(spec, digest) if spec.prompt else digest.model_dump_json(indent=2)
         )

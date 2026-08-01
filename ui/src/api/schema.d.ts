@@ -536,6 +536,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/improve/prompt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Improve Prompt
+         * @description Render the prompt this improve launch would send, without sending it.
+         *
+         *     Not `Writable`-gated and not a plan: it spends nothing, writes nothing and calls no model, so a
+         *     read-only console can show it. It is a POST only because the thing being described is a request
+         *     body — the same one `/improve` takes, so the prompt shown is the prompt that launch would send
+         *     rather than a generic one for the skill.
+         *
+         *     Built through `improve.digest_for` and `improve.render_step_prompt`, which is what `propose`
+         *     itself calls. That is the whole discipline here: a preview assembled by a second code path would
+         *     drift from the real one and be believed anyway, which is strictly worse than showing nothing.
+         *
+         *     Where the launch would refuse, this still renders and says why in `warnings`. A stale run is the
+         *     case that matters: "the failures describe a reviewer that no longer exists" is a claim an
+         *     operator should be able to check by *looking at the failures*, and refusing the diagnostic is
+         *     refusing exactly at the moment it is wanted.
+         */
+        post: operations["improve_prompt_api_jobs_improve_prompt_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/improve/stage": {
         parameters: {
             query?: never;
@@ -2914,6 +2948,47 @@ export interface components {
              */
             readonly unreadable: boolean;
         };
+        /**
+         * ImprovePrompt
+         * @description The improve step's own prompt file with every variable filled — what the model reads.
+         *
+         *     Diagnostics for the one step whose input is invisible. A run is a score you can drill into; a
+         *     gate is a verdict with reasons; a draft is a rewrite you read line by line. The prompt behind
+         *     the draft was the only thing in the loop nobody could see, and it is assembled from six moving
+         *     parts — the failure digest, the clustering, the holdout blindfold, the case narrowing, the
+         *     guidance, the wiki. When a draft comes back wrong, the first question is what it was shown, and
+         *     until this route the only way to answer it was to read `improve.py`.
+         */
+        ImprovePrompt: {
+            /** Appended */
+            appended: string[];
+            /** Calls A Model */
+            calls_a_model: boolean;
+            /** From Run */
+            from_run: string;
+            /** Holdout Withheld */
+            holdout_withheld: number;
+            /** Runs As Agent */
+            runs_as_agent: boolean;
+            /** Shown */
+            shown: number;
+            /** Skill Id */
+            skill_id: string;
+            /** Source */
+            source: string;
+            /** System */
+            system: string;
+            /** Template */
+            template: string;
+            /** Text */
+            text: string;
+            /** Total Failures */
+            total_failures: number;
+            /** Variables */
+            variables: components["schemas"]["PromptVariable"][];
+            /** Warnings */
+            warnings: string[];
+        };
         /** ImproveRequest */
         ImproveRequest: {
             /** Cases */
@@ -3616,6 +3691,18 @@ export interface components {
              * @enum {string}
              */
             tier: "active" | "archive";
+        };
+        /**
+         * PromptVariable
+         * @description One `{{variable}}` an improve prompt may use, and what it came to on this launch.
+         */
+        PromptVariable: {
+            /** Chars */
+            chars: number;
+            /** Name */
+            name: string;
+            /** Used */
+            used: boolean;
         };
         /**
          * Proposal
@@ -6530,6 +6617,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    improve_prompt_api_jobs_improve_prompt_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImproveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImprovePrompt"];
                 };
             };
             /** @description Validation Error */
