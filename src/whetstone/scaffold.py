@@ -161,8 +161,8 @@ failure, largest group first.
 
 ## Current guidance — companion pages
 
-These are part of the same guidance and reach the reviewer verbatim, under the paths shown. If a
-rule you need to change lives here, change it here.
+These are part of the same guidance, under the paths shown. If a rule you need to change lives
+here, change it here, and return that page's complete new text keyed by its path.
 
 {{pages}}
 

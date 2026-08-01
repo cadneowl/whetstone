@@ -211,9 +211,12 @@ agent:
 What changes:
 
 - **`SKILL.md` becomes instructions**, not prompt filler.
-- **The other pages are read on demand.** The agent is told they exist and fetches one with
-  `read_skill_file` when its own instructions point at it. A `README.md` written for humans stops
-  being fed to the model as rules.
+- **The other pages are read on demand.** The agent is told they exist, with each one's length, and
+  fetches one with `read_skill_file` when its own instructions point at it. A `README.md` written
+  for humans stops being fed to the model as rules. A page too long for one reply comes back a
+  window at a time, capped like every other read here, saying which lines it gave and how to ask for
+  the next — an uncapped page would put the whole wall of text back one tool call in, which is the
+  thing this replaces.
 - **`source:` adds `read_file`, `grep` and `list_dir`**, read-only and sandboxed to that root —
   every path resolved and checked to be inside it, symlinks included. A root that is set but is not
   a directory is refused at the plan, because every tool would answer "no such file" and the agent
@@ -282,9 +285,17 @@ reviewing to your program.
 ### The same everywhere: improve and triage run as agents too
 
 `agent:` is **not** an evaluate-step setting. It is valid on every step whose work is the skill
-thinking — `evaluate`, `improve` and `triage` — and it means the same thing on each: `SKILL.md` is
-the instructions, the folder's other pages are fetched on demand, `source:` and `tools:` are in
-reach, and the step finishes by calling a terminal tool.
+thinking — `evaluate`, `improve` and `triage` — and on each it means the same runtime: `source:` and
+`tools:` are in reach, and the step finishes by calling a terminal tool.
+
+**`triage` is the one exception to "`SKILL.md` is the instructions", and deliberately.** The
+single-call triage prompt ends *"You are deliberately not shown the review guidance"*, because an
+expectation written while looking at the rules describes the rules — and a corpus built that way
+confirms the guidance instead of testing it. Running the step as an agent must not smuggle the
+guidance back in through the system prompt, so a triage agent gets the drafting brief as its
+instructions and is offered no `read_skill_file` at all. Everything the runtime is actually wanted
+for on that step — the source tree, the skill's own tools, the resolved context — is unaffected,
+because none of it lives on the guidance.
 
 This matters most on `improve`. The drafter is asked to rewrite guidance so a set of failures stops
 recurring, and until it could run as an agent it was a single call that had never read the code
@@ -307,6 +318,8 @@ context:
 **The prompt is the task; the skill body is the instructions.** Same split the reviewer has: its
 `SKILL.md` becomes the system prompt, and the step's rendered prompt — the failure digest, or the
 candidate's diff — is what it is being asked to do. So an agent step still needs its `prompt:`.
+(On `triage` the instructions are the drafting brief instead, for the reason above; the task half is
+the same.)
 
 | step | terminal tool | what it returns |
 | --- | --- | --- |

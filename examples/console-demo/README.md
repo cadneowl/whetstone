@@ -61,9 +61,14 @@ check describe something that actually happened.
 `go-timeout-guard` sets `agent: enabled`, so Whetstone **runs the folder** rather than pasting it
 into a prompt — `SKILL.md` is the instruction set, `references/timeouts.md` is fetched on demand with
 `read_skill_file`, and the skill answers by calling `submit_findings`. That is the shape a skill has
-inside a real agent runtime, and its `evaluate`, `improve` *and* `triage` steps all run that way. A
-skill scored as an agent but improved through one-shot prompts would be tuned against a reviewer
-that only exists inside Whetstone.
+inside a real agent runtime, and its `evaluate`, `improve` *and* `triage` steps all use it. A skill
+scored as an agent but improved through one-shot prompts would be tuned against a reviewer that only
+exists inside Whetstone.
+
+`triage` runs on the same runtime with one deliberate difference: it is **not** given the guidance.
+Its instructions are the drafting brief, and no `read_skill_file` is offered — an expectation
+written while looking at the rules describes the rules, and a corpus built that way confirms the
+guidance instead of testing it.
 
 The whole loop, on one skill, in about a minute:
 

@@ -643,6 +643,22 @@ ADR-022's non-goal; the reviewer-program seam remains, and the two are mutually 
 but do it more cleverly — cannot work: only the agent knows which page is relevant to the change in
 front of it, which is precisely the judgement `SKILL.md` was written to express.
 
+**It has to hold on every step, and that took a second pass.** `agent:` reached `improve` and
+`triage` before this decision reached their prompts: the improve step rendered `{{guidance}}` as the
+body the agent already had as its system prompt and appended every companion page verbatim, beside
+the `read_skill_file` tool offered to fetch them — a skill that was a folder on the evaluate path and
+a wall of text on the next one. Under `agent:` both variables are now pointers and the appendix is
+not added. `read_skill_file` was also the one uncapped read in the agent — every other one clips —
+so a single call on a large page restored the same wall; it now serves windows.
+
+**`triage` inverts one half of this on purpose.** Its single-call prompt ends *"You are deliberately
+not shown the review guidance"* (ADR-018): an expectation written while looking at the rules
+describes the rules, and a corpus built that way confirms the guidance rather than testing it.
+Running it as an agent was silently swapping that for a system prompt whose first section *was* the
+guidance. A triage agent now runs on a blindfolded skill — the drafting brief for instructions, no
+pages, so the tool route is closed with the prompt route — while keeping the source access and
+declared tools that are the reason to run it as an agent at all.
+
 **The host still learns nothing domain-specific.** A skill that needs a tracker ships a script that
 reads the tracker and names it under `agent: tools:`. Whetstone offers it to the model and runs it
 on the same JSON-on-stdin contract `improve`/`update` already use. Whetstone never grows a Jira
