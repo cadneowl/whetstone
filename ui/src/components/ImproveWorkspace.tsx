@@ -162,12 +162,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     draft &&
     save.mutate(
       { skillId, edit: { body: draft.body, pages: draft.pages } },
-      {
-        onSuccess: () => {
-          setDraft(null)
-          setNotice('Applied to the skill files on disk. Re-score to see if it caught them.')
-        },
-      },
+      // Marked applied, not cleared. Clearing it swapped the whole review — the rationale, the
+      // per-file diffs, the list of files touched — for a one-line notice, exactly when an
+      // operator wants to check what they just wrote to disk.
+      { onSuccess: () => setDraft((current) => current && { ...current, applied: true }) },
     )
   const onDrafted = (job: { result?: unknown }) => {
     const r = (job.result ?? {}) as Record<string, unknown>
@@ -182,14 +180,14 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       pages,
       rationale: String(r.rationale ?? ''),
       selectedMissing: (r.selected_missing ?? []) as string[],
+      // Snapshotted here, once, while it still describes what the draft was written against.
+      baseline: { body: proposal?.body ?? '', pages: proposal?.pages ?? {} },
     })
   }
 
   const review = draft && (
     <DraftReview
       draft={draft}
-      // The on-disk guidance the draft would replace, so every rewritten file shows as a diff.
-      baseline={{ body: proposal?.body ?? '', pages: proposal?.pages ?? {} }}
       applying={save.isPending}
       readOnly={readOnly}
       error={save.error}
@@ -503,6 +501,16 @@ type Draft = {
   pages: Record<string, string>
   rationale: string
   selectedMissing: string[]
+  // The on-disk guidance as it stood when this draft arrived, captured rather than read live.
+  //
+  // Applying invalidates the skill, so the live `proposal` refetches to the *new* on-disk text —
+  // and a diff computed against that shows no change at all. The review would go blank at the
+  // moment it becomes the record of what was written. It also stops a background refetch altering
+  // a diff someone is midway through reading.
+  baseline: Baseline
+  // Set once the write has landed. The panel stays and says so, rather than vanishing: what was
+  // applied is the thing you most want to look at immediately after applying it.
+  applied?: boolean
 }
 
 /**
@@ -541,9 +549,42 @@ function InPlaceNotice({ skillId }: { skillId: string }) {
   )
 }
 
+/** The on-disk guidance a draft would replace: `SKILL.md` plus every companion page, by path. */
+export type Baseline = { body: string; pages: Record<string, string> }
+
+/** One file the draft rewrites, ready to render as a diff. */
+export type DraftedFile = { path: string; before: string; after: string }
+
+/**
+ * Every file a draft actually rewrites — `SKILL.md` when the body moved, plus each companion page
+ * the drafter returned.
+ *
+ * A skill is a folder and the improve step edits it as one, so the review has to show it as one. A
+ * panel that rendered only the body would silently drop a rule the drafter fixed in
+ * `references/x.md`, and the operator would apply a change believing they had read all of it.
+ *
+ * Extracted from the component because that claim is worth testing and a component this repo has no
+ * renderer for cannot be. `pages` arrives already filtered by the server: `GuidanceProposal.
+ * changed_pages` drops anything handed back unchanged, so a page present here really did change.
+ */
+export function draftedFiles(
+  draft: { body: string; pages: Record<string, string> },
+  baseline: Baseline,
+): DraftedFile[] {
+  return [
+    ...(draft.body.trim() !== baseline.body.trim()
+      ? [{ path: 'SKILL.md', before: baseline.body, after: draft.body }]
+      : []),
+    // Sorted, so two drafts touching the same files review in the same order — a diff that moves
+    // between renders is one people stop reading.
+    ...Object.entries(draft.pages)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, after]) => ({ path, before: baseline.pages[path] ?? '', after })),
+  ]
+}
+
 function DraftReview({
   draft,
-  baseline,
   applying,
   readOnly,
   error,
@@ -551,33 +592,35 @@ function DraftReview({
   onDiscard,
 }: {
   draft: Draft
-  // The on-disk guidance the draft would replace — body plus every companion page, keyed by path —
-  // so each rewritten file is shown as a diff rather than a wall of new text.
-  baseline: { body: string; pages: Record<string, string> }
   applying: boolean
   readOnly: boolean
   error: unknown
   onApply: () => void
   onDiscard: () => void
 }) {
-  // Every file the draft actually rewrites: SKILL.md when the body moved, plus each companion page
-  // the drafter returned (the server already drops pages handed back unchanged). A skill is a
-  // folder and the improve step edits it as one, so the review shows it as one — not just the body.
-  const files = [
-    ...(draft.body.trim() !== baseline.body.trim()
-      ? [{ path: 'SKILL.md', before: baseline.body, after: draft.body }]
-      : []),
-    ...Object.entries(draft.pages).map(([path, after]) => ({
-      path,
-      before: baseline.pages[path] ?? '',
-      after,
-    })),
-  ]
+  // Against the snapshot on the draft, never the live query — see `Draft.baseline`. Applying
+  // refetches the on-disk guidance, and diffing against *that* would blank the review at the moment
+  // it becomes the record of what was written.
+  const files = draftedFiles(draft, draft.baseline)
+  const applied = Boolean(draft.applied)
   return (
-    <div className="mt-3 space-y-2 rounded-lg border border-accent/40 bg-accent/5 p-3">
-      <p className="text-xs text-muted">
-        Drafted a change to {files.length} file{files.length === 1 ? '' : 's'}. Read it before
-        applying — the drafter is not the reviewer.
+    <div
+      className={`mt-3 space-y-2 rounded-lg border p-3 ${
+        applied ? 'border-good/40 bg-good/5' : 'border-accent/40 bg-accent/5'
+      }`}
+    >
+      <p className={`text-xs ${applied ? 'text-good' : 'text-muted'}`}>
+        {applied ? (
+          <>
+            Applied to disk — {files.length} file{files.length === 1 ? '' : 's'} written. This is
+            what was written; re-score to see whether it caught them.
+          </>
+        ) : (
+          <>
+            Drafted a change to {files.length} file{files.length === 1 ? '' : 's'}. Read it before
+            applying — the drafter is not the reviewer.
+          </>
+        )}
       </p>
       {draft.rationale && <p className="text-sm">{draft.rationale}</p>}
       {files.length === 0 ? (
@@ -599,16 +642,22 @@ function DraftReview({
         </p>
       )}
       <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={onApply}
-          disabled={readOnly || applying || files.length === 0}
-          className="rounded border border-good/50 px-3 py-1 text-sm text-good hover:bg-good/10 disabled:opacity-40"
-        >
-          {applying ? 'Applying…' : 'Apply to disk'}
-        </button>
+        {/* Gone once it has landed, rather than left enabled: a second click would write the same
+            content again and bump the version for nothing. */}
+        {!applied && (
+          <button
+            type="button"
+            onClick={onApply}
+            disabled={readOnly || applying || files.length === 0}
+            className="rounded border border-good/50 px-3 py-1 text-sm text-good hover:bg-good/10 disabled:opacity-40"
+          >
+            {applying ? 'Applying…' : 'Apply to disk'}
+          </button>
+        )}
+        {/* "Discard" throws away work; "Close" puts away a record of work already done. Same
+            handler, and the word is the only thing telling you which one you are about to do. */}
         <button type="button" onClick={onDiscard} className="px-2 py-1 text-sm text-muted">
-          Discard
+          {applied ? 'Close' : 'Discard'}
         </button>
       </div>
       {error != null && <ErrorNote error={error} />}
