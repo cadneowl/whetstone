@@ -102,6 +102,11 @@ class Digest(BaseModel):
     holdout_withheld: int = 0
     clusters: list[Cluster] = Field(default_factory=list)
     wiki: str = ""
+    # Pages the skill's `wiki/index.yaml` names, whether or not any were retrieved. Carried purely
+    # so an empty `{{wiki}}` can say *which* empty it is: a skill with no `wiki/` folder and a skill
+    # whose globs matched nothing are different problems with different fixes, and one message for
+    # both sent an operator looking for a folder that was already there.
+    wiki_indexed: int = 0
     recall: float | None = None
     fp_rate: float | None = None
     # A one-off steer from the operator (`--instruction`). Empty for a plain run. Kept on the
@@ -123,20 +128,69 @@ class Digest(BaseModel):
             blocks.append(cluster.representative.render() + note)
         return "\n\n".join(blocks) + withheld
 
-    def render_pages(self) -> str:
-        """The companion guidance, each page under the path it must be returned as."""
+    def render_pages(self, *, served_by_tools: bool = False) -> str:
+        """The companion guidance, each page under the path it must be returned as.
+
+        `served_by_tools` is the agent path: the pages are reachable through `read_skill_file` and
+        their paths are already listed in the agent's instructions, so pasting them here would undo
+        the one thing running a skill as an agent is for. A skill is a folder whose `SKILL.md` says
+        what to consult and when; concatenating the folder into one prompt is the treatment `agent:`
+        replaces, and doing it anyway meant a skill was a folder on the evaluate path and a wall of
+        text on the improve path.
+        """
         if not self.pages:
             return "(this skill is a single SKILL.md — it has no companion pages)"
+        if served_by_tools:
+            listing = "\n".join(f"- {path}" for path in sorted(self.pages))
+            return (
+                "Not pasted here. Read one with `read_skill_file` when you need it, by the exact "
+                f"path:\n\n{listing}"
+            )
         return "\n\n".join(
             f"### {path}\n\n{text.strip()}" for path, text in sorted(self.pages.items())
         )
 
-    def prompt_values(self) -> dict[str, str]:
-        """Every `{{variable}}` an improve prompt may use."""
+    def _no_wiki(self) -> str:
+        """Why `{{wiki}}` is empty — the reason, not the symptom.
+
+        Read as a variable that failed to fill, which is the one thing it never is. There are three
+        distinct causes and they need three different actions, so a single message for all of them
+        is worse than useless: it sent an operator looking for a `wiki/` folder that was already
+        there, with two pages in it.
+
+        Retrieval is keyed to the source paths a run's cases touch (`wiki.retrieve`), so a skill
+        with a perfectly good wiki and no scored run retrieves nothing at all — the commonest way to
+        see this, and the one least likely to be guessed.
+        """
+        if not self.wiki_indexed:
+            return "(this skill has no wiki/ folder, so no repo context is injected)"
+        if not self.scored_cases:
+            return (
+                f"(this skill indexes {self.wiki_indexed} wiki page(s), but repo context is "
+                "retrieved for the files a scored run's cases touch and no run was scored — "
+                "run the eval first and the pages covering those files will appear here)"
+            )
+        return (
+            f"(this skill indexes {self.wiki_indexed} wiki page(s), none of whose path globs match "
+            "the files these cases touch — check the `paths:` entries in wiki/index.yaml)"
+        )
+
+    def prompt_values(self, *, served_by_tools: bool = False) -> dict[str, str]:
+        """Every `{{variable}}` an improve prompt may use.
+
+        `served_by_tools` renders the two guidance variables as pointers instead of text — see
+        `render_pages`. `guidance` goes with them because an agent's `SKILL.md` *is* its system
+        prompt: repeating it in the task would send the body twice and say nothing new.
+        """
         return {
             "skill_id": self.skill_id,
-            "guidance": self.guidance,
-            "pages": self.render_pages(),
+            "guidance": (
+                "Your instructions above are the current guidance — it is not repeated here. "
+                "Return its complete new text as `body`."
+                if served_by_tools
+                else self.guidance
+            ),
+            "pages": self.render_pages(served_by_tools=served_by_tools),
             "failures": self.render_failures(),
             "failure_count": str(self.total_failures),
             "shown_count": str(len(self.clusters)),
@@ -144,7 +198,7 @@ class Digest(BaseModel):
             "cases_scored": str(self.scored_cases),
             "recall": "n/a" if self.recall is None else f"{self.recall:.3f}",
             "fp_rate": "n/a" if self.fp_rate is None else f"{self.fp_rate:.3f}",
-            "wiki": self.wiki or "(no repo context indexed for this skill)",
+            "wiki": self.wiki or self._no_wiki(),
             "instruction": self.instruction,
         }
 
@@ -229,6 +283,7 @@ def build_digest(
         holdout_withheld=0 if record is None else _withheld(record, inputs),
         clusters=clusters,
         wiki=wiki_text,
+        wiki_indexed=len(skill.wiki.pages),
         recall=None if record is None else record.score.recall,
         fp_rate=None if record is None else record.score.fp_rate,
         instruction=instruction.strip(),
@@ -637,10 +692,16 @@ def appendices(spec: StepSpec, digest: Digest) -> list[tuple[str, str]]:
     will be sent, and "which sections did the host add for me?" is part of that answer. Deriving it
     a second time somewhere else is how the two would come to disagree — so there is one list, this
     one, and the renderer appends exactly it.
+
+    An agent step gets neither block pasted. Its pages are a tool call away and its `SKILL.md` is
+    already its system prompt, so appending the folder would hand it, in one text, the thing it was
+    given tools to read a page at a time — on a large skill that is the whole folder in the context
+    the harness exists to keep it out of.
     """
     named = placeholders(spec.prompt or "")
+    served_by_tools = spec.agent.enabled
     out: list[tuple[str, str]] = []
-    if digest.pages and "pages" not in named:
+    if digest.pages and "pages" not in named and not served_by_tools:
         out.append((
             "pages",
             "\n\n## Current guidance — companion pages\n\n"
@@ -660,8 +721,13 @@ def appendices(spec: StepSpec, digest: Digest) -> list[tuple[str, str]]:
 
 
 def render_step_prompt(spec: StepSpec, digest: Digest) -> str:
-    """The prompt as sent: the template filled, plus what it forgot to place — see `appendices`."""
-    text = spec.render_prompt(digest.prompt_values())
+    """The prompt as sent: the template filled, plus what it forgot to place — see `appendices`.
+
+    The step decides how its own guidance arrives: a plain prompt step is handed it as text, an
+    `agent:` step reaches it through `read_skill_file` and its own instructions. One renderer for
+    both, so what the console previews is what `propose` sends on either path.
+    """
+    text = spec.render_prompt(digest.prompt_values(served_by_tools=spec.agent.enabled))
     return text + "".join(body for _, body in appendices(spec, digest))
 
 

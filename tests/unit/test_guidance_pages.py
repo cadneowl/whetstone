@@ -265,3 +265,64 @@ def test_a_rule_in_a_page_can_be_reported_untested(tmp_path: Path) -> None:
     )
 
     assert untested_rules(skill, record) == ["R3"]
+
+
+# --- what the operator is told, before paying for it -------------------------------
+
+
+def _plan(skill_dir: Path):
+    from whetstone.llm.factory import resolve_backend
+    from whetstone.preflight import annotate_reviewer, plan_eval
+    from whetstone.reviewer.factory import reviewer_from_step
+    from whetstone.steps import load_step
+
+    skill = load_skill(skill_dir)
+    spec = load_step(skill_dir, "evaluate", skill_id=skill.id)
+    choice = reviewer_from_step(spec, skill_dir)
+    backend = resolve_backend("anthropic")
+    plan = plan_eval(skill, backend)
+    annotate_reviewer(plan, choice, invocations=1, skill=skill)
+    return plan
+
+
+def test_the_plan_says_the_pages_are_being_pasted(tmp_path: Path) -> None:
+    """The built-in reviewer concatenates the folder into one system prompt on every review. For a
+    single-file skill that is right; for a skill split across files it is the opposite of how the
+    skill gets used, and the operator was never told which of the two they were measuring."""
+    d = _skill(tmp_path, patterns__rust="- **R3** no unwrap.\n")
+    plan = _plan(d)
+
+    joined = " ".join(plan.details)
+    assert "pasted into one system prompt" in joined
+    assert "agent: enabled: true" in joined, "and say how to change it"
+
+
+def test_a_single_file_skill_gets_no_such_note(tmp_path: Path) -> None:
+    """Nothing is wrong with pasting a skill that is one file, so nothing is said about it."""
+    plan = _plan(_skill(tmp_path))
+    assert not any("pasted" in d for d in plan.details)
+
+
+def test_the_page_cap_reaches_the_operator_and_not_only_the_model(tmp_path: Path) -> None:
+    """An oversized page is dropped whole and named *in the prompt* — right, but it reaches nobody
+    who could act on it. The run still produces a score, measured against rules never sent."""
+    d = _skill(tmp_path, patterns__rust="- **R3** keep me.\n", patterns__huge="x" * 30_000)
+    plan = _plan(d)
+
+    joined = " ".join(plan.warnings)
+    assert "patterns/huge.md" in joined
+    assert "not sent" in joined
+
+
+def test_an_agent_skill_is_described_as_one(tmp_path: Path) -> None:
+    d = _skill(tmp_path, patterns__rust="- **R3** no unwrap.\n")
+    (d / "evaluate").mkdir(exist_ok=True)
+    (d / "evaluate" / "step.yaml").write_text(
+        "description: x\nagent:\n  enabled: true\n  max_steps: 5\n", encoding="utf-8"
+    )
+    plan = _plan(d)
+
+    joined = " ".join(plan.details)
+    assert "runs as an agent" in joined
+    assert "read on demand" in joined
+    assert not any("pasted" in x for x in plan.details)

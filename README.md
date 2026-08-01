@@ -318,14 +318,26 @@ skills/<skill-id>/
   wiki/                 # repo context, retrieved per change and injected into the review prompt
     index.yaml          #   which source paths each page describes
     pages/*.md
-  evaluate/step.yaml    # how this skill is scored (sampling, trials, wiki caps — and optionally
-                        #   `run:`, your own source-reading reviewer, plus the `context:` it needs)
+  references/*.md       # guidance that outgrew SKILL.md — read on demand when `agent:` is on
+  evaluate/step.yaml    # how this skill is scored (sampling, trials, wiki caps — `agent:`, and
+                        #   optionally `run:`, your own reviewer, plus the `context:` it needs)
   improve/step.yaml     # how a guidance change is drafted from failures  (+ prompt.md)
   update/step.yaml      # how the wiki is regenerated, by invoking your own generator
 ```
 
 The last four are the **skill pipeline** — each skill's own scripts for keeping itself sharp.
 `whetstone skills scaffold --skill skills/<id>` writes correct starter versions of all of them.
+
+**How a skill is run matters as much as what it says.** By default the reviewer is one model call
+with the whole folder concatenated into its prompt, which is right for a skill that is one file and
+wrong for one that is several — a skill is split across files precisely so that it is never all in
+context at once. Setting `agent: enabled: true` on a step runs it the way something using the skill
+would: `SKILL.md` as instructions, companion pages fetched with a tool when the instructions point
+at them, and `source:` adding sandboxed `read_file`/`grep`/`list_dir` over a checkout. It is valid
+on `evaluate`, `improve` and `triage`, and the reference skill uses it on the first two. The cost
+plan for a run, a gate or a baseline says which of the two you are about to get, and warns when the
+concatenation cap is silently dropping pages from every review. Full reference:
+**[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
 Full reference: **[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
 
 ### `SKILL.md`
@@ -358,7 +370,9 @@ Frontmatter fields (all optional except `id`, which defaults to the folder name)
 | `triggers.paths` | Glob patterns (`PurePosixPath.full_match`, so `**/*.rs` works) used to route eval cases to this skill. |
 | `triggers.labels` | Merge-request labels the skill answers to — the fallback when the subject isn't visible in a file path (a `security` label over a `values.yaml`). Paths win when both match. |
 
-The markdown **body** below the frontmatter is the actual guidance handed to the reviewer.
+The markdown **body** below the frontmatter is the actual guidance: pasted into the reviewer's
+prompt by default, or — with `agent:` on the step — used as its instructions, with the folder's
+other pages fetched on demand.
 
 ### `meta.yaml`
 
@@ -622,13 +636,21 @@ Skill code-review-rust-error-handling v1  (k=5)
   recall 1.000   fp_rate 0.000   precision 1.000   F2 1.000
   stdev: recall 0.000  fp_rate 0.000
   cases:
-    [catch ] unwrap-in-handler              recall 1.00
-    [noflag] unwrap-in-test                 fp_rate 0.00
-    [noflag] error-mapped-question-mark     fp_rate 0.00
+    [noflag] error-mapped-question-mark       fp_rate 0.00
+    [catch ] swallowed-error-in-refund        recall 1.00
+    [catch ] unwrap-in-handler                recall 1.00
+    [noflag] unwrap-in-test                   fp_rate 0.00
+  train   recall 1.000  fp_rate 0.000  (2 case(s))
+  holdout recall 1.000  fp_rate 0.000  (2 case(s))  divergence +0.000
 
-run 20260725T040013Z-code-review-rust-error-handling-349fb3  (12 llm calls, 8.4s)
+run 20260725T040013Z-code-review-rust-error-handling-349fb3
   whetstone report --run 20260725T040013Z-code-review-rust-error-handling-349fb3
 ```
+
+This skill scores as an agent, so the preflight above prices a review at the step budget rather than
+at one call — `up to 13 model call(s) per review (12 steps + one forced answer) x 20 review(s)`, an
+upper bound an agent normally stops well short of. Drop `agent:` from its `evaluate/step.yaml` and
+the same run is one call per review with the guidance pasted in.
 
 ### `whetstone eval gate`
 
@@ -2064,6 +2086,7 @@ provider = "ollama"          # anthropic · openai · ollama · lmstudio · vllm
 model = "qwen3-coder:30b"    # required for local / OpenAI-compatible backends
 base_url = ""                # a custom OpenAI-compatible gateway — NOT changeable from the browser
 max_tokens = 32000           # how much one reply may generate (default: ask the backend)
+timeout = 1800               # seconds one request may take (default 600)
 ```
 
 `base_url` is deliberately not settable from the console: an operator picks among known providers
@@ -2492,8 +2515,10 @@ Two safety properties for custom harnesses:
 - **Typos still fail loudly.** An unknown name *without* a base URL is treated as a typo and rejected
   with the list of valid presets — you don't silently hit the wrong endpoint.
 
-Slow hardware? Raise the per-request timeout (a Pi running a 7B model can take minutes):
-`--llm ollama ... ` with `WHETSTONE_LLM_TIMEOUT=600` (seconds), or `build_llm_client(..., timeout=600)`.
+Slow hardware? Raise the per-request timeout (a Pi running a 7B model can take minutes): `timeout`
+under `[llm]` in `whetstone.toml`, `WHETSTONE_LLM_TIMEOUT=1800` (seconds) for one run, or
+`build_llm_client(..., timeout=1800)`. The default is 600s, and it has to cover the *whole* reply —
+these are non-streaming requests, so nothing arrives until the model has finished writing.
 
 From the CLI, `eval run` and `eval gate` take the same options:
 
@@ -2767,7 +2792,7 @@ Two things worth knowing, both about values being read back exactly as written:
 | `WHETSTONE_LLM_MODEL` | `build_llm_client` | Model id when `--model` is omitted (required for local/OpenAI/custom backends). |
 | `WHETSTONE_LLM_BASE_URL` | `build_llm_client` | OpenAI-compatible endpoint when `--base-url` is omitted — e.g. a remote Pi or custom harness. |
 | `WHETSTONE_LLM_API_KEY_ENV` | `build_llm_client` | Name of the env var holding the API key, if the backend needs one. |
-| `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Per-request timeout in seconds for OpenAI-compatible backends (raise it for slow local hardware). |
+| `WHETSTONE_LLM_TIMEOUT` | `build_llm_client` | Overrides `[llm] timeout` (default 600s) for one run or one shell. These are non-streaming requests, so the budget covers the *whole* generation — raise it for slow hardware or very long guidance rewrites. |
 | `WHETSTONE_LLM_MAX_TOKENS` | `build_llm_client` | Overrides `[llm] max_tokens` (default 64000) for one run or one shell — how much a single reply may generate. Raise it when a call fails as `LLMTruncatedError`, meaning the reply was cut off before it finished. See `[llm]` above. |
 | `GITLAB_TOKEN` | GitLab connector | Personal/project access token. The env-var **name** is configurable via `--token-env` / `token_env`. |
 | `JIRA_TOKEN` | Jira connector | API token (Cloud) or personal access token (Server/DC). Name configurable via `--jira-token-env` / `token_env`. |

@@ -9,8 +9,10 @@ import httpx
 
 from whetstone.llm.base import (
     DEFAULT_MAX_TOKENS,
+    DEFAULT_TIMEOUT_S,
     Effort,
     LLMStructuredError,
+    LLMTimeoutError,
     LLMTruncatedError,
     T,
     cap_refused,
@@ -206,7 +208,7 @@ class OpenAICompatibleClient:
         # question, and a client that went and asked anyway could only disagree with them.
         max_tokens: int | None = None,
         max_retries: int = 3,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_TIMEOUT_S,
         temperature: float = 0.0,
         on_retry: Callable[[str], None] | None = None,
     ) -> None:
@@ -228,6 +230,7 @@ class OpenAICompatibleClient:
         self._probed = max_tokens is not None
         self._max_retries = max_retries
         self._temperature = temperature
+        self._timeout = timeout
         self._use_response_format = True
         # Retries are the difference between a slow call and a stuck one, and they used to be
         # invisible: two nested loops (schema-invalid JSON, then HTTP 429/5xx) each up to
@@ -427,7 +430,24 @@ class OpenAICompatibleClient:
         attempt = 0
         clamps = 0
         while True:
-            resp = self._client.post(url, json=body)
+            try:
+                resp = self._client.post(url, json=body)
+            except httpx.TimeoutException as exc:
+                # `ReadTimeout: The read operation timed out` names nothing an operator can act on:
+                # not the endpoint, not how long it waited, not that the model may have been most
+                # of the way through a reply that was then thrown away. These are non-streaming
+                # requests, so the whole generation has to fit inside this budget.
+                raise LLMTimeoutError(
+                    f"{self._model} at {self._base} did not answer within {self._timeout:.0f}s "
+                    f"({type(exc).__name__}). This is one non-streaming request, so that budget "
+                    f"has to cover the entire reply — and an improve step returns a complete "
+                    f"guidance body, which is the longest reply this system asks for.\n\n"
+                    f"Raise it in whetstone.toml:\n"
+                    f"    [llm]\n"
+                    f"    timeout = {int(self._timeout * 2)}\n"
+                    f"(or WHETSTONE_LLM_TIMEOUT for one run). If it is the endpoint that is stuck "
+                    f"rather than slow, nothing was charged and nothing was written."
+                ) from exc
             if resp.status_code in _RETRY_STATUS and attempt < self._max_retries:
                 attempt += 1
                 self._note(

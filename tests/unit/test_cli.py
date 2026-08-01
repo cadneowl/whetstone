@@ -375,11 +375,17 @@ def stub_gate(monkeypatch: pytest.MonkeyPatch) -> None:
 
     A reviewer that finds nothing: both sides score identically, which is all these tests need —
     they are about what the command *stores*, not about what it concludes.
+
+    Tool-capable as well as single-shot, because the reference skill scores as an agent: the harness
+    calls `converse` for the review and `structured` for the judge, and a stub that answered only
+    the second would error every case while the gate still printed a verdict over nothing.
     """
     from pydantic import BaseModel
 
     from whetstone.judge.llm_judge import JudgeVerdict
-    from whetstone.llm.fake_client import FakeLLMClient
+    from whetstone.llm.fake_client import FakeLLMClient, FakeToolClient
+    from whetstone.llm.tools import Message, ToolCall, ToolSpec, Turn
+    from whetstone.reviewer.agent_reviewer import SUBMIT
     from whetstone.reviewer.llm_reviewer import LLMFindingList
 
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
@@ -387,7 +393,15 @@ def stub_gate(monkeypatch: pytest.MonkeyPatch) -> None:
             return JudgeVerdict(matched=False, confidence=1.0, reason="nothing was flagged")
         return LLMFindingList(findings=[])
 
-    monkeypatch.setattr("whetstone.cli._client", lambda *a, **k: FakeLLMClient(handler))
+    def turns(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        return Turn(calls=[ToolCall("1", SUBMIT, {"findings": []})])
+
+    class Both(FakeLLMClient, FakeToolClient):
+        def __init__(self) -> None:
+            FakeLLMClient.__init__(self, handler)
+            FakeToolClient.__init__(self, turns)
+
+    monkeypatch.setattr("whetstone.cli._client", lambda *a, **k: Both())
 
 
 def test_eval_gate_stores_a_record(tmp_path: Path, stub_gate: None) -> None:
@@ -449,6 +463,22 @@ def test_preflight_names_the_backend_and_estimates_the_calls(
     assert "doubled" in result.output
 
 
+def test_the_gate_estimate_prices_an_agent_reviewer_per_step(stub_gate: None) -> None:
+    """The gate resolved the reviewer and then planned as if it had not.
+
+    The reference skill scores as an agent, so one review is up to `max_steps + 1` calls, not one.
+    `eval run` and the console's gate both passed that through; this path did not, so the number an
+    operator confirms against understated the most expensive command in the CLI by an order of
+    magnitude — and a `run:` skill was quoted for review calls Whetstone never makes.
+    """
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    result = runner.invoke(
+        app, ["eval", "gate", "--base", skill, "--candidate", skill, "--no-save", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "13 review call(s)" in result.output  # 12 investigation steps + one forced answer
+
+
 def test_a_walk_that_dies_still_reports_what_it_saved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -488,3 +518,24 @@ def test_an_interrupted_walk_keeps_and_reports_its_work(
 
     assert "1 candidate(s) written" in result.stdout
     assert (out / "acme-payments-812-t0" / "candidate.json").is_file()
+
+
+def test_the_baseline_probe_uses_the_same_reviewer_as_the_real_run(
+    tmp_path: Path, stub_gate: None
+) -> None:
+    """This path resolved no reviewer at all.
+
+    The probe scores the corpus with the guidance stripped, and `discrimination` compares that to
+    the guided run to decide which cases "no longer measure the guidance" — which is a retirement
+    recommendation. For a skill that scores as an agent, the probe was running the *built-in*
+    pasted-prompt reviewer, so the difference between the two runs included the reviewer changing
+    underneath. Cases were being proposed for deletion on a comparison that was never like for like.
+    """
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    result = runner.invoke(
+        app,
+        ["eval", "baseline", "--skill", skill, "--runs-dir", str(tmp_path / "runs"), "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "runs as an agent" in result.output
+    assert "13 review call(s)" in result.output

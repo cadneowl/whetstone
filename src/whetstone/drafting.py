@@ -159,6 +159,25 @@ _SYSTEM = (
 )
 
 
+def blindfolded(skill: Skill) -> Skill:
+    """The skill an agentic triage step runs as: the drafting brief for instructions, no rules.
+
+    A skill agent's `SKILL.md` becomes its system prompt and its pages are served by
+    `read_skill_file`. For evaluate and improve that is the whole point. For triage it inverts a
+    deliberate blindfold — the single-call path's system prompt ends "You are deliberately not shown
+    the review guidance", because an expectation written while looking at the rules describes the
+    rules rather than the evidence, and a corpus built that way confirms the guidance instead of
+    testing it. Turning `agent:` on was silently swapping that for a prompt whose first section is
+    the guidance, under the heading "Your instructions".
+
+    So the body is replaced with the brief and the pages are dropped — closing the tool route as
+    well as the prompt one. Everything `agent:` is actually wanted for on this step survives: the
+    source tree, the skill's declared tools, and the resolved context are all held by the runner,
+    not by this object.
+    """
+    return skill.model_copy(update={"body": _SYSTEM, "pages": []})
+
+
 def draft_semantic(
     spec: StepSpec,
     entry: CandidateEntry,
@@ -183,7 +202,7 @@ def draft_semantic(
     if agent is not None:
         if skill is None:
             raise StepError("running a triage step as an agent needs the skill it belongs to")
-        answer, _ = agent.run(skill, prompt, _SUBMIT_EXPECTATION)
+        answer, _ = agent.run(blindfolded(skill), prompt, _SUBMIT_EXPECTATION)
         draft = SemanticDraft(
             semantic=str(answer.get("semantic") or ""),
             rationale=str(answer.get("rationale") or ""),

@@ -6,6 +6,21 @@
 
 description: Score this skill against its promoted eval cases.
 
+# Run the skill *as an agent*, which is how a skill is actually used: SKILL.md is the instructions,
+# the companion pages are fetched with `read_skill_file` only when the instructions point at them,
+# and the source tree is searchable. Turn this off and the built-in reviewer concatenates the whole
+# folder into one system prompt — fine for a skill this size, wrong for any skill big enough to be
+# split across files in the first place, which is the reason a skill is a folder.
+agent:
+  enabled: true
+  # Investigation budget per case: read a page, grep a definition, answer. Cost is priced at
+  # max_steps + 1 — the budget buys twelve turns and then one forced answer.
+  max_steps: 12
+  # Where the reviewed code is checked out. Machine-specific, so it comes from the environment and
+  # is never committed. Deliberately NOT `required: true`: unset, the agent still runs on the diff
+  # and its own pages, exactly as a reviewer with no checkout would.
+  source: { env: WHETSTONE_RUST_SOURCE }
+
 # Reviewer passes per case. Raise to 2-3 for an unstable skill to measure variance; every
 # increment multiplies the cost of every run and every gate by the same factor.
 trials: 1

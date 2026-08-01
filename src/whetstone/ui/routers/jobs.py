@@ -20,7 +20,10 @@ money is a write, whatever it leaves on disk.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -57,6 +60,7 @@ from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
 from whetstone.preflight import (
     Estimate,
     Plan,
+    annotate_reviewer,
     check_budget,
     plan_calls,
     plan_eval,
@@ -690,16 +694,29 @@ def launch_improve(
         agent = step.build(client) if step is not None else None
         if agent is not None:
             agent.bind_cancel(handle.cancel_event)
-        result = propose(
-            spec,
-            skill,
-            record,
-            client=client,
-            effort=spec.model.effort or "high",
-            instruction=request.instruction,
-            only=set(request.cases) or None,
-            agent=agent,
+        # Said before the wait, because the wait is the part that looks broken. An improve step
+        # returns a complete guidance body in one reply, so minutes is normal and the console
+        # should say so rather than leave an operator to guess whether it has hung.
+        handle.log(
+            LogLine(
+                text=(
+                    "drafting: one call that returns the complete new guidance, so this is the "
+                    "longest wait in the console — minutes is normal. Nothing streams back until "
+                    "the model has finished writing it."
+                )
+            )
         )
+        with _waiting(handle, "waiting for the model"):
+            result = propose(
+                spec,
+                skill,
+                record,
+                client=client,
+                effort=spec.model.effort or "high",
+                instruction=request.instruction,
+                only=set(request.cases) or None,
+                agent=agent,
+            )
         # The model has now read these cases. Recording it is what stops a promoted case that was
         # sharpened against from being handed back to the hash at graduation and counted as an
         # exam question it passed unseen. Written on the draft rather than on the apply: the
@@ -859,7 +876,10 @@ def improve_prompt(
         # question this route was opened to ask.
         raise Unprocessable(str(exc)) from exc
 
-    values = digest.prompt_values()
+    # The same view `render_step_prompt` just used, so the per-variable sizes describe the text
+    # above them. An agent's `{{guidance}}` and `{{pages}}` are pointers to tools, and reporting
+    # their pasted length here would say the drafter was sent a folder it was not sent.
+    values = digest.prompt_values(served_by_tools=spec.agent.enabled)
     if spec.calls_a_model and "failures" not in named:
         warnings.append(
             f"{_step_file(spec, root)} never places {{{{failures}}}}, so the drafter is "
@@ -1279,7 +1299,7 @@ def plan_review_job(
     )
     if not skill.body.strip():
         plan.warnings.append("this skill has no guidance, so the reviewer is being sent no rules")
-    _annotate_reviewer(plan, choice, invocations=1, judged=False)
+    annotate_reviewer(plan, choice, invocations=1, judged=False, skill=skill)
     check_budget(plan, config.runs.max_llm_calls_per_run)
     return plan
 
@@ -1310,18 +1330,22 @@ def launch_review(
         handle.progress(0, 1, f"reviewing {ref or 'the change'}")
         handle.check()
         client = _client(config, spec, selection, label=f"review-{skill.id}")
-        record = record_review(
-            skill,
-            change,
-            client,
-            source=source,
-            ref=ref,
-            url=url,
-            title=title,
-            backend=backend.name,
-            model=backend.model,
-            reviewer=choice.build(client),
-        )
+        # The same shape as the improve step — one call, nothing to report until it returns — so it
+        # goes silent the same way on a slow backend. Leaving one of two identical jobs unfixed
+        # would just move the confusion to another tab.
+        with _waiting(handle, f"reviewing {ref or 'the change'}"):
+            record = record_review(
+                skill,
+                change,
+                client,
+                source=source,
+                ref=ref,
+                url=url,
+                title=title,
+                backend=backend.name,
+                model=backend.model,
+                reviewer=choice.build(client),
+            )
         reviews.save(record)
         handle.log(
             *(
@@ -1488,7 +1512,7 @@ def plan_baseline_job(
         "scores every active case with the guidance stripped — a should_catch case the naked "
         "model passes never measured the guidance"
     )
-    _annotate_reviewer(plan, choice, invocations=len(naked.eval_cases))
+    annotate_reviewer(plan, choice, invocations=len(naked.eval_cases), skill=naked)
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if choice.custom:
         plan.warnings.append(
@@ -2128,6 +2152,37 @@ _OUTCOME = {
 # --- shared ----------------------------------------------------------------------
 
 
+@contextmanager
+def _waiting(handle: JobHandle, label: str) -> Iterator[None]:
+    """Count the seconds while one long call is in flight.
+
+    A run reports per case and an agent reports per tool call, so both look alive. A single
+    structured call reports nothing at all — and the improve step *is* one call, the longest in the
+    system, because it returns a whole rewritten guidance body. So the console sat on "assembling
+    the digest" for however long the model took and then, when the read timed out, showed a failure
+    with no indication that anything had been happening. Indistinguishable from a hang, which is
+    what it was reported as.
+
+    A ticking elapsed count is the least this can do without streaming: it does not say how far
+    along the model is — nothing here knows that — but it does say the wait is real and how long it
+    has been, which is what decides whether to keep waiting or raise the timeout.
+    """
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def tick() -> None:
+        while not stop.wait(2.0):
+            handle.progress(0, 1, f"{label} — {int(time.monotonic() - started)}s")
+
+    ticker = threading.Thread(target=tick, daemon=True, name="job-heartbeat")
+    ticker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        ticker.join(timeout=1.0)
+
+
 def _launch(
     jobs: JobStore, kind: Any, skill_id: str, work: Any, plan: Plan | None
 ) -> Job:
@@ -2350,70 +2405,6 @@ def _reviewer_choice(config: Config, skill: Skill) -> ReviewerChoice:
     return choice
 
 
-def _annotate_reviewer(
-    plan: Plan, choice: ReviewerChoice, *, invocations: int, gate: bool = False, judged: bool = True
-) -> None:
-    """Say, in the cost plan, that a custom reviewer will run — what it gets, and how often.
-
-    The estimate above counts only the judge, because Whetstone makes no review call at all here.
-    What it cannot price is the program's own spend, so it prices what it can and *counts* what it
-    cannot: the invocation volume is the one number the operator needs to multiply by their own
-    per-call cost, and a plan that hid it would understate the run to the point of dishonesty.
-
-    `judged=False` for a live review, which has no judge — there is nothing to judge until a human
-    rules on the findings. Saying "plus the judge" there described a call that never happens, in the
-    same banner whose built-in wording already says the opposite.
-    """
-    if not choice.custom:
-        return
-    if choice.agent is not None:
-        # An agent *does* spend Whetstone's backend — it is the one custom reviewer whose calls are
-        # ours, so they are priced rather than merely counted, at the step ceiling.
-        # `max_calls`, not `max_steps`: the budget buys that many investigation turns and then one
-        # more forced turn to make it answer. Pricing the ceiling at `max_steps` understates every
-        # review by exactly one call.
-        calls = choice.agent.max_calls
-        plan.details.append(
-            f"reviewer: {choice.identity} — this skill runs as an agent. Its SKILL.md is the "
-            f"instruction set, its other pages are read on demand, and it investigates before "
-            f"answering."
-        )
-        plan.details.append(
-            f"up to {calls} model call(s) per review ({choice.agent.max_steps} steps + one forced "
-            f"answer) x {invocations} review(s) = up to {calls * invocations} calls on the backend "
-            f"above{', plus the judge' if judged else ' (there is no judge on a live review)'}. An "
-            f"agent usually stops well short of its step ceiling, so this is an upper bound, not "
-            f"an estimate."
-        )
-        if choice.agent.source_root:
-            plan.details.append(
-                "the agent can read the declared source tree (read-only, sandboxed to its root)"
-            )
-        if choice.agent.tools:
-            names = ", ".join(t.name for t in choice.agent.tools)
-            plan.details.append(f"skill-provided tools: {names} — run as programs by this skill")
-    else:
-        plan.details.append(
-            f"reviewer: {choice.identity} — your program reads the diff and the context and "
-            f"returns findings; Whetstone calls no model for the review (the judge still runs on "
-            f"the backend above, and the estimate counts only that)"
-        )
-        plan.details.append(
-            f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot "
-            f"price those calls, only count them, so the cost of the run is this many invocations "
-            f"at whatever each one spends"
-        )
-    if choice.context and choice.context.redacted:
-        shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
-        plan.details.append(f"reviewer context: {shown}")
-    if gate:
-        plan.warnings.append(
-            "this gate scores with a custom reviewer that reads source Whetstone does not hash — "
-            "pin it to a fixed snapshot (a context var like source_ref) so base and candidate read "
-            "the same code, or a verdict may reflect the source moving rather than the guidance"
-        )
-
-
 def _step(root: Path, skill: Skill, kind: Any) -> StepSpec | None:
     try:
         return load_step(root / skill.id, kind, skill_id=skill.id)
@@ -2525,6 +2516,9 @@ def _client(
             # model runs, never how much room it gets. So it comes from the config rather than from
             # `selection`, and a per-launch model override keeps the configured cap.
             max_tokens=config.llm.max_tokens,
+            # Non-streaming, so this budget covers the whole generation: a cap large enough
+            # to finish a guidance rewrite needs a timeout large enough to wait for one.
+            timeout=config.llm.timeout,
         )
     except ValueError as exc:
         raise Unprocessable(str(exc)) from exc
@@ -2567,7 +2561,9 @@ def _eval_plan(
         # wrong number to be confirming.
         plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * sides})
         plan.details.append("both base and candidate are scored, so this is doubled")
-    _annotate_reviewer(plan, choice, invocations=scored * trials * sides, gate=sides > 1)
+    annotate_reviewer(
+        plan, choice, invocations=scored * trials * sides, gate=sides > 1, skill=skill
+    )
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if spec and spec.judge.tier1.configured:
         plan.details.append(

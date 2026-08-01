@@ -105,6 +105,75 @@ def test_a_single_file_skill_gets_no_appended_page_section(tmp_path: Path) -> No
     assert "companion pages" not in rendered
 
 
+# --- what an agent step is shown ----------------------------------------------------
+#
+# A skill is split across files precisely so it is never all in one context at once: `SKILL.md` says
+# what to consult and when, and the harness serves the rest a page at a time. `agent:` is how
+# Whetstone runs a skill that way — and the improve step was pasting the whole folder into the task
+# prompt anyway, so a skill was a folder on the evaluate path and a wall of text on the improve one.
+
+
+def _agent_spec(tmp_path: Path, prompt: str) -> StepSpec:
+    from whetstone.steps import AgentPolicy
+
+    return StepSpec(
+        kind="improve",
+        skill_id="s",
+        directory=tmp_path,
+        prompt=prompt,
+        agent=AgentPolicy(enabled=True),
+    )
+
+
+def test_an_agent_reads_its_pages_rather_than_being_handed_them(tmp_path: Path) -> None:
+    from whetstone.improve import render_step_prompt
+
+    spec = _agent_spec(tmp_path, "{{pages}}")
+    rendered = render_step_prompt(spec, build_digest(_skill(tmp_path), None, FailureInputs()))
+
+    assert "R2 — no swallowed errors" not in rendered, "the page text must not be pasted"
+    assert "read_skill_file" in rendered, "say how to get it instead"
+    assert "patterns/errors.md" in rendered, "and name the path to ask for"
+
+
+def test_an_agent_template_that_never_mentions_pages_gets_none_appended(tmp_path: Path) -> None:
+    """The appendix exists so a template written before pages still sends them. For an agent it
+    would send the folder it was given tools to read — and its instructions already list the
+    paths, so nothing is lost by leaving it out."""
+    from whetstone.improve import appendices, render_step_prompt
+
+    spec = _agent_spec(tmp_path, "{{guidance}}")
+    digest = build_digest(_skill(tmp_path), None, FailureInputs())
+
+    assert [name for name, _ in appendices(spec, digest)] == []
+    assert "R2 — no swallowed errors" not in render_step_prompt(spec, digest)
+
+
+def test_an_agent_is_not_sent_its_own_instructions_a_second_time(tmp_path: Path) -> None:
+    """`SKILL.md` is already the agent's system prompt. Repeating it in the task sends the body
+    twice and says nothing new — and on a large skill that is the bulk of the context."""
+    from whetstone.improve import render_step_prompt
+
+    rendered = render_step_prompt(
+        _agent_spec(tmp_path, "{{guidance}}"),
+        build_digest(_skill(tmp_path), None, FailureInputs()),
+    )
+
+    assert "The rules live in ./patterns/errors.md." not in rendered
+    assert "Your instructions above are the current guidance" in rendered
+
+
+def test_a_plain_prompt_step_is_unchanged(tmp_path: Path) -> None:
+    """The default is still one call with the guidance as text. Only the agent path changes."""
+    from whetstone.improve import render_step_prompt
+
+    spec = StepSpec(kind="improve", skill_id="s", directory=tmp_path, prompt="{{guidance}}")
+    rendered = render_step_prompt(spec, build_digest(_skill(tmp_path), None, FailureInputs()))
+
+    assert "The rules live in ./patterns/errors.md." in rendered
+    assert "R2 — no swallowed errors" in rendered, "still appended for a non-agent step"
+
+
 # --- what it may write --------------------------------------------------------------
 
 

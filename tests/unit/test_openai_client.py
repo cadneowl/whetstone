@@ -7,6 +7,7 @@ import pytest
 import respx
 from pydantic import BaseModel
 
+from whetstone.llm.base import LLMTimeoutError
 from whetstone.llm.openai_client import (
     LLMStructuredError,
     LLMTruncatedError,
@@ -437,3 +438,40 @@ def test_retries_on_transient_5xx() -> None:
         )
         out = _client().structured("sys", "user", Verdict)
     assert out.reason == "ok"
+
+
+# --- a call that never came back ---------------------------------------------------
+#
+# Reported from a real improve run as, in its entirety:
+#
+#     ReadTimeout: The read operation timed out
+#
+# Which endpoint, how long it waited, whether the model had nearly finished, what to change: none
+# of it. And the wait itself showed no progress at all, because a single structured call reports
+# nothing until it returns.
+
+
+def test_a_timeout_names_the_endpoint_the_budget_and_the_knob() -> None:
+    with respx.mock() as router:
+        router.post(f"{BASE}/chat/completions").mock(side_effect=httpx.ReadTimeout("timed out"))
+        client = OpenAICompatibleClient("m", BASE, max_tokens=64000, timeout=120.0)
+        try:
+            client.structured("sys", "user", Guidance)
+        except LLMTimeoutError as exc:
+            message = str(exc)
+        else:  # pragma: no cover
+            raise AssertionError("expected LLMTimeoutError")
+
+    assert BASE in message and "120s" in message, "which endpoint, and how long it waited"
+    assert "non-streaming" in message, "why the budget must cover the whole reply"
+    assert "[llm]" in message and "timeout = 240" in message, "the setting, with a value to paste"
+    assert "WHETSTONE_LLM_TIMEOUT" in message
+
+
+def test_the_default_budget_covers_a_whole_guidance_rewrite() -> None:
+    """Two minutes is less than a large rewrite takes, and the failure it produced was a timeout
+    *after* the model had done most of the work — paid for and thrown away."""
+    from whetstone.llm.base import DEFAULT_TIMEOUT_S
+
+    assert OpenAICompatibleClient("m", BASE)._timeout == DEFAULT_TIMEOUT_S
+    assert DEFAULT_TIMEOUT_S >= 600, "the same budget the Anthropic SDK allows a non-streaming call"

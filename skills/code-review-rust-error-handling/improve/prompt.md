@@ -13,9 +13,9 @@ failure, largest group first.
 
 {{guidance}}
 
-## Repo context
+## Its companion pages
 
-{{wiki}}
+{{pages}}
 
 ## What to do
 
