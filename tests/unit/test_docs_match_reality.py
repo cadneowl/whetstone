@@ -228,3 +228,78 @@ def test_a_single_file_skill_is_not_flagged() -> None:
     """Pasting one file is right, so the row is informative rather than a complaint."""
     row = _runtimes(REFERENCE)["evaluate"]
     assert row.mode == "agent" and not row.problem
+
+
+def test_a_broken_step_file_describes_itself_instead_of_500ing(tmp_path: Path) -> None:
+    """`load_step` runs `yaml.safe_load` before it validates anything, so a stray tab raises
+    `YAMLError`, not `StepError`. Catching only the tidy exception turned one malformed step into a
+    500 on the whole skill page — the screen someone opens *because* a skill is behaving oddly."""
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "evaluate").mkdir()
+    (tmp_path / "evaluate" / "step.yaml").write_text("agent:\n\tenabled: true\n", encoding="utf-8")
+
+    row = _runtimes(tmp_path)["evaluate"]
+
+    assert row.present is True
+    assert row.problem, "the row carries the parse error"
+    assert row.mode == "none"
+
+
+def test_a_pasted_evaluate_step_says_what_the_cap_drops(tmp_path: Path) -> None:
+    """`evaluate` is not refused — that would stop scoring for every multi-file skill — but it
+    concatenates and drops whole pages past the cap, naming them only to the model. A run then
+    produces an ordinary-looking score measured against rules that were never sent."""
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "big.md").write_text("x" * 30_000, encoding="utf-8")
+    (tmp_path / "evaluate").mkdir()
+    (tmp_path / "evaluate" / "step.yaml").write_text("description: x\n", encoding="utf-8")
+
+    row = _runtimes(tmp_path)["evaluate"]
+
+    assert row.mode == "prompt"
+    assert "size cap drops references/big.md" in row.note
+
+
+def test_the_steps_of_a_renamed_skill_are_still_found(tmp_path: Path) -> None:
+    """`_load_one` deliberately supports a folder whose name is not the skill's id. Addressing the
+    steps by id reported "no step file" for every step of such a skill — a screen whose whole job is
+    saying how a skill runs, quietly saying it does not run at all."""
+    from whetstone.core.loader import load_skill as _load
+    from whetstone.ui.routers.skills import _skill_dir
+
+    folder = tmp_path / "old-folder-name"
+    (folder / "evaluate").mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\nid: renamed\n---\n\n# S\n", encoding="utf-8")
+    (folder / "evaluate" / "step.yaml").write_text(
+        "description: x\nagent:\n  enabled: true\n", encoding="utf-8"
+    )
+    skill = _load(folder)
+
+    assert _skill_dir(tmp_path, skill) == folder
+    assert _runtimes(_skill_dir(tmp_path, skill))["evaluate"].mode == "agent"
+
+
+def test_the_paste_note_is_per_step_not_one_sentence_for_all_three(tmp_path: Path) -> None:
+    """The guidance does not reach the three steps alike, so one sentence is wrong on two of them.
+
+    `improve` pastes under no cap at all — quoting the reviewer's would describe a limit it does not
+    have — and `triage` is never shown the guidance, so a skill being a folder changes nothing there.
+    """
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "big.md").write_text("x" * 30_000, encoding="utf-8")
+    for kind in ("evaluate", "improve", "triage"):
+        (tmp_path / kind).mkdir()
+        (tmp_path / kind / "step.yaml").write_text(
+            "description: x\nprompt: p.md\n" if kind != "evaluate" else "description: x\n",
+            encoding="utf-8",
+        )
+        if kind != "evaluate":
+            (tmp_path / kind / "p.md").write_text("x", encoding="utf-8")
+
+    rows = _runtimes(tmp_path)
+
+    assert "size cap drops" in rows["evaluate"].note, "only the reviewer has that cap"
+    assert "size cap drops" not in rows["improve"].note, "improve has no cap; it is refused"
+    assert rows["triage"].note == "one prompt, one answer", "triage never sees the guidance"

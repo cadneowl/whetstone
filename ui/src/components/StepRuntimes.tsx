@@ -30,15 +30,18 @@ export function StepRuntimes({ steps }: { steps: Runtime[] }) {
 
 function Row({ step }: { step: Runtime }) {
   const broken = Boolean(step.problem)
+  // `bad`, not `danger`: the palette is canvas/surface/line/ink/muted/good/bad/warn/accent, and
+  // Tailwind emits a utility only for a token that exists. `text-danger` compiled to nothing, so
+  // the one row that most needed to look like a warning rendered in body colour.
   return (
     <span className="flex items-baseline gap-1.5" title={step.problem || step.note}>
       <span className="font-mono text-muted">{step.kind}</span>
-      <span className={broken ? 'font-medium text-danger' : 'font-medium'}>
+      <span className={broken ? 'font-medium text-bad' : 'font-medium'}>
         {broken ? '⚠ ' : ''}
-        {label(step.mode)}
+        {label(step)}
       </span>
       {step.note && !broken && <span className="text-muted">· {step.note}</span>}
-      {broken && <span className="text-danger">· refuses to run</span>}
+      {broken && <span className="text-bad">· {step.mode === 'none' ? 'see the file' : 'refuses to run'}</span>}
     </span>
   )
 }
@@ -47,8 +50,8 @@ function Row({ step }: { step: Runtime }) {
  * Plain words, not the YAML key. "prompt" is what someone reading `agent: enabled: false` has to
  * infer; "one pasted prompt" is the thing that is actually happening to their skill.
  */
-function label(mode: Runtime['mode']): string {
-  switch (mode) {
+function label(step: Runtime): string {
+  switch (step.mode) {
     case 'agent':
       return 'an agent'
     case 'prompt':
@@ -58,6 +61,8 @@ function label(mode: Runtime['mode']): string {
     case 'task':
       return 'a task agent'
     default:
-      return 'not configured'
+      // A step file that would not parse has no mode, and "not configured" would be a lie about a
+      // file that is right there and broken.
+      return step.problem ? 'a broken step file' : 'not configured'
   }
 }

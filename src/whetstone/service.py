@@ -1220,17 +1220,22 @@ def step_runtimes(skill: Skill, skill_dir: Path) -> list[StepRuntime]:
 
     Best-effort by design: a step file that will not parse becomes a `problem` on its row instead of
     failing the whole page. The skill detail screen is where someone goes to find out *why* a skill
-    is behaving oddly, so it is the last place that should refuse to load because of it.
+    is behaving oddly, so it is the last place that should refuse to load because of it — which is
+    why the catch is broad rather than `StepError` alone. `load_step` runs `yaml.safe_load` before
+    it validates anything, so a step file with a stray tab in it raises `YAMLError`, and catching
+    only the tidy exception would have turned one malformed step into a 500 on the whole skill.
     """
     from whetstone.improve import would_paste_the_folder
-    from whetstone.steps import AGENT_KINDS, STEP_KINDS, StepError, load_step
+    from whetstone.steps import STEP_KINDS, load_step
 
     out: list[StepRuntime] = []
     for kind in STEP_KINDS:
         try:
             spec = load_step(skill_dir, kind, skill_id=skill.id)
-        except StepError as exc:
-            out.append(StepRuntime(kind=kind, present=True, problem=str(exc)))
+        except Exception as exc:  # noqa: BLE001 - a broken step describes itself; it must not 500
+            out.append(
+                StepRuntime(kind=kind, present=True, note="unreadable", problem=str(exc))
+            )
             continue
         if spec is None:
             out.append(StepRuntime(kind=kind, present=False, note="no step file"))
@@ -1254,16 +1259,39 @@ def step_runtimes(skill: Skill, skill_dir: Path) -> list[StepRuntime]:
         elif spec.is_subprocess:
             out.append(StepRuntime(kind=kind, mode="program", note=" ".join(spec.run)))
         else:
-            pages = (
-                f"the whole folder ({len(skill.pages)} page(s)) is pasted into one prompt"
-                if skill.pages and kind in AGENT_KINDS
-                else "one prompt, one answer"
-            )
             out.append(StepRuntime(
-                kind=kind, mode="prompt", note=pages,
+                kind=kind, mode="prompt", note=_pasted_note(skill, kind),
                 problem=would_paste_the_folder(spec, skill) if kind == "improve" else "",
             ))
     return out
+
+
+def _pasted_note(skill: Skill, kind: str) -> str:
+    """What "one prompt" means for this step — which is a different thing on each of the three.
+
+    Per kind, because the guidance does not reach them alike and one sentence for all of them would
+    be wrong on two:
+
+    - `evaluate` concatenates the folder *and* drops whole pages past `MAX_PAGE_BYTES`, naming them
+      only to the model. It is not refused the way `improve` is — that would stop scoring for every
+      multi-file skill — so a run can produce an ordinary-looking score measured against rules that
+      were never sent, and this is the only place that says so.
+    - `improve` pastes the same folder under no cap at all, which is why it is refused instead.
+      Quoting the reviewer's cap here would describe a limit this step does not have.
+    - `triage` is never shown the guidance in the first place (`drafting`), so a skill being a
+      folder changes nothing about its prompt.
+    """
+    if kind == "triage" or not skill.pages:
+        return "one prompt, one answer"
+    note = f"the whole folder ({len(skill.pages)} page(s)) is pasted into one prompt"
+    if kind != "evaluate":
+        return note
+    from whetstone.reviewer.llm_reviewer import render_pages
+
+    dropped = render_pages(skill)[1]
+    if not dropped:
+        return note
+    return f"{note} — and the size cap drops {', '.join(dropped)} from every one"
 
 
 def _case_summary(case: EvalCase, latest: RunRecord | None) -> CaseSummary:
