@@ -120,3 +120,68 @@ def test_an_empty_draft_is_refused(tmp_path: Path) -> None:
 def test_a_model_step_without_a_client_says_so(tmp_path: Path) -> None:
     with pytest.raises(StepError, match="no LLM client"):
         draft_semantic(_step(tmp_path), _with_thread(), client=None)
+
+
+# --- the blindfold, when the step runs as an agent ---------------------------------
+
+
+def test_an_agentic_triage_step_is_still_blind_to_the_guidance(tmp_path: Path) -> None:
+    """The load-bearing property, restated for the runtime that nearly removed it.
+
+    A skill agent's `SKILL.md` becomes its system prompt and its pages are served by
+    `read_skill_file`, which is exactly right for evaluate and improve. On triage it inverted a
+    deliberate blindfold: the single-call system prompt ends "You are deliberately not shown the
+    review guidance", and turning `agent:` on replaced it with a prompt whose first section was the
+    guidance, under the heading "Your instructions". An expectation written while looking at the
+    rules describes the rules, and a corpus built that way confirms the guidance instead of
+    testing it.
+    """
+    from whetstone.agent.step import AgentStep
+    from whetstone.core.loader import load_skill
+    from whetstone.llm.fake_client import FakeToolClient
+    from whetstone.llm.tools import Message, ToolCall, ToolSpec, Turn
+
+    (tmp_path / "SKILL.md").write_text(
+        "---\nid: s\nname: S\n---\n\n# S\n\n- **R1** never call unwrap in a handler.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "rules.md").write_text(
+        "- **R2** never swallow an error.\n", encoding="utf-8"
+    )
+    write_scaffold(tmp_path)
+    skill = load_skill(tmp_path)
+    spec = load_step(tmp_path, "triage", skill_id="s")
+    assert spec is not None
+
+    seen: dict[str, object] = {}
+
+    def turns(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        seen["system"] = system
+        seen["tools"] = [t.name for t in tools]
+        return Turn(calls=[ToolCall("1", "submit_expectation", {"semantic": "an unwrap here"})])
+
+    draft = draft_semantic(
+        spec, _with_thread(), agent=AgentStep(FakeToolClient(turns), max_steps=3), skill=skill
+    )
+
+    assert draft.semantic == "an unwrap here"
+    system = str(seen["system"])
+    assert "never call unwrap in a handler" not in system, "the body is guidance, not instructions"
+    assert "deliberately not shown the review guidance" in system, "say why, as the plain path does"
+    # The pages route is closed too, or the blindfold is one tool call from being taken off.
+    assert "read_skill_file" not in seen["tools"]
+
+
+def test_the_blindfold_keeps_everything_agentic_triage_is_for() -> None:
+    """Source access and the skill's own tools are the reason to run triage as an agent at all;
+    they live on the runner, not on the skill, so dropping the rules costs none of them."""
+    from whetstone.domain.skill import GuidancePage, Skill
+    from whetstone.drafting import blindfolded
+
+    skill = Skill(id="s", body="# rules", pages=[GuidancePage(path="p.md", text="- R1")])
+    blind = blindfolded(skill)
+
+    assert blind.id == "s"
+    assert blind.pages == []
+    assert "# rules" not in blind.body

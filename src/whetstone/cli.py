@@ -46,7 +46,15 @@ from whetstone.improve import digest_for, propose, render_step_prompt
 from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
-from whetstone.preflight import Plan, check_budget, plan_calls, plan_eval, plan_tasks, render
+from whetstone.preflight import (
+    Plan,
+    annotate_reviewer,
+    check_budget,
+    plan_calls,
+    plan_eval,
+    plan_tasks,
+    render,
+)
 from whetstone.providers.base import ConnectorError
 from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
@@ -467,6 +475,7 @@ def eval_run(
         host_reviews=choice.agent is not None or not choice.custom,
         calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
+    annotate_reviewer(plan, choice, invocations=(scored or len(sk.eval_cases)) * trials, skill=sk)
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
 
@@ -737,6 +746,12 @@ def eval_baseline(
         raise typer.Exit(1)
 
     policy = _step(skill, "evaluate")
+    # The same reviewer the guided run uses. This path resolved none at all, so a skill that scores
+    # as an agent was probed with the built-in pasted-prompt reviewer instead — and `discrimination`
+    # then compared the two runs and concluded which cases "no longer measure the guidance". That
+    # difference was the reviewer, not the guidance, and the conclusion it drives is retirement:
+    # cases deleted from the corpus on the strength of a comparison that was never like for like.
+    choice = _reviewer_choice(policy, skill)
     pick = _backend_for(policy, llm, model, base_url)
     backend = _resolve(*pick)
     plan = plan_eval(
@@ -746,8 +761,17 @@ def eval_baseline(
         cases=len(naked.eval_cases),
         wiki_limits=None,
         judge_cascade=bool(policy and policy.judge.enabled),
+        host_reviews=choice.agent is not None or not choice.custom,
+        calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     plan.action = "baseline"
+    annotate_reviewer(plan, choice, invocations=len(naked.eval_cases), skill=naked)
+    if choice.custom and choice.agent is None:
+        plan.warnings.append(
+            "this skill's reviewer is a program that reads the source, not the guidance — so "
+            "stripping the guidance changes nothing it sees, and this probe then measures whether "
+            "the program discriminates, not whether the guidance does"
+        )
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
 
@@ -760,6 +784,7 @@ def eval_baseline(
         on_event=None if json_out else _progress,
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
+        reviewer=choice.build(client),
     )
     _store(runs_dir).save(record)
     found = discrimination(sk, record)
@@ -879,6 +904,9 @@ def eval_gate(
         if plan.estimate:
             plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * 2})
             plan.details.append("both base and candidate are scored, so this is doubled")
+        annotate_reviewer(
+            plan, choice, invocations=scored * gate_trials * 2, gate=True, skill=candidate_skill
+        )
         check_budget(plan, load_config().runs.max_llm_calls_per_run)
         _preflight(plan, yes)
 

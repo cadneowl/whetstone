@@ -23,13 +23,16 @@ the API can show the same warning the CLI does, and it can be tested without a m
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
 
 from whetstone.domain.skill import Skill
 from whetstone.llm.factory import LOCAL_PRESETS, Backend
 from whetstone.wiki import WikiLimits, paths_of, retrieve
+
+if TYPE_CHECKING:
+    from whetstone.reviewer.factory import ReviewerChoice
 
 Billing = Literal["billed", "local", "unknown"]
 
@@ -227,6 +230,116 @@ def check_budget(plan: Plan, max_calls: int) -> None:
         plan.warnings.append(
             f"estimated {plan.estimate.calls} calls exceeds [runs] max_llm_calls_per_run "
             f"({max_calls})"
+        )
+
+
+def annotate_reviewer(
+    plan: Plan,
+    choice: ReviewerChoice,
+    *,
+    invocations: int,
+    gate: bool = False,
+    judged: bool = True,
+    skill: Skill | None = None,
+) -> None:
+    """Say, in the cost plan, how this skill will be reviewed — what it gets, and how often.
+
+    The estimate above counts only the judge, because Whetstone makes no review call at all here.
+    What it cannot price is the program's own spend, so it prices what it can and *counts* what it
+    cannot: the invocation volume is the one number the operator needs to multiply by their own
+    per-call cost, and a plan that hid it would understate the run to the point of dishonesty.
+
+    `judged=False` for a live review, which has no judge — there is nothing to judge until a human
+    rules on the findings. Saying "plus the judge" there described a call that never happens, in the
+    same banner whose built-in wording already says the opposite.
+
+    Lives here rather than in the console router it was written in, because the CLI needs to say the
+    same things and was saying none of them: the same run, described in full in the browser and not
+    at all in the terminal.
+    """
+    if not choice.custom:
+        _describe_builtin(plan, skill)
+        return
+    if choice.agent is not None:
+        # An agent *does* spend Whetstone's backend — it is the one custom reviewer whose calls are
+        # ours, so they are priced rather than merely counted, at the step ceiling.
+        # `max_calls`, not `max_steps`: the budget buys that many investigation turns and then one
+        # more forced turn to make it answer. Pricing the ceiling at `max_steps` understates every
+        # review by exactly one call.
+        calls = choice.agent.max_calls
+        plan.details.append(
+            f"reviewer: {choice.identity} — this skill runs as an agent. Its SKILL.md is the "
+            f"instruction set, its other pages are read on demand, and it investigates before "
+            f"answering."
+        )
+        plan.details.append(
+            f"up to {calls} model call(s) per review ({choice.agent.max_steps} steps + one forced "
+            f"answer) x {invocations} review(s) = up to {calls * invocations} calls on the backend "
+            f"above{', plus the judge' if judged else ' (there is no judge on a live review)'}. An "
+            f"agent usually stops well short of its step ceiling, so this is an upper bound, not "
+            f"an estimate."
+        )
+        if choice.agent.source_root:
+            plan.details.append(
+                "the agent can read the declared source tree (read-only, sandboxed to its root)"
+            )
+        if choice.agent.tools:
+            names = ", ".join(t.name for t in choice.agent.tools)
+            plan.details.append(f"skill-provided tools: {names} — run as programs by this skill")
+    else:
+        plan.details.append(
+            f"reviewer: {choice.identity} — your program reads the diff and the context and "
+            f"returns findings; Whetstone calls no model for the review (the judge still runs on "
+            f"the backend above, and the estimate counts only that)"
+        )
+        plan.details.append(
+            f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot "
+            f"price those calls, only count them, so the cost of the run is this many invocations "
+            f"at whatever each one spends"
+        )
+    if choice.context and choice.context.redacted:
+        shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
+        plan.details.append(f"reviewer context: {shown}")
+    if gate:
+        plan.warnings.append(
+            "this gate scores with a custom reviewer that reads source Whetstone does not hash — "
+            "pin it to a fixed snapshot (a context var like source_ref) so base and candidate read "
+            "the same code, or a verdict may reflect the source moving rather than the guidance"
+        )
+
+
+def _describe_builtin(plan: Plan, skill: Skill | None) -> None:
+    """What the default reviewer does to a skill that is a folder — stated before it is paid for.
+
+    The built-in reviewer concatenates `SKILL.md` and every companion page into one system prompt,
+    on every case of every trial on both sides of a gate. For a single-file skill that is exactly
+    right and there is nothing to say. For a skill split across files it is the opposite of how the
+    skill is used in a harness, where `SKILL.md` is the instruction sheet and the pages are opened
+    when it points at them — so the operator is told which of the two they are about to measure,
+    and how to switch.
+
+    The page cap gets the same treatment `_describe_wiki` already gives the wiki cap. A page over
+    the budget is dropped whole and named *to the model*, which is right but reaches nobody who
+    could act on it: the run still produces a score, and a score measured against rules that were
+    silently not sent is the kind of number that gets believed.
+    """
+    if skill is None or not skill.pages:
+        return
+    from whetstone.reviewer.llm_reviewer import MAX_PAGE_BYTES, render_pages
+
+    text, dropped = render_pages(skill)
+    sent = len(skill.pages) - len(dropped)
+    plan.details.append(
+        f"reviewer: built-in — {sent} of this skill's {len(skill.pages)} companion page(s) "
+        f"({len(text.encode('utf-8')):,} bytes) are pasted into one system prompt on every review, "
+        f"not read on demand. Set `agent: enabled: true` on the evaluate step to run the skill the "
+        f"way something using it would."
+    )
+    if dropped:
+        plan.warnings.append(
+            f"the {MAX_PAGE_BYTES}-byte guidance cap drops {len(dropped)} page(s) from every "
+            f"review ({', '.join(dropped)}) — those rules are not sent, and the score is measured "
+            f"without them. Running as an agent has no such cap: pages are fetched one at a time."
         )
 
 

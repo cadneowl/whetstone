@@ -60,6 +60,7 @@ from whetstone.meta_eval.evaluate import evaluate_judge, load_judge_corpus
 from whetstone.preflight import (
     Estimate,
     Plan,
+    annotate_reviewer,
     check_budget,
     plan_calls,
     plan_eval,
@@ -1298,7 +1299,7 @@ def plan_review_job(
     )
     if not skill.body.strip():
         plan.warnings.append("this skill has no guidance, so the reviewer is being sent no rules")
-    _annotate_reviewer(plan, choice, invocations=1, judged=False)
+    annotate_reviewer(plan, choice, invocations=1, judged=False, skill=skill)
     check_budget(plan, config.runs.max_llm_calls_per_run)
     return plan
 
@@ -1511,7 +1512,7 @@ def plan_baseline_job(
         "scores every active case with the guidance stripped — a should_catch case the naked "
         "model passes never measured the guidance"
     )
-    _annotate_reviewer(plan, choice, invocations=len(naked.eval_cases))
+    annotate_reviewer(plan, choice, invocations=len(naked.eval_cases), skill=naked)
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if choice.custom:
         plan.warnings.append(
@@ -2404,70 +2405,6 @@ def _reviewer_choice(config: Config, skill: Skill) -> ReviewerChoice:
     return choice
 
 
-def _annotate_reviewer(
-    plan: Plan, choice: ReviewerChoice, *, invocations: int, gate: bool = False, judged: bool = True
-) -> None:
-    """Say, in the cost plan, that a custom reviewer will run — what it gets, and how often.
-
-    The estimate above counts only the judge, because Whetstone makes no review call at all here.
-    What it cannot price is the program's own spend, so it prices what it can and *counts* what it
-    cannot: the invocation volume is the one number the operator needs to multiply by their own
-    per-call cost, and a plan that hid it would understate the run to the point of dishonesty.
-
-    `judged=False` for a live review, which has no judge — there is nothing to judge until a human
-    rules on the findings. Saying "plus the judge" there described a call that never happens, in the
-    same banner whose built-in wording already says the opposite.
-    """
-    if not choice.custom:
-        return
-    if choice.agent is not None:
-        # An agent *does* spend Whetstone's backend — it is the one custom reviewer whose calls are
-        # ours, so they are priced rather than merely counted, at the step ceiling.
-        # `max_calls`, not `max_steps`: the budget buys that many investigation turns and then one
-        # more forced turn to make it answer. Pricing the ceiling at `max_steps` understates every
-        # review by exactly one call.
-        calls = choice.agent.max_calls
-        plan.details.append(
-            f"reviewer: {choice.identity} — this skill runs as an agent. Its SKILL.md is the "
-            f"instruction set, its other pages are read on demand, and it investigates before "
-            f"answering."
-        )
-        plan.details.append(
-            f"up to {calls} model call(s) per review ({choice.agent.max_steps} steps + one forced "
-            f"answer) x {invocations} review(s) = up to {calls * invocations} calls on the backend "
-            f"above{', plus the judge' if judged else ' (there is no judge on a live review)'}. An "
-            f"agent usually stops well short of its step ceiling, so this is an upper bound, not "
-            f"an estimate."
-        )
-        if choice.agent.source_root:
-            plan.details.append(
-                "the agent can read the declared source tree (read-only, sandboxed to its root)"
-            )
-        if choice.agent.tools:
-            names = ", ".join(t.name for t in choice.agent.tools)
-            plan.details.append(f"skill-provided tools: {names} — run as programs by this skill")
-    else:
-        plan.details.append(
-            f"reviewer: {choice.identity} — your program reads the diff and the context and "
-            f"returns findings; Whetstone calls no model for the review (the judge still runs on "
-            f"the backend above, and the estimate counts only that)"
-        )
-        plan.details.append(
-            f"your reviewer program is invoked up to {invocations} time(s) — Whetstone cannot "
-            f"price those calls, only count them, so the cost of the run is this many invocations "
-            f"at whatever each one spends"
-        )
-    if choice.context and choice.context.redacted:
-        shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
-        plan.details.append(f"reviewer context: {shown}")
-    if gate:
-        plan.warnings.append(
-            "this gate scores with a custom reviewer that reads source Whetstone does not hash — "
-            "pin it to a fixed snapshot (a context var like source_ref) so base and candidate read "
-            "the same code, or a verdict may reflect the source moving rather than the guidance"
-        )
-
-
 def _step(root: Path, skill: Skill, kind: Any) -> StepSpec | None:
     try:
         return load_step(root / skill.id, kind, skill_id=skill.id)
@@ -2624,7 +2561,9 @@ def _eval_plan(
         # wrong number to be confirming.
         plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * sides})
         plan.details.append("both base and candidate are scored, so this is doubled")
-    _annotate_reviewer(plan, choice, invocations=scored * trials * sides, gate=sides > 1)
+    annotate_reviewer(
+        plan, choice, invocations=scored * trials * sides, gate=sides > 1, skill=skill
+    )
     check_budget(plan, config.runs.max_llm_calls_per_run)
     if spec and spec.judge.tier1.configured:
         plan.details.append(

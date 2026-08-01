@@ -60,17 +60,24 @@ def skill_tools(skill: Skill) -> list[ToolSpec]:
     """Reading the skill's own companion pages."""
     if not skill.pages:
         return []
-    listing = ", ".join(p.path for p in skill.pages)
+    # Sizes, not just names. A skill's pages are the one thing the agent is asked to choose between
+    # blind, and "which of these do I open" is a different question when one of them is 4,000 lines.
+    listing = ", ".join(f"{p.path} ({len(p.text.splitlines())} lines)" for p in skill.pages)
     return [
         ToolSpec(
             name="read_skill_file",
             description=(
                 "Read one of this skill's own reference pages, by the exact path your instructions "
-                f"link to. Available pages: {listing}"
+                "link to. A long page comes back in one window at a time; pass `start` to continue "
+                f"from where it stopped. Available pages: {listing}"
             ),
             input_schema={
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "e.g. references/x.md"}},
+                "properties": {
+                    "path": {"type": "string", "description": "e.g. references/x.md"},
+                    "start": {"type": "integer", "description": "1-based first line (optional)"},
+                    "end": {"type": "integer", "description": "last line (optional)"},
+                },
                 "required": ["path"],
             },
         )
@@ -140,7 +147,10 @@ class BuiltinTools:
     def dispatch(self, call: ToolCall) -> ToolResult:
         args = call.arguments
         if call.name == "read_skill_file":
-            return ToolResult(call.id, self._skill_file(str(args.get("path", ""))))
+            return ToolResult(
+                call.id,
+                self._skill_file(str(args.get("path", "")), args.get("start"), args.get("end")),
+            )
         if self.root is None:
             return ToolResult(
                 call.id, "This skill declared no source root, so there is no code to read.", True
@@ -159,11 +169,24 @@ class BuiltinTools:
 
     # --- skill pages ---------------------------------------------------------------
 
-    def _skill_file(self, path: str) -> str:
+    def _skill_file(self, path: str, start: object, end: object) -> str:
+        """One companion page, in windows — the same discipline every other read here follows.
+
+        This was the one uncapped read in the agent. `read_file` clips a source file at
+        `MAX_FILE_BYTES`, `grep` stops at a hit count, `list_dir` at an entry count; a skill's own
+        page came back whole however large it was. On the skills this feature exists for — the ones
+        split across files precisely so they are never all in context at once — a single
+        `read_skill_file` on the big page put the wall of text straight back, one tool call in, and
+        could end the run by overflowing the window mid-review.
+
+        Windowed rather than truncated: a rule cut off mid-sentence still reads as a complete rule,
+        so the cut is stated with the line numbers on both sides of it and the agent is told how to
+        ask for the rest. Never a silent clip.
+        """
         wanted = path.strip().lstrip("./")
         for page in self.skill.pages:
             if page.path == wanted:
-                return page.text
+                return _window(page.text, wanted, start, end)
         available = ", ".join(p.path for p in self.skill.pages) or "(none)"
         return f"No page {path!r} in this skill. Available: {available}"
 
@@ -251,6 +274,39 @@ class BuiltinTools:
                                 hits, pattern, f"stopped at {MAX_GREP_HITS} matches"
                             )
         return _grep_result(hits, pattern, "")
+
+
+def _window(text: str, label: str, start: object, end: object) -> str:
+    """`text`'s requested line range, clipped to `MAX_FILE_BYTES`, saying what it left out."""
+    lines = text.splitlines()
+    total = len(lines)
+    if not total:
+        return "(empty)"
+    first = int(start) if isinstance(start, int) and start > 0 else 1
+    last = int(end) if isinstance(end, int) and end >= first else total
+    chosen = lines[first - 1 : last]
+    if not chosen:
+        return f"{label} has {total} line(s); line {first} is past the end."
+
+    body = "\n".join(chosen)
+    if len(body.encode("utf-8")) > MAX_FILE_BYTES:
+        kept: list[str] = []
+        spent = 0
+        for line in chosen:
+            size = len(line.encode("utf-8")) + 1
+            if spent + size > MAX_FILE_BYTES:
+                break
+            kept.append(line)
+            spent += size
+        chosen = kept or chosen[:1]
+        body = "\n".join(chosen)
+    shown_to = first + len(chosen) - 1
+    if first == 1 and shown_to == total:
+        return body
+    note = f"\n\n… lines {first}-{shown_to} of {total}."
+    if shown_to < total:
+        note += f" Call read_skill_file again with start={shown_to + 1} for the rest."
+    return body + note
 
 
 def _hidden(path: Path) -> bool:

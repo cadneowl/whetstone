@@ -91,6 +91,54 @@ def test_an_unknown_page_lists_what_there_is(skill_dir: Path) -> None:
     assert "references/principles.md" in result.content
 
 
+def test_a_huge_page_comes_back_in_windows_rather_than_whole() -> None:
+    """The one uncapped read in the agent. `read_file` clips a source file, `grep` stops at a hit
+    count, `list_dir` at an entry count — and a skill's own page came back entire however large it
+    was. On the skills this feature exists for, that put the whole wall of text back one tool call
+    in, and could end the run by overflowing the context mid-review."""
+    from whetstone.agent.builtins import MAX_FILE_BYTES
+    from whetstone.domain.skill import GuidancePage, Skill
+
+    page = "\n".join(f"rule {n}: never do the thing" for n in range(4000))
+    skill = Skill(id="s", body="# S", pages=[GuidancePage(path="big.md", text=page)])
+
+    got = BuiltinTools(skill=skill).dispatch(ToolCall("1", "read_skill_file", {"path": "big.md"}))
+
+    assert len(got.content.encode("utf-8")) < MAX_FILE_BYTES + 200
+    assert "of 4000." in got.content, "say how much of the page this is"
+    assert "start=" in got.content, "and how to get the rest"
+
+
+def test_a_page_window_can_be_continued_from_where_it_stopped() -> None:
+    from whetstone.domain.skill import GuidancePage, Skill
+
+    page = "\n".join(f"line {n}" for n in range(100))
+    skill = Skill(id="s", body="# S", pages=[GuidancePage(path="p.md", text=page)])
+    tools = BuiltinTools(skill=skill)
+
+    got = tools.dispatch(ToolCall("1", "read_skill_file", {"path": "p.md", "start": 51}))
+
+    assert "line 50" in got.content and "line 49" not in got.content
+    assert "lines 51-100 of 100." in got.content
+
+
+def test_a_page_that_fits_is_returned_plain(skill_dir: Path) -> None:
+    """No gutter, no footer, no line numbers: the common case is rules, and decorating them changes
+    what the model reads as guidance."""
+    skill = load_skill(skill_dir)
+    got = BuiltinTools(skill=skill).dispatch(
+        ToolCall("1", "read_skill_file", {"path": "references/principles.md"})
+    )
+    assert "lines" not in got.content.rsplit("\n\n", 1)[-1]
+
+
+def test_the_page_listing_says_how_long_each_one_is(skill_dir: Path) -> None:
+    """"Which of these do I open" is a different question when one of them is 4,000 lines."""
+    skill = load_skill(skill_dir)
+    [spec] = [t for t in BuiltinTools(skill=skill).specs() if t.name == "read_skill_file"]
+    assert "lines)" in spec.description
+
+
 def test_source_tools_are_absent_until_a_root_is_declared(skill_dir: Path) -> None:
     skill = load_skill(skill_dir)
     assert "read_file" not in {t.name for t in BuiltinTools(skill=skill).specs()}

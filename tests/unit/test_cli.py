@@ -518,3 +518,24 @@ def test_an_interrupted_walk_keeps_and_reports_its_work(
 
     assert "1 candidate(s) written" in result.stdout
     assert (out / "acme-payments-812-t0" / "candidate.json").is_file()
+
+
+def test_the_baseline_probe_uses_the_same_reviewer_as_the_real_run(
+    tmp_path: Path, stub_gate: None
+) -> None:
+    """This path resolved no reviewer at all.
+
+    The probe scores the corpus with the guidance stripped, and `discrimination` compares that to
+    the guided run to decide which cases "no longer measure the guidance" — which is a retirement
+    recommendation. For a skill that scores as an agent, the probe was running the *built-in*
+    pasted-prompt reviewer, so the difference between the two runs included the reviewer changing
+    underneath. Cases were being proposed for deletion on a comparison that was never like for like.
+    """
+    skill = str(SKILLS_ROOT / "code-review-rust-error-handling")
+    result = runner.invoke(
+        app,
+        ["eval", "baseline", "--skill", skill, "--runs-dir", str(tmp_path / "runs"), "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "runs as an agent" in result.output
+    assert "13 review call(s)" in result.output
