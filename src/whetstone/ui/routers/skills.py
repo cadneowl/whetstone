@@ -34,6 +34,7 @@ from whetstone.service import (
     case_detail,
     skill_detail,
     skill_summaries,
+    step_runtimes,
 )
 from whetstone.sharpening import DEFAULT_WINDOW, SharpeningReport, sharpening_report
 from whetstone.steps import StepError
@@ -68,6 +69,16 @@ def get_skill(
 ) -> SkillDetail:
     skill = _load_one(root, skill_id)
     detail = skill_detail(skill, store)
+    # How each step runs — `agent:` decides whether a skill is run or pasted, which is the largest
+    # difference in what a model sees, and it was visible on no screen at all.
+    #
+    # `_skill_dir`, not `root / skill_id`: `_load_one` deliberately supports a skill whose folder
+    # name differs from its declared id, and addressing the steps by id would have reported "no step
+    # file" for every step of a renamed skill — a screen whose whole job is saying how a skill runs,
+    # quietly saying it does not run at all.
+    detail.steps = step_runtimes(
+        skill, _skill_dir(root, skill), large_prompt_chars=config.runs.large_prompt_chars
+    )
     # The same record `skill_detail` read the on-disk outcomes from, so a pending case and a merged
     # one can never report from different runs on one screen.
     latest = store.load(detail.runs[0].id) if detail.runs else None
@@ -516,6 +527,25 @@ def _load_all(root: Path) -> list[Skill]:
     if not root.is_dir():
         raise NotFound(f"skills root {root} does not exist")
     return load_skills(root)
+
+
+def _skill_dir(root: Path, skill: Skill) -> Path:
+    """The folder `skill` was loaded from, which is not always `root / skill.id`.
+
+    `SKILL.md` frontmatter may override `id`, and `_load_one` falls back to scanning rather than
+    404-ing on a renamed folder — so anything that goes back to disk for that skill has to find the
+    folder the same way, or it reads a path that does not exist and reports an empty answer.
+    """
+    direct = root / skill.id
+    if (direct / "SKILL.md").is_file():
+        return direct
+    for candidate in sorted(p for p in root.iterdir() if (p / "SKILL.md").is_file()):
+        try:
+            if load_skill(candidate).id == skill.id:
+                return candidate
+        except SkillLoadError:
+            continue
+    return direct
 
 
 def _load_one(root: Path, skill_id: str) -> Skill:

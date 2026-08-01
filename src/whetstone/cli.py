@@ -42,7 +42,12 @@ from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
 from whetstone.gates import GateStore
 from whetstone.gitio import GitError
-from whetstone.improve import digest_for, propose, render_step_prompt
+from whetstone.improve import (
+    digest_for,
+    propose,
+    render_step_prompt,
+    would_paste_the_folder,
+)
 from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
@@ -475,7 +480,10 @@ def eval_run(
         host_reviews=choice.agent is not None or not choice.custom,
         calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
-    annotate_reviewer(plan, choice, invocations=(scored or len(sk.eval_cases)) * trials, skill=sk)
+    annotate_reviewer(
+        plan, choice, invocations=(scored or len(sk.eval_cases)) * trials, skill=sk,
+        large_prompt_chars=load_config().runs.large_prompt_chars,
+    )
     check_budget(plan, load_config().runs.max_llm_calls_per_run)
     _preflight(plan, yes)
 
@@ -765,7 +773,10 @@ def eval_baseline(
         calls_per_review=choice.agent.max_calls if choice.agent else 1,
     )
     plan.action = "baseline"
-    annotate_reviewer(plan, choice, invocations=len(naked.eval_cases), skill=naked)
+    annotate_reviewer(
+        plan, choice, invocations=len(naked.eval_cases), skill=naked,
+        large_prompt_chars=load_config().runs.large_prompt_chars,
+    )
     if choice.custom and choice.agent is None:
         plan.warnings.append(
             "this skill's reviewer is a program that reads the source, not the guidance — so "
@@ -905,7 +916,8 @@ def eval_gate(
             plan.estimate = plan.estimate.model_copy(update={"calls": plan.estimate.calls * 2})
             plan.details.append("both base and candidate are scored, so this is doubled")
         annotate_reviewer(
-            plan, choice, invocations=scored * gate_trials * 2, gate=True, skill=candidate_skill
+            plan, choice, invocations=scored * gate_trials * 2, gate=True, skill=candidate_skill,
+            large_prompt_chars=load_config().runs.large_prompt_chars,
         )
         check_budget(plan, load_config().runs.max_llm_calls_per_run)
         _preflight(plan, yes)
@@ -1871,7 +1883,17 @@ def skills_improve(
         typer.echo(
             render_step_prompt(spec, digest) if spec.prompt else digest.model_dump_json(indent=2)
         )
+        # After the prompt, on stderr: `--dry-run` exists to show what would be sent, and the size
+        # of that is exactly what the reader is being shown. Refusing to print it would hide the
+        # evidence for the refusal.
+        refusal = would_paste_the_folder(spec, sk)
+        if refusal:
+            typer.echo(f"\n{refusal}\nWithout --dry-run this is refused.", err=True)
         return
+
+    refusal = would_paste_the_folder(spec, sk)
+    if refusal:
+        raise typer.BadParameter(refusal)
 
     if record is not None and not _worth_improving(record, instruction):
         return

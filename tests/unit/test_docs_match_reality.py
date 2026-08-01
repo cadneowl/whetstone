@@ -170,3 +170,214 @@ def test_a_source_root_that_is_not_a_directory_is_refused(tmp_path: Path) -> Non
     )
     choice = reviewer_from_step(load_step(tmp_path, "evaluate", skill_id="s"), tmp_path)
     assert any("not a directory" in p for p in choice.problems)
+
+
+# --- how a step runs, on the screen rather than in a file ---------------------------
+
+
+def _runtimes(skill_dir: Path) -> dict[str, object]:
+    from whetstone.service import step_runtimes
+
+    return {s.kind: s for s in step_runtimes(load_skill(skill_dir), skill_dir)}
+
+
+def test_the_skill_page_can_say_each_step_runs_as_an_agent() -> None:
+    """`agent:` decides whether a skill is run or pasted — the largest difference in what a model
+    sees — and it appeared on no screen. You had to know the setting existed to go looking."""
+    rows = _runtimes(ROOT / "examples" / "agent-skill" / "skills" / "panic-guard-agent")
+
+    assert rows["evaluate"].mode == "agent"
+    assert "+source" in rows["evaluate"].note
+    assert "read on demand" in rows["evaluate"].note
+    assert rows["improve"].mode == "agent"
+
+
+def test_a_step_with_no_file_is_shown_as_absent_not_as_broken() -> None:
+    rows = _runtimes(ROOT / "examples" / "agent-skill" / "skills" / "panic-guard-agent")
+    assert rows["triage"].present is False
+
+
+def test_a_triage_agent_row_says_it_is_blindfolded() -> None:
+    """Otherwise a row reading "an agent" everywhere implies it reads SKILL.md, which is the one
+    thing it must not do."""
+    rows = _runtimes(
+        ROOT / "examples" / "console-demo" / "workspace" / "skills" / "go-timeout-guard"
+    )
+    assert rows["triage"].mode == "agent"
+    assert "not shown the guidance" in rows["triage"].note
+
+
+def test_a_folder_shaped_skill_on_a_plain_improve_step_shows_as_refusing(tmp_path: Path) -> None:
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "a.md").write_text("- R1\n", encoding="utf-8")
+    (tmp_path / "improve").mkdir()
+    (tmp_path / "improve" / "step.yaml").write_text(
+        "description: x\nprompt: prompt.md\n", encoding="utf-8"
+    )
+    (tmp_path / "improve" / "prompt.md").write_text("{{guidance}}", encoding="utf-8")
+
+    row = _runtimes(tmp_path)["improve"]
+
+    assert row.mode == "prompt"
+    assert "whole folder" in row.note
+    assert "agent: enabled: true" in row.problem, "the row says the fix, before the button does"
+
+
+def test_a_single_file_skill_is_not_flagged() -> None:
+    """Pasting one file is right, so the row is informative rather than a complaint."""
+    row = _runtimes(REFERENCE)["evaluate"]
+    assert row.mode == "agent" and not row.problem
+
+
+def test_a_broken_step_file_describes_itself_instead_of_500ing(tmp_path: Path) -> None:
+    """`load_step` runs `yaml.safe_load` before it validates anything, so a stray tab raises
+    `YAMLError`, not `StepError`. Catching only the tidy exception turned one malformed step into a
+    500 on the whole skill page — the screen someone opens *because* a skill is behaving oddly."""
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "evaluate").mkdir()
+    (tmp_path / "evaluate" / "step.yaml").write_text("agent:\n\tenabled: true\n", encoding="utf-8")
+
+    row = _runtimes(tmp_path)["evaluate"]
+
+    assert row.present is True
+    assert row.problem, "the row carries the parse error"
+    assert row.mode == "none"
+
+
+def test_a_pasted_evaluate_step_says_what_the_cap_drops(tmp_path: Path) -> None:
+    """`evaluate` is not refused — that would stop scoring for every multi-file skill — but it
+    concatenates and drops whole pages past the cap, naming them only to the model. A run then
+    produces an ordinary-looking score measured against rules that were never sent."""
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "big.md").write_text("x" * 30_000, encoding="utf-8")
+    (tmp_path / "evaluate").mkdir()
+    (tmp_path / "evaluate" / "step.yaml").write_text("description: x\n", encoding="utf-8")
+
+    row = _runtimes(tmp_path)["evaluate"]
+
+    assert row.mode == "prompt"
+    assert "size cap drops references/big.md" in row.note
+
+
+def test_the_steps_of_a_renamed_skill_are_still_found(tmp_path: Path) -> None:
+    """`_load_one` deliberately supports a folder whose name is not the skill's id. Addressing the
+    steps by id reported "no step file" for every step of such a skill — a screen whose whole job is
+    saying how a skill runs, quietly saying it does not run at all."""
+    from whetstone.core.loader import load_skill as _load
+    from whetstone.ui.routers.skills import _skill_dir
+
+    folder = tmp_path / "old-folder-name"
+    (folder / "evaluate").mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\nid: renamed\n---\n\n# S\n", encoding="utf-8")
+    (folder / "evaluate" / "step.yaml").write_text(
+        "description: x\nagent:\n  enabled: true\n", encoding="utf-8"
+    )
+    skill = _load(folder)
+
+    assert _skill_dir(tmp_path, skill) == folder
+    assert _runtimes(_skill_dir(tmp_path, skill))["evaluate"].mode == "agent"
+
+
+def test_the_paste_note_is_per_step_not_one_sentence_for_all_three(tmp_path: Path) -> None:
+    """The guidance does not reach the three steps alike, so one sentence is wrong on two of them.
+
+    `improve` pastes under no cap at all — quoting the reviewer's would describe a limit it does
+    not have — and `triage` never sees the guidance, so a folder changes nothing about its prompt.
+    """
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n", encoding="utf-8")
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "big.md").write_text("x" * 30_000, encoding="utf-8")
+    for kind in ("evaluate", "improve", "triage"):
+        (tmp_path / kind).mkdir()
+        (tmp_path / kind / "step.yaml").write_text(
+            "description: x\nprompt: p.md\n" if kind != "evaluate" else "description: x\n",
+            encoding="utf-8",
+        )
+        if kind != "evaluate":
+            (tmp_path / kind / "p.md").write_text("x", encoding="utf-8")
+
+    rows = _runtimes(tmp_path)
+
+    assert "size cap drops" in rows["evaluate"].note, "only the reviewer has that cap"
+    assert "size cap drops" not in rows["improve"].note, "improve has no cap; it is refused"
+    assert rows["triage"].note == "one prompt, one answer", "triage never sees the guidance"
+
+
+# --- the large-prompt warning ------------------------------------------------------
+
+
+def _big_skill(tmp_path: Path, *, agent: bool) -> Path:
+    (tmp_path / "SKILL.md").write_text("---\nid: s\n---\n\n# S\n" + "x" * 50_000, encoding="utf-8")
+    for kind in ("evaluate", "improve"):
+        (tmp_path / kind).mkdir()
+        body = "description: x\n" + ("prompt: p.md\n" if kind == "improve" else "")
+        if agent:
+            body += "agent:\n  enabled: true\n"
+        (tmp_path / kind / "step.yaml").write_text(body, encoding="utf-8")
+    (tmp_path / "improve" / "p.md").write_text("{{guidance}}", encoding="utf-8")
+    return tmp_path
+
+
+def test_a_large_pasted_prompt_is_warned_about_not_truncated(tmp_path: Path) -> None:
+    """A cap that shrinks a prompt by discarding rules makes the model rewrite guidance it saw a
+    fraction of — a worse failure than a large prompt, and a much quieter one. So this warns."""
+    from whetstone.service import step_runtimes
+
+    skill_dir = _big_skill(tmp_path, agent=False)
+    rows = {
+        s.kind: s
+        for s in step_runtimes(load_skill(skill_dir), skill_dir, large_prompt_chars=40_000)
+    }
+
+    assert "large_prompt_chars" in rows["evaluate"].warning
+    assert "50,0" in rows["evaluate"].warning, "say the size, not just that it is over"
+    assert not rows["evaluate"].problem, "a warning is not a refusal"
+
+
+def test_an_agent_step_is_not_warned_about_prompt_size(tmp_path: Path) -> None:
+    """It does not paste the guidance, so its size is not a prompt-size problem."""
+    from whetstone.service import step_runtimes
+
+    skill_dir = _big_skill(tmp_path, agent=True)
+    rows = {
+        s.kind: s
+        for s in step_runtimes(load_skill(skill_dir), skill_dir, large_prompt_chars=40_000)
+    }
+
+    assert rows["evaluate"].mode == "agent"
+    assert not rows["evaluate"].warning
+
+
+def test_the_threshold_is_configurable_and_can_be_switched_off(tmp_path: Path) -> None:
+    from whetstone.config import RunsConfig
+    from whetstone.service import step_runtimes
+
+    skill_dir = _big_skill(tmp_path, agent=False)
+    skill = load_skill(skill_dir)
+
+    off = {s.kind: s for s in step_runtimes(skill, skill_dir, large_prompt_chars=0)}
+    high = {s.kind: s for s in step_runtimes(skill, skill_dir, large_prompt_chars=500_000)}
+    low = {s.kind: s for s in step_runtimes(skill, skill_dir, large_prompt_chars=100)}
+
+    assert not off["evaluate"].warning, "0 switches it off"
+    assert not high["evaluate"].warning
+    assert low["evaluate"].warning
+    assert RunsConfig().large_prompt_chars == 40_000, "the documented default"
+
+
+def test_the_cost_preflight_warns_on_the_same_threshold(tmp_path: Path) -> None:
+    """The skill page is where you look; the preflight is where you are about to spend."""
+    from whetstone.llm.factory import resolve_backend
+    from whetstone.preflight import annotate_reviewer, plan_eval
+    from whetstone.reviewer.factory import reviewer_from_step
+    from whetstone.steps import load_step
+
+    skill_dir = _big_skill(tmp_path, agent=False)
+    skill = load_skill(skill_dir)
+    choice = reviewer_from_step(load_step(skill_dir, "evaluate", skill_id=skill.id), skill_dir)
+    plan = plan_eval(skill, resolve_backend("anthropic"))
+    annotate_reviewer(plan, choice, invocations=1, skill=skill, large_prompt_chars=40_000)
+
+    assert any("large_prompt_chars" in w for w in plan.warnings)

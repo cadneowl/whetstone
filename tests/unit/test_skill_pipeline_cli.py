@@ -358,6 +358,30 @@ def test_a_staged_wiki_changes_the_hash_the_gate_must_cover(workspace: Path) -> 
 
 # --- a skill that is a folder ---------------------------------------------------
 
+def _as_agent(root: Path, answer: dict[str, object], monkeypatch) -> None:
+    """Make the skill's improve step agentic, with the model scripted to submit `answer`.
+
+    A multi-file skill has no other path: the single call is refused for one, because its only way
+    to show a folder is to paste it. So a test about what a *page rewrite* does downstream has to
+    reach that rewrite the way a real one now does.
+    """
+    from whetstone.improve import SUBMIT_GUIDANCE
+    from whetstone.llm.fake_client import FakeBothClient
+    from whetstone.llm.tools import Message, ToolCall, ToolSpec, Turn
+
+    step = _skill(root) / "improve" / "step.yaml"
+    step.write_text(
+        step.read_text(encoding="utf-8") + "\nagent:\n  enabled: true\n  max_steps: 3\n",
+        encoding="utf-8",
+    )
+
+    def turns(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        return Turn(calls=[ToolCall("1", SUBMIT_GUIDANCE, answer)])
+
+    monkeypatch.setattr(cli, "_client", lambda *a, **k: FakeBothClient(_handler, turns))
+
+
+
 
 def test_apply_stages_a_rewritten_companion_page(workspace: Path, monkeypatch) -> None:
     """`--apply` carried only the body, so a proposal that fixed a rule in `patterns/*.md` staged a
@@ -373,13 +397,11 @@ def test_apply_stages_a_rewritten_companion_page(workspace: Path, monkeypatch) -
 
     fixed = "- **R7** the rule, sharpened by the improve step.\n"
 
-    def rewrites_the_page(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        if schema is GuidanceProposal:
-            return GuidanceProposal(body=load_skill(_skill(workspace)).body,
-                                    pages={"patterns/panics.md": fixed})
-        return _handler(system, user, schema)
-
-    monkeypatch.setattr(cli, "_client", lambda *a, **k: FakeLLMClient(rewrites_the_page))
+    _as_agent(
+        workspace,
+        {"body": load_skill(_skill(workspace)).body, "pages": {"patterns/panics.md": fixed}},
+        monkeypatch,
+    )
     _run_eval(workspace)
     result = _improve(workspace, "--apply")
     assert result.exit_code == 0, result.output  # type: ignore[attr-defined]
@@ -394,13 +416,14 @@ def test_a_page_rewrite_is_named_when_it_is_not_applied(workspace: Path, monkeyp
     page.parent.mkdir(parents=True)
     page.write_text("- **R7** the rule as it stands.\n", encoding="utf-8")
 
-    def rewrites_the_page(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
-        if schema is GuidanceProposal:
-            return GuidanceProposal(body=load_skill(_skill(workspace)).body,
-                                    pages={"patterns/panics.md": "- **R7** sharpened.\n"})
-        return _handler(system, user, schema)
-
-    monkeypatch.setattr(cli, "_client", lambda *a, **k: FakeLLMClient(rewrites_the_page))
+    _as_agent(
+        workspace,
+        {
+            "body": load_skill(_skill(workspace)).body,
+            "pages": {"patterns/panics.md": "- **R7** sharpened.\n"},
+        },
+        monkeypatch,
+    )
     _run_eval(workspace)
     result = _improve(workspace)
 

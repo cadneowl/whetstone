@@ -241,6 +241,7 @@ def annotate_reviewer(
     gate: bool = False,
     judged: bool = True,
     skill: Skill | None = None,
+    large_prompt_chars: int = 0,
 ) -> None:
     """Say, in the cost plan, how this skill will be reviewed — what it gets, and how often.
 
@@ -258,7 +259,7 @@ def annotate_reviewer(
     at all in the terminal.
     """
     if not choice.custom:
-        _describe_builtin(plan, skill)
+        _describe_builtin(plan, skill, large_prompt_chars)
         return
     if choice.agent is not None:
         # An agent *does* spend Whetstone's backend — it is the one custom reviewer whose calls are
@@ -308,7 +309,7 @@ def annotate_reviewer(
         )
 
 
-def _describe_builtin(plan: Plan, skill: Skill | None) -> None:
+def _describe_builtin(plan: Plan, skill: Skill | None, large_prompt_chars: int = 0) -> None:
     """What the default reviewer does to a skill that is a folder — stated before it is paid for.
 
     The built-in reviewer concatenates `SKILL.md` and every companion page into one system prompt,
@@ -323,11 +324,24 @@ def _describe_builtin(plan: Plan, skill: Skill | None) -> None:
     could act on it: the run still produces a score, and a score measured against rules that were
     silently not sent is the kind of number that gets believed.
     """
-    if skill is None or not skill.pages:
+    if skill is None:
         return
     from whetstone.reviewer.llm_reviewer import MAX_PAGE_BYTES, render_pages
 
     text, dropped = render_pages(skill)
+    # Body plus pages: what this reviewer sends on *every* case before the diff, the wiki and any
+    # precedents are added. Checked even for a single-file skill, because one very large `SKILL.md`
+    # is the same problem — a skill that has outgrown being pasted — with none of the tells.
+    guidance = len(skill.body) + sum(len(page.text) for page in skill.pages)
+    if large_prompt_chars > 0 and guidance >= large_prompt_chars:
+        plan.warnings.append(
+            f"this skill's guidance is {guidance:,} characters and is pasted into every review "
+            f"prompt, over the [runs] large_prompt_chars of {large_prompt_chars:,}. Nothing is "
+            f"truncated to fit; `agent: enabled: true` sends SKILL.md and fetches the rest on "
+            f"demand."
+        )
+    if not skill.pages:
+        return
     sent = len(skill.pages) - len(dropped)
     plan.details.append(
         f"reviewer: built-in — {sent} of this skill's {len(skill.pages)} companion page(s) "

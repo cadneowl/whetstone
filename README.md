@@ -2060,6 +2060,7 @@ protected_branches = ["main", "master"]
 [runs]
 dir = ".whetstone/runs"
 max_llm_calls_per_run = 2000       # preflight warning; see the note below
+large_prompt_chars = 40000         # warn when a non-agent step pastes this much; 0 disables
 
 [gate]                             # defaults for `whetstone eval gate`; --recall-tol overrides
 recall_tol = 0.0
@@ -2072,6 +2073,15 @@ dir = ".whetstone/gates"           # stored gate records — what gate-before-pr
 > console (`preflight.check_budget`) — so the operator confirms with the number in front of them.
 > It is a warning rather than a refusal because the estimate is an upper bound; nothing stops a run
 > mid-flight if the actual calls run over. A hard backstop comes with run-level metering later.
+
+> **`large_prompt_chars` catches a skill outgrowing the way it is being run.** A step without
+> `agent:` pastes the guidance into every prompt it sends, so the skill page, the cost preflight and
+> the drafting-prompt preview all warn once that reaches this many characters. Nothing is truncated
+> to fit, ever: a cap that shrinks a prompt by discarding rules leaves the model rewriting guidance
+> it saw a fraction of, which is a worse failure than a large prompt and a much quieter one. Raise
+> it if the size is expected, set `agent: enabled: true` to stop pasting, or set it to 0 to switch
+> the warning off. A real skill that tripped this was sending 178,046 characters, 162,972 of them
+> companion pages concatenated into one call.
 
 **Pinning the default model (`[llm]`).** Empty by default, which means "resolve the way the CLI
 does" — the `WHETSTONE_LLM*` environment, then the built-in Anthropic model. Set it to pin a default

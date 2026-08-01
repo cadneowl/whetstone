@@ -61,3 +61,35 @@ class FakeToolClient:
         if force_tool:
             self.forced.append(force_tool)
         return self._handler(system, messages, tools)
+
+
+class FakeBothClient:
+    """A double that answers `structured` *and* `converse` — what an agent-scored run needs.
+
+    Composed, never inherited. `FakeLLMClient` and `FakeToolClient` both keep their callback on
+    `self._handler`, so a subclass of the pair silently ends up with whichever `__init__` ran last
+    and routes every `structured` call into the turn handler. That failure is invisible where the
+    scripted agent happens to return no findings, because then nothing is judged and `structured`
+    is never reached — so it survives a green test run and surfaces later as a wrong verdict.
+    """
+
+    def __init__(
+        self,
+        handler: Callable[[str, str, type[BaseModel]], BaseModel],
+        turns: Callable[[str, list[Message], list[ToolSpec]], Turn],
+    ) -> None:
+        self.llm = FakeLLMClient(handler)
+        self.tools = FakeToolClient(turns)
+
+    def structured(self, system: str, user: str, schema: type[T], *, effort: Effort = "high") -> T:
+        return self.llm.structured(system, user, schema, effort=effort)
+
+    def converse(
+        self,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        *,
+        force_tool: str | None = None,
+    ) -> Turn:
+        return self.tools.converse(system, messages, tools, force_tool=force_tool)

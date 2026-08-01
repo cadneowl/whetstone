@@ -16,6 +16,7 @@ import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 import { SharpeningPanel } from '@/components/SharpeningPanel'
 import { SourceBadge } from '@/components/signals'
+import { StepRuntimes } from '@/components/StepRuntimes'
 import { TasksPanel } from '@/components/TasksPanel'
 
 // The tab keys, in strip order. An unknown `?tab=` value coerces to the first — a blank content
@@ -67,6 +68,9 @@ export function SkillDetail() {
               triggers: {skill.triggers.paths.join(', ')}
             </p>
           )}
+          {/* Under the title, for every skill. Whether a step runs the folder or pastes it is the
+              largest difference in what the model sees, and it was readable only in a step file. */}
+          <StepRuntimes steps={data.steps} />
         </div>
         {/* Scoring belongs on the header, not inside a tab. It is the most repeated action in the
             whole loop — you re-run it after every guidance edit — and it used to live behind the

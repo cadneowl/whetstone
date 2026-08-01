@@ -12,6 +12,7 @@ import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, computed_field
 
@@ -946,8 +947,32 @@ class CaseHistoryEntry(BaseModel):
     flaky: bool
 
 
+class StepRuntime(BaseModel):
+    """How one of a skill's steps actually runs — the thing that was only in a YAML file.
+
+    `agent:` decides whether a skill is *run* or *pasted*, which is the largest single difference in
+    what a model sees, and it was visible nowhere: not on the skill page, not on a launch button,
+    not on the editor. An operator had to already know the setting existed to go looking for it, and
+    the symptom when it was off was a prompt quietly carrying a whole folder.
+
+    `mode` is the one-word answer and `note` is the sentence under it. The other two are separate
+    states, not degrees of one: `problem` means the step will refuse, `warning` means it will run
+    and you should probably look at it. Collapsing them would either make a warning stop the loop
+    or make a refusal look advisory.
+    """
+
+    kind: str
+    present: bool = True
+    mode: Literal["agent", "prompt", "program", "task", "none"] = "none"
+    note: str = ""
+    problem: str = ""
+    warning: str = ""
+
+
 class SkillDetail(BaseModel):
     skill: Skill
+    # How each step runs, in pipeline order. Empty only for a skill with no step files at all.
+    steps: list[StepRuntime] = []
     cases: list[CaseSummary] = []
     runs: list[RunSummary] = []
     rules: list[str] = []
@@ -1191,6 +1216,113 @@ def skill_detail(skill: Skill, store: RunStore, *, runs: int = 20) -> SkillDetai
         # Same record the case outcomes were read from, so the two can never disagree.
         scored_by=history[0] if history else None,
     )
+
+
+def step_runtimes(
+    skill: Skill, skill_dir: Path, *, large_prompt_chars: int = 0
+) -> list[StepRuntime]:
+    """How each of this skill's steps runs, for a screen rather than for a YAML reader.
+
+    Best-effort by design: a step file that will not parse becomes a `problem` on its row instead of
+    failing the whole page. The skill detail screen is where someone goes to find out *why* a skill
+    is behaving oddly, so it is the last place that should refuse to load because of it — which is
+    why the catch is broad rather than `StepError` alone. `load_step` runs `yaml.safe_load` before
+    it validates anything, so a step file with a stray tab in it raises `YAMLError`, and catching
+    only the tidy exception would have turned one malformed step into a 500 on the whole skill.
+    """
+    from whetstone.improve import would_paste_the_folder
+    from whetstone.steps import STEP_KINDS, load_step
+
+    out: list[StepRuntime] = []
+    for kind in STEP_KINDS:
+        try:
+            spec = load_step(skill_dir, kind, skill_id=skill.id)
+        except Exception as exc:  # noqa: BLE001 - a broken step describes itself; it must not 500
+            out.append(
+                StepRuntime(kind=kind, present=True, note="unreadable", problem=str(exc))
+            )
+            continue
+        if spec is None:
+            out.append(StepRuntime(kind=kind, present=False, note="no step file"))
+            continue
+        if spec.task.enabled:
+            out.append(StepRuntime(
+                kind=kind, mode="task",
+                note=f"scored on work produced, {spec.task.max_steps} steps",
+            ))
+        elif spec.agent.enabled:
+            extra = " +source" if spec.agent.source else ""
+            extra += f" +{len(spec.agent.tools)} tool(s)" if spec.agent.tools else ""
+            note = f"{spec.agent.max_steps} steps{extra}"
+            if kind == "triage":
+                # Otherwise this row implies the drafter reads SKILL.md, which is the one thing it
+                # must not do — and someone reading "agent" everywhere would never learn otherwise.
+                note += " — not shown the guidance"
+            elif skill.pages:
+                note += f", {len(skill.pages)} page(s) read on demand"
+            out.append(StepRuntime(kind=kind, mode="agent", note=note))
+        elif spec.is_subprocess:
+            out.append(StepRuntime(kind=kind, mode="program", note=" ".join(spec.run)))
+        else:
+            out.append(StepRuntime(
+                kind=kind, mode="prompt", note=_pasted_note(skill, kind),
+                problem=would_paste_the_folder(spec, skill) if kind == "improve" else "",
+                warning=_large_prompt(skill, kind, large_prompt_chars),
+            ))
+    return out
+
+
+def _large_prompt(skill: Skill, kind: str, limit: int) -> str:
+    """Whether this non-agent step's guidance alone is already a large prompt.
+
+    Guidance only — not the diff, the failure digest or the wiki, which vary per case and per run.
+    It is the floor rather than the total, and that is the point: a floor this size means every
+    prompt the step ever sends is at least this big, before any of the material the step is actually
+    about. An estimate that tried to include the variable parts would be wrong in both directions
+    and could not be checked by looking at the folder.
+
+    `triage` is exempt: it is never shown the guidance, so a skill being large changes nothing
+    there.
+    """
+    if limit <= 0 or kind == "triage":
+        return ""
+    chars = len(skill.body) + sum(len(page.text) for page in skill.pages)
+    if chars < limit:
+        return ""
+    return (
+        f"this step is not an agent, so its guidance is pasted into every prompt — {chars:,} "
+        f"characters before the change, the failures or the repo context are added, against a "
+        f"[runs] large_prompt_chars of {limit:,}. Running it as an agent sends `SKILL.md` and "
+        f"fetches the rest only when the guidance points at it."
+    )
+
+
+def _pasted_note(skill: Skill, kind: str) -> str:
+    """What "one prompt" means for this step — which is a different thing on each of the three.
+
+    Per kind, because the guidance does not reach them alike and one sentence for all of them would
+    be wrong on two:
+
+    - `evaluate` concatenates the folder *and* drops whole pages past `MAX_PAGE_BYTES`, naming them
+      only to the model. It is not refused the way `improve` is — that would stop scoring for every
+      multi-file skill — so a run can produce an ordinary-looking score measured against rules that
+      were never sent, and this is the only place that says so.
+    - `improve` pastes the same folder under no cap at all, which is why it is refused instead.
+      Quoting the reviewer's cap here would describe a limit this step does not have.
+    - `triage` is never shown the guidance in the first place (`drafting`), so a skill being a
+      folder changes nothing about its prompt.
+    """
+    if kind == "triage" or not skill.pages:
+        return "one prompt, one answer"
+    note = f"the whole folder ({len(skill.pages)} page(s)) is pasted into one prompt"
+    if kind != "evaluate":
+        return note
+    from whetstone.reviewer.llm_reviewer import render_pages
+
+    dropped = render_pages(skill)[1]
+    if not dropped:
+        return note
+    return f"{note} — and the size cap drops {', '.join(dropped)} from every one"
 
 
 def _case_summary(case: EvalCase, latest: RunRecord | None) -> CaseSummary:

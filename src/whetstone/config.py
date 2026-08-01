@@ -63,6 +63,17 @@ class RunsConfig(BaseModel):
     # count against this and warns before anything spends — in both the CLI and the console — but
     # nothing stops a run mid-flight if the actual calls run over. A hard backstop comes later.
     max_llm_calls_per_run: int = 2000
+    # Warn when a step that is *not* running as an agent would assemble a prompt this large, in
+    # characters. Same shape as the call budget above and for the same reason: a warning before the
+    # spend, never a truncation. Nothing is dropped to fit it — a cap that shrinks a prompt by
+    # discarding rules makes the model rewrite guidance it was shown a fraction of, which is a
+    # worse failure than a large prompt and a much quieter one.
+    #
+    # What it catches is a skill outgrowing the way it is being run. The default is generous: a
+    # normal drafting prompt is a few thousand characters, and a real skill that tripped this was
+    # sending 178,046 — 162,972 of them companion pages concatenated into one call because
+    # `agent:` was off. Set to 0 to switch the warning off.
+    large_prompt_chars: int = 40_000
     # Write every prompt and reply to disk, for answering "why did the model say that?".
     #
     # Off by default and deliberately so: a transcript contains the whole review prompt — your
