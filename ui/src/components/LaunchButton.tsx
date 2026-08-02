@@ -480,6 +480,37 @@ const TONE: Record<string, string> = {
   bad: 'text-bad',
 }
 
+/**
+ * base → candidate, in numbers.
+ *
+ * Without it a passing gate is one word beside a transcript of base-side misses, and the only
+ * available reading is that the verdict ignores them. The base side is the last commit: it failing
+ * the cases the candidate was written to fix is not a problem with the gate, it is the improvement
+ * the gate exists to measure.
+ */
+function GateDelta({ r }: { r: Record<string, unknown> }) {
+  const num = (key: string) => (typeof r[key] === 'number' ? (r[key] as number) : null)
+  const recallOld = num('recall_old')
+  const recallNew = num('recall_new')
+  const fpOld = num('fp_rate_old')
+  const fpNew = num('fp_rate_new')
+  // A record from before these were reported carries none of them; showing a partial delta would
+  // be worse than showing none.
+  if (recallOld === null || recallNew === null || fpOld === null || fpNew === null) return null
+
+  return (
+    <p
+      className="mt-0.5 text-muted"
+      title="base is your last commit; candidate is what is on disk. A gate passes when the candidate does not regress — so base failing cases the candidate catches is exactly what a useful gate looks like."
+    >
+      base → candidate: recall <span className="tabular">{recallOld.toFixed(3)}</span> →{' '}
+      <span className="tabular">{recallNew.toFixed(3)}</span> · fp{' '}
+      <span className="tabular">{fpOld.toFixed(3)}</span> →{' '}
+      <span className="tabular">{fpNew.toFixed(3)}</span>
+    </p>
+  )
+}
+
 function JobResult({ job }: { job: Job }) {
   const r = job.result as Record<string, unknown>
   if (job.kind === 'eval') {
@@ -504,9 +535,26 @@ function JobResult({ job }: { job: Job }) {
   }
   if (job.kind === 'gate') {
     const reasons = (r.reasons as string[]) ?? []
+    const fixed = (r.fixed_cases as string[]) ?? []
+    const regressed = (r.regressed_cases as string[]) ?? []
     return (
       <div className="mt-2 text-xs">
         <p className={r.passed ? 'text-good' : 'text-bad'}>Gate: {r.passed ? 'PASS' : 'FAIL'}</p>
+        {/* The comparison itself. A gate is a delta, and its base side is the last commit — so the
+            transcript above is *supposed* to be full of `base → e1 MISSED it (fn)` for every case
+            the candidate was written to fix. Printing only the word PASS beside that reads as the
+            gate contradicting the evidence under it. */}
+        <GateDelta r={r} />
+        {fixed.length > 0 && (
+          <p className="mt-0.5 text-good">
+            fixed {fixed.length} targeted case(s): <span className="font-mono">{fixed.join(', ')}</span>
+          </p>
+        )}
+        {regressed.length > 0 && (
+          <p className="mt-0.5 text-bad">
+            regressed: <span className="font-mono">{regressed.join(', ')}</span>
+          </p>
+        )}
         {reasons.map((reason) => (
           <p key={reason} className="mt-0.5 text-muted">
             {reason}
