@@ -22,7 +22,7 @@ from whetstone.core.loader import (
 from whetstone.curation import CurationError, contradictions, retier_yaml
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import CaseTier, EvalKind
-from whetstone.domain.run import RunRecord
+from whetstone.domain.run import RunRecord, skill_hash
 from whetstone.domain.skill import Skill
 from whetstone.naming import describe_unsafe, is_safe_segment
 from whetstone.sampling import partition_for, pinned_partitions
@@ -44,6 +44,7 @@ from whetstone.ui.deps import (
     ConfigDep,
     DriftDep,
     GatesDep,
+    ReviewsDep,
     SkillsRootDep,
     StoreDep,
     TaskGatesDep,
@@ -65,7 +66,11 @@ def list_skills(
 
 @router.get("/{skill_id}", response_model=SkillDetail)
 def get_skill(
-    skill_id: str, root: SkillsRootDep, store: StoreDep, config: ConfigDep
+    skill_id: str,
+    root: SkillsRootDep,
+    store: StoreDep,
+    config: ConfigDep,
+    reviews: ReviewsDep,
 ) -> SkillDetail:
     skill = _load_one(root, skill_id)
     detail = skill_detail(skill, store)
@@ -94,6 +99,14 @@ def get_skill(
     detail.contradictions = contradictions(
         skill, store.pass_history(skill.id, runs=_CONTRADICTION_WINDOW)
     )
+    # Counted, not listed. The tab strip needs the number on every tab, and listing this skill's
+    # reviews to get it would validate every record on disk — each carrying its whole diff — for
+    # three integers. The Reviews tab fetches the records themselves, once it is opened.
+    counted = reviews.counts({skill.id: skill_hash(skill)}).get(skill.id)
+    if counted is not None:
+        detail.reviews = counted.reviews
+        detail.unruled_findings = counted.unruled_findings
+        detail.stale_reviews = counted.stale_reviews
     return detail
 
 
@@ -140,6 +153,7 @@ def _promoted_but_unmerged(
                 id=case.id,
                 kind=case.kind,
                 path=case.change.files[0].path if case.change.files else "",
+                semantic=case.expect[0].semantic if case.expect else "",
                 provenance=case.provenance,
                 last_recall=run.confusion.recall if run else None,
                 last_fp_rate=run.confusion.fp_rate if run else None,

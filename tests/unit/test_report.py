@@ -116,10 +116,16 @@ def test_html_escapes_content() -> None:
 
 
 def test_practice_mode_is_called_out() -> None:
+    """Badged for what it means, not for a mechanism it does not guarantee.
+
+    This used to read "no model was called", which was only ever true of the in-process doubles.
+    A practice-mode console runs against a local backend — a real model, answering for real — and
+    the thing that matters about the record either way is that nothing will accept it as evidence.
+    """
     record = _record()
     record.practice_mode = True
     assert "practice mode" in render_run_html(record)
-    assert "no model was called" in render_run_html(record)
+    assert "not evidence" in render_run_html(record)
 
 
 def test_multi_trial_run_reports_variance_and_flakiness() -> None:

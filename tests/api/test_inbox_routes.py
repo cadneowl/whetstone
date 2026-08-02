@@ -5,13 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from helpers import make_record
+from helpers import AT, make_record, make_review
 
 from whetstone.candidates import store_candidates
 from whetstone.corpus.model import CandidateCase
 from whetstone.domain.change import CodeChange, FileChange
 from whetstone.domain.eval_model import Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
+from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 
 
@@ -65,6 +66,72 @@ def test_new_signal_surfaces_with_its_merge_request(client: TestClient, tmp_path
     assert row["new_signals"] == 1
     assert row["signals"][0]["ref"] == "acme/payments!812"
     assert row["signals"][0]["path"] == "src/handlers/charge.rs"
+
+
+def test_an_unruled_live_review_asks_for_a_verdict(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """The strongest evidence the project collects was invisible on the home screen."""
+    reviews.save(make_review())
+    row = _inbox(client)["inbox"]["attention"][0]
+
+    assert row["action"]["kind"] == "review"
+    assert row["action"]["label"] == "Rule 2 findings"
+    assert row["unruled_findings"] == 2
+    assert row["unruled_reviews"] == 1
+
+
+def test_a_ruled_review_stops_asking(client: TestClient, reviews: ReviewStore) -> None:
+    from whetstone.reviews import FindingVerdict
+
+    record = make_review()
+    for i in range(2):
+        record = record.with_verdict(FindingVerdict(finding_index=i, correct=True, at=AT))
+    reviews.save(record)
+
+    row = _inbox(client)["inbox"]["attention"][0]
+    assert row["unruled_findings"] == 0
+    assert row["action"]["kind"] != "review"
+
+
+def test_a_review_the_guidance_moved_past_is_not_offered_as_a_verdict_to_give(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """The defect this fixes: the inbox said "Rule 3 findings", the operator clicked through, and
+    the review's own banner told them not to rule on it and to re-run it instead. The count that
+    sorts the whole queue must not include work the next screen refuses."""
+    reviews.save(make_review(skill_hash="a-version-that-is-gone"))
+
+    row = _inbox(client)["inbox"]["attention"][0]
+
+    assert row["action"]["kind"] != "review"
+    assert row["unruled_findings"] == 0
+    # Not dropped either — someone paid for this review, and a guidance edit is what expired it.
+    assert row["stale_reviews"] == 1
+
+
+def test_a_staged_change_outranks_an_unruled_review_but_the_row_still_shows_it(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """The count is carried whatever wins the row: it is the one signal here that expires."""
+    from whetstone import staging
+    from whetstone.authoring import SkillEdit, prepare_guidance
+
+    reviews.save(make_review())
+    config = client.app.state.config  # type: ignore[attr-defined]
+    base, current = staging.working_skill(config, "rust-errors")
+    prepared = prepare_guidance(
+        base,
+        current,
+        SkillEdit(body="# Rust errors\n\n- **R9 — an edit on disk.**\n"),
+        skills_root=staging.relative_skills_root(config),
+        base_version=staging.base_version(config, "rust-errors"),
+    )
+    staging.write_in_place(config, prepared.files)
+
+    row = _inbox(client)["inbox"]["attention"][0]
+    assert row["action"]["kind"] == "gate"
+    assert row["unruled_findings"] == 2
 
 
 def test_signal_that_matches_no_skill_is_counted_rather_than_lost(

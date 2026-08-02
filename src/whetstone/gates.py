@@ -129,10 +129,11 @@ class GateRecord(BaseModel):
     def evidential(self) -> bool:
         """Whether this record can justify publishing the content it gated.
 
-        Practice mode is excluded. It swaps in the pattern reviewer and the deterministic judge so
-        the console is explorable with no credentials and no spend (C4) — which makes its verdict a
-        statement about a regex, not about the model that will actually review code. Letting it
-        satisfy C6 would turn the whole rule into something a demo mode can wave through.
+        Practice mode is excluded. It is the mode you turn on to explore the console without
+        spending — the harness refuses any backend that can bill, which in practice means a local
+        model or an offline stub standing in for one (C4). Either way the verdict is a statement
+        about that stand-in, not about the model that will review real code. Letting it satisfy C6
+        would turn the whole rule into something a demo mode can wave through.
         """
         return self.result.passed and not self.practice_mode
 
@@ -389,7 +390,7 @@ def verdict_over(records: Sequence[GateLike]) -> Verdict:
         return Verdict(
             can_propose=False,
             latest=_as_record(latest),
-            reason="every gate on this version ran in practice mode, which scores a regex "
+            reason="every gate on this version ran in practice mode, which measures the stand-in "
             "rather than the reviewer — re-run against a real backend",
         )
     # The newest *real* gate, not the newest overall: a practice run made afterwards must not

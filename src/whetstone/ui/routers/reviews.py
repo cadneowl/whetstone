@@ -53,6 +53,11 @@ class ReviewListItem(BaseModel):
     # True when the guidance has been edited since. The findings then describe a reviewer that no
     # longer exists, so ruling on them teaches the corpus about a version nobody runs.
     stale_skill: bool = False
+    # Whether the skill is still in the registry at all. A review outlives the skill it came from —
+    # renamed, moved, deleted — and the record stays, correctly, because a ruling on it is still a
+    # real label. What must not happen is the cross-skill queue rendering it as an ordinary group
+    # with links into `/skills/<id>`, which is a 404 dressed as the way forward.
+    skill_known: bool = True
 
 
 class ReviewDetail(BaseModel):
@@ -120,7 +125,12 @@ def list_reviews(
     records = reviews.list(skill_id=skill_id, limit=limit)
     current = _current_hashes(config)
     return [
-        ReviewListItem(summary=summarize(r), stale_skill=_is_stale(r, current)) for r in records
+        ReviewListItem(
+            summary=summarize(r),
+            stale_skill=_is_stale(r, current),
+            skill_known=r.skill_id in current,
+        )
+        for r in records
     ]
 
 

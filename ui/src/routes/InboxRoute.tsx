@@ -152,6 +152,30 @@ function Row({ row }: { row: Attention }) {
             stale
           </Badge>
         )}
+        {/* Carried even when something else wins the row. An unruled finding is the only evidence
+            here that expires — the guidance moves and it stops describing a reviewer that exists —
+            so it must not be invisible behind every staged change. */}
+        {row.unruled_findings > 0 && row.action.kind !== 'review' && (
+          <Link
+            to={`/skills/${encodeURIComponent(row.skill_id)}?tab=reviews`}
+            className="text-xs text-muted underline decoration-dotted hover:text-accent"
+            title="Findings on live reviews that nobody has ruled on — the strongest label the corpus can get, and it goes stale when the guidance changes"
+          >
+            {row.unruled_findings} unruled finding{row.unruled_findings === 1 ? '' : 's'}
+          </Link>
+        )}
+        {/* The ones that already went stale. Never an action — a ruling cannot finish them, only a
+            re-run can — but never silent either: this is a review someone paid for, and the reason
+            it stopped counting is a guidance edit the operator made themselves. */}
+        {row.stale_reviews > 0 && (
+          <Link
+            to={`/skills/${encodeURIComponent(row.skill_id)}?tab=reviews`}
+            className="text-xs text-warn underline decoration-dotted hover:text-accent"
+            title="These reviews ran against guidance that has since been edited, so their findings describe a reviewer that no longer exists. Re-run them to get a label worth having."
+          >
+            {row.stale_reviews} expired review{row.stale_reviews === 1 ? '' : 's'}
+          </Link>
+        )}
       </div>
 
       <p className="mt-1 text-sm text-muted">{row.action.why}</p>
@@ -261,6 +285,18 @@ function Action({ row }: { row: Attention }) {
       </Link>
     )
   }
+  if (kind === 'review') {
+    // The skill's own Reviews tab, not the cross-skill queue: the row already named the skill, and
+    // the tab is where ruling these leads on into scoring and sharpening them.
+    return (
+      <Link
+        to={`/skills/${encodeURIComponent(row.skill_id)}?tab=reviews`}
+        className="inline-block rounded-lg border border-accent/50 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/10"
+      >
+        {label} →
+      </Link>
+    )
+  }
   if (kind === 'score') {
     return <LaunchButton kind="eval" request={{ skill_id: row.skill_id }} label={label} />
   }
@@ -331,6 +367,7 @@ function ActionBadge({ kind }: { kind: ActionKind }) {
   const tone = {
     propose: 'good',
     gate: 'accent',
+    review: 'accent',
     triage: 'accent',
     score: 'neutral',
     improve: 'warn',

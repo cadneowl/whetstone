@@ -17,6 +17,7 @@ import { HealthPanel } from '@/components/HealthPanel'
 import { ImproveWorkspace } from '@/components/ImproveWorkspace'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
+import { SkillReviews } from '@/components/reviews'
 import { SharpeningPanel } from '@/components/SharpeningPanel'
 import { SourceBadge } from '@/components/signals'
 import { StepRuntimes } from '@/components/StepRuntimes'
@@ -27,6 +28,7 @@ import { TasksPanel } from '@/components/TasksPanel'
 const TAB_KEYS = [
   'guidance',
   'edit',
+  'reviews',
   'improve',
   'cases',
   'tasks',
@@ -53,8 +55,19 @@ export function SkillDetail() {
   if (!data) return <Empty>Not found.</Empty>
 
   const { skill, cases, runs } = data
-  const tab = activeTab(params.get('tab'))
   const isTask = tasks?.is_task ?? false
+  // Counted on the payload this page already fetches. Listing the reviews for a tab label would
+  // validate every record on disk, diffs and all, on every visit to every tab.
+  const unruled = data.unruled_findings
+  // Hidden for a task skill, which produces work rather than findings and which the review path
+  // refuses outright — unless one exists anyway (an upload), in which case hiding it would make a
+  // real record unreachable from the skill it belongs to.
+  const showReviews = !isTask || data.reviews > 0
+  // A tab nobody can see must not be reachable by URL either: `?tab=reviews` on a task skill would
+  // otherwise render the panel — including a "Review a change" button whose only outcome is a 422
+  // — under a strip with nothing selected.
+  const raw = activeTab(params.get('tab'))
+  const tab = raw === 'reviews' && !showReviews ? 'guidance' : raw
 
   return (
     <div>
@@ -102,6 +115,23 @@ export function SkillDetail() {
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">
           <Trigger value="guidance">Guidance</Trigger>
           <Trigger value="edit">Edit</Trigger>
+          {/* Between the guidance and the loop that changes it, because that is the order the work
+              happens in: here are the rules, here is what they did on real code, now sharpen them.
+              The count is the unruled findings — the work — not the number of reviews. */}
+          {showReviews && (
+            <Trigger value="reviews">
+              Reviews{' '}
+              {unruled > 0 ? (
+                <span className="text-accent">({unruled} to rule)</span>
+              ) : data.stale_reviews > 0 ? (
+                /* Nothing to rule, but not nothing to do: these ran against wording that is gone
+                   and want a re-run. Naming them "(n)" here would read as settled history. */
+                <span className="text-warn">({data.stale_reviews} expired)</span>
+              ) : (
+                <span className="text-muted">({data.reviews})</span>
+              )}
+            </Trigger>
+          )}
           <Trigger value="improve">Improve</Trigger>
           <Trigger value="cases">Eval cases ({cases.length})</Trigger>
           {/* Only for a skill that actually has a `task:` step. A tab offering to run task cases on
@@ -133,6 +163,17 @@ export function SkillDetail() {
           {/* Mounted only while selected, so the draft starts from what is on disk each time the
               tab is opened rather than from a stale copy taken at page load. */}
           <GuidanceEditor detail={data} />
+        </Tabs.Content>
+
+        <Tabs.Content value="reviews">
+          <TabIntro>
+            What this skill said about real changes nobody has labelled — its own output, not a
+            score. Rule each finding correct or false and the ruling becomes an eval case: a
+            confirmed one the skill must keep catching, a rejected one the gate refuses to let back
+            in. A place it stayed silent and should not have is a case too. This is the ground
+            truth the eval numbers are a proxy for; when the two disagree, believe this one.
+          </TabIntro>
+          <SkillReviews skillId={skill.id} />
         </Tabs.Content>
 
         <Tabs.Content value="improve">
@@ -412,6 +453,11 @@ function PendingCaseList({ cases }: { cases: PendingCase[] }) {
               {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
             </Badge>
             <SourceBadge provenance={c.provenance} />
+            {/* The expectation, for the same reason the improve list shows it: several cases
+                promoted from one review share a file, and without this they are one row repeated. */}
+            <span className="min-w-0 flex-1 truncate" title={c.id}>
+              {c.semantic || <span className="font-mono text-xs text-muted">{c.id}</span>}
+            </span>
             <span className="font-mono text-xs text-muted">{c.path}</span>
             <span className="ml-auto tabular text-muted">
               {c.kind === 'should_catch'

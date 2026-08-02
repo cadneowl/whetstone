@@ -1,21 +1,26 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { useReviews, useSkills, type ReviewListItem, type ReviewSummary } from '@/api/client'
-import { LaunchButton } from '@/components/LaunchButton'
-import { Badge, Empty, ErrorNote, Intro, Loading, when } from '@/components/primitives'
+import { Link } from 'react-router-dom'
+import { useReviews, type ReviewListItem } from '@/api/client'
+import { ReviewAChange, ReviewList } from '@/components/reviews'
+import { Empty, ErrorNote, Intro, Loading } from '@/components/primitives'
 
 /**
- * Live reviews awaiting a ruling.
+ * Every skill's live reviews, in one queue.
  *
- * The other direction from triage. Triage mines what humans said months ago and infers what the
- * reviewer should have said; this asks the reviewer directly, about a change nobody has labelled,
- * and a person rules on the answer.
+ * The per-skill view is the skill's own Reviews tab — a review belongs to exactly one skill, and
+ * that is where the loop it feeds continues. This is the cross-skill queue: which of them is
+ * waiting on a human, when you do not already know which skill you came to work on.
+ *
+ * Grouped by skill rather than interleaved by date, because the group is the unit of work. Ruling
+ * six findings for one skill and then improving it is one sitting; ruling six findings scattered
+ * across four skills is four.
  */
 export function ReviewsIndex() {
   const { data, isLoading, error } = useReviews()
 
   if (isLoading) return <Loading />
   if (error) return <ErrorNote error={error} />
+
+  const groups = groupBySkill(data ?? [])
 
   return (
     <div>
@@ -24,175 +29,106 @@ export function ReviewsIndex() {
         <Intro>
           The skill's own output on a live change, waiting for a verdict — the opposite direction
           from Triage, which infers what a reviewer <em>should</em> have said. Open one and mark
-          each finding Correct or False positive. Each ruling mints a triage candidate: a confirmed
-          finding becomes a case the skill must keep catching, a rejected one a case the gate
-          refuses to let back in.
+          each finding Correct or False positive. Each ruling mints a case the skill must keep
+          getting right, and the skill's own <em>Reviews</em> tab carries that straight into the
+          improve loop.
         </Intro>
       </header>
 
-      <ReviewAChange />
+      <div className="mb-5">
+        <ReviewAChange />
+      </div>
 
-      {!data?.length ? (
+      {groups.length === 0 ? (
         <Empty>No reviews yet — run one above.</Empty>
       ) : (
-        <ul className="space-y-1.5">
-          {data.map((item) => (
-            <li key={item.summary.id}>
-              <Row item={item} />
-            </li>
+        <div className="space-y-5">
+          {groups.map((group) => (
+            <section key={group.skillId}>
+              <h2 className="mb-2 flex flex-wrap items-baseline gap-x-3 text-sm">
+                {group.known ? (
+                  <Link
+                    to={`/skills/${encodeURIComponent(group.skillId)}?tab=reviews`}
+                    className="font-medium hover:text-accent"
+                  >
+                    {group.skillId}
+                  </Link>
+                ) : (
+                  <span className="font-medium text-muted">{group.skillId}</span>
+                )}
+                <span className="text-xs text-muted">
+                  {group.pending > 0
+                    ? `${group.pending} finding${group.pending === 1 ? '' : 's'} to rule`
+                    : 'all ruled'}
+                  {group.expired > 0 &&
+                    ` · ${group.expired} expired against newer guidance`}
+                </span>
+                {group.known ? (
+                  <Link
+                    to={`/skills/${encodeURIComponent(group.skillId)}?tab=reviews`}
+                    className="ml-auto text-xs text-muted underline decoration-dotted hover:text-accent"
+                  >
+                    the skill's own reviews →
+                  </Link>
+                ) : (
+                  /* The record outlives the skill, correctly — a ruling on it was still a real
+                     label. What it must not do is offer a route into a skill page that 404s. */
+                  <span
+                    className="ml-auto text-xs text-warn"
+                    title="No skill by this id is in the registry — it was renamed, moved or deleted after these reviews ran."
+                  >
+                    no longer in the registry
+                  </span>
+                )}
+              </h2>
+              <ReviewList items={group.items} showSkill={false} />
+            </section>
           ))}
-        </ul>
+        </div>
       )}
     </div>
   )
 }
 
+export type ReviewGroup = {
+  skillId: string
+  items: ReviewListItem[]
+  pending: number
+  expired: number
+  known: boolean
+}
+
 /**
- * Running a review, on the screen that lists them.
+ * Reviews grouped by the skill that produced them, the ones needing a ruling first.
  *
- * This was the one stage of the loop with no button: you could rule on findings but not produce
- * any, so a review had to come from the CLI or an upload — which meant the half of the corpus that
- * comes from the skill's own output was reachable only by people who already knew the commands.
+ * Extracted and exported because the ordering claim is the screen's whole argument — work waiting
+ * on a human outranks a settled record — and a component this repo has no renderer for cannot test
+ * it. Within a group the server's newest-first order is left alone.
  *
- * A pasted diff leads, because it works on the first day with nothing configured. The
- * merge-request field takes a URL pasted straight from the browser (or a bare number) and lets the
- * server fetch the diff; whether the forge is reachable is the server's to report, so the field is
- * always offered rather than hidden behind config the browser can only guess at.
+ * `pending` counts only reviews the guidance has *not* moved past. A stale review's findings
+ * describe a reviewer that no longer exists, so counting them here would sort a skill to the top of
+ * a queue for work that no ruling can finish. They are counted separately instead, and said
+ * separately.
+ *
+ * `known` is false when the skill has left the registry — renamed, moved, deleted. The record is
+ * still real evidence and stays listed, but a group header linking into `/skills/<id>` would be a
+ * 404 offered as the way forward, so the header stops being a link.
  */
-function ReviewAChange() {
-  const { data: skills } = useSkills()
-  const navigate = useNavigate()
-  const [open, setOpen] = useState(false)
-  const [skillId, setSkillId] = useState('')
-  const [diff, setDiff] = useState('')
-  const [mr, setMr] = useState('')
-
-  const chosen = skillId || skills?.[0]?.id || ''
-  const byMr = mr.trim().length > 0
-  const request = byMr ? { skill_id: chosen, mr: mr.trim() } : { skill_id: chosen, diff }
-  const ready = Boolean(chosen) && (diff.trim().length > 0 || byMr)
-
-  if (!skills?.length) return null
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="mb-4 rounded-lg border border-line px-3 py-1.5 text-sm transition-colors hover:border-accent/50 hover:text-accent"
-      >
-        Review a change
-      </button>
-    )
+export function groupBySkill(items: ReviewListItem[]): ReviewGroup[] {
+  const by = new Map<string, ReviewListItem[]>()
+  for (const item of items) {
+    const list = by.get(item.summary.skill_id)
+    if (list) list.push(item)
+    else by.set(item.summary.skill_id, [item])
   }
-
-  return (
-    <section className="mb-5 space-y-3 rounded-lg border border-line bg-surface/50 p-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-sm font-medium">Review a change</h2>
-        <span className="text-xs text-muted">
-          the skill reads it and reports; nothing is judged and nothing is scored
-        </span>
-        <button
-          type="button"
-          onClick={() => setOpen(false)}
-          className="ml-auto text-xs text-muted transition-colors hover:text-ink"
-        >
-          Close
-        </button>
-      </div>
-
-      <label className="block text-xs text-muted">
-        Skill
-        <select
-          value={chosen}
-          onChange={(e) => setSkillId(e.target.value)}
-          className="mt-1 block w-full rounded border border-line bg-canvas px-2 py-1.5 text-sm text-ink"
-        >
-          {skills.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.name || s.id}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="block text-xs text-muted">
-        Paste a unified diff
-        <textarea
-          value={diff}
-          onChange={(e) => setDiff(e.target.value)}
-          rows={6}
-          spellCheck={false}
-          placeholder={'diff --git a/src/x.rs b/src/x.rs\n--- a/src/x.rs\n+++ b/src/x.rs\n@@ …'}
-          className="mt-1 block w-full rounded border border-line bg-canvas px-2 py-1.5 font-mono text-xs text-ink"
-        />
-      </label>
-
-      <label className="block text-xs text-muted">
-        …or a GitLab merge-request URL or number
-        <input
-          value={mr}
-          onChange={(e) => setMr(e.target.value)}
-          placeholder="https://gitlab.example/acme/payments/-/merge_requests/1423"
-          className="mt-1 block w-full rounded border border-line bg-canvas px-2 py-1.5 font-mono text-xs text-ink"
-        />
-        <span className="mt-1 block">
-          Whetstone fetches the diff. A full URL needs only{' '}
-          <code className="font-mono">[watch] gitlab_url</code> and a token; a bare number also
-          needs <code className="font-mono">projects</code> set.
-        </span>
-      </label>
-
-      {ready ? (
-        <LaunchButton
-          kind="review"
-          request={request}
-          label="Review it"
-          onDone={(job) => {
-            const id = (job.result as { review_id?: string }).review_id
-            if (id) navigate(`/reviews/${encodeURIComponent(id)}`)
-          }}
-        />
-      ) : (
-        <p className="text-xs text-muted">
-          Paste a diff, or give a merge request URL or number, to continue.
-        </p>
-      )}
-    </section>
-  )
-}
-
-function Row({ item }: { item: ReviewListItem }) {
-  const { summary } = item
-  return (
-    <Link
-      to={`/reviews/${encodeURIComponent(summary.id)}`}
-      className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-lg border border-line bg-surface px-3 py-2 text-sm transition-colors hover:border-accent/50"
-    >
-      <span className="min-w-0 truncate font-mono text-xs">{summary.ref || summary.id}</span>
-      {summary.title && <span className="min-w-0 flex-1 truncate text-muted">{summary.title}</span>}
-      <Progress summary={summary} />
-      {item.stale_skill && (
-        <Badge
-          tone="warn"
-          title="The guidance has been edited since this ran, so these findings describe a reviewer that no longer exists"
-        >
-          stale
-        </Badge>
-      )}
-      <span className="ml-auto text-xs text-muted">{when(summary.created_at)}</span>
-      <span className="font-mono text-xs text-muted">{summary.skill_id}</span>
-    </Link>
-  )
-}
-
-function Progress({ summary }: { summary: ReviewSummary }) {
-  if (summary.findings === 0) return <Badge tone="neutral">no findings</Badge>
-  if (summary.pending === 0) return <Badge tone="good">all {summary.findings} ruled</Badge>
-  return (
-    <Badge tone="accent">
-      {summary.pending} of {summary.findings} to rule
-    </Badge>
-  )
+  return [...by.entries()]
+    .map(([skillId, group]) => ({
+      skillId,
+      items: group,
+      pending: group.reduce((sum, i) => sum + (i.stale_skill ? 0 : i.summary.pending), 0),
+      expired: group.filter((i) => i.stale_skill).length,
+      // Absent on every item or none: the flag is a property of the skill, not the review.
+      known: group.every((i) => i.skill_known),
+    }))
+    .sort((a, b) => b.pending - a.pending || a.skillId.localeCompare(b.skillId))
 }

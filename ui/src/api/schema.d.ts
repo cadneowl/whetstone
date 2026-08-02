@@ -1533,6 +1533,11 @@ export interface components {
              */
             staged: boolean;
             /**
+             * Stale Reviews
+             * @default 0
+             */
+            stale_reviews: number;
+            /**
              * Stale Run
              * @default false
              */
@@ -1547,6 +1552,16 @@ export interface components {
              * @default 0
              */
             total_cases: number;
+            /**
+             * Unruled Findings
+             * @default 0
+             */
+            unruled_findings: number;
+            /**
+             * Unruled Reviews
+             * @default 0
+             */
+            unruled_reviews: number;
         };
         /** BackendInfo */
         BackendInfo: {
@@ -1928,6 +1943,11 @@ export interface components {
              *     }
              */
             provenance: components["schemas"]["Provenance"];
+            /**
+             * Semantic
+             * @default
+             */
+            semantic: string;
             /**
              * Tier
              * @default active
@@ -3530,7 +3550,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "propose" | "gate" | "triage" | "score" | "improve" | "drift" | "curate" | "cadence" | "task" | "nothing";
+            kind: "propose" | "gate" | "review" | "triage" | "score" | "improve" | "drift" | "curate" | "cadence" | "task" | "nothing";
             /** Label */
             label: string;
             /** Rank */
@@ -3575,6 +3595,11 @@ export interface components {
              *     }
              */
             provenance: components["schemas"]["Provenance"];
+            /**
+             * Semantic
+             * @default
+             */
+            semantic: string;
         };
         /**
          * Plan
@@ -4030,6 +4055,11 @@ export interface components {
          * @description One review as it appears in a list — enough to choose which to work on.
          */
         ReviewListItem: {
+            /**
+             * Skill Known
+             * @default true
+             */
+            skill_known: boolean;
             /**
              * Stale Skill
              * @default false
@@ -4912,6 +4942,11 @@ export interface components {
                 [key: string]: number;
             };
             /**
+             * Reviews
+             * @default 0
+             */
+            reviews: number;
+            /**
              * Rules
              * @default []
              */
@@ -4924,10 +4959,20 @@ export interface components {
             scored_by?: components["schemas"]["RunSummary"] | null;
             skill: components["schemas"]["Skill"];
             /**
+             * Stale Reviews
+             * @default 0
+             */
+            stale_reviews: number;
+            /**
              * Steps
              * @default []
              */
             steps: components["schemas"]["StepRuntime"][];
+            /**
+             * Unruled Findings
+             * @default 0
+             */
+            unruled_findings: number;
             /**
              * Untested Rules
              * @default []

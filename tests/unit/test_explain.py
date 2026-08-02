@@ -251,6 +251,42 @@ def test_a_case_that_could_not_be_scored_is_not_reported_as_a_miss() -> None:
     assert any("could not be scored, so the figures above are over" in c for c in summary.caveats)
 
 
+def test_a_run_where_nothing_could_be_scored_does_not_lead_with_a_metric() -> None:
+    """An empty confusion reads as recall 1.0, and the headline is the line that travels alone.
+
+    A reviewer pointed at a backend it cannot authenticate to fails every case; announcing that as
+    "caught 0 of 2 — recall 1.000" reads as a broken summary rather than a broken run.
+    """
+    record = _run()
+    for case in record.score.cases:
+        case.error = "TypeError: could not resolve authentication method"
+        case.trials = []
+
+    summary = explain_run(record)
+
+    assert summary.headline.startswith("nothing was measured")
+    assert "all 3 case(s) failed to run" in summary.headline
+    assert "recall 1.000" not in summary.headline
+    assert summary.verdict == "failed"
+
+
+def test_a_run_over_no_cases_at_all_says_so_plainly() -> None:
+    record = _run()
+    record.cases = []
+    record.score.cases = []
+    assert explain_run(record).headline == "scored no cases"
+
+
+def test_one_unscorable_case_still_reports_the_rest() -> None:
+    """The headline only stands down when *nothing* was measured — one bad case is a caveat."""
+    record = _run()
+    record.score.cases[0].error = "TimeoutError: 30s"
+    record.score.cases[0].trials = []
+
+    headline = explain_run(record).headline
+    assert "recall" in headline and "caught" in headline
+
+
 def test_running_out_of_steps_is_a_caveat_and_not_silently_a_miss() -> None:
     """The failure that started all of this: an exhausted agent scores identically to a careful
     one that found nothing, and the fixes are opposite."""

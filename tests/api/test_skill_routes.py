@@ -4,8 +4,9 @@ from datetime import timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from helpers import AT, make_record
+from helpers import AT, make_record, make_review
 
+from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
 
 
@@ -99,6 +100,49 @@ def test_detail_exposes_guidance_rules_and_provenance(client: TestClient) -> Non
     assert "no unchecked panics" in body["skill"]["body"]
     assert body["rules"] == ["R1", "R2"]
     assert body["skill"]["provenance"]["R1"][0]["ref"] == "acme/payments!812#note_44"
+
+
+def test_detail_counts_live_reviews_without_being_asked_for_them(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """The tab strip needs the number on every tab, so it rides on the payload the page already
+    fetches — listing the reviews to get it would validate every record on disk, diffs and all."""
+    assert client.get("/api/skills/rust-errors").json()["reviews"] == 0
+
+    reviews.save(make_review())
+    body = client.get("/api/skills/rust-errors").json()
+    assert body["reviews"] == 1
+    assert body["unruled_findings"] == 2
+
+
+def test_detail_stops_counting_a_review_once_it_is_ruled(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    from whetstone.reviews import FindingVerdict
+
+    record = make_review()
+    for i in range(2):
+        record = record.with_verdict(FindingVerdict(finding_index=i, correct=True, at=AT))
+    reviews.save(record)
+
+    body = client.get("/api/skills/rust-errors").json()
+    assert body["reviews"] == 1  # still history
+    assert body["unruled_findings"] == 0  # but nothing waiting
+
+
+def test_detail_counts_an_expired_review_apart_from_work_waiting(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """A review the guidance moved past is not a ruling away from being useful — it is a re-run
+    away. The tab label reads from these two numbers, so folding it into `unruled_findings` would
+    send an operator at a screen whose own banner tells them to re-run it instead."""
+    reviews.save(make_review(skill_hash="a-version-that-is-gone"))
+
+    body = client.get("/api/skills/rust-errors").json()
+
+    assert body["reviews"] == 1
+    assert body["unruled_findings"] == 0
+    assert body["stale_reviews"] == 1
 
 
 def test_untested_rules_need_a_run_to_be_knowable(client: TestClient, store: RunStore) -> None:

@@ -395,6 +395,23 @@ def test_a_review_of_an_unknown_skill_is_not_called_stale(
     assert client.get("/api/reviews").json()[0]["stale_skill"] is False
 
 
+def test_a_review_says_whether_its_skill_is_still_in_the_registry(
+    client: TestClient, reviews: ReviewStore
+) -> None:
+    """The record outlives the skill — renamed, moved, deleted — and stays listed, because a ruling
+    on it was still a real label. What the cross-skill queue must not do is head that group with a
+    link into `/skills/<id>`, which is a 404 offered as the way forward."""
+    _seed(reviews, _record())
+    assert client.get("/api/reviews").json()[0]["skill_known"] is True
+
+    orphan = _record(review_id="20260701T130000Z-gone-bbbbbb")
+    _seed(reviews, orphan.model_copy(update={"skill_id": "gone"}))
+    by_skill = {
+        r["summary"]["skill_id"]: r["skill_known"] for r in client.get("/api/reviews").json()
+    }
+    assert by_skill == {"rust-errors": True, "gone": False}
+
+
 # --- ruling ---------------------------------------------------------------------
 
 

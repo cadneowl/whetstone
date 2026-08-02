@@ -262,8 +262,19 @@ export function useSetModel() {
   })
 }
 
-export function useSkills() {
-  return useQuery({ queryKey: keys.skills, queryFn: () => get<SkillSummary[]>('/api/skills') })
+/**
+ * Every skill, for the screens that let you pick one.
+ *
+ * `enabled` exists for the forms that already know their subject: the review form on a skill's own
+ * tab renders no picker, and fetching the registry to populate one it will not draw costs a load of
+ * every skill and a read of the run store, on a page that asked for one skill.
+ */
+export function useSkills(enabled = true) {
+  return useQuery({
+    queryKey: keys.skills,
+    queryFn: () => get<SkillSummary[]>('/api/skills'),
+    enabled,
+  })
 }
 
 export function useSkill(id: string) {
@@ -673,7 +684,7 @@ export function useRuleOnFinding(reviewId: string) {
         `/api/reviews/${encodeURIComponent(reviewId)}/findings/${index}/verdict`,
         { correct, note: note ?? '' },
       ),
-    onSuccess: () => invalidateReview(client, reviewId),
+    onSuccess: (res) => invalidateReview(client, reviewId, res.record.skill_id),
   })
 }
 
@@ -685,7 +696,7 @@ export function useUndoFindingVerdict(reviewId: string) {
         'DELETE',
         `/api/reviews/${encodeURIComponent(reviewId)}/findings/${index}/verdict`,
       ),
-    onSuccess: () => invalidateReview(client, reviewId),
+    onSuccess: (record) => invalidateReview(client, reviewId, record.skill_id),
   })
 }
 
@@ -735,8 +746,13 @@ export function usePromoteFinding(reviewId: string) {
           severity_min: over.severity_min ?? null,
         },
       ),
-    onSuccess: () => {
-      invalidateReview(client, reviewId)
+    onSuccess: (promoted) => {
+      // The skill id comes off the promoted case, so the skill's *detail* is invalidated too, not
+      // just the index. Promoting adds to `pending_cases`, which is what the improve workspace
+      // selects from — and the case just minted links straight there. Without it the workspace can
+      // open on a cached detail that has never heard of the case, drop the id as unknown, and
+      // silently fall back to selecting everything.
+      invalidateReview(client, reviewId, promoted.prepared.skill_id)
       void client.invalidateQueries({ queryKey: keys.skills })
     },
   })
@@ -757,19 +773,33 @@ export function usePromoteMissed(reviewId: string) {
         severity_min: args.severity_min ?? null,
         case_id: args.case_id ?? '',
       }),
-    onSuccess: () => {
-      invalidateReview(client, reviewId)
+    onSuccess: (promoted) => {
+      // The skill id comes off the promoted case, so the skill's *detail* is invalidated too, not
+      // just the index. Promoting adds to `pending_cases`, which is what the improve workspace
+      // selects from — and the case just minted links straight there. Without it the workspace can
+      // open on a cached detail that has never heard of the case, drop the id as unknown, and
+      // silently fall back to selecting everything.
+      invalidateReview(client, reviewId, promoted.prepared.skill_id)
       void client.invalidateQueries({ queryKey: keys.skills })
     },
   })
 }
 
-function invalidateReview(client: ReturnType<typeof useQueryClient>, reviewId: string) {
+function invalidateReview(
+  client: ReturnType<typeof useQueryClient>,
+  reviewId: string,
+  skillId = '',
+) {
   void client.invalidateQueries({ queryKey: keys.review(reviewId) })
   void client.invalidateQueries({ queryKey: ['reviews'] })
   // A ruling adds to — or removes from — the triage queue.
   void client.invalidateQueries({ queryKey: keys.candidates })
   void client.invalidateQueries({ queryKey: keys.batch })
+  // And it settles a finding, which is the number on the skill's Reviews tab and the reason the
+  // home screen is telling you to go and rule something. Both would otherwise keep asking for a
+  // verdict that has just been given.
+  void client.invalidateQueries({ queryKey: keys.inbox })
+  if (skillId) void client.invalidateQueries({ queryKey: keys.skill(skillId) })
 }
 
 function invalidateSkill(client: ReturnType<typeof useQueryClient>, skillId: string) {
@@ -831,6 +861,13 @@ function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
     // saturation proposals — but never the run list, which deliberately excludes baseline records.
     void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })
     void client.invalidateQueries({ queryKey: ['case', job.skill_id] })
+  }
+  // A review adds a record, and with it findings waiting for a verdict. That is the reviews list on
+  // two screens and the count on the skill's tab strip — which reads off the skill payload, so a
+  // review run from that very tab would otherwise leave the tab still naming the old number.
+  if (job.kind === 'review') {
+    void client.invalidateQueries({ queryKey: ['reviews'] })
+    void client.invalidateQueries({ queryKey: keys.skill(job.skill_id) })
   }
   // A drift probe fills the health payload's drift section; the inbox is already invalidated above.
   if (job.kind === 'drift') void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })

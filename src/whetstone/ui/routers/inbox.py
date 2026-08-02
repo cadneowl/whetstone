@@ -21,6 +21,7 @@ from whetstone.domain.skill import Skill
 from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
 from whetstone.inbox import Attention, Inbox, Retirement, Signal, decide
+from whetstone.reviews import ReviewCounts
 from whetstone.runs import CorruptRecord, RunStore
 from whetstone.taskruns import TaskRunStore
 from whetstone.ui.deps import (
@@ -28,6 +29,7 @@ from whetstone.ui.deps import (
     ConfigDep,
     DriftDep,
     GatesDep,
+    ReviewsDep,
     SkillsRootDep,
     StoreDep,
     TaskRunsDep,
@@ -63,14 +65,27 @@ def get_inbox(
     cadence: CadenceDep,
     watcher: WatcherDep,
     task_runs: TaskRunsDep,
+    reviews: ReviewsDep,
 ) -> InboxView:
     from whetstone.ui.routers.skills import _load_all
 
     skills = _load_all(root)
     pending = _pending_by_skill(config)
+    # One pass over the review directory for the whole page, like the candidate queue above it.
+    # Hashed against the guidance on disk so a review the guidance has moved past is counted as
+    # needing a re-run rather than as findings to rule on — see `ReviewCounts`.
+    review_counts = reviews.counts({s.id: skill_hash(s) for s in skills})
     rows = [
         _attention(
-            config, store, gates, drift, cadence, skill, pending.get(skill.id, []), task_runs
+            config,
+            store,
+            gates,
+            drift,
+            cadence,
+            skill,
+            pending.get(skill.id, []),
+            task_runs,
+            review_counts.get(skill.id, ReviewCounts()),
         )
         for skill in skills
     ]
@@ -117,6 +132,7 @@ def _attention(
     skill: Skill,
     pending: list[CandidateEntry],
     task_runs: TaskRunStore,
+    reviews: ReviewCounts,
 ) -> Attention:
     record = _latest(store, skill.id)
     is_task, task_cases = _task_state(config, skill)
@@ -160,6 +176,8 @@ def _attention(
     ]
     action = decide(
         new_signals=len(pending),
+        unruled_findings=reviews.unruled_findings,
+        unruled_reviews=reviews.unruled_reviews,
         staged=staged,
         can_propose=can_propose,
         blocked_reason=blocked,
@@ -185,6 +203,9 @@ def _attention(
         name=skill.name or skill.id,
         new_signals=len(pending),
         signals=[_signal(e) for e in pending[:SIGNALS_SHOWN]],
+        unruled_findings=reviews.unruled_findings,
+        unruled_reviews=reviews.unruled_reviews,
+        stale_reviews=reviews.stale_reviews,
         failing_cases=failing,
         total_cases=len(skill.eval_cases),
         recall=None if record is None else record.score.recall,
