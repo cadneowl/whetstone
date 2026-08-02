@@ -316,3 +316,36 @@ def test_a_graduated_case_is_not_labelled_promoted(client: TestClient) -> None:
 
 def test_a_case_in_neither_place_is_still_404(client: TestClient) -> None:
     assert client.get("/api/skills/rust-errors/cases/nope").status_code == 404
+
+
+def test_the_skill_page_names_cases_that_cannot_both_pass(
+    client: TestClient, store: RunStore
+) -> None:
+    """A pair that never passes together makes every gate on them unwinnable, and every improve
+    round trades one for the other — which reads as the drafter being incompetent rather than the
+    corpus being self-contradictory. The fixture's two cases are a catch and a no-flag on the same
+    concern, so alternating runs are exactly that shape.
+    """
+    for i, (catch, noflag) in enumerate([(True, False), (False, True), (True, False)]):
+        store.save(
+            make_record(
+                f"run-{i}",
+                recall_tp=catch,
+                created_at=AT + timedelta(hours=i),
+                noflag_clean=noflag,
+            )
+        )
+
+    body = client.get("/api/skills/rust-errors").json()
+
+    [pair] = body["contradictions"]
+    assert {pair["left"], pair["right"]} == {"unwrap-in-handler", "unwrap-in-test"}
+    assert pair["from_history"] is True
+    assert pair["runs"] == 3
+
+
+def test_a_healthy_corpus_reports_no_contradictions(client: TestClient, store: RunStore) -> None:
+    for i in range(3):
+        store.save(make_record(f"run-{i}", recall_tp=True, created_at=AT + timedelta(hours=i)))
+
+    assert client.get("/api/skills/rust-errors").json()["contradictions"] == []

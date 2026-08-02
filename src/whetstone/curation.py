@@ -22,6 +22,7 @@ deliberate: de-weighting a case can move the score, so the score gets re-proven.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
 
 import yaml
@@ -321,3 +322,139 @@ def tier_counts(cases: list[EvalCase]) -> dict[str, int]:
     for case in cases:
         counts[case.tier] += 1
     return counts
+
+
+# --- contradictions -----------------------------------------------------------------
+
+
+# A pair must have been scored together this many times before history is allowed to claim
+# anything. Two runs that happen to disagree are variance — especially at k=1 with an agent
+# reviewer, which is a different draw of the same distribution every time.
+CONTRADICTION_RUNS = 3
+
+
+class Contradiction(BaseModel):
+    """Two active cases the evidence says cannot both be satisfied, and why we think so.
+
+    Evidence, never a verdict — the same rule `similar_cases` follows at the promotion door.
+    Genuinely contradictory cases happen: two reviewers disagreed, or a rule was right in one
+    subsystem and wrong in another, and which one the corpus should keep is a judgement about the
+    codebase that no amount of token overlap settles. What this removes is the *silence* — a pair
+    that can never both pass makes every gate on them unwinnable, and until now nothing said so.
+    """
+
+    left: str
+    right: str
+    # The sentence a person decides on. Names the evidence, not a confidence.
+    why: str
+    left_semantic: str = ""
+    right_semantic: str = ""
+    # Runs that scored both cases. 0 when the pair is flagged on wording alone.
+    runs: int = 0
+    from_history: bool = False
+    from_semantics: bool = False
+
+
+def contradictions(
+    skill: Skill,
+    passes: Mapping[str, Mapping[str, bool]],
+    *,
+    min_runs: int = CONTRADICTION_RUNS,
+    limit: int = 10,
+) -> list[Contradiction]:
+    """Pairs of active cases that look mutually unsatisfiable.
+
+    `passes` is case id -> run id -> whether that case passed in that run, which is exactly what
+    the case index already stores. Taking it as a mapping keeps this module free of the run store
+    and makes the rule testable without a database.
+
+    Two signals, history first because it is the only one that is not a guess:
+
+    * **Never together.** Both cases have passed at some point, both were scored in at least
+      `min_runs` of the same runs, and in none of those runs did they pass together. That is a
+      measured trade-off — every version of the guidance so far has bought one by losing the other.
+    * **Opposed wording.** One `should_catch` and one `should_not_flag`, on the same file, whose
+      expectations describe the same thing. This is word overlap and it guesses, so it is reported
+      as the weaker evidence it is — but it is the only signal available on a corpus too young to
+      have history, which is precisely when a contradiction is cheapest to resolve.
+    """
+    active = [c for c in skill.eval_cases if c.tier == "active"]
+    found: list[tuple[int, Contradiction]] = []
+    for i, left in enumerate(active):
+        for right in active[i + 1 :]:
+            pair = _contradiction(left, right, passes, min_runs)
+            if pair is not None:
+                # History-backed first, then by how much was measured, then by id for stability.
+                found.append(((1 if pair.from_history else 0) * 1000 + pair.runs, pair))
+    found.sort(key=lambda entry: (-entry[0], entry[1].left, entry[1].right))
+    return [pair for _, pair in found[:limit]]
+
+
+def _contradiction(
+    left: EvalCase, right: EvalCase, passes: Mapping[str, Mapping[str, bool]], min_runs: int
+) -> Contradiction | None:
+    runs, never = _never_together(passes.get(left.id, {}), passes.get(right.id, {}))
+    from_history = never and runs >= min_runs
+    from_semantics = _opposed_wording(left, right)
+    if not from_history and not from_semantics:
+        return None
+
+    if from_history:
+        why = (
+            f"scored together {runs} time(s) and never passed together, though each has passed on "
+            f"its own — every version of the guidance so far has bought one by losing the other"
+        )
+        if from_semantics:
+            why += ", and they describe the same thing at the same file with opposite verdicts"
+    else:
+        why = (
+            "one says flag this and the other says do not, at the same file, in nearly the same "
+            "words — no run has scored them together yet, so this is wording alone"
+        )
+    return Contradiction(
+        left=left.id,
+        right=right.id,
+        why=why,
+        left_semantic=_semantic_of(left),
+        right_semantic=_semantic_of(right),
+        runs=runs,
+        from_history=from_history,
+        from_semantics=from_semantics,
+    )
+
+
+def _never_together(
+    left: Mapping[str, bool], right: Mapping[str, bool]
+) -> tuple[int, bool]:
+    """How many runs scored both, and whether they never once passed in the same one.
+
+    Both must have passed *somewhere* in those runs. A case that simply always fails is not in
+    conflict with anything — it is just failing, which the score already says plainly.
+    """
+    shared = [run for run in left if run in right]
+    if not shared:
+        return 0, False
+    together = any(left[run] and right[run] for run in shared)
+    return len(shared), (
+        not together and any(left[run] for run in shared) and any(right[run] for run in shared)
+    )
+
+
+def _opposed_wording(left: EvalCase, right: EvalCase) -> bool:
+    """A catch and a no-flag case describing the same thing in the same file."""
+    if left.kind == right.kind:
+        return False
+    if _path_of(left) != _path_of(right) or not _path_of(left):
+        return False
+    overlap = _overlap(_tokens(_semantic_of(left)), _tokens(_semantic_of(right)))
+    return overlap >= _SAME_PATH_OVERLAP
+
+
+def _semantic_of(case: EvalCase) -> str:
+    return next((e.semantic for e in case.expect if e.semantic), "")
+
+
+def _path_of(case: EvalCase) -> str:
+    if case.expect:
+        return case.expect[0].where.path
+    return case.change.files[0].path if case.change.files else ""
