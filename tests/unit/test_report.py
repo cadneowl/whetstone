@@ -147,3 +147,36 @@ def test_empty_skill_renders() -> None:
     record.cases = []
     html = render_run_html(record)
     assert "no eval cases" in html
+
+
+def test_a_report_says_what_it_measured_and_with_what() -> None:
+    """Two reports headed by the same skill and version read as one experiment run twice.
+
+    They are only comparable if the case set and the judge match — a run over the graduated corpus
+    and a run over that corpus plus the promoted batch are different populations, and a different
+    judge is a different instrument. Without these, a case passing in one report and failing in the
+    other looks like the scoring contradicting itself rather than two runs that were never
+    measuring the same thing.
+    """
+    record = _record().model_copy(
+        update={"judge_hash": "j" * 64, "reviewer": "agent: 8 steps +source"}
+    )
+
+    html = render_run_html(record)
+    text = render_run_text(record)
+
+    assert f"{len(record.cases)} case(s)" in html
+    assert "judge <code>jjjjjjjjjjjj</code>" in html
+    assert "reviewer <code>agent: 8 steps +source</code>" in html
+    assert f"measured {len(record.cases)} case(s)" in text
+    assert "judge jjjjjjjjjjjj" in text
+
+
+def test_a_report_without_a_judge_or_reviewer_omits_them_rather_than_printing_blanks() -> None:
+    record = _record()
+
+    html = render_run_html(record)
+
+    assert "judge <code>" not in html
+    assert "reviewer <code>" not in html
+    assert f"{len(record.cases)} case(s)" in html

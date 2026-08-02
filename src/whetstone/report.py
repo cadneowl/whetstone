@@ -141,6 +141,12 @@ def render_run_text(record: RunRecord) -> str:
         f"  backend  {record.backend or '-'}  model {record.model or '-'}"
         + ("  [practice]" if record.practice_mode else ""),
         f"  trials   k={record.k}   llm calls {record.llm_calls}   {record.duration_s:.1f}s",
+        # The population and the instrument, beside the number. Two runs of one skill over
+        # different case sets, or judged differently, are different measurements — and without
+        # these a case passing in one and failing in the other reads as scoring that contradicts
+        # itself rather than two experiments that were never comparable.
+        f"  measured {len(record.cases)} case(s)"
+        + (f"   judge {record.judge_hash[:12]}" if record.judge_hash else ""),
         f"  score    recall {score.recall:.3f}   fp_rate {score.fp_rate:.3f}   "
         f"precision {score.precision:.3f}   F2 {score.f_beta():.3f}",
     ]
@@ -204,7 +210,17 @@ def _metrics_html(score: SkillScore) -> str:
 
 
 def _facts_html(record: RunRecord) -> str:
+    """What this number is a measurement *of*.
+
+    A standalone report is the artifact people compare side by side, and two of them headed
+    `architect-skill v5` read as the same experiment run twice. They are not comparable unless the
+    case set, the judge and the reviewer all match — a run over the graduated corpus and a run over
+    that corpus plus the promoted batch are different populations, and a different judge is a
+    different instrument. The console says all three; the report said none of them, so a case that
+    passed in one and failed in the other looked like the scoring contradicting itself.
+    """
     facts = [
+        f"{len(record.cases)} case(s)",
         f"backend <code>{escape(record.backend or '-')}</code>",
         f"model <code>{escape(record.model or '-')}</code>",
         f"k={record.k}",
@@ -213,6 +229,10 @@ def _facts_html(record: RunRecord) -> str:
         f"{record.duration_s:.1f}s",
         f"skill hash <code>{escape(record.skill_hash[:12])}</code>",
     ]
+    if record.judge_hash:
+        facts.append(f"judge <code>{escape(record.judge_hash[:12])}</code>")
+    if record.reviewer:
+        facts.append(f"reviewer <code>{escape(record.reviewer)}</code>")
     if record.git_ref:
         facts.append(f"ref <code>{escape(record.git_ref[:12])}</code>")
     if record.principal:
