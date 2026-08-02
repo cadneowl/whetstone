@@ -49,6 +49,42 @@ export function narrowedCases(
   return all.filter((id) => selected.has(id))
 }
 
+/**
+ * What the sharpen button calls itself, and what it says it will draft from.
+ *
+ * Keyed on `narrowed` — the value actually sent — rather than on the tick count, because those two
+ * disagree in a state an operator reaches by doing nothing at all: a fresh visit starts with every
+ * case ticked, and `narrowedCases` reads that as "no filter". A tick count in the label therefore
+ * promised a narrowing the request did not carry.
+ *
+ * Exported and pure because this is the claim the panel makes about what it is about to spend on,
+ * and it was wrong twice over before: the no-batch path — the common one — hardcoded "Drafts from
+ * every case the last run failed" while `improveRequest` carried the selection regardless, flatly
+ * contradicting the checkbox panel directly above it.
+ *
+ * Three scope states, not two: "every failure" is reached both by ticking nothing and by ticking
+ * everything, and only the first is fixed by ticking something.
+ */
+export function sharpenWording(
+  narrowed: readonly string[] | null,
+  ticked: number,
+  hasBatch: boolean,
+): { label: string; scope: string } {
+  if (narrowed) {
+    return {
+      label: hasBatch ? 'Improve from selected' : 'Draft from selected',
+      scope: `Drafts from the ${narrowed.length} selected case(s)`,
+    }
+  }
+  return {
+    label: hasBatch ? 'Improve from every failure' : 'Draft from the last run',
+    scope:
+      ticked === 0
+        ? 'Nothing is ticked, so this drafts from every failure in the run — tick cases above to narrow it'
+        : 'Every case is ticked, so this drafts from every failure in the run — untick some to narrow it',
+  }
+}
+
 /** The inverse: `null` to drop the param entirely, which is how "all" stays out of the URL. */
 export function selectionParam(
   selected: ReadonlySet<string>,
@@ -168,6 +204,12 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     ...(narrowed ? { cases: narrowed } : {}),
     instruction,
   }
+
+  const { label: sharpenLabel, scope: sharpenScope } = sharpenWording(
+    narrowed,
+    selected.size,
+    hasBatch,
+  )
 
   // The score buttons run `scope: 'promoted'`, which accepts promoted ids and refuses any other,
   // so the selection is intersected rather than passed through — ticking a corpus regression must
@@ -428,19 +470,43 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
 
         <div className={hasBatch ? 'border-t border-line pt-3' : undefined}>
           <h3 className="text-sm font-medium">{step.sharpen} · Sharpen the guidance</h3>
+          {/* Both paths, and both reachable. This used to offer hand-editing in prose and only
+              the LLM in fact — the editor is on another tab and nothing here said so, let alone
+              linked to it. */}
           {hasBatch ? (
+            <p className="mt-0.5 mb-2 text-xs text-muted">
+              Draft a change with the LLM from the cases you selected, or{' '}
+              <Link to={{ search: editorSearch }} className="text-accent underline">
+                edit the files by hand
+              </Link>{' '}
+              in the Edit tab (your ticked cases and this score come back with you). Either way it
+              lands on disk and is re-scored above.
+            </p>
+          ) : (
+            <p className="mt-0.5 mb-2 text-xs text-muted">
+              No promoted batch waiting — sharpening runs against the corpus cases the last run got
+              wrong. Draft with the LLM here, or{' '}
+              <Link to={{ search: editorSearch }} className="text-accent underline">
+                edit the files on disk by hand
+              </Link>
+              . To sharpen against fresh signal instead,{' '}
+              <Link to="/triage" className="underline">
+                promote cases in Triage
+              </Link>
+              .
+            </p>
+          )}
+
+          {/* One launcher for both paths, because the selection belongs to both. `improveRequest`
+              carries `cases` whether or not a promoted batch exists, so the no-batch path — the
+              common one — was quietly sending a narrowed draft while its button said "Draft from
+              the last run" and its own copy said "every case the last run failed", flatly
+              contradicting the checkbox panel above it. It also had no `noneDraftable` guard, so
+              an all-holdout selection got as far as a cost banner for a draft the server was
+              always going to refuse. Duplicating the guard would have re-invited the drift; this
+              leaves nowhere for the two to disagree. */}
+          {hasBatch || latestRunId ? (
             <>
-              {/* Both paths, and both reachable. This used to offer hand-editing in prose and only
-                  the LLM in fact — the editor is on another tab and nothing here said so, let alone
-                  linked to it. */}
-              <p className="mt-0.5 mb-2 text-xs text-muted">
-                Draft a change with the LLM from the cases you selected, or{' '}
-                <Link to={{ search: editorSearch }} className="text-accent underline">
-                  edit the files by hand
-                </Link>{' '}
-                in the Edit tab (your ticked cases and this score come back with you). Either way it
-                lands on disk and is re-scored above.
-              </p>
               {/* Every ticked case is holdout, so the drafter would be shown nothing at all and
                   the call could only return the guidance unchanged. The server refuses this at
                   plan time now; disabling it here means the operator never gets as far as a cost
@@ -462,7 +528,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               <LaunchButton
                 kind="improve"
                 request={improveRequest}
-                label={selected.size ? 'Improve from selected' : 'Improve from every failure'}
+                label={sharpenLabel}
                 disabled={noneDraftable}
                 disabledReason="Every ticked case is holdout — the drafter is never shown one."
                 onDone={onDrafted}
@@ -472,10 +538,11 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                     selected case(s)" described the opposite of what the button does — and sat
                     directly above a cost banner correctly saying "up to N clustered failure(s)". */}
                 <p className="mb-2 text-xs text-muted">
-                  {selected.size
-                    ? `Drafts from the ${selected.size} selected case(s)`
-                    : 'Nothing is ticked, so this drafts from every failure in the run — tick cases above to narrow it'}
-                  {batchRun ? '' : ' — score them first for the drafter to see what fails'}.
+                  {sharpenScope}
+                  {hasBatch && !batchRun
+                    ? ' — score them first for the drafter to see what fails'
+                    : ''}
+                  .
                 </p>
                 <Steer value={instruction} onChange={setInstruction} />
               </LaunchButton>
@@ -485,42 +552,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               <ImprovePromptPanel request={improveRequest} />
             </>
           ) : (
-            <>
-              <p className="mt-0.5 mb-2 text-xs text-muted">
-                No promoted batch waiting — sharpening runs against the corpus cases the last run
-                got wrong. Draft with the LLM here, or edit the files on disk by hand. To sharpen
-                against fresh signal instead,{' '}
-                <Link to="/triage" className="underline">
-                  promote cases in Triage
-                </Link>
-                .
-              </p>
-              {latestRunId ? (
-                <>
-                  <LaunchButton
-                    kind="improve"
-                    request={improveRequest}
-                    label="Draft from the last run"
-                    onDone={onDrafted}
-                  >
-                    <p className="mb-2 text-xs text-muted">
-                      Drafts from every case the last run failed. For a finer, multi-file hand edit,{' '}
-                      <Link to={{ search: editorSearch }} className="text-accent underline">
-                        the Edit tab
-                      </Link>{' '}
-                      has the full editor.
-                    </p>
-                    <Steer value={instruction} onChange={setInstruction} />
-                  </LaunchButton>
-                  <ImprovePromptPanel request={improveRequest} />
-                </>
-              ) : (
-                <p className="text-xs text-muted italic">
-                  Never scored — run evals from the header first, so the drafter can see what the
-                  guidance currently gets wrong.
-                </p>
-              )}
-            </>
+            <p className="text-xs text-muted italic">
+              Never scored — run evals from the header first, so the drafter can see what the
+              guidance currently gets wrong.
+            </p>
           )}
           {review}
         </div>

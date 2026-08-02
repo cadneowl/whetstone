@@ -324,3 +324,94 @@ def test_pass_history_is_bounded_by_the_run_window(tmp_path: Path) -> None:
 
 def test_pass_history_is_empty_for_a_skill_with_no_runs(tmp_path: Path) -> None:
     assert RunStore(tmp_path / "runs").pass_history("nobody") == {}
+
+
+def _errored_record(run_id: str, *, at: datetime = AT) -> RunRecord:
+    """A run in which the reviewer could not be run on the case at all.
+
+    Note what it is *not*: a failure. It carries no trials, so its confusion is empty — and an
+    empty confusion reads as `recall 1.0, fp_rate 0.0`, the convention that is correct for "there
+    was nothing to catch here" and catastrophic for "we never found out".
+    """
+    case = CaseScore(
+        case_id="c1", kind="should_catch", trials=[], error="backend refused tools"
+    )
+    return RunRecord(
+        id=run_id,
+        created_at=at,
+        skill_id="s",
+        skill_version=1,
+        skill_hash="0" * 64,
+        cases=[CaseRun(case_id="c1", kind="should_catch", error="backend refused tools")],
+        score=SkillScore(skill_id="s", version=1, k=1, cases=[case]),
+    )
+
+
+def test_case_history_carries_the_error_so_a_reader_can_tell_1_0_apart(tmp_path: Path) -> None:
+    """`recall 1.0` on an errored row is the empty-confusion convention, not a result."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_errored_record("r1"))
+
+    outcome = store.case_history("s", "c1")[0]
+
+    assert outcome.recall == 1.0  # the convention, unchanged
+    assert outcome.error == "backend refused tools"
+    assert outcome.passed is False  # ...and it does not read as a pass
+
+
+def test_pass_history_omits_a_case_that_could_not_be_scored(tmp_path: Path) -> None:
+    """Omitted, not recorded as failing.
+
+    `CaseScore.passed` refuses to call an unscorable case a pass; before the error was indexed,
+    every consumer of this index re-derived the opposite from `recall`/`fp_rate` alone. Recording
+    `False` instead would swap one wrong answer for another — a case that could not be scored has
+    not failed either, and `curation._never_together` counts a run as shared evidence purely by
+    its presence in both maps.
+    """
+    store = RunStore(tmp_path / "runs")
+    store.save(_errored_record("r1"))
+
+    assert store.pass_history("s") == {}
+
+
+def test_pass_history_keeps_scorable_runs_of_a_sometimes_errored_case(tmp_path: Path) -> None:
+    """Only the unscorable run drops out; the case itself is not blacklisted."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_errored_record("r1"))
+    store.save(_record(run_id="r2"))  # same skill, same case id, actually scored
+
+    assert store.pass_history("s") == {"c1": {"r2": True}}
+
+
+def test_reindexing_an_errored_record_keeps_the_error(tmp_path: Path) -> None:
+    """The index is derived and disposable, so a rebuild must reproduce it exactly."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_errored_record("r1"))
+
+    store.reindex()
+
+    assert store.case_history("s", "c1")[0].error == "backend refused tools"
+    assert store.pass_history("s") == {}
+
+
+def test_resaving_a_record_refreshes_every_indexed_metric(tmp_path: Path) -> None:
+    """`ON CONFLICT` used to refresh only `created_at`.
+
+    No live path re-saves an id — `new_run_id` carries a uuid suffix — but a clause that silently
+    discards fifteen of eighteen columns is a trap set for the first path that does, and the
+    staleness check compares *file counts*, which a re-save does not change. So nothing would ever
+    repair it.
+    """
+    store = RunStore(tmp_path / "runs")
+    store.save(_record(run_id="fixed"))
+    assert store.list(skill_id="s")[0].recall == 1.0
+
+    missed = CaseScore(case_id="c1", kind="should_catch", trials=[Confusion(fn=1)])
+    store.save(
+        _record(run_id="fixed").model_copy(
+            update={"score": SkillScore(skill_id="s", version=1, k=1, cases=[missed])}
+        )
+    )
+
+    assert store.list(skill_id="s")[0].recall == 0.0
+    assert store.load("fixed").score.recall == 0.0

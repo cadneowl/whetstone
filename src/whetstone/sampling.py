@@ -218,12 +218,24 @@ def holdout_report(
     None rather than a report full of zeros: a divergence computed over zero holdout cases is
     noise wearing the costume of a number, and the UI should say "no holdout cases scored"
     instead of charting it.
+
+    **Only scorable cases are counted.** A case the reviewer could not be run on contributes an
+    empty confusion, and the counts here are not merely cosmetic: `holdout_cases` drives
+    `HoldoutReport.resolution`, which drives `conclusive` — the arming of the overfitting alarm.
+    Counting errors therefore made the alarm *more* confident the less it had measured. A holdout
+    of ten cases with nine unscorable reported `resolution 0.10`, `conclusive True`, and the
+    sentence "the skill performs on cases the improve loop has never seen" — the all-clear, over
+    one case, which is the precise claim `conclusive` exists to withhold. Excluding them means the
+    resolution describes what was actually measured, and a holdout that errored away to nothing
+    reports None, exactly as one that was never drawn does.
     """
     if fraction <= 0:
         return None
     parts: dict[str, list[Confusion]] = {"train": [], "holdout": []}
     counts = {"train": 0, "holdout": 0}
     for case in score.cases:
+        if case.error:
+            continue
         part = partition_for(case.case_id, fraction, pinned)
         parts[part].append(case.confusion)
         counts[part] += 1

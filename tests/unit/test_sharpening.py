@@ -32,18 +32,26 @@ def _run(
     model: str = "sonnet",
     guidance: str = "g1",
     holdout: HoldoutReport | None = None,
+    errored: frozenset[str] = frozenset(),
 ) -> RunRecord:
     """A run in which each named case was caught (True) or missed (False).
 
     The record's `cases` carry real trials rather than empty ones, because the store's per-case
     index derives its recall from them — and an empty confusion reads as recall 1.0, so a shortcut
     here would have made every case look like it passed and quietly confirmed every fix.
+
+    `errored` names cases the reviewer could not be run on at all. They are the shape that trap
+    takes for real: no trials, so the empty confusion is genuine rather than a shortcut, and
+    nothing but the recorded `error` distinguishes them from a flawless pass.
     """
     cases = [
         CaseRun(
             case_id=case_id,
             kind="should_catch",
-            trials=[
+            error="backend refused tools" if case_id in errored else "",
+            trials=[]
+            if case_id in errored
+            else [
                 TrialRecord(
                     index=0,
                     outcomes=[
@@ -66,7 +74,10 @@ def _run(
             CaseScore(
                 case_id=case_id,
                 kind="should_catch",
-                trials=[Confusion(tp=1) if ok else Confusion(fn=1)],
+                error="backend refused tools" if case_id in errored else "",
+                trials=[]
+                if case_id in errored
+                else [Confusion(tp=1) if ok else Confusion(fn=1)],
             )
             for case_id, ok in caught.items()
         ],
@@ -207,6 +218,29 @@ def test_a_fix_nobody_re_measured_is_neither_confirmed_nor_denied(tmp_path: Path
     """None, not True. "Not looked at since" must not read as "still working"."""
     _run(tmp_path / "runs", at=AT, caught={"a": False})
     _gate(tmp_path / "gates", at=AT + timedelta(hours=5), fixed=["a"])
+
+    report = _report(tmp_path)
+    assert report.proven_fixes[0].still_holds is None
+    assert report.fixes_that_stuck == 0
+
+
+def test_a_fix_the_newest_run_could_not_score_is_not_confirmed(tmp_path: Path) -> None:
+    """The same third state, and it used to be the worst version of it.
+
+    An unscorable case carries no trials, so its confusion is empty and reads as `recall 1.0` —
+    which meant the ledger answered "still holds" most confidently in exactly the situation where
+    it had learned nothing, and a reviewer that had stopped working entirely would keep every fix
+    on the books indefinitely.
+    """
+    _run(tmp_path / "runs", at=AT, caught={"a": False})
+    _gate(tmp_path / "gates", at=AT + timedelta(hours=1), fixed=["a"])
+    _run(tmp_path / "runs", at=AT + timedelta(hours=2), caught={"a": True})
+    _run(
+        tmp_path / "runs",
+        at=AT + timedelta(hours=3),
+        caught={"a": True},
+        errored=frozenset({"a"}),
+    )
 
     report = _report(tmp_path)
     assert report.proven_fixes[0].still_holds is None
