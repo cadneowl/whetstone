@@ -290,10 +290,26 @@ def _verifier_identity(verifier: object) -> str:
 
 
 @router.get("/{skill_id}/cases/{case_id}", response_model=CaseDetail)
-def get_case(skill_id: str, case_id: str, root: SkillsRootDep, store: StoreDep) -> CaseDetail:
+def get_case(
+    skill_id: str, case_id: str, root: SkillsRootDep, store: StoreDep, config: ConfigDep
+) -> CaseDetail:
+    """One case, graduated or promoted.
+
+    The promoted set is overlaid via `with_promoted_cases`, the same "what is under test" seam the
+    eval job and the gate use, so this page resolves exactly the corpus a run was scored against.
+    Reading only `eval_cases/` made it 404 for every case in a batch run's drill-down — precisely
+    the cases someone has a reason to open, and with a message ("has no eval case") that denied the
+    existence of what the run had just measured.
+    """
     skill = _load_one(root, skill_id)
+    promoted = staging.promoted_cases(config, skill_id)
     try:
-        return case_detail(skill, case_id, store)
+        return case_detail(
+            staging.with_promoted_cases(config, skill),
+            case_id,
+            store,
+            promoted=[c.id for c in promoted],
+        )
     except KeyError as exc:
         raise NotFound(str(exc)) from exc
 
