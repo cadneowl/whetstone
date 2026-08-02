@@ -1,10 +1,10 @@
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from whetstone.domain.run import CaseRun, RunRecord, TrialRecord
+from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
 from whetstone.domain.score import CaseScore, Confusion, SkillScore
 from whetstone.runs import RunStore, new_run_id, stale_version_ids
 
@@ -234,3 +234,93 @@ def test_stale_version_ids_ignores_repeat_runs_of_same_content(tmp_path: Path) -
     store.save(_record(run_id="a", version=2, hash_="h1"))
     store.save(_record(run_id="b", version=2, hash_="h1"))
     assert stale_version_ids(store.list()) == set()
+
+
+def _two_case_record(
+    run_id: str, *, caught: bool, clean: bool, at: datetime = AT
+) -> RunRecord:
+    """One catch case and one no-flag case, each passing or not — the shape a contradiction has."""
+
+    def trial(must: str, outcome: str) -> TrialRecord:
+        return TrialRecord(
+            index=0,
+            findings=[],
+            outcomes=[ExpectationOutcome(expectation_id="e1", must=must, outcome=outcome)],
+        )
+
+    return RunRecord(
+        id=run_id,
+        created_at=at,
+        skill_id="s",
+        skill_version=1,
+        skill_hash="0" * 64,
+        score=SkillScore(skill_id="s", version=1, k=1, cases=[]),
+        cases=[
+            CaseRun(
+                case_id="catcher",
+                kind="should_catch",
+                trials=[trial("appear", "tp" if caught else "fn")],
+            ),
+            CaseRun(
+                case_id="quiet",
+                kind="should_not_flag",
+                trials=[trial("not_appear", "tn" if clean else "fp")],
+            ),
+        ],
+    )
+
+def test_pass_history_answers_the_whole_corpus_in_one_query(tmp_path: Path) -> None:
+    """Asked per case, this cost a connection and a glob of the runs directory per case — 102ms of
+    a 108ms contradiction check at 120 cases, on the screen people open most, and linear in both
+    the corpus and the number of stored runs.
+    """
+    store = RunStore(tmp_path / "runs")
+    for i, (caught, clean) in enumerate([(True, False), (False, True)]):
+        store.save(
+            _two_case_record(f"run-{i}", caught=caught, clean=clean, at=AT + timedelta(hours=i))
+        )
+
+    history = store.pass_history("s", runs=20)
+
+    assert history["catcher"] == {"run-0": True, "run-1": False}
+    assert history["quiet"] == {"run-0": False, "run-1": True}
+
+
+def test_pass_history_reads_each_kind_by_its_own_rule(tmp_path: Path) -> None:
+    """A catch case passes by catching; a no-flag case passes by staying quiet. One rule for both
+    would report every clean no-flag case as a failure and invent contradictions everywhere."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_two_case_record("run-0", caught=True, clean=True))
+
+    history = store.pass_history("s")
+
+    assert history["catcher"]["run-0"] is True
+    assert history["quiet"]["run-0"] is True
+
+
+def test_pass_history_excludes_baseline_probes(tmp_path: Path) -> None:
+    """A run with the guidance stripped says nothing about what guidance can satisfy."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_two_case_record("real", caught=True, clean=True))
+    probe = _two_case_record("probe", caught=False, clean=False, at=AT + timedelta(hours=1))
+    store.save(probe.model_copy(update={"baseline": True}))
+
+    history = store.pass_history("s")
+
+    assert set(history["catcher"]) == {"real"}
+
+
+def test_pass_history_is_bounded_by_the_run_window(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    for i in range(5):
+        store.save(
+            _two_case_record(f"run-{i}", caught=True, clean=True, at=AT + timedelta(hours=i))
+        )
+
+    history = store.pass_history("s", runs=2)
+
+    assert set(history["catcher"]) == {"run-4", "run-3"}
+
+
+def test_pass_history_is_empty_for_a_skill_with_no_runs(tmp_path: Path) -> None:
+    assert RunStore(tmp_path / "runs").pass_history("nobody") == {}

@@ -379,10 +379,13 @@ def contradictions(
       have history, which is precisely when a contradiction is cheapest to resolve.
     """
     active = [c for c in skill.eval_cases if c.tier == "active"]
+    # Tokenized once per case, not once per comparison: the loop is quadratic, so a corpus of 500
+    # would otherwise tokenize a quarter of a million times to answer a cheap question.
+    words = {c.id: _tokens(_semantic_of(c)) for c in active}
     found: list[tuple[int, Contradiction]] = []
     for i, left in enumerate(active):
         for right in active[i + 1 :]:
-            pair = _contradiction(left, right, passes, min_runs)
+            pair = _contradiction(left, right, passes, min_runs, words)
             if pair is not None:
                 # History-backed first, then by how much was measured, then by id for stability.
                 found.append(((1 if pair.from_history else 0) * 1000 + pair.runs, pair))
@@ -391,11 +394,15 @@ def contradictions(
 
 
 def _contradiction(
-    left: EvalCase, right: EvalCase, passes: Mapping[str, Mapping[str, bool]], min_runs: int
+    left: EvalCase,
+    right: EvalCase,
+    passes: Mapping[str, Mapping[str, bool]],
+    min_runs: int,
+    words: Mapping[str, frozenset[str]],
 ) -> Contradiction | None:
     runs, never = _never_together(passes.get(left.id, {}), passes.get(right.id, {}))
     from_history = never and runs >= min_runs
-    from_semantics = _opposed_wording(left, right)
+    from_semantics = _opposed_wording(left, right, words)
     if not from_history and not from_semantics:
         return None
 
@@ -440,14 +447,15 @@ def _never_together(
     )
 
 
-def _opposed_wording(left: EvalCase, right: EvalCase) -> bool:
+def _opposed_wording(
+    left: EvalCase, right: EvalCase, words: Mapping[str, frozenset[str]]
+) -> bool:
     """A catch and a no-flag case describing the same thing in the same file."""
     if left.kind == right.kind:
         return False
     if _path_of(left) != _path_of(right) or not _path_of(left):
         return False
-    overlap = _overlap(_tokens(_semantic_of(left)), _tokens(_semantic_of(right)))
-    return overlap >= _SAME_PATH_OVERLAP
+    return _overlap(words[left.id], words[right.id]) >= _SAME_PATH_OVERLAP
 
 
 def _semantic_of(case: EvalCase) -> str:
