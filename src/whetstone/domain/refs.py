@@ -27,12 +27,18 @@ class Region(BaseModel):
     path: str
     line_range: tuple[int, int] | None = None
 
-    def contains(self, path: str, line: int | None) -> bool:
+    def admits(self, path: str, line: int | None) -> bool:
+        """Whether a finding at `path`:`line` may stand for something asserted about this region.
+
+        A finding that names no line at all is admitted rather than discarded. It cannot be placed,
+        so the only honest thing to do is let the judge read it: a custom reviewer that reports the
+        right problem without a line number would otherwise fail every case it got right, silently
+        and on a technicality, with the drill-down reporting it as out of range when in truth it was
+        never in a position to be in range.
+        """
         if path != self.path:
             return False
-        if self.line_range is None:
+        if self.line_range is None or line is None:
             return True
-        if line is None:
-            return False
         lo, hi = self.line_range
         return lo <= line <= hi

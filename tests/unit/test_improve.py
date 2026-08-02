@@ -485,3 +485,78 @@ def test_globs_that_match_nothing_point_at_the_index(tmp_path: Path) -> None:
 
     assert "wiki/index.yaml" in text
     assert "no run was scored" not in text
+
+
+class TestWhatTheReviewerSaid:
+    """A miss has two very different causes, and only one is the guidance's fault.
+
+    The digest used to render both as "(about the same file, but not matching)". A drafter reading
+    that infers a wording problem, rewrites a rule that was already producing the right finding, and
+    the next run fails identically — a loop with no exit, which is what a case pinned to a single
+    line produces on every round.
+    """
+
+    PATH = "src/a.rs"
+
+    def _run(self, findings: list[Finding], outcome: ExpectationOutcome) -> RunRecord:
+        return _record(
+            [
+                CaseRun(
+                    case_id="c1",
+                    kind="should_catch",
+                    trials=[TrialRecord(index=0, findings=findings, outcomes=[outcome])],
+                )
+            ]
+        )
+
+    def _outcome(self, **kw: object) -> ExpectationOutcome:
+        base: dict[str, object] = {
+            "expectation_id": "e1",
+            "must": "appear",
+            "outcome": "fn",
+            "semantic": "flag the unwrap",
+            "where": Region(path=self.PATH, line_range=(2, 2)),
+        }
+        return ExpectationOutcome(**{**base, **kw})  # type: ignore[arg-type]
+
+    def _rendered(self, findings: list[Finding], outcome: ExpectationOutcome) -> str:
+        digest = build_digest(
+            _skill([_case("c1")]), self._run(findings, outcome), FailureInputs()
+        )
+        return digest.render_failures()
+
+    def _finding(self, line: int) -> Finding:
+        return Finding(skill_id="s", path=self.PATH, line=line, message="wrong exception type")
+
+    def test_a_finding_the_judge_rejected_is_named_as_such(self) -> None:
+        outcome = self._outcome(
+            considered=Region(path=self.PATH, line_range=(1, 40)),
+            eligible_finding_indices=[0],
+            verdicts=[
+                JudgeVerdictRecord(
+                    finding_index=0, matched=False, confidence=0.9, reason="different issue"
+                )
+            ],
+        )
+
+        text = self._rendered([self._finding(2)], outcome)
+
+        assert "the judge read this and called it a different issue" in text
+        assert "defect in the case" not in text
+
+    def test_a_finding_the_prefilter_dropped_says_the_case_is_at_fault(self) -> None:
+        """The whole point. The reviewer said the right thing; the case rejected it on location."""
+        outcome = self._outcome()  # no verdicts, no eligible findings
+
+        text = self._rendered([self._finding(11)], outcome)
+
+        assert "never reached the judge" in text
+        assert "it flagged line 11, and the case only accepts lines 2-2" in text
+        assert "This is a defect in the case, not in the guidance" in text
+        assert "do not rewrite a rule to chase it" in text
+
+    def test_a_reviewer_that_said_nothing_is_still_reported_as_nothing(self) -> None:
+        text = self._rendered([], self._outcome())
+
+        assert "Reviewer said: nothing at this location." in text
+        assert "defect in the case" not in text

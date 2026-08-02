@@ -295,6 +295,11 @@ def _expected_html(outcome: ExpectationOutcome) -> str:
             lo, hi = outcome.where.line_range
             location += f" lines {lo}–{hi}"
         parts.append(f"<code>{location}</code>")
+        # The anchor is one line; matching ran against everything the change touches. Printing only
+        # the anchor makes an accepted finding on a nearby line look like a scoring error.
+        used = outcome.considered.line_range if outcome.considered else None
+        if used is not None and used != outcome.where.line_range:
+            parts.append(f"matched across lines {used[0]}–{used[1]} of the change")
     if outcome.severity_min is not None:
         parts.append(f"severity ≥ {escape(outcome.severity_min.name)}")
     if not parts:

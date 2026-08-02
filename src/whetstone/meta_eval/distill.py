@@ -163,7 +163,11 @@ def _triples_of(record: RunRecord, diffs: _DiffJoin) -> list[DistillTriple]:
                     if not 0 <= verdict.finding_index < len(trial.findings):
                         continue  # a corrupt index teaches nothing worth learning
                     finding = trial.findings[verdict.finding_index]
-                    where = outcome.where
+                    # The region the judge was actually shown, not the human's anchor. A triple is
+                    # a training example of the input that produced this verdict; recording the
+                    # anchor would teach a distilled judge to expect a location production never
+                    # sends it. Older records carry no `considered` and ran on `where`.
+                    where = outcome.considered or outcome.where
                     rng = where.line_range if where else None
                     out.append(
                         DistillTriple(

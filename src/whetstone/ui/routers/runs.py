@@ -147,7 +147,11 @@ def dispute_verdict(
         expectation=Expectation(
             id=request.expectation_id,
             must=outcome.must,
-            where=outcome.where,
+            # The region the judge was shown, not the human's anchor. This pair becomes ground
+            # truth the judge is measured against, so it has to be the input that actually produced
+            # the verdict being ruled on — otherwise meta-eval grades the judge on a question it
+            # was never asked. Older records have no `considered` and ran on `where`.
+            where=outcome.considered or outcome.where,
             semantic=outcome.semantic,
             severity_min=outcome.severity_min,
         ),

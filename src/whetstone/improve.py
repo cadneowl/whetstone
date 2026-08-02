@@ -31,6 +31,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from whetstone.domain.eval_model import EvalCase
+from whetstone.domain.finding import Finding
 from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
@@ -53,6 +54,11 @@ class Failure(BaseModel):
     reviewer_said: str = ""
     rule_id: str = ""
     diff_excerpt: str = ""
+    # True when this failure is the eval case's fault, not the guidance's: the reviewer reported
+    # the issue and the structural prefilter dropped its finding before any judging. Rewriting the
+    # guidance cannot fix it, so the prompt says so outright instead of letting the drafter infer a
+    # wording problem from a failure that has none.
+    case_at_fault: bool = False
 
     def render(self) -> str:
         head = "MISSED" if self.kind == "fn" else "FALSELY FLAGGED"
@@ -63,6 +69,12 @@ class Failure(BaseModel):
             lines.append(f"Reviewer said: {self.reviewer_said}")
         else:
             lines.append("Reviewer said: nothing at this location.")
+        if self.case_at_fault:
+            lines.append(
+                "NOTE: the reviewer reported this issue and the eval case rejected it on location, "
+                "not on substance. This is a defect in the case, not in the guidance — do not "
+                "rewrite a rule to chase it, and say so in your rationale."
+            )
         if self.diff_excerpt:
             lines.append(f"\n```diff\n{self.diff_excerpt.strip()}\n```")
         return "\n".join(lines)
@@ -404,7 +416,7 @@ def _failure(
     inputs: FailureInputs,
 ) -> Failure:
     path = outcome.where.path if outcome.where else ""
-    said, rule_id = _what_the_reviewer_said(trial, outcome, path)
+    said, rule_id, case_at_fault = _what_the_reviewer_said(trial, outcome, path)
     return Failure(
         case_id=case_run.case_id,
         kind="fn" if outcome.outcome == "fn" else "fp",
@@ -413,28 +425,62 @@ def _failure(
         path=path,
         reviewer_said=said,
         rule_id=rule_id,
+        case_at_fault=case_at_fault,
         diff_excerpt=_excerpt(case, path, inputs.max_diff_bytes),
     )
 
 
 def _what_the_reviewer_said(
     trial: TrialRecord, outcome: ExpectationOutcome, path: str
-) -> tuple[str, str]:
-    """The finding behind this outcome, as text plus its rule id.
+) -> tuple[str, str, bool]:
+    """The finding behind this outcome, as text, rule id, and whether the case itself is at fault.
 
     For a false positive that is the finding that wrongly matched. For a miss it is whatever the
     reviewer said about that file instead — often the most informative thing in the whole digest,
     because "it flagged the wrong line" and "it said nothing" call for different rule changes.
+
+    The third value is the one that stops a drafting loop. A miss has two very different causes:
+    the judge read the finding and said it was a different issue, or the finding never reached the
+    judge because the structural prefilter dropped it. Only the first is a guidance problem. Told
+    the two apart, a drafter can leave a working rule alone; told only "not matching", it rewrites
+    a rule that was already producing the right finding, the next run fails identically, and the
+    loop has no exit — which is exactly how a case pinned to one line burns round after round.
     """
     for verdict in outcome.verdicts:
         if verdict.matched and verdict.finding_index < len(trial.findings):
             f = trial.findings[verdict.finding_index]
-            return f.message, f.rule_id or ""
-    nearby = [f for f in trial.findings if f.path == path]
-    if nearby:
-        said = f"(about the same file, but not matching) {nearby[0].message}"
-        return said, nearby[0].rule_id or ""
-    return "", ""
+            return f.message, f.rule_id or "", False
+    judged = {v.finding_index for v in outcome.verdicts}
+    excluded = {e.finding_index for e in outcome.excluded_findings(trial.findings)}
+    for index, finding in enumerate(trial.findings):
+        if finding.path != path:
+            continue
+        if index in judged:
+            return (
+                f"(the judge read this and called it a different issue) {finding.message}",
+                finding.rule_id or "",
+                False,
+            )
+        if index in excluded:
+            return (
+                f"(never reached the judge — {_why_excluded(outcome, finding)}) {finding.message}",
+                finding.rule_id or "",
+                True,
+            )
+        return f"(about the same file, but not matching) {finding.message}", (
+            finding.rule_id or ""
+        ), False
+    return "", "", False
+
+
+def _why_excluded(outcome: ExpectationOutcome, finding: Finding) -> str:
+    """The prefilter's reason, in the terms the drafter needs: what it would have to change."""
+    region = outcome.considered or outcome.where
+    if region is not None and not region.admits(finding.path, finding.line):
+        rng = region.line_range
+        span = f"lines {rng[0]}-{rng[1]}" if rng else "this file"
+        return f"it flagged line {finding.line}, and the case only accepts {span}"
+    return "it did not meet the case's severity floor"
 
 
 def _excerpt(case: EvalCase | None, path: str, budget: int) -> str:

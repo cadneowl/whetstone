@@ -97,6 +97,13 @@ class ExpectationOutcome(BaseModel):
     # UI says so rather than inventing a description.
     semantic: str = ""
     where: Region | None = None
+    # The region eligibility was actually run against: `where` widened to the footprint of the
+    # case's change (`core.matching.effective_region`). Kept beside `where` rather than replacing it
+    # because they answer different questions — what the human meant, and what the filter did — and
+    # a record that carried only one of them cannot explain its own exclusions. Absent on records
+    # written before the widening, which is read as "the same as `where`", exactly what those runs
+    # did.
+    considered: Region | None = None
     severity_min: Severity | None = None
     eligible_finding_indices: list[int] = []
     verdicts: list[JudgeVerdictRecord] = []
@@ -117,14 +124,19 @@ class ExpectationOutcome(BaseModel):
         This is the other half of "why did this fail?". A reviewer that produced a finding one
         severity level too low, or a few lines outside the region, looks identical to a reviewer
         that said nothing at all — unless the filtering is spelled out.
+
+        Reasons are computed against `considered`, the region the run really ran. Computing them
+        against `where` would report a finding as "outside the expected line range" when the run had
+        in fact judged it — the drill-down contradicting the score it exists to explain.
         """
-        if self.where is None:
+        region = self.considered or self.where
+        if region is None:
             return []
         out: list[ExcludedFinding] = []
         for index, finding in enumerate(findings):
             if index in self.eligible_finding_indices:
                 continue
-            reason = _exclusion_reason(finding, self.where, self.severity_min)
+            reason = _exclusion_reason(finding, region, self.severity_min)
             if reason is not None:
                 out.append(ExcludedFinding(finding_index=index, reason=reason))
         return out
@@ -143,7 +155,7 @@ def _exclusion_reason(
     """Why a finding was ineligible, in the order `core.matching` applies the checks."""
     if finding.path != where.path:
         return "other_file"
-    if not where.contains(finding.path, finding.line):
+    if not where.admits(finding.path, finding.line):
         return "outside_region"
     if severity_min is not None and finding.severity < severity_min:
         return "below_severity"

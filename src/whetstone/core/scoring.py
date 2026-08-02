@@ -15,8 +15,11 @@ def record_trial(
 
     This is the scoring path; `score_trial` is a thin projection of it. Recording adds no LLM calls
     (see `evaluate_expectation`), so there is no cheaper non-recording variant worth maintaining.
+
+    The case's own change goes in because eligibility is scoped to what that change touches rather
+    than to the single line a human happened to comment on — see `core.matching`.
     """
-    outcomes = [evaluate_expectation(findings, exp, judge) for exp in case.expect]
+    outcomes = [evaluate_expectation(findings, exp, judge, case.change) for exp in case.expect]
     return TrialRecord(index=index, findings=findings, outcomes=outcomes)
 
 

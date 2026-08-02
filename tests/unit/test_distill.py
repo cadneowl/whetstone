@@ -233,3 +233,29 @@ def test_a_gate_folds_the_tier1_model_into_its_own_judge_identity(monkeypatch) -
     # And a gate under no tier-1 hashes as the plain judge — the seam changes nothing by default.
     plain = record_gate(base, candidate, FakeLLMClient(main_handler))
     assert plain.judge_hash == judge_identity(None)
+
+
+def test_a_triple_records_the_region_the_judge_was_shown() -> None:
+    """A triple is a training example of an input that produced a verdict.
+
+    Matching widens the human's one-line anchor to the footprint of the change and asks the judge
+    about *that*; exporting the anchor instead would teach a distilled judge to expect a location
+    production never sends it, and the distilled tier would then disagree with its own teacher on
+    precisely the pairs the widening exists to rescue.
+    """
+    record = _record("r1", "j" * 64)
+    outcome = record.cases[0].trials[0].outcomes[0]
+    outcome.considered = Region(path=outcome.where.path, line_range=(38, 41))  # type: ignore[union-attr]
+
+    [triple] = export_triples([record], {"s": _skill_with_case()}, judge_hash="j" * 64).triples
+
+    assert triple.where_lines == "38-41"
+
+
+def test_an_old_triple_without_considered_exports_what_that_run_ran() -> None:
+    record = _record("r1", "j" * 64)
+    record.cases[0].trials[0].outcomes[0].considered = None
+
+    [triple] = export_triples([record], {"s": _skill_with_case()}, judge_hash="j" * 64).triples
+
+    assert triple.where_lines == "39-39"
