@@ -30,7 +30,7 @@ function outcome(over: Partial<ExpectationOutcome> = {}): ExpectationOutcome {
 }
 
 function trial(findings: Finding[]): TrialRecord {
-  return { index: 0, findings, outcomes: [] } as TrialRecord
+  return { index: 0, findings, outcomes: [], note: '' } as TrialRecord
 }
 
 describe('excludedFindings', () => {

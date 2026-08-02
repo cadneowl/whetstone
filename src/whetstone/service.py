@@ -6,11 +6,13 @@ and the same functions run against the real model in production.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import threading
 import time
-from collections.abc import Iterator, Sequence
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -49,11 +51,11 @@ from whetstone.domain.eval_model import (
     Provenance,
 )
 from whetstone.domain.refs import RepoRef
-from whetstone.domain.run import RunRecord, guidance_hash, skill_hash
+from whetstone.domain.run import CaseRun, RunRecord, case_set_hash, guidance_hash, skill_hash
 from whetstone.domain.score import HoldoutReport, SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.drift import DRIFT_ALARM, DriftStore
-from whetstone.gates import GateRecord, new_gate_id
+from whetstone.gates import BaselineKey, GateRecord, GateStore, new_gate_id
 from whetstone.judge.cascade import CascadingJudgeFactory, GroundedJudge
 from whetstone.judge.llm_judge import LLMJudge, judge_identity
 from whetstone.judge.spec import JudgeSpec
@@ -84,16 +86,51 @@ from whetstone.verify.base import Verifier
 from whetstone.wiki import SkillWiki, WikiLimits
 
 
+class ReusedBaseline(BaseModel):
+    """A base-side measurement taken by an earlier gate and reused by this one.
+
+    Carries everything the base side would have produced, plus where it came from — a gate that
+    borrowed a baseline has to say so on its own record, or the evidence claims a freshness it
+    does not have.
+    """
+
+    score: SkillScore
+    notes: dict[str, str] = {}
+    trace: list[str] = []
+    # When the measurement was originally taken and which gate took it. Both are carried through a
+    # chain of reuses unchanged, so the tenth gate to reuse one baseline still points at the first.
+    measured_at: datetime
+    from_gate: str
+
+
+# Given the digest of the case set actually drawn, a baseline to reuse or None. A callback because
+# the draw happens inside `gate_skills` while everything else the key needs — the judge, the model,
+# the store — is known only to `record_gate`, and neither is the right place to move the other to.
+BaselineLookup = Callable[[str], ReusedBaseline | None]
+
+
 class GateOutcome(BaseModel):
     result: GateResult
     base: SkillScore
     candidate: SkillScore
+    # The set both sides were scored over (`domain.run.case_set_hash`), so the record can name the
+    # population its baseline is reusable for.
+    cases_hash: str = ""
+    # Set when the base side was not measured by this gate.
+    baseline: ReusedBaseline | None = None
     # What an agent reviewer looked at on each side. A gate blames a score difference on the
     # guidance, which holds only if everything else the reviewer saw was the same — and an agent
     # that investigated differently on the two sides breaks exactly that. Empty for every reviewer
     # that does not investigate.
     base_trace: list[str] = []
     candidate_trace: list[str] = []
+    # Per case, what the instrument had to say about measuring it on that side — today, that the
+    # agent ran out of steps and was made to answer. Only cases with something to report appear.
+    # A gate keeps scores rather than findings, and this is the one piece of the discarded detail
+    # that changes how a verdict should be read: a case whose candidate answer was cut short is not
+    # evidence of a guidance regression, and the gate said "1 case(s) regressed" either way.
+    base_notes: dict[str, str] = {}
+    candidate_notes: dict[str, str] = {}
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -579,6 +616,7 @@ def gate_skills(
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
     reviewer: Reviewer | None = None,
+    baseline_for: BaselineLookup | None = None,
 ) -> GateOutcome:
     """Score a base and candidate version of a skill and apply the regression gate.
 
@@ -632,17 +670,32 @@ def gate_skills(
     # One reviewer instance serves both sides: it is stateless across calls and takes the skill
     # per review, so base and candidate differ only in their guidance — exactly what a gate holds
     # fixed everything else to measure.
-    base_score = run_eval(
-        base.model_copy(update={"eval_cases": cases}), client, trials=trials,
-        wiki_limits=wiki_limits, precedent_limits=precedent_limits,
-        precedent_corpus=base.eval_cases,
-        judge=judge, judge_policy=judge_policy, sample=no_draw,
-        on_event=on_base, cancel=cancel, reviewer=reviewer,
-    )
-    # Snapshot before the candidate side resets it — one reviewer serves both, so the trajectories
-    # would otherwise arrive merged and the divergence check would never fire.
-    base_trace = _trace_of(reviewer)
-    candidate_score = run_eval(
+    # The baseline is the last commit: it did not change between two gates ten minutes apart, so
+    # measuring it again buys nothing and costs twice — once in spend, and once in variance, since a
+    # second sample of a nondeterministic reviewer can fail a gate on its own. Reuse is offered only
+    # when every input that could move the number is identical (`gates.BaselineKey`), so the case
+    # set is hashed here, after the draw, where it is finally known.
+    cases_hash = case_set_hash(cases)
+    reused = baseline_for(cases_hash) if baseline_for is not None else None
+    if reused is not None:
+        base_score, base_notes, base_trace = reused.score, dict(reused.notes), list(reused.trace)
+    else:
+        # `record_eval` rather than `run_eval` — the same run, keeping the per-case detail. The gate
+        # still stores only scores, but `case_notes` needs the case runs that `run_eval` throws
+        # away, and re-deriving them would mean scoring twice.
+        base_record = record_eval(
+            base.model_copy(update={"eval_cases": cases}), client, trials=trials,
+            wiki_limits=wiki_limits, precedent_limits=precedent_limits,
+            precedent_corpus=base.eval_cases,
+            judge=judge, judge_policy=judge_policy, sample=no_draw,
+            on_event=on_base, cancel=cancel, reviewer=reviewer,
+        )
+        base_score = base_record.score
+        base_notes = case_notes(base_record.cases)
+        # Snapshot before the candidate side resets it — one reviewer serves both, so the
+        # trajectories would otherwise arrive merged and the divergence check would never fire.
+        base_trace = _trace_of(reviewer)
+    candidate_record = record_eval(
         candidate.model_copy(update={"eval_cases": cases}), client, trials=trials,
         wiki_limits=wiki_limits, precedent_limits=precedent_limits,
         precedent_corpus=candidate.eval_cases,
@@ -651,14 +704,49 @@ def gate_skills(
     )
     # Read after the candidate side, which reset the trajectory when it started — so this is the
     # candidate's alone, and `base_trace` was captured the same way before it.
-    result = gate(base_score, candidate_score, cfg)
+    result = gate(base_score, candidate_record.score, cfg)
     return GateOutcome(
         result=result,
         base=base_score,
-        candidate=candidate_score,
+        candidate=candidate_record.score,
+        cases_hash=cases_hash,
+        baseline=reused,
         base_trace=base_trace,
         candidate_trace=_trace_of(reviewer),
+        base_notes=base_notes,
+        candidate_notes=case_notes(candidate_record.cases),
     )
+
+
+def _inputs_digest(wiki: WikiLimits | None, precedents: PrecedentLimits | None) -> str:
+    """Identity of the budgets a run gives the built-in reviewer, for the baseline key.
+
+    These come from `evaluate/step.yaml`, which nothing else in `BaselineKey` covers — the skill
+    hash is the skill folder and the reviewer identity describes an agent's steps. Raising
+    `inputs.precedents.k` changes what the reviewer is shown and therefore what it reports, so
+    without this a gate could reuse a baseline measured under a different budget.
+    """
+    payload = {
+        "wiki": wiki.model_dump(mode="json") if wiki is not None else None,
+        "precedents": precedents.model_dump(mode="json") if precedents is not None else None,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def case_notes(cases: Sequence[CaseRun]) -> dict[str, str]:
+    """Per case, the first thing any of its trials had to say about how it was measured.
+
+    The first rather than all of them: at k>1 the note is the same sentence about the same step
+    ceiling on every trial that hit it, and a verdict that has to be read quickly is not helped by
+    the same sentence three times. Cases with nothing to report are absent, so the common case
+    stores an empty dict rather than a row per case saying nothing.
+    """
+    out: dict[str, str] = {}
+    for case in cases:
+        note = next((t.note for t in case.trials if t.note), "")
+        if note:
+            out[case.case_id] = note
+    return out
 
 
 def record_gate(
@@ -684,6 +772,8 @@ def record_gate(
     on_candidate: EventSink | None = None,
     cancel: threading.Event | None = None,
     reviewer: Reviewer | None = None,
+    baselines: GateStore | None = None,
+    baseline_max_age: timedelta | None = None,
 ) -> GateRecord:
     """Gate a candidate against a baseline and return a storable record of the comparison.
 
@@ -701,17 +791,6 @@ def record_gate(
     # one recorder still reporting only the judge's calls.
     reviewer_calls_before = _llm_calls_of(reviewer)
     started_at = now or datetime.now(UTC)
-    clock = time.perf_counter()
-    outcome = gate_skills(
-        base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
-        precedent_limits=precedent_limits, judge=judge, judge_policy=judge_policy,
-        on_base=on_base, on_candidate=on_candidate, cancel=cancel, reviewer=reviewer,
-    )
-    duration = time.perf_counter() - clock
-
-    fraction = (sample or SamplePolicy()).holdout_fraction
-    pinned = pinned_partitions(union_cases(base, candidate))
-    candidate_hash = skill_hash(candidate)
     # The tier-1 model folds into the identity exactly as it does on a plain run: a gate judged by
     # a distilled tier 1 is a different instrument than one judged by the teacher, and recording
     # the same hash for both would let a later gate-accuracy trend draw straight through the swap.
@@ -719,6 +798,62 @@ def record_gate(
     if judge_policy is not None and judge_policy.tier1.configured:
         t1 = judge_policy.tier1
         tier1_model = resolve_backend(t1.llm, model=t1.model, base_url=t1.base_url).model
+    judge_hash = judge_identity(
+        judge.system if judge else None,
+        escalate_below=judge_policy.escalate_below
+        if judge_policy is not None and judge_policy.enabled
+        else 0.0,
+        tier1_model=tier1_model,
+    )
+    # Everything the baseline key needs except the case set, which only exists after the draw.
+    # `gate_skills` finishes it through the callback below and hands the digest back on the
+    # outcome, so the record can be found by the next gate whether or not this one reused anything.
+    partial_key = BaselineKey(
+        base_hash=skill_hash(base),
+        cases_hash="",
+        judge_hash=judge_hash,
+        reviewer=gate_prov.identity,
+        reviewer_context_digest=gate_prov.context_digest,
+        backend=backend,
+        model=model,
+        k=trials,
+        practice_mode=practice_mode,
+        inputs_digest=_inputs_digest(wiki_limits, precedent_limits),
+    )
+
+    def full_key(cases_hash: str) -> BaselineKey:
+        return partial_key.model_copy(update={"cases_hash": cases_hash})
+
+    def lookup(cases_hash: str) -> ReusedBaseline | None:
+        if baselines is None:
+            return None
+        found = baselines.baseline_for(
+            candidate.id, full_key(cases_hash).digest, max_age=baseline_max_age, now=started_at
+        )
+        if found is None:
+            return None
+        return ReusedBaseline(
+            score=found.base_score,
+            notes=dict(found.base_notes),
+            trace=list(found.base_trace),
+            # The *original* measurement's time and gate, not this record's — see `ReusedBaseline`.
+            measured_at=found.baseline_taken_at,
+            from_gate=found.base_from_gate or found.id,
+        )
+
+    clock = time.perf_counter()
+    outcome = gate_skills(
+        base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
+        precedent_limits=precedent_limits, judge=judge, judge_policy=judge_policy,
+        on_base=on_base, on_candidate=on_candidate, cancel=cancel, reviewer=reviewer,
+        baseline_for=lookup,
+    )
+    duration = time.perf_counter() - clock
+
+    fraction = (sample or SamplePolicy()).holdout_fraction
+    pinned = pinned_partitions(union_cases(base, candidate))
+    candidate_hash = skill_hash(candidate)
+    borrowed = outcome.baseline
     return GateRecord(
         id=new_gate_id(candidate.id, candidate_hash, started_at),
         created_at=started_at,
@@ -737,13 +872,12 @@ def record_gate(
         reviewer_context_digest=gate_prov.context_digest,
         base_trace=outcome.base_trace,
         candidate_trace=outcome.candidate_trace,
-        judge_hash=judge_identity(
-            judge.system if judge else None,
-            escalate_below=judge_policy.escalate_below
-            if judge_policy is not None and judge_policy.enabled
-            else 0.0,
-            tier1_model=tier1_model,
-        ),
+        base_notes=outcome.base_notes,
+        candidate_notes=outcome.candidate_notes,
+        base_key=full_key(outcome.cases_hash).digest,
+        base_measured_at=borrowed.measured_at if borrowed else None,
+        base_from_gate=borrowed.from_gate if borrowed else "",
+        judge_hash=judge_hash,
         k=trials,
         practice_mode=practice_mode,
         duration_s=duration,

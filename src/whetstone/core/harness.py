@@ -78,10 +78,14 @@ def run_skill_recorded(
         _check_cancelled(cancel)
         progress.case_started(case.id)
         trials: list[list[Finding]] = []
+        notes: list[str] = []
         try:
             for trial_index in range(k):
                 _check_cancelled(cancel)
                 trials.append(reviewer.review(skill, case.change))
+                # Read immediately after the review that produced it: one reviewer instance serves
+                # every case and both sides of a gate, so this is only ever about the last pass.
+                notes.append(str(getattr(reviewer, "last_note", "") or ""))
                 progress.trial_done(case.id, trial_index)
         except RunCancelled:
             raise
@@ -95,7 +99,7 @@ def run_skill_recorded(
             return record
         # A cascading judge grounds its tier-2 calls in this case's own diff, so it is bound per
         # case; a plain judge passes through unchanged.
-        record = record_case(case, trials, judge_for_case(judge, case.change))
+        record = record_case(case, trials, judge_for_case(judge, case.change), notes)
         progress.case_done(case.id, record)
         return record
 

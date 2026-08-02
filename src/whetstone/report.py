@@ -13,6 +13,7 @@ from html import escape
 
 from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
 from whetstone.domain.score import SkillScore
+from whetstone.explain import Explanation, explain_run, format_summary
 
 _OUTCOME_LABEL = {"tp": "TP", "fn": "FN", "fp": "FP", "tn": "TN"}
 _OUTCOME_TITLE = {
@@ -96,6 +97,17 @@ details details { background: var(--bg); }
 .verdict.yes { color: var(--good); }
 .verdict.no { color: var(--bad); }
 .none { color: var(--muted); font-style: italic; }
+.summary {
+  border: 1px solid var(--line); border-left: 4px solid var(--good); background: var(--panel);
+  border-radius: 6px; padding: .9rem 1.1rem; margin: 1.25rem 0;
+}
+.summary.failed { border-left-color: var(--bad); }
+.summary .headline { margin: 0; font-weight: 600; }
+.summary ul { margin: .6rem 0 0; padding-left: 1.2rem; }
+.summary .reasons li { margin: .25rem 0; white-space: pre-wrap; }
+.summary .caveats li { margin: .25rem 0; color: var(--muted); }
+.summary .k { margin: .9rem 0 0; font-size: .8rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--muted); }
 footer {
   color: var(--muted); font-size: .8rem; margin-top: 2.5rem;
   border-top: 1px solid var(--line); padding-top: .75rem;
@@ -117,6 +129,7 @@ def render_run_html(record: RunRecord) -> str:
         f"<p class='sub'>Run <code>{escape(record.id)}</code> · "
         f"{escape(record.created_at.strftime('%Y-%m-%d %H:%M:%S %Z').strip())}</p>",
         _metrics_html(score),
+        _summary_html(explain_run(record)),
         _facts_html(record),
         "<h2>Cases</h2>",
     ]
@@ -180,6 +193,9 @@ def render_run_text(record: RunRecord) -> str:
             continue
         flag = "  ⚠ flaky" if case.flaky else ""
         lines.append(f"    [{tag}] {case.case_id:<32} {metric}{flag}")
+    # Last rather than first: the table above is the evidence, and a reader who disagrees with the
+    # reading needs to have seen it before the conclusion, not after.
+    lines += ["", *(f"  {line}" for line in format_summary(explain_run(record)).split("\n"))]
     return "\n".join(lines)
 
 
@@ -190,6 +206,26 @@ def _practice_badge(record: RunRecord) -> str:
     if not record.practice_mode:
         return ""
     return " <span class='badge practice'>practice mode — no model was called</span>"
+
+
+def _summary_html(summary: Explanation) -> str:
+    """The verdict in prose, directly under the numbers it is a reading of.
+
+    Reasons and caveats are two lists rather than one, marked differently, because the difference is
+    the point: the first is what to go and fix, the second is how much to believe any of it.
+    """
+    parts = [
+        f"<section class='summary {escape(summary.verdict)}'>",
+        f"<p class='headline'>{escape(summary.headline)}</p>",
+    ]
+    if summary.reasons:
+        items = "".join(f"<li>{escape(r)}</li>" for r in summary.reasons)
+        parts.append(f"<ul class='reasons'>{items}</ul>")
+    if summary.caveats:
+        items = "".join(f"<li>{escape(c)}</li>" for c in summary.caveats)
+        parts.append(f"<p class='k'>Read with these in mind</p><ul class='caveats'>{items}</ul>")
+    parts.append("</section>")
+    return "".join(parts)
 
 
 def _metrics_html(score: SkillScore) -> str:

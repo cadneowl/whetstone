@@ -62,6 +62,31 @@ def test_detail_exposes_the_unjudged_and_unmatched_distinction(
     assert len(trial["findings"]) == 2
 
 
+def test_summary_says_a_clean_run_is_clean(client: TestClient, store: RunStore) -> None:
+    store.save(make_record())
+    body = client.get("/api/runs/run-1/summary").json()
+    assert body["verdict"] == "passed"
+    assert "caught 1 of 1" in body["headline"]
+    assert body["reasons"] == []
+
+
+def test_summary_explains_a_miss_rather_than_only_counting_it(
+    client: TestClient, store: RunStore
+) -> None:
+    """The judge saw the finding and rejected it — which is a different problem from silence, and
+    the reason it gave is the thing worth reading."""
+    store.save(make_record(recall_tp=False))
+    body = client.get("/api/runs/run-1/summary").json()
+    assert body["verdict"] == "failed"
+    reason = next(r for r in body["reasons"] if r.startswith("unwrap-in-handler"))
+    assert "the judge ruled" in reason
+    assert "a different concern" in reason
+
+
+def test_summary_of_a_missing_run_is_a_404(client: TestClient) -> None:
+    assert client.get("/api/runs/nope/summary").status_code == 404
+
+
 def test_detail_carries_run_provenance(client: TestClient, store: RunStore) -> None:
     store.save(make_record())
     body = client.get("/api/runs/run-1").json()

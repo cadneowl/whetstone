@@ -11,6 +11,7 @@ of history only. Git remains canonical for skills.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Literal
 
@@ -18,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from whetstone.caseindex import index_digest
 from whetstone.domain.enums import Severity
-from whetstone.domain.eval_model import EvalKind, Must
+from whetstone.domain.eval_model import EvalCase, EvalKind, Must
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region
 from whetstone.domain.score import Confusion, HoldoutReport, SkillScore
@@ -168,6 +169,11 @@ class TrialRecord(BaseModel):
     index: int
     findings: list[Finding] = []
     outcomes: list[ExpectationOutcome] = []
+    # What the instrument has to say about this pass, when it has something — today, that an agent
+    # exhausted its step budget and was made to answer. Empty is the normal case and means the
+    # reviewer answered under its own steam. Read this before reading an empty `findings` as a
+    # judgement: the two look identical in a score and mean opposite things.
+    note: str = ""
 
     @property
     def confusion(self) -> Confusion:
@@ -341,6 +347,26 @@ def skill_hash(skill: Skill) -> str:
         h.update(case.model_dump_json(exclude={"partition"}).encode("utf-8"))
     _feed_wiki(h, skill)
     _feed_index(h, skill)
+    return h.hexdigest()
+
+
+def case_set_hash(cases: Sequence[EvalCase]) -> str:
+    """Content identity for the exact set of cases a run scored.
+
+    `skill_hash` covers a skill's *own* cases, which is the wrong question for a gate: both sides
+    are scored over the **union** of the two case sets, so the population actually measured is not
+    named by either side's hash. Anything that wants to say "these two measurements were taken over
+    the same cases" — the baseline cache above all — needs this instead.
+
+    Order-independent and `partition`-blind, for the same reasons `skill_hash` is: the cases are
+    sorted before feeding, and which side of the holdout split a case is on governs who may learn
+    from it, not what gets measured.
+    """
+    h = hashlib.sha256()
+    h.update(b"whetstone/case-set/1\0")
+    for case in sorted(cases, key=lambda c: c.id):
+        h.update(b"\0case\0")
+        h.update(case.model_dump_json(exclude={"partition"}).encode("utf-8"))
     return h.hexdigest()
 
 

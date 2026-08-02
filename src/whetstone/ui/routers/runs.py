@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from whetstone.domain.eval_model import Expectation
 from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
+from whetstone.explain import Explanation, explain_run
 from whetstone.meta_eval.disputes import Dispute, DisputeStore, dispute_id
 from whetstone.report import render_run_html
 from whetstone.runs import CorruptRecord, RunSummary, stale_version_ids
@@ -45,6 +46,18 @@ def list_runs(
 @router.get("/{run_id}", response_model=RunRecord)
 def get_run(run_id: str, store: StoreDep) -> RunRecord:
     return _load(store, run_id)
+
+
+@router.get("/{run_id}/summary", response_model=Explanation)
+def get_run_summary(run_id: str, store: StoreDep) -> Explanation:
+    """Why this run came out where it did.
+
+    Its own endpoint rather than a field on the record: the record is the evidence and is stored on
+    disk, while this is a reading of it that will get better as Whetstone learns to say more. Baking
+    it into `RunRecord` would mean every improvement to the wording either rewrote history or left
+    old runs explaining themselves in an older vocabulary than new ones.
+    """
+    return explain_run(_load(store, run_id))
 
 
 @router.get("/{run_id}/report", response_class=HTMLResponse)

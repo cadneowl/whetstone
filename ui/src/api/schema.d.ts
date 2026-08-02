@@ -1099,6 +1099,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Run Summary
+         * @description Why this run came out where it did.
+         *
+         *     Its own endpoint rather than a field on the record: the record is the evidence and is stored on
+         *     disk, while this is a reading of it that will get better as Whetstone learns to say more. Baking
+         *     it into `RunRecord` would mean every improvement to the wording either rewrote history or left
+         *     old runs explaining themselves in an older vocabulary than new ones.
+         */
+        get: operations["get_run_summary_api_runs__run_id__summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills": {
         parameters: {
             query?: never;
@@ -2584,6 +2609,26 @@ export interface components {
             verdicts: components["schemas"]["JudgeVerdictRecord"][];
             where?: components["schemas"]["Region"] | null;
         };
+        /**
+         * Explanation
+         * @description What happened, why, and how much to trust it.
+         */
+        Explanation: {
+            /**
+             * Caveats
+             * @default []
+             */
+            caveats: string[];
+            /** Headline */
+            headline: string;
+            /**
+             * Reasons
+             * @default []
+             */
+            reasons: string[];
+            /** Verdict */
+            verdict: string;
+        };
         /** FileChange */
         FileChange: {
             /**
@@ -2705,9 +2750,25 @@ export interface components {
              * @default
              */
             backend: string;
+            /**
+             * Base From Gate
+             * @default
+             */
+            base_from_gate: string;
             /** Base Hash */
             base_hash: string;
             base_holdout?: components["schemas"]["HoldoutReport"] | null;
+            /**
+             * Base Key
+             * @default
+             */
+            base_key: string;
+            /** Base Measured At */
+            base_measured_at?: string | null;
+            /** Base Notes */
+            base_notes?: {
+                [key: string]: string;
+            };
             /**
              * Base Ref
              * @default
@@ -2719,6 +2780,10 @@ export interface components {
             /** Candidate Hash */
             candidate_hash: string;
             candidate_holdout?: components["schemas"]["HoldoutReport"] | null;
+            /** Candidate Notes */
+            candidate_notes?: {
+                [key: string]: string;
+            };
             /**
              * Candidate Ref
              * @default
@@ -2813,6 +2878,11 @@ export interface components {
          *     arbitrary folders — the thing it needs a verdict about is always what is in the working tree.
          */
         GateRequest: {
+            /**
+             * Fresh Baseline
+             * @default false
+             */
+            fresh_baseline: boolean;
             /**
              * Model
              * @default
@@ -5687,6 +5757,11 @@ export interface components {
             /** Index */
             index: number;
             /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
              * Outcomes
              * @default []
              */
@@ -7703,6 +7778,37 @@ export interface operations {
                 };
                 content: {
                     "text/html": string;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_run_summary_api_runs__run_id__summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Explanation"];
                 };
             };
             /** @description Validation Error */

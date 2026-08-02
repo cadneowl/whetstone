@@ -287,7 +287,26 @@ max_llm_calls_per_run = 2000     # preflight warning when the estimate exceeds i
 [gate]
 recall_tol = 0.0
 fp_tol = 0.0
+reuse_baseline = true            # reuse a base-side score an earlier gate already measured
+baseline_max_age_hours = 24.0    # how old that measurement may be; 0 also disables reuse
 ```
+
+**On reusing the baseline.** A gate scores the last commit and the working tree. The last commit
+does not change between two gates ten minutes apart, so measuring it twice costs double — once in
+spend, and once in variance, because a second sample of a nondeterministic reviewer can fail a gate
+on its own. Two real gates 6.5 minutes apart over byte-identical content disagreed on one case, and
+one of them blocked a change the other had passed.
+
+Reuse is offered only when every input that could move the number is identical: the base content,
+the case set actually drawn (the **union** of both sides, so a new candidate case forbids reuse),
+the judge, the reviewer identity and context, the backend and model, `k`, practice mode, and the
+wiki/precedent budgets. The one input that key cannot see is a provider changing the model behind a
+name, which is what `baseline_max_age_hours` is for. A record that borrowed a baseline says so —
+`base_from_gate` and `base_measured_at` — and both are carried forward through a chain of reuses,
+so ten gates reusing one measurement all age from the original.
+
+Force a fresh measurement for one run with `--fresh-baseline`, `{"fresh_baseline": true}` on the
+gate job, or the *re-measure the baseline* checkbox beside **Run the gate**.
 
 Pointing the console at a company skills repo is `[skills] repo = "../company-skills"`. `gitio`
 operates on whatever repo contains `skills.root`, so nothing else changes.

@@ -256,6 +256,65 @@ def test_a_gate_reports_the_delta_it_measured(
         assert isinstance(result[field], list), (field, result)
 
 
+def test_a_second_gate_reuses_the_first_gate_s_baseline(
+    client: TestClient, steps: Path, gates: GateStore, repo: Path
+) -> None:
+    """The last commit did not move between two gates, so measuring it twice buys nothing and
+    costs twice — once in spend, once in a second coin flip that can fail the gate on its own."""
+    _stage_guidance(client)
+    launched = client.post("/api/jobs/gate", json={"skill_id": "rust-errors"}).json()
+    first = _await(client, launched["id"], timeout=30)["result"]
+    assert first["baseline_reused"] is False
+
+    second = client.post("/api/jobs/gate", json={"skill_id": "rust-errors"}).json()
+    result = _await(client, second["id"], timeout=30)["result"]
+
+    assert result["baseline_reused"] is True
+    assert result["baseline_from_gate"] == first["gate_id"]
+
+
+def test_fresh_baseline_forces_the_measurement_to_be_taken_again(
+    client: TestClient, steps: Path, gates: GateStore, repo: Path
+) -> None:
+    """For the one input the key cannot see: a provider changing the model behind a name."""
+    _stage_guidance(client)
+    first = client.post("/api/jobs/gate", json={"skill_id": "rust-errors"}).json()
+    _await(client, first["id"], timeout=30)
+
+    again = client.post(
+        "/api/jobs/gate", json={"skill_id": "rust-errors", "fresh_baseline": True}
+    ).json()
+
+    assert _await(client, again["id"], timeout=30)["result"]["baseline_reused"] is False
+
+
+def test_a_finished_gate_carries_a_readable_summary(
+    client: TestClient, steps: Path, gates: GateStore, repo: Path
+) -> None:
+    """The numbers above are the evidence; this is the reading of them, and it is what the operator
+    actually sees when the job finishes."""
+    _stage_guidance(client)
+    launched = client.post("/api/jobs/gate", json={"skill_id": "rust-errors"}).json()
+
+    summary = _await(client, launched["id"], timeout=30)["result"]["summary"]
+
+    assert summary["verdict"] in ("passed", "failed")
+    assert summary["headline"]
+    assert isinstance(summary["reasons"], list)
+    assert isinstance(summary["caveats"], list)
+
+
+def test_a_finished_score_run_says_why_it_landed_where_it_did(
+    client: TestClient, steps: Path, store: RunStore, repo: Path
+) -> None:
+    launched = client.post("/api/jobs/eval", json={"skill_id": "rust-errors"}).json()
+
+    summary = _await(client, launched["id"], timeout=30)["result"]["summary"]
+
+    assert "caught" in summary["headline"]
+    assert summary["verdict"] in ("passed", "failed")
+
+
 # --- improve ---------------------------------------------------------------------
 
 

@@ -86,6 +86,17 @@ class RunsConfig(BaseModel):
 class GateDefaults(BaseModel):
     recall_tol: float = 0.0
     fp_tol: float = 0.0
+    # Reuse a base-side score an earlier gate already measured, when every input that could change
+    # it is identical (`gates.BaselineKey`). On by default: the baseline is the last commit, so a
+    # second gate ten minutes later is paying twice to measure content that did not move — and with
+    # a nondeterministic reviewer the second sample is a second coin flip that can fail a gate on
+    # its own. Set false to always re-measure; a single run can force it with `--fresh-baseline`.
+    reuse_baseline: bool = True
+    # How old a reusable baseline may be. The key covers everything Whetstone can see; what it
+    # cannot see is a provider changing the model behind a name, which is the whole reason there is
+    # a clock here at all. A day is short enough that such a swap cannot hide behind stale evidence
+    # for long, and long enough to cover a working session. 0 disables reuse outright.
+    baseline_max_age_hours: float = 24.0
     # Where gate records are stored. Unlike runs (C2, pure telemetry) these are *load-bearing*: the
     # console will not publish a guidance change without a passing record for that exact content,
     # so deleting this directory costs the right to propose until the gates are re-run.

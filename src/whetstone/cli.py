@@ -6,7 +6,7 @@ import os
 import shutil
 import webbrowser
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -40,6 +40,7 @@ from whetstone.domain.review import MergeRequestRef
 from whetstone.domain.run import RunEvent, RunRecord, guidance_hash
 from whetstone.domain.skill import Skill
 from whetstone.envfile import ENV_FILE_VAR, load_env_file
+from whetstone.explain import explain_gate, explain_run, format_summary
 from whetstone.gates import GateStore
 from whetstone.gitio import GitError
 from whetstone.improve import (
@@ -512,6 +513,7 @@ def eval_run(
         typer.echo(record.score.model_dump_json(indent=2))
         return
     typer.echo(format_score(record.score))
+    typer.echo(format_summary(explain_run(record)))
     if record.holdout:
         typer.echo(format_holdout(record.holdout))
     if save:
@@ -849,6 +851,13 @@ def eval_gate(
     save: Annotated[
         bool, typer.Option("--save/--no-save", help="Store a gate record (the console reads these)")
     ] = True,
+    fresh_baseline: Annotated[
+        bool,
+        typer.Option(
+            "--fresh-baseline",
+            help="Re-measure the baseline even if an identical one is already on record",
+        ),
+    ] = False,
     gates_dir: GatesDirOpt = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate both sides; no model call")
@@ -875,6 +884,12 @@ def eval_gate(
         # Not read from `[gate]`: which cases a change must fix is a property of that change, not a
         # repo-wide default that would silently apply to every later gate run.
         targeted_cases=list(targeted or []),
+    )
+    store = _gates(gates_dir)
+    reuse = (
+        defaults.reuse_baseline
+        and not fresh_baseline
+        and defaults.baseline_max_age_hours > 0
     )
     base_dir, base_tmp = _resolve_skill_dir(base, base_ref, repo, skill_path)
     cand_dir, cand_tmp = _resolve_skill_dir(candidate, candidate_ref, repo, skill_path)
@@ -939,13 +954,23 @@ def eval_gate(
             judge=load_judge(load_config().judge_dir),
             judge_policy=policy.judge if policy else None,
             reviewer=choice.build(client),
+            # Only when records are being kept: reusing a baseline out of a store this run will not
+            # write back to would take the saving and leave nothing for the next run to reuse.
+            baselines=store if (save and reuse) else None,
+            baseline_max_age=timedelta(hours=defaults.baseline_max_age_hours),
         )
         if save:
-            _gates(gates_dir).save(record)
+            store.save(record)
         if json_out:
             typer.echo(record.model_dump_json(indent=2))
         else:
             typer.echo(format_gate(record.result))
+            if record.baseline_reused:
+                typer.echo(
+                    f"  baseline reused from {record.base_from_gate} "
+                    f"(measured {record.baseline_taken_at.isoformat(timespec='seconds')})"
+                )
+            typer.echo(format_summary(explain_gate(record)))
             traces = format_traces(record)
             if traces:
                 typer.echo(traces)
