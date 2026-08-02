@@ -44,10 +44,14 @@ check describe something that actually happened.
 1. **Inbox → Rust error handling → Draft a change.** It states why first: *failing 3 of 4 scored
    cases: expect-in-handler, swallowed-error, unwrap-in-test*. The draft lands in the editor and the
    right-hand pane shows a **diff**, not a preview — three rules added, nothing removed.
-2. **Stage on branch**, then **Run the gate**. Both sides are scored; recall goes 0.33 → 1.00 and
-   fp_rate 1.00 → 0.00. `Propose MR` turns on, and the proposal card names the gate that cleared it.
-3. **Propose MR** pushes to `workspace/origin.git` — a bare repo standing in for GitLab. It reports
-   honestly that it cannot open the merge request itself.
+2. **Apply to disk**, then **Run the gate**. Applying writes straight into the workspace's `skills/`
+   folder — the console never branches or commits. Both sides are scored; recall goes 0.33 → 1.00 and
+   fp_rate 1.00 → 0.00. The **Gate status** badge flips from *not gated* to **gate-proven**, naming
+   the gate that cleared it and the cases it fixed.
+3. Edit one more character and watch the badge fall back to *not gated*. The permission is bound to
+   the content hash, not to the version number — which is the whole of C6 in one keystroke.
+   Publishing from here is your own `git`: see
+   [Publishing, and what the gate guarantees](../../README.md#publishing-and-what-the-gate-guarantees).
 4. **Inbox → SQL migration safety → Run evals.** It scores 0.5: it catches the un-`CONCURRENTLY`
    index and misses the `NOT NULL` column with no default. Now it has a baseline, and the inbox
    switches it to *Draft a change*.

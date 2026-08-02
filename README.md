@@ -2,8 +2,10 @@
 
 A system for keeping a company's agent **skills** (code review, arch review, secret-scanning, …)
 continuously sharp. It learns from GitLab merge-request reviews, from the defects your tracker says
-shipped anyway, and from the codebase — and, critically, **never ships a skill change it can't prove
-is a net improvement**, because every change passes an evaluated regression gate first.
+shipped anyway, and from the codebase — and, critically, **never calls a skill change shippable it
+can't prove is a net improvement**, because a stored regression-gate verdict, bound to the exact
+content, is what it checks before saying so. Publishing itself stays in your own git; see
+[what the gate guarantees](#publishing-and-what-the-gate-guarantees).
 
 > **The thesis:** most AI review tools are stateless — they review each PR fresh. Whetstone treats
 > the *skill* as the durable, versioned knowledge artifact and turns human review signals into
@@ -30,21 +32,22 @@ self-measuring judge, and a console that puts every skill's state of affairs on 
 6. [Eval cases](#eval-cases)
 7. [Scoring model](#scoring-model)
 8. [The regression gate](#the-regression-gate)
-9. [The skill pipeline](docs/skill-pipeline.md) — `evaluate/`, `improve/`, `update/`, and the wiki
-10. [CLI reference](#cli-reference)
-11. [Run records & reports](#run-records--reports)
-12. [The console (`whetstone ui`)](#the-console-whetstone-ui)
-13. [Configuration (`whetstone.toml`)](#configuration-whetstonetoml)
-14. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
-15. [Providers & the plugin architecture](#providers--the-plugin-architecture)
-16. [The corpus builder](#the-corpus-builder)
-17. [The LLM layer](#the-llm-layer)
-18. [Reviewers & judges](#reviewers--judges)
-19. [Meta-evaluation (validating the judge and the drafter)](#meta-evaluation-validating-the-judge-and-the-drafter)
-20. [Testing](#testing)
-21. [Extending Whetstone](#extending-whetstone)
-22. [Environment variables](#environment-variables)
-23. [Repository layout](#repository-layout)
+9. [Publishing, and what the gate guarantees](#publishing-and-what-the-gate-guarantees)
+10. [The skill pipeline](docs/skill-pipeline.md) — `evaluate/`, `improve/`, `update/`, and the wiki
+11. [CLI reference](#cli-reference)
+12. [Run records & reports](#run-records--reports)
+13. [The console (`whetstone ui`)](#the-console-whetstone-ui)
+14. [Configuration (`whetstone.toml`)](#configuration-whetstonetoml)
+15. [Programmatic API (`whetstone.service`)](#programmatic-api-whetstoneservice)
+16. [Providers & the plugin architecture](#providers--the-plugin-architecture)
+17. [The corpus builder](#the-corpus-builder)
+18. [The LLM layer](#the-llm-layer)
+19. [Reviewers & judges](#reviewers--judges)
+20. [Meta-evaluation (validating the judge and the drafter)](#meta-evaluation-validating-the-judge-and-the-drafter)
+21. [Testing](#testing)
+22. [Extending Whetstone](#extending-whetstone)
+23. [Environment variables](#environment-variables)
+24. [Repository layout](#repository-layout)
 
 ---
 
@@ -96,20 +99,21 @@ being precise about which parts are automatic and which are a person's judgement
         │
         │  ── a person edits the rules, in the console's guidance editor ──
         ▼
-  skills/<id>/SKILL.md on whetstone/skill/<id>
+  skills/<id>/SKILL.md on disk           ← the console writes in place; git stays yours
         │  eval gate --targeted <case>    (measures whether the edit is an improvement)
         ▼
   a stored gate record, keyed to that exact content
-        │  Propose MR                     (refused unless a passing gate covers it)
+        │  the console says "gate-proven"  (or names what is missing, and refuses to say it)
         ▼
-  merge request
+  you commit and push it yourself
 ```
 
 **Nothing here writes guidance blind.** The corpus builder proposes test data, the *improve* step
 drafts a guidance change from a run's clustered failures, and the gate rules on whether that rewrite
-was an improvement — but a human reads every draft before it is staged, and the console refuses to
-publish one no passing gate covers. The drafter is an assistant inside the loop, not an autopilot
-around it: its output enters at the same place a person's edit does and faces the same gate.
+was an improvement — but a human reads every draft before it is written, and the console will not
+call a change gate-proven without a passing gate over that exact content. The drafter is an
+assistant inside the loop, not an autopilot around it: its output enters at the same place a
+person's edit does and faces the same gate.
 
 ---
 
@@ -120,7 +124,24 @@ job. Whetstone's answer is a loop that continuously *replaces its own exam* from
 four layers of machinery that keep the loop honest. The whole system is below; the rest of this
 section is a guided tour of it.
 
-![The anti-rot loop: a six-stage improvement cycle wrapped by four layers — measurement integrity, corpus hygiene, representativeness, and capability — with an operating cadence beneath.](docs/assets/anti-rot-loop.png)
+The loop runs in the middle; each layer exists to keep one stage of it honest.
+
+```mermaid
+flowchart LR
+    S1["① Production signal"] --> S2["② Mine and triage"] --> S3["③ Eval run"]
+    S3 --> S4["④ Improve"] --> S5["⑤ Gate"] --> S6["⑥ Publish"]
+    S6 -. "new misses and false positives<br/>become new cases" .-> S1
+
+    L1["Layer 1 — Measurement integrity<br/>versioned judge · identity on every run<br/>confidence cascade · human rulings · accuracy ratchet"]
+    L2["Layer 2 — Corpus hygiene<br/>holdout split · case tiers<br/>saturation probe · dedup at the promotion door"]
+    L3["Layer 3 — Representativeness<br/>drift metric · synthetic cases"]
+    L4["Layer 4 — Capability<br/>case-RAG at review time · judge distillation"]
+
+    L1 -- "makes ③ and ⑤ mean anything" --> S3
+    L2 -- "keeps the exam lean" --> S2
+    L3 -- "keeps the exam like production" --> S2
+    L4 -- "raises the ceiling" --> S4
+```
 
 > **Rot enters at three points — and they are not equal.** The instrument miscounts, the test set
 > drifts from reality, or the guidance bloats. **Fix the instrument first:** every score, gate, and
@@ -147,7 +168,7 @@ flowchart LR
     E("③ Eval Run<br/>the reviewer, scored against the case corpus")
     I("④ Improve<br/>clustered failures → a drafted guidance change")
     G("⑤ Gate<br/>no regressions, and targeted cases must pass")
-    S("⑥ Propose and Ship<br/>merged guidance")
+    S("⑥ Publish<br/>merged guidance, in your own git")
 
     P --> M --> E --> I --> G --> S
     S -. "new misses and false positives<br/>become new cases" .-> P
@@ -160,7 +181,7 @@ flowchart LR
 | ③ Eval Run | the reviewer scored against the corpus | `service.record_eval`, **Skill → header → Run evals** |
 | ④ Improve | clustered failures → a drafted guidance change | `improve/` step, **Skill → Improve** (or Edit → Draft a change) |
 | ⑤ Gate | no regressions; targeted cases must pass | `service.record_gate`, **Skill → Improve / Edit → Run the gate** |
-| ⑥ Propose and Ship | the merged guidance | *Propose MR*, refused without a passing gate (C6) |
+| ⑥ Publish | the merged guidance | your own `git` — the console vouches for it only with a passing gate (C6) |
 
 ### Layer 1 — Measurement integrity (fix the instrument first)
 
@@ -190,7 +211,19 @@ flowchart LR
 The cascade — the third step above, zoomed in — is where the judge spends effort only on the calls
 it is unsure about:
 
-![The confidence cascade: a tier-1 pairwise verdict is kept when confident; a low-confidence verdict escalates to a tier-2 judge grounded in the case's own diff, unless there is no hunk to ground in.](docs/assets/judge-cascade.png)
+```mermaid
+flowchart TB
+    F["Finding + Expectation"] --> T1["Tier 1 — pairwise judge"]
+    T1 --> C{"confidence at or above<br/>escalate_below?"}
+    C -- "yes" --> K["Keep the verdict"]
+    C -- "no — escalate<br/>an unsure yes or an unsure no" --> H{"is there a diff hunk<br/>for this file?"}
+    H -- "no" --> K1["Keep the tier-1 verdict<br/>no ungrounded repeat"]
+    H -- "yes" --> T2["Tier 2 — grounded judge<br/>re-judge against the case's own hunks"]
+    T2 --> V["final verdict is tier 2<br/>the tier-1 prior is recorded beside it"]
+```
+
+Grounding is paid for only on the contested calls, so the judge gets sharper without multiplying the
+largest cost line.
 
 ### Layer 2 — Corpus hygiene (keep the exam lean and live)
 
@@ -239,7 +272,24 @@ The full design, phase by phase, is in [`ANTI_ROT_PLAN.md`](ANTI_ROT_PLAN.md).
 
 ## Architecture
 
-![Whetstone's plugin boundary: ui and cli depend on service, service and core and reviewer and judge all depend inward on the domain model, and providers (gitlab, jira, fake) implement capability Protocols — the core never imports GitLab.](docs/assets/architecture-plugin-boundary.png)
+```mermaid
+flowchart TB
+    UI["ui — the console"] --> SVC["service — the operable API"]
+    CLI["cli"] --> SVC
+    SVC --> DOM
+
+    CORE["core — the harness<br/>loader · matching · scoring · gate"] --> DOM
+    REV["reviewer<br/>LLMReviewer · PatternReviewer · agent"] --> DOM
+    JDG["judge<br/>LLMJudge · cascade · deterministic"] --> DOM
+    LLM["llm<br/>factory · Anthropic · OpenAI-compatible · embedding"] --> DOM
+
+    DOM["domain — the canonical model<br/>change · finding · eval_model · skill · score · run<br/>imports no provider code"]
+    DOM -. "depends only on" .-> P["capability Protocols<br/>providers/base.py"]
+    PROV["providers<br/>gitlab · jira · fake<br/>normalize their world into domain at the edges"] -- "implement" --> P
+```
+
+The core never imports GitLab. One contract-conformance suite runs against every provider, so adding
+GitHub is a new adapter rather than a core change.
 
 ```
 src/whetstone/
@@ -498,7 +548,29 @@ score.recall, score.fp_rate, score.precision, score.f_beta(), score.recall_stdev
 
 ## The regression gate
 
-![The regression gate: one deterministic stratified sample drawn from the union of cases is scored on both the base and the candidate through the same reviewer-judge-confusion pipeline; gate() compares the two and a PASS produces a GateRecord keyed on skill_hash — the evidence C6 requires before Propose MR.](docs/assets/regression-gate.png)
+```mermaid
+flowchart TB
+    U["Union of both sides' eval cases"] --> SAMPLE["Deterministic stratified sample<br/>drawn ONCE"]
+    SAMPLE --> B["BASE — the current version"]
+    SAMPLE --> C["CANDIDATE — the change"]
+
+    B --> BR["LLM reviewer → findings"]
+    BR --> BJ["LLM judge → semantic match?"]
+    BJ --> BS["per-case confusion → SkillScore<br/>recall · fp_rate · F2"]
+
+    C --> CR["LLM reviewer → findings"]
+    CR --> CJ["LLM judge → semantic match?"]
+    CJ --> CS["per-case confusion → SkillScore<br/>recall · fp_rate · F2"]
+
+    BS --> G{"gate base vs candidate<br/>recall must not drop<br/>fp_rate must not rise<br/>targeted cases must pass"}
+    CS --> G
+    G -- "FAIL" --> X["no pass is recorded;<br/>the reasons say which guard broke"]
+    G -- "PASS" --> REC["GateRecord — keyed on skill_hash"]
+    REC --> OK["the console calls the change gate-proven,<br/>naming this gate and what it fixed.<br/>You commit and push it."]
+```
+
+Identical inputs on both sides mean a score difference is attributable to the guidance change, not to
+which cases got drawn.
 
 `gate(old_score, new_score, cfg)` in `core/gate.py` compares a baseline skill version against a
 candidate. It **PASSes only if all guards hold**:
@@ -559,11 +631,25 @@ change must fix is a property of that change, not a repo-wide default.
 Every gate is stored under `.whetstone/gates/` as a `GateRecord` carrying the **content hash of the
 candidate skill as committed** (`domain/run.skill_hash` — the guidance body *and its companion
 pages*, the wiki, the case index, and every eval case: everything that can change what the skill
-scores). That record is what makes "never ship a skill change you can't prove is an improvement" a property
-of the system rather than a habit: the console will not publish a guidance branch unless a passing
-record exists for the exact content it would push (see [ADR-008](docs/decisions.md)).
+scores). That record is what turns "never ship a skill change you can't prove is an improvement" from
+a habit into something checkable: the console will not call a change **gate-proven** unless a passing
+record exists for the exact content on disk (see [ADR-008](docs/decisions.md), and
+[Publishing](#publishing-and-what-the-gate-guarantees) for what that does and does not stop).
 
-![skill_hash and C6: a guidance edit, wiki refresh, index rebuild, or case retier all change skill_hash, which retracts the prior gate evidence and forces a re-gate before publishing — while rebuilds that change nothing do not retract.](docs/assets/skill-hash-c6.png)
+```mermaid
+flowchart LR
+    E1["Guidance edit<br/>SKILL.md or a companion page"] --> H
+    E2["Wiki refresh"] --> H
+    E3["Case index rebuild"] --> H
+    E4["Case retier or edit<br/>active ↔ archive"] --> H
+
+    H["skill_hash =<br/>guidance + wiki digest<br/>+ index digest + eval cases"]
+    H -- "any content change is a new hash" --> R["The prior gate record no longer<br/>matches — its evidence is retracted"]
+    R --> RG["Re-gate the new content"]
+    RG --> P["A pass keyed to what is on disk:<br/>the console calls it gate-proven.<br/>Publishing is your own git."]
+
+    N["Rebuilds that change nothing do not retract:<br/>the index digest ignores timestamps and vectors,<br/>the wiki digest ignores its source block"] -. "no new hash" .- H
+```
 
 Four consequences worth knowing:
 
@@ -580,7 +666,7 @@ Four consequences worth knowing:
   not the model that reviews real code. The console stamps the flag on everything it records while
   `[ui] practice_mode` is on (see [Console configuration](#console-configuration)).
 - **`.whetstone/gates/` is load-bearing.** Unlike `.whetstone/runs/`, which is telemetry and safe to
-  delete, removing gate records costs the right to propose until they are re-run.
+  delete, removing gate records means nothing is gate-proven until they are re-run.
 
 Gate records are **local and gitignored**, which matches the console's local-first design (D2) but
 has a consequence worth knowing: a colleague's passing gate does not unlock *your* console. For a
@@ -589,6 +675,42 @@ a job on the skills repo blocks the merge regardless of who ran what locally.
 
 The hash is taken from the skills handed to `record_gate`, not from the ones `gate_skills` scores —
 those carry the union of both sides' cases, a set that exists in neither commit.
+
+---
+
+## Publishing, and what the gate guarantees
+
+**Whetstone does not publish anything.** The console writes skills straight into your working tree
+and stops: no branch, no commit, no push, and no endpoint that does any of those. `git` stays
+yours, and someone editing the same files in an editor sees console changes immediately.
+
+So it is worth being exact about what C6 buys you.
+
+**What it does guarantee.** A gate verdict is stored (`.whetstone/gates/`) keyed on the `skill_hash`
+of the content it scored. `GateStore.verdict_for(skill_id, hash)` is the sole authority, and the
+console will not describe a change as **gate-proven** unless a passing gate covers the *exact* bytes
+on disk. Edit one character and the badge goes back to **not gated**, because a permission attached
+to a branch or a version number would be a standing licence — gate once, then keep editing. The
+verdict also refuses to overstate itself: a gate that regressed nothing but fixed nothing reads as
+*"proves the change breaks nothing, not that it improves anything"*, because a passing gate and a
+demonstrated improvement are not the same claim.
+
+**What it does not guarantee.** Nothing stops you committing an ungated change. `can_propose` is
+computed and displayed — on the Edit tab's badge, in the inbox row — and no code path refuses an
+action on it, because there is no publishing action to refuse. It is advice you are free to ignore,
+and the source says so in as many words (`ui/routers/authoring.py`: *"C6, now advisory — there is no
+push for it to bar"*).
+
+**Where to put real enforcement.** In CI, on the skills repo. `whetstone eval gate` exits non-zero
+on a regression, so a job on the merge request is the seam that can actually block — and it is the
+right seam for a team anyway, since gate records are local and gitignored, and a colleague's passing
+gate does not unlock your console. The console's job is to tell you the truth about what you have;
+the merge request is where a policy gets teeth.
+
+This is a deliberate narrowing. An earlier design had the console own a `whetstone/skill/<id>`
+branch and refuse to push it unproven; that made the console a partial owner of your git for the
+sake of a check CI does better. The CLI still stages on that branch for the flows that want it
+(`skills improve --apply`, `skills update`, `skills index`) — the console does not.
 
 ---
 
@@ -819,7 +941,7 @@ hash, so an assumed one means "not stale" is an assumption rather than a fact.
 
 ⚠️ This turns the console into something other systems POST to. It has **no authentication of its
 own** and binds loopback by default; a CI job posting to it needs the authenticating reverse proxy
-described in [Identity](#identity--authorization), not `--insecure-bind`.
+described in [Security and deployment](#security-and-deployment), not `--insecure-bind`.
 
 ### `whetstone corpus pull`
 
@@ -1075,10 +1197,11 @@ not summarize repositories; it invokes yours, checks the output is indexable, an
 | `--working-tree` | off | Write into the checked-out folder instead of staging on the branch. |
 | `--no-write` | off | Report what changed without writing it. |
 
-The generated wiki is staged on `whetstone/skill/<id>`, the same branch guidance edits go to, so the
-console and the CLI never disagree about this skill's content. The wiki is part of `skill_hash`, so
-a refresh that changes any page **retracts the skill's passing gate** and it must be re-gated before
-it can be proposed.
+The generated wiki is staged on `whetstone/skill/<id>` — a CLI convenience, so a refresh can be
+reviewed as a diff before it reaches the working tree; pass `--working-tree` to write it in place
+instead, which is where the console does all its writing. Either way the wiki is part of
+`skill_hash`, so a refresh that changes any page **retracts the skill's passing gate**, and it must
+be re-gated before anything will call it shippable.
 
 Full reference: **[docs/skill-pipeline.md](docs/skill-pipeline.md)**.
 
@@ -1158,9 +1281,28 @@ whetstone report --run 20260725T040013Z-...-349fb3 --out report.html
 
 Run records are one of several plain-JSON stores, each a directory owning one concern — runs, gates,
 drift, cadence, meta-eval, candidates, reviews, and the skills registry itself. The console and CLI
-read all of them and write through staging branches:
+read all of them; the console writes them in place, and only the CLI's `--apply` flows write through
+a staging branch:
 
-![Where Whetstone keeps its evidence: eight on-disk stores — RunStore, GateStore, DriftStore, CadenceStore, meta-eval, CandidateStore, ReviewStore, and the skills registry — all read by the console and CLI, which write through staging branches.](docs/assets/store-map.png)
+```mermaid
+flowchart LR
+    RUNS[".whetstone/runs — RunStore<br/>JSON records + a rebuildable SQLite index<br/>eval and baseline runs"] <--> HUB
+    GATES[".whetstone/gates — GateStore<br/>keyed on skill_hash; the C6 evidence"] <--> HUB
+    DRIFT[".whetstone/drift — DriftStore<br/>corpus-vs-stream reports"] <--> HUB
+    CAD[".whetstone/cadence — CadenceStore<br/>when each routine pass was last done"] <--> HUB
+
+    HUB["The console and the CLI"]
+
+    HUB <--> META[".whetstone/meta_eval<br/>judge disputes and the rising bar"]
+    HUB <--> CAND["candidates/ — CandidateStore<br/>the triage queue"]
+    HUB <--> REVS[".whetstone/reviews — ReviewStore<br/>rulings on production findings"]
+    HUB <--> SKILLS["skills/ — the registry<br/>SKILL.md · meta.yaml · eval_cases<br/>promoted_cases · index · wiki"]
+
+    HUB -. "only skills improve --apply,<br/>skills update and skills index" .-> BR["a staging branch<br/>whetstone/skill/id — CLI only"]
+```
+
+Plain JSON files on disk, one directory per concern — deletable, diffable, each written atomically.
+The console reads and writes all of them **in place**; it creates no branch and no commit.
 
 `SkillScore` answers *what* a skill scored. A **run record** answers *why*: it keeps every finding
 the reviewer produced and every verdict the judge returned, so a failing case can be diagnosed long
@@ -1227,14 +1369,14 @@ a passing gate is worth more than starting a new one.
   [ Review 3 signals → ]
 ```
 
-The next action is one of, in priority order: **propose** (a passing gate is going unused),
-**gate** (something is staged and unproven), **triage** (new signal to rule on), **score** (never
-measured, or measured as different content), **improve** (failing cases we already know about), or
-nothing — said plainly rather than left to inference.
+The next action is one of, in priority order: **propose** — *"Ready to commit: a gate-proven change
+is on disk"* — then **gate** (a change is on disk and unproven), **triage** (new signal to rule on),
+**score** (never measured, or measured as different content), **improve** (failing cases we already
+know about), or nothing — said plainly rather than left to inference.
 
 It is a thin HTTP layer over `whetstone.service` plus a prebuilt single-page app. It holds no state
 of its own: skills are read from disk on every request, runs come from `.whetstone/runs/`, and every
-write it makes lands as a git commit on a branch.
+write it makes lands as a plain file in your working tree — never a commit, a branch or a push.
 
 **Contents:** [Watching for signal](#watching-for-signal) · [Prerequisites](#prerequisites) ·
 [Install](#install) · [Starting it](#starting-it) ·
@@ -1528,54 +1670,55 @@ a health surface that hid what it could not see would read as healthier than it 
 A markdown box per guidance file beside a live preview, with the eval cases that constrain the rule
 pinned underneath — a rewrite is only as trustworthy as what tests it, and a skill with two cases
 has a gate that will pass on almost anything. This is the hand-editing surface; the **Improve** tab
-(below) wraps the same stage → gate → propose steps into a guided, case-driven loop.
+(below) wraps the same score → sharpen → gate steps into a guided, case-driven loop.
 
-**Stage on branch** commits to `whetstone/skill/<id>` through git plumbing: the working tree is
-never touched, `main` is never written, and a `version` bump lands once per proposal rather than
-once per save. Everything in the frontmatter you did not edit — `triggers`, comments, quoting style
-— comes back exactly as you wrote it; only the keys that changed are rewritten, and the result is
-verified by loading it back before anything is committed.
+**Apply to disk** writes straight into `skills/<id>/` in your working tree — no branch, no commit,
+no push.
+Everything in the frontmatter you did not edit — `triggers`, comments, quoting style — comes back
+exactly as you wrote it; only the keys that changed are rewritten, and the result is verified by
+loading it back before it is written.
 
-Below the editor is the **Proposal** panel, which is C6 made visible:
+Below the editor is the **Gate status** panel, which is C6 made visible:
 
 ```
-Proposal   whetstone/skill/rust-errors   v3 · 1 commit ahead of main      [not gated]
+Gate status   v3 · on disk, vs last committed at main             [not gated]
 
   this guidance has never been gated — run one to see whether it is an improvement
 
-  Did that help? The gate scores base vs the branch over the same cases.
+  Did that help? The gate scores your last commit against what's on disk over the
+  same cases and reports the difference.
     [ Run the gate ]      or run it yourself ▸
 
-  [ Propose MR ]   ← disabled
+  The console never commits or pushes. When it's gate-proven, commit and push with
+  your own git.
 ```
 
-*Propose MR* stays disabled until a **passing gate exists for the exact staged content**. Edit one
-more character and the permission is gone again, because the evidence is bound to the content hash
-rather than to the branch. When it does unlock, the panel names the gate that cleared it and what it
-bought (`fixed unwrap-in-handler`).
+The badge reads **not gated** until a passing gate exists for the **exact on-disk content**. Edit
+one more character and it goes back, because the evidence is bound to the content hash rather than
+to a branch or a version number. When it reads **gate-proven**, the panel names the gate that
+cleared it and what it bought (`fixed unwrap-in-handler`).
 
 A pass is not withdrawn by a later failing run — an eval at `k=1` is noisy, and letting a re-run
 revoke a demonstrated result would make publishing hostage to variance. But the disagreement is
-never hidden: the badge reads **gated, with a caveat** and the later failure is quoted.
+never hidden: the badge reads **gate-proven, with a caveat** and the later failure is quoted.
 
-The same check runs server-side at `POST /api/git/propose`, so a branch edited outside the console
-faces it too. A concurrent write is a `409`, shown as what the branch holds versus what this tab
-expected, with an explicit *load what is on the branch* — nothing is overwritten silently.
+That verdict is **advisory** — nothing in the console can stop you committing an ungated change,
+because the console does not hold your git. See
+[Publishing, and what the gate guarantees](#publishing-and-what-the-gate-guarantees).
 
 #### Improve — the guided loop
 
-One surface that takes a skill from *"triage promoted cases it fails on"* to a gated, proposable
-change, so the loop is not spread across three screens. Top to bottom: the **branch** (with a
-`git worktree` command to check it out and hand-edit in your own editor); the **proposed cases**
-with checkboxes; then the numbered steps — **score the promoted batch**, **sharpen** (draft with
-the LLM from the selected cases, or by hand on the branch), **gate & propose**. The branch is the
-one artifact: hand edits and LLM drafts both commit to `whetstone/skill/<id>`, and the working tree
-is never touched.
+One surface that takes a skill from *"triage promoted cases it fails on"* to a gate-proven change,
+so the loop is not spread across three screens. Top to bottom: the **proposed cases** with
+checkboxes; then the numbered steps — **score the promoted batch**, **sharpen** (draft with the LLM
+from the selected cases, or by hand in your own editor), **run the gate**. The files on disk are the
+one artifact: hand edits and LLM drafts write to the same `skills/<id>/`, and the console never
+branches, commits or pushes.
 
 It is a hub, not a dead end. With no promoted batch — the state the inbox's *improve* and *propose*
-actions arrive in — the same loop runs against the merged cases the last run failed, and the branch,
-sharpen and gate/propose steps are still there. Holdout cases are scored but kept out of the gate's
-targeted set, since a change may not claim to fix a case the loop never saw.
+actions arrive in — the same loop runs against the merged cases the last run failed, and the sharpen
+and gate steps are still there. Holdout cases are scored but kept out of the gate's targeted set,
+since a change may not claim to fix a case the loop never saw.
 
 #### Case detail
 
@@ -1708,7 +1851,22 @@ letting you spend attention on a version nobody runs.
 
 ### Triage: the full workflow
 
-![Growing the corpus: production signal and synthetic generators feed the candidate queue; a person triages each one (rewrite, route, set region, dedup) and promotes it to promoted_cases/ on disk; the promoted cases are scored, then the ones that earn it are graduated into the eval corpus and gated.](docs/assets/triage-to-propose.png)
+```mermaid
+flowchart LR
+    PS["Production signal<br/>GitLab MRs + shipped defects<br/>corpus pull · the watch connector"] --> Q
+    SG["Synthetic generators<br/>counterfactual negatives<br/>+ mutation probes"] --> Q
+
+    Q["Candidate queue<br/>candidates/"] --> T["Triage — a person<br/>rewrite the semantic · route to a skill<br/>set region and kind · dedup at the door"]
+
+    T -- "Reject" --> RJ["a reasoned rejection,<br/>recorded against the candidate"]
+    T -- "Promote" --> PC["promoted_cases/<br/>written into your working tree"]
+
+    PC --> ER["Eval run — score the promoted set.<br/>They gate nothing yet."]
+    ER --> GR["Graduate the ones that earn it<br/>into eval_cases/"]
+    GR --> GT["Now they gate every change<br/>to this guidance. You commit them<br/>with your own git."]
+```
+
+A machine proposes every case; a person decides. Nothing enters the corpus un-triaged.
 
 `corpus pull` proposes candidate eval cases; a person decides which are real. This is the screen
 that exists because the CLI genuinely could not do the job.
@@ -1876,14 +2034,13 @@ Only some promoted cases graduate; the rest are left to keep testing against, or
 rejected. Graduating changes `skill_hash`, so C6 asks for a fresh passing gate before the changed
 corpus can be proposed — the same discipline every corpus change gets.
 
-**Publishing the two travel different roads, by design.** A *guidance* change is dangerous — it can
-make the reviewer worse — so it goes through the console's gated flow: staged on
-`whetstone/skill/<id>`, gated, then **Propose**d as a reviewed branch. *Cases* cannot make the
-reviewer worse (adding one only tests it harder — the C6 exemption), so they need no gate and no
-special flow: graduated `eval_cases/` are ordinary files in your skills repo that you commit and
-push with normal `git add` / `commit` / `push`. The console does not commit or push them for you,
-and the guidance **Propose** button carries only the guidance branch — not the cases sitting in your
-working tree.
+**Both are ordinary files you commit yourself — but they carry different obligations.** A *guidance*
+change is dangerous: it can make the reviewer worse, so C6 asks for a passing gate over that exact
+content before the console will call it shippable. *Cases* cannot make the reviewer worse (adding
+one only tests it harder — the C6 exemption), so they need no gate at all. Either way the console
+writes files into your working tree and stops there: graduated `eval_cases/` and edited guidance
+alike are committed and pushed with normal `git add` / `commit` / `push`, and it is on you to
+honour the gate verdict for the guidance half.
 
 #### What triage never does
 
@@ -1928,20 +2085,24 @@ guard is the server's, not the interface's.
 ### HTTP API
 
 Interactive docs at **`/docs`**; the schema at **`/openapi.json`**. Responses are the same pydantic
-models the CLI uses.
+models the CLI uses. The table below is the read-and-author surface; the job endpoints that *run*
+things are listed under [Running work from the console](#running-work-from-the-console), and
+`/openapi.json` is the complete list.
+
+There is deliberately **no publish endpoint**. The console writes files and never commits, branches
+or pushes — see [Publishing, and what the gate guarantees](#publishing-and-what-the-gate-guarantees).
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/config` | Capabilities, principal, read-only and practice flags, backends |
-| `GET` | `/api/git/status` | Branch, head, cleanliness, remote |
-| `POST` | `/api/git/propose` | Push a branch — **refused** if it changes guidance no passing gate covers |
+| `GET` | `/api/git/status` | Branch, head, cleanliness, remote — read-only, for display |
 | `GET` | `/api/skills` | Index rows, weakest first |
 | `GET` | `/api/skills/{id}` | Guidance, cases, runs, rules, untested rules |
 | `GET` | `/api/skills/{id}/cases/{case_id}` | Eval case, diff, history |
-| `GET` | `/api/skills/{id}/proposal` | What is staged, the diff, and whether it may be published |
+| `GET` | `/api/skills/{id}/proposal` | What is on disk, and whether a passing gate covers it (C6) |
 | `POST` | `/api/skills/{id}/guidance/preview` | Validate a guidance edit, write nothing |
-| `PUT` | `/api/skills/{id}/guidance` | Stage a `SKILL.md` edit on `whetstone/skill/{id}` |
-| `PUT` | `/api/skills/{id}/meta` | Stage a `meta.yaml` edit on the same branch |
+| `PUT` | `/api/skills/{id}/guidance` | Write a `SKILL.md` edit into the working tree |
+| `PUT` | `/api/skills/{id}/meta` | Write a `meta.yaml` edit into the working tree |
 | `GET` | `/api/runs` | Run history, `?skill_id=`, `?limit=` |
 | `GET` | `/api/runs/{id}` | Full record — findings and verdicts |
 | `GET` | `/api/runs/{id}/report` | Standalone HTML report |
@@ -2000,11 +2161,8 @@ See [`ui/README.md`](ui/README.md) for frontend conventions and the dependency-a
 | Skills index is empty | `[skills] root` points somewhere without skill folders. The start-up banner prints the resolved path. |
 | Triage says "No candidate directory" | Run `whetstone corpus pull --out candidates`, or point `[candidates] dir` at existing output. |
 | `⚠ version reused for different content` | Guidance changed without bumping `version` in `SKILL.md`. Bump it; comparison keys on content hash, not the number. |
-| Promote fails with `uncommitted changes in …` | Commit or stash your local edits to those files first. The console will not sweep them into its commit. |
-| Promote fails with a `409` | Another writer moved the branch. Reload and retry. |
-| `Propose` fails with `no git remote` | Nothing is lost; the branch exists locally. Add a remote or push by hand. |
-| `Propose` fails with `refusing to push` | The branch is protected or outside `[git] branch_prefix`. The console only publishes branches it created. |
-| Header shows a `•` next to the branch | The working tree is dirty. Informational. |
+| Header shows a `•` next to the branch | The working tree is dirty — which it will be, since the console writes there. Informational. |
+| Gate status says `not gated` after you just gated | The gate covers a content hash; any edit since retracts it. Re-run the gate on what is on disk now. |
 | `did not respond within 30s` | The console process died. Check the terminal running `whetstone ui`. |
 | Port already in use | `whetstone ui --port 9000` |
 
@@ -2017,7 +2175,7 @@ The console launches everything the CLI does. Nothing in the loop requires a ter
 | Where | Does |
 |---|---|
 | **Skill → header** | *Run evals* — scores the skill from any tab (working tree or promoted batch), with live progress and cancellation |
-| **Skill → Improve** | the loop, in one place: *Score the promoted batch*, *Improve from selected*, *Run the gate*, *Propose* |
+| **Skill → Improve** | the loop, in one place: *Score the promoted batch*, *Improve from selected*, *Run the gate* |
 | **Skill → Edit** | *Draft a change* into the editor, and *Run the gate* — the same steps on the raw multi-file editor |
 | **Skill → Health** | *Baseline probe*, *Drift probe*, *Build/rebuild case index*, *Generate synthetic cases* |
 | **Judge** | *Measure the judge* against the labeled corpus and ratchet the bar |
@@ -2614,6 +2772,11 @@ from whetstone.core.harness import run_skill
 score = run_skill(skill, LLMReviewer(client), LLMJudge(client), k=5)
 ```
 
+A skill can also bring **its own reviewer program** — one that reaches the live source tree while it
+reviews, with a per-skill `context:` bag the host resolves and forwards. How that works, what it
+costs, and why a gate over a custom reviewer warns unless its source is pinned:
+**[docs/design/agentic-reviewers.md](docs/design/agentic-reviewers.md)**.
+
 ---
 
 ## Meta-evaluation (validating the judge and the drafter)
@@ -2855,7 +3018,8 @@ whetstone/
 ## Where this is going
 
 **Measurement came first** — the `gate` function, callable from code, CLI, and HTTP, plus a stored
-verdict publishing is checked against, so the thesis is enforced rather than intended. Built on top
+verdict bound to the content it scored, so the thesis is checkable rather than merely intended.
+Built on top
 of it now is the whole [anti-rot loop](#keeping-skills-sharp-the-anti-rot-loop): corpus mining and
 triage, the improve step that drafts a guidance change from clustered failures, console orchestration
 of every run and gate, and the holdout / tier / saturation / drift / case-index / self-measuring-judge
@@ -2870,6 +3034,9 @@ What is still ahead:
 - **Judge distillation in production** — the tier-1 seam and the distillation exhaust exist; deploying
   a cheap local student judge that clears the accuracy ratchet is the remaining step.
 - **Control-plane API + fleet governance** — a `POST /sharpen` surface, an approval workflow, and
-  cross-repository rollout, so a fleet of skills is governed rather than a single checkout.
+  cross-repository rollout, so a fleet of skills is governed rather than a single checkout. This is
+  also where *enforced* publishing belongs: today the gate verdict is advisory and CI is the only
+  place that can actually block a merge (see
+  [Publishing](#publishing-and-what-the-gate-guarantees)).
 
-Nothing ships that the gate can't show is a net improvement.
+Nothing is called an improvement that the gate can't show is one.

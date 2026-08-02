@@ -1,5 +1,10 @@
 # Whetstone — Milestone 1: Eval / Backtest Harness (detailed plan)
 
+> **Historical planning document.** This is the plan M1 was built from, kept for its design
+> reasoning; it is not maintained against the code. The harness it describes shipped and is
+> documented in the [README](../README.md). Decisions still in force live in
+> [decisions.md](decisions.md).
+
 **Goal of M1:** Prove we can *measure whether a skill change is a net improvement*, grounded in real
 historical GitLab MRs — before we build anything that auto-edits skills. Everything downstream
 (distillation, proposal engine) plugs into the gate this milestone produces.

@@ -94,10 +94,10 @@ uv run whetstone ui
 ```
 
 - **Reviews** — the imported review, its two rulings, and the notes that justify them.
-- **Triage** — the two candidates those rulings minted, ready to promote onto a batch branch.
+- **Triage** — the two candidates those rulings minted, ready to promote into `promoted_cases/`.
 - **Skills → demo-rust-errors → Runs** — the baseline, with per-case drill-down.
-- **Skills → demo-rust-errors → Edit** — the guidance editor, and the gate verdict that decides
-  whether *Propose MR* is enabled.
+- **Skills → demo-rust-errors → Edit** — the guidance editor, and the **Gate status** panel that
+  says whether a passing gate covers what is on disk right now.
 
 ---
 
