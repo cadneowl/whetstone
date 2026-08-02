@@ -576,9 +576,9 @@ Four consequences worth knowing:
   cases so it counts. **Adding** cases is the one exemption, which is why triage batches push
   without a gate: a case the skill never had cannot make it worse at the ones it did.
 - **A practice-mode gate does not count.** `gates.py` refuses to treat a run flagged `practice_mode`
-  as publish evidence — a practice run's verdict is meant to be about deterministic doubles, not the
-  model that reviews real code. The guard is in place; the flag itself is reserved (see the note
-  under [Console configuration](#console-configuration)) and no current command sets it.
+  as publish evidence — a practice run's verdict is about the stand-in backend it was restricted to,
+  not the model that reviews real code. The console stamps the flag on everything it records while
+  `[ui] practice_mode` is on (see [Console configuration](#console-configuration)).
 - **`.whetstone/gates/` is load-bearing.** Unlike `.whetstone/runs/`, which is telemetry and safe to
   delete, removing gate records costs the right to propose until they are re-run.
 
@@ -1356,7 +1356,7 @@ Every setting resolves **CLI flag → environment variable → `whetstone.toml` 
 host = "127.0.0.1"
 port = 8787
 read_only = false
-practice_mode = false            # reserved; see the note below
+practice_mode = false            # on: refuse any backend that can bill; see the note below
 trust_proxy_headers = false      # must be true to accept identity headers
 
 [skills]
@@ -1383,10 +1383,19 @@ dir = ".whetstone/runs"          # where run records are read from
 Relative paths in `whetstone.toml` resolve against the file's own directory; paths from environment
 variables resolve against the current working directory, as environment variables conventionally do.
 
-> **`practice_mode` is declared but inert.** It is reported to the UI and shown as a badge, but no
-> CLI or console command sets it on a run yet, so today it changes only what the header displays. The
-> guards that *would* discount a practice run — the gate refusing it as evidence, the cadence clocks
-> and the distill digest holding it out — are already in place for when a command does set it.
+> **`practice_mode` is a spend guard, enforced server-side.** With it on, the console **refuses to
+> launch anything against a backend that can bill** — `billing_of(...) != "local"`, so a private
+> gateway Whetstone cannot classify counts as billed. Point `WHETSTONE_LLM` at a local backend
+> (`ollama`, or the stub in `examples/console-demo`) and every button works; point it at Anthropic
+> and each launch is refused with a 422 that names both ways out. Everything the console records in
+> this mode is stamped `practice_mode`, which is what makes the existing guards fire: the gate will
+> not accept it as publish evidence, and the cadence clocks, the sharpening ledger and the distill
+> digest all hold it out.
+>
+> It deliberately does **not** swap in `PatternReviewer`/`DeterministicJudge` behind your back. A
+> regex reviewer ignores the guidance entirely, so a score from one looks like a measurement and is
+> not — a worse failure than the one this replaces. Doubles are how `tests/golden/` and the console
+> demo work, and records from either are flagged the same way.
 
 **Pointing at a separate skills repo:**
 

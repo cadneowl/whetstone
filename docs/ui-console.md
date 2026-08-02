@@ -93,9 +93,18 @@ nothing but history. Gitignored.
 **C3 — Capture must not change scores.** Adding finding/verdict capture must leave every existing
 score bit-identical. `tests/golden/` pins exact scores and must pass unmodified.
 
-**C4 — Zero-cost mode is always available.** `PatternReviewer`, `DeterministicJudge`, and
-`FakeLLMClient` already exist. The console exposes them as **practice mode**, so the entire UI is
-explorable, demoable, and E2E-testable with no credentials and no spend.
+**C4 — Zero-cost mode is always available.** The whole UI is explorable, demoable and E2E-testable
+with no credentials and no spend, via a stand-in backend: `examples/console-demo` serves one over
+the OpenAI wire protocol and points `WHETSTONE_LLM` at it, and `PatternReviewer`/`DeterministicJudge`
+/`FakeLLMClient` cover the same ground in-process for the golden tests.
+
+**`practice_mode` is what makes that guarantee enforceable rather than a convention.** With it on
+the console refuses to launch against any backend that can bill — the check is `preflight.
+practice_refusal`, applied at the two seams a job can spend through (`_client` for LLM work,
+`_embedding_backend` for the drift probe and the index build) — and stamps `practice_mode` on
+everything it records, so nothing produced in the mode can become gate evidence. It does *not*
+substitute doubles for your configured backend: a regex reviewer ignores the guidance, so a score
+from one would look like a measurement without being one.
 
 **C5 — One process, no infrastructure.** `whetstone ui` starts a single Python process on
 `127.0.0.1`, serves prebuilt assets, opens a browser. No Node at runtime, no Redis, no Postgres, no
@@ -936,8 +945,8 @@ caused it while the person is still editing.
 - **Evidence is keyed on content, not on the branch.** A gate record stores the `skill_hash` of the
   skill *as committed*, and C6 matches on it. Typing one more character retracts the permission to
   publish. Keying on the branch instead would let a passing gate become a standing licence.
-- **A practice-mode gate is not evidence.** Practice mode swaps in the pattern reviewer and the
-  deterministic judge (C4), so its verdict is about a regex. Accepting it would let a demo mode
+- **A practice-mode gate is not evidence.** Practice mode (C4) only ever runs against a stand-in
+  backend on this machine, so its verdict is about the stand-in. Accepting it would let a demo mode
   wave the whole rule through.
 
 Editing `meta.yaml` is text-with-validation rather than a form: the provenance block is already

@@ -100,10 +100,10 @@ neither commit.
 cases — what determines a score. Owner, references and provenance cannot change what the reviewer
 does, so forcing a re-gate after an owner change would be ceremony that teaches nobody anything.
 
-**Why a practice-mode gate is not evidence.** Practice mode (C4) substitutes the pattern reviewer
-and the deterministic judge so the console is explorable with no spend and nothing to authenticate
-with. Its PASS is a statement about a regex. Accepting it would let a demo mode wave the whole rule
-through.
+**Why a practice-mode gate is not evidence.** Practice mode (C4) is how the console is explorable
+with no spend and nothing to authenticate with: it refuses any backend that is not on this machine,
+which in practice means a local model or an offline stub standing in for one. Its PASS is a
+statement about that stand-in. Accepting it would let a demo mode wave the whole rule through.
 
 **Why the check sits at the push and not only in the editor.** The console's *Open in editor* escape
 hatch hands a branch to whatever tools someone prefers, and the resulting commits arrive like any

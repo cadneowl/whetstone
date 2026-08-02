@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
   useConsoleConfig,
@@ -13,7 +13,9 @@ import {
   type ReviewRecord,
 } from '@/api/client'
 import { DiffView, type Overlay } from '@/components/diff/DiffView'
+import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, severityName, when } from '@/components/primitives'
+import { improveLink } from '@/components/reviews'
 
 /** A promoted eval case, as the card/panel remembers it after a successful promote. */
 type Committed = { caseId: string }
@@ -44,6 +46,14 @@ export function ReviewDetail() {
   const undo = useUndoFindingVerdict(reviewId)
   const makeCase = usePromoteFinding(reviewId)
 
+  // Every case this sitting has minted, findings and misses alike. Held on the page rather than in
+  // each card because the thing worth doing next is about all of them at once: adjudicating a
+  // review produces a *set* of cases, and sharpening against that set is one trip through the
+  // improve loop, not one per card.
+  const [minted, setMinted] = useState<string[]>([])
+  const mint = (caseId: string) =>
+    setMinted((current) => (current.includes(caseId) ? current : [...current, caseId]))
+
   const record = data?.record
   const overlays: Overlay[] = useMemo(() => {
     const finding = record?.findings[selected]
@@ -64,6 +74,14 @@ export function ReviewDetail() {
   const readOnly = Boolean(config?.read_only)
   const findings = record?.findings ?? []
 
+  // Each card's own "Make test case", registered by index so the keyboard can reach it.
+  //
+  // The alternative was re-implementing minting at page level, and the part worth keeping is not
+  // the happy path — it is the 422: a bare confirmation comes back asking for a description, and
+  // the card is where that prompt lives. Calling the card's handler means the key and the button
+  // are the same action, including when it fails.
+  const minters = useRef(new Map<number, () => void>())
+
   // Adjudicating a dozen findings is the same volume activity triage is, and had been mouse-only.
   useReviewKeys({
     enabled: !readOnly && findings.length > 0 && !rule.isPending && !undo.isPending,
@@ -73,6 +91,10 @@ export function ReviewDetail() {
     onUndo: () => {
       if (record?.verdicts.some((v) => v.finding_index === selected)) undo.mutate(selected)
     },
+    // `a`, as in triage — the same key for the same act of committing a case, on the two screens
+    // that both do it in volume. Without it the keyboard could rule a dozen findings and then had
+    // to hand back to the mouse for the step that actually feeds the corpus.
+    onMint: () => minters.current.get(selected)?.(),
   })
 
   if (isLoading) return <Loading />
@@ -83,23 +105,33 @@ export function ReviewDetail() {
 
   return (
     <div>
-      <Header record={record} stale={data.stale_skill} />
+      <Header record={record} stale={data.stale_skill} diff={data.diff} readOnly={readOnly} />
       <PrecedentStrip record={record} />
+      <MintedBar skillId={record.skill_id} caseIds={minted} />
 
       {record.findings.length === 0 ? (
-        <>
-          <Empty>
-            The skill found nothing here. That is a result too — but it is not evidence yet: nothing
-            on this screen can tell whether it stayed quiet correctly or missed something.
-          </Empty>
-          <MissedCasePanel
-            reviewId={reviewId}
-            skillId={record.skill_id}
-            files={changeFiles}
-            readOnly={readOnly}
-            defaultOpen
-          />
-        </>
+        /* The diff belongs on screen here as much as it does beside the findings — more, in fact.
+           This branch's only action is describing what the skill *should* have said at a file and
+           a line, and the form used to ask for both with the code nowhere in sight. */
+        <div className="grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)] 2xl:grid-cols-[32rem_minmax(0,1fr)]">
+          <div className="min-w-0 space-y-3">
+            <Empty>
+              The skill found nothing here. That is a result too — but it is not evidence yet:
+              nothing on this screen can tell whether it stayed quiet correctly or missed something.
+            </Empty>
+            <MissedCasePanel
+              reviewId={reviewId}
+              skillId={record.skill_id}
+              files={changeFiles}
+              readOnly={readOnly}
+              onMinted={mint}
+              defaultOpen
+            />
+          </div>
+          <div className="min-w-0">
+            <DiffView diff={data.diff} selection={null} overlays={[]} />
+          </div>
+        </div>
       ) : (
         <>
           <div className="grid gap-4 xl:h-[calc(100vh-17rem)] xl:min-h-[28rem] xl:grid-cols-[26rem_minmax(0,1fr)] xl:grid-rows-[minmax(0,1fr)] 2xl:grid-cols-[32rem_minmax(0,1fr)]">
@@ -118,12 +150,17 @@ export function ReviewDetail() {
                   onRule={(correct, note) => rule.mutate({ index: i, correct, note })}
                   onUndo={() => undo.mutate(i)}
                   onMakeCase={(semantic) => makeCase.mutateAsync({ index: i, semantic })}
+                  onMinted={mint}
+                  registerMint={(fn) => {
+                    if (fn) minters.current.set(i, fn)
+                    else minters.current.delete(i)
+                  }}
                 />
               ))}
               {(rule.error || undo.error) && <ErrorNote error={rule.error ?? undo.error} />}
               <p className="pt-1 text-[11px] leading-relaxed text-muted">
                 <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>c</kbd> correct · <kbd>f</kbd> false positive
-                · <kbd>u</kbd> undo
+                · <kbd>a</kbd> make the case · <kbd>u</kbd> undo
               </p>
             </div>
 
@@ -136,6 +173,7 @@ export function ReviewDetail() {
             skillId={record.skill_id}
             files={changeFiles}
             readOnly={readOnly}
+            onMinted={mint}
           />
         </>
       )}
@@ -143,19 +181,24 @@ export function ReviewDetail() {
   )
 }
 
-/** Keyboard adjudication. Mirrors triage's `j`/`k`, with `c`/`f` for the verdict and `u` to undo. */
+/**
+ * Keyboard adjudication. Mirrors triage's `j`/`k` and its `a` to commit a case, with `c`/`f` for
+ * the verdict and `u` to undo.
+ */
 function useReviewKeys({
   enabled,
   onNext,
   onPrev,
   onRule,
   onUndo,
+  onMint,
 }: {
   enabled: boolean
   onNext: () => void
   onPrev: () => void
   onRule: (correct: boolean) => void
   onUndo: () => void
+  onMint: () => void
 }) {
   useEffect(() => {
     if (!enabled) return
@@ -171,6 +214,7 @@ function useReviewKeys({
         c: () => onRule(true),
         f: () => onRule(false),
         u: onUndo,
+        a: onMint,
       }
       const action = actions[event.key]
       if (action) {
@@ -180,10 +224,51 @@ function useReviewKeys({
     }
     window.addEventListener('keydown', handle)
     return () => window.removeEventListener('keydown', handle)
-  }, [enabled, onNext, onPrev, onRule, onUndo])
+  }, [enabled, onNext, onPrev, onRule, onUndo, onMint])
 }
 
-function Header({ record, stale }: { record: ReviewRecord; stale: boolean }) {
+/**
+ * What the cases minted here are *for*.
+ *
+ * The step the console used to leave to the operator. A ruling wrote a case and said "score it on
+ * the skill page" — which is a tab strip, not a step: the promoted set is scored from Improve, and
+ * the case just made had to be found among everything else waiting there. This names the ids in
+ * the link, so the workspace opens with exactly this sitting's work ticked and nothing else.
+ */
+function MintedBar({ skillId, caseIds }: { skillId: string; caseIds: string[] }) {
+  if (caseIds.length === 0) return null
+  return (
+    <section className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-good/40 bg-good/5 px-3 py-2 text-sm">
+      <span className="text-good">
+        {caseIds.length} case{caseIds.length === 1 ? '' : 's'} minted from this review
+      </span>
+      {/* Not the ids. Cases minted from one review share its id as a prefix and differ in a
+          character, so listing them printed the same forty characters three times over and pushed
+          the button that matters to the edge — where a fourth case would have truncated it into
+          nonsense. Each card below already names its own case, next to the finding it came from,
+          which is the version of this that also says *which*. */}
+      <Link
+        to={improveLink(skillId, caseIds)}
+        className="ml-auto rounded-lg border border-good/50 px-3 py-1 font-medium text-good transition-colors hover:bg-good/10"
+      >
+        Sharpen {skillId} against {caseIds.length === 1 ? 'it' : 'them'} →
+      </Link>
+    </section>
+  )
+}
+
+function Header({
+  record,
+  stale,
+  diff,
+  readOnly,
+}: {
+  record: ReviewRecord
+  stale: boolean
+  diff: string
+  readOnly: boolean
+}) {
+  const navigate = useNavigate()
   return (
     <header className="mb-4">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
@@ -206,7 +291,12 @@ function Header({ record, stale }: { record: ReviewRecord; stale: boolean }) {
         <span className="ml-auto text-xs text-muted">{when(record.created_at)}</span>
       </div>
       <p className="mt-1 flex flex-wrap items-center gap-2 font-mono text-xs text-muted">
-        <Link to={`/skills/${encodeURIComponent(record.skill_id)}`} className="hover:text-accent">
+        {/* Back to this skill's own review queue, not its overview: the likeliest next move after
+            finishing one review is the next review of the same skill. */}
+        <Link
+          to={`/skills/${encodeURIComponent(record.skill_id)}?tab=reviews`}
+          className="hover:text-accent"
+        >
           {record.skill_id}
         </Link>
         <span>v{record.skill_version}</span>
@@ -238,11 +328,30 @@ function Header({ record, stale }: { record: ReviewRecord; stale: boolean }) {
         )}
       </p>
       {stale && (
-        <p className="mt-2 rounded-lg border border-warn/40 bg-warn/5 px-3 py-2 text-sm text-warn">
-          The guidance has been edited since this ran. These findings describe a reviewer that no
-          longer exists, so a ruling here teaches the corpus about a version nobody runs — re-run
-          the review before spending attention on it.
-        </p>
+        <div className="mt-2 rounded-lg border border-warn/40 bg-warn/5 px-3 py-2 text-sm">
+          <p className="text-warn">
+            The guidance has been edited since this ran. These findings describe a reviewer that no
+            longer exists, so a ruling here teaches the corpus about a version nobody runs — re-run
+            the review before spending attention on it.
+          </p>
+          {/* The banner used to name that action and offer no way to take it, which left the
+              operator to find the Reviews tab, open "Review a change" and paste the diff back in —
+              a diff this record is already holding. The same change, the guidance as it stands
+              now: a new record, and this one becomes history rather than a trap. */}
+          {!readOnly && diff && (
+            <div className="mt-2">
+              <LaunchButton
+                kind="review"
+                request={{ skill_id: record.skill_id, diff }}
+                label="Re-run it on the current guidance"
+                onDone={(job) => {
+                  const id = (job.result as { review_id?: string }).review_id
+                  if (id) navigate(`/reviews/${encodeURIComponent(id)}`)
+                }}
+              />
+            </div>
+          )}
+        </div>
       )}
     </header>
   )
@@ -290,6 +399,8 @@ function FindingCard({
   onRule,
   onUndo,
   onMakeCase,
+  onMinted,
+  registerMint,
 }: {
   finding: Finding
   index: number
@@ -302,6 +413,9 @@ function FindingCard({
   onRule: (correct: boolean, note: string) => void
   onUndo: () => void
   onMakeCase: (semantic?: string) => Promise<PromoteResponse>
+  onMinted: (caseId: string) => void
+  /** Publish this card's mint action to the page, so `a` reaches the selected one. */
+  registerMint: (fn: (() => void) | null) => void
 }) {
   const [note, setNote] = useState('')
   // Reopened on an already-ruled finding, so a typo in the note can be corrected. The note becomes
@@ -325,6 +439,7 @@ function FindingCard({
     try {
       const res = await onMakeCase(semantic)
       setCommitted({ caseId: res.prepared.case_id })
+      onMinted(res.prepared.case_id)
       setNeedsDescription(false)
     } catch (error) {
       const message = apiMessage(error)
@@ -338,6 +453,15 @@ function FindingCard({
       setMaking(false)
     }
   }
+
+  // Offered to the keyboard only while the button is: a card with no ruling has nothing to commit,
+  // and one already committed would mint a duplicate. Deregistered on unmount so a stale closure
+  // over a card that has gone cannot be called.
+  const canMint = Boolean(verdict) && !editing && !committed && !readOnly && !busy && !making
+  useEffect(() => {
+    registerMint(canMint ? () => void make(needsDescription ? description.trim() : undefined) : null)
+    return () => registerMint(null)
+  })
 
   return (
     <section
@@ -370,16 +494,19 @@ function FindingCard({
           {verdict.note && <p className="break-words italic">“{verdict.note}”</p>}
 
           {committed ? (
+            /* Just the case, and where it went. The instruction that used to follow this — score
+               it, sharpen against it, or wait and take them together — is the same sentence on
+               every ruled card, and the bar at the top of the page already carries it once, with
+               a button, for the whole sitting. */
             <p className="text-good">
               ✓ Promoted as{' '}
               <Link
-                to={`/skills/${encodeURIComponent(skillId)}`}
+                to={improveLink(skillId, [committed.caseId])}
                 className="font-mono underline decoration-dotted hover:text-accent"
                 onClick={(e) => e.stopPropagation()}
               >
                 {committed.caseId}
               </Link>
-              . Score it on the skill page, then graduate and gate it.
             </p>
           ) : (
             <>
@@ -543,12 +670,14 @@ function MissedCasePanel({
   skillId,
   files,
   readOnly,
+  onMinted,
   defaultOpen = false,
 }: {
   reviewId: string
   skillId: string
   files: string[]
   readOnly: boolean
+  onMinted: (caseId: string) => void
   defaultOpen?: boolean
 }) {
   const missed = usePromoteMissed(reviewId)
@@ -577,6 +706,7 @@ function MissedCasePanel({
         severity_min: severity || null,
       })
       setCommitted({ caseId: res.prepared.case_id })
+      onMinted(res.prepared.case_id)
       setSemantic('')
       setLineStart('')
       setLineEnd('')
@@ -623,7 +753,7 @@ function MissedCasePanel({
         <p className="mt-3 text-sm text-good">
           ✓ Promoted as{' '}
           <Link
-            to={`/skills/${encodeURIComponent(skillId)}`}
+            to={improveLink(skillId, [committed.caseId])}
             className="font-mono underline decoration-dotted hover:text-accent"
           >
             {committed.caseId}

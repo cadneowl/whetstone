@@ -980,6 +980,11 @@ class CaseSummary(BaseModel):
     tier: CaseTier = "active"
     path: str = ""  # the file the case is about; cases are narrowed to one
     expectations: int = 0
+    # The first expectation's own words. `expectations` says how many assertions a case makes;
+    # this says what the first one is, which is the field that tells two cases about the same file
+    # apart. See `PendingCase.semantic` — the improve workspace lists both kinds side by side and
+    # has to render them the same way.
+    semantic: str = ""
     provenance: Provenance = Provenance()
     last_recall: float | None = None
     last_fp_rate: float | None = None
@@ -1002,6 +1007,11 @@ class PendingCase(BaseModel):
     id: str
     kind: EvalKind
     path: str = ""
+    # The first expectation's own words — what this case actually asserts. Carried because the
+    # other fields do not distinguish one case from another: adjudicating a single review mints
+    # several cases from one file, and a list showing only kind, source and path renders them as
+    # identical rows. Which is exactly the list the "sharpen against these" link lands on.
+    semantic: str = ""
     # Where the case came from — a merge request, a Jira defect, a live review — so the improve
     # screen can show at a glance that the loop is fed by real signal, not just a cryptic id.
     provenance: Provenance = Provenance()
@@ -1130,6 +1140,16 @@ class SkillDetail(BaseModel):
     # drafter being incompetent rather than the corpus being self-contradictory. Surfaced, never
     # acted on: which case to keep is a judgement about the codebase.
     contradictions: list[Contradiction] = []
+    # Live reviews of this skill: how many, how many findings still want a verdict, and how many
+    # ran against guidance that has since changed. Carried on the payload the page already fetches
+    # rather than left to a second request, because the tab strip needs the numbers on every tab —
+    # and the obvious way to get them, listing the reviews, validates every record on disk (each
+    # with its whole diff) to arrive at three integers.
+    #
+    # `unruled_findings` excludes the stale ones on purpose: they are not work a ruling can finish.
+    reviews: int = 0
+    unruled_findings: int = 0
+    stale_reviews: int = 0
 
 
 class BaselineVerdict(BaseModel):
@@ -1478,6 +1498,7 @@ def _case_summary(case: EvalCase, latest: RunRecord | None) -> CaseSummary:
         tier=case.tier,
         path=case.change.files[0].path if case.change.files else "",
         expectations=len(case.expect),
+        semantic=case.expect[0].semantic if case.expect else "",
         provenance=case.provenance,
         last_recall=run.confusion.recall if run else None,
         last_fp_rate=run.confusion.fp_rate if run else None,

@@ -60,8 +60,15 @@ export function AppShell() {
                 read-only
               </Badge>
             )}
+            {/* What this badge used to say — "runs use deterministic doubles — no model, no
+                spend" — was false: nothing swapped in a double and every button called the real
+                backend. It now names the guard that exists: the server refuses to launch anything
+                against a backend that can bill. */}
             {config?.practice_mode && (
-              <Badge tone="warn" title="Runs use deterministic doubles — no model, no spend">
+              <Badge
+                tone="warn"
+                title="This console will only run against a backend that cannot bill, and nothing it records counts as gate evidence"
+              >
                 practice mode
               </Badge>
             )}

@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from whetstone.domain.change import CodeChange, FileChange, parse_hunk_added_lines
+from whetstone.domain.enums import Severity
 from whetstone.domain.finding import Finding
+from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import (
     CaseRun,
     ExpectationOutcome,
@@ -16,6 +19,7 @@ from whetstone.domain.run import (
     TrialRecord,
 )
 from whetstone.domain.score import CaseScore, Confusion, SkillScore
+from whetstone.reviews import ReviewRecord
 
 AT = datetime(2026, 7, 25, 9, 0, 0, tzinfo=UTC)
 
@@ -114,4 +118,73 @@ def make_record(
                 ),
             ],
         ),
+    )
+
+
+# The change a live review is about. Deliberately a different file from `make_record`'s eval case:
+# a review is the skill's output on code nobody has labelled, not a re-run of the corpus.
+REVIEWED_PATH = "src/handlers/refund.rs"
+REVIEW_HUNK = (
+    "@@ -12,3 +12,5 @@\n"
+    " fn refund(id: Id) -> Result<()> {\n"
+    "+    let row = db.get(id).unwrap();\n"
+    '+    log::info!("refunding");\n'
+    " }\n"
+)
+
+
+def make_review(
+    *,
+    review_id: str = "20260725T090000Z-rust-errors-aaaaaa",
+    skill_id: str = "rust-errors",
+    created_at: datetime = AT,
+    skill_hash: str = "",
+) -> ReviewRecord:
+    """A live review with two findings and nobody's verdict on either.
+
+    Shared rather than rebuilt per test file: the inbox, the skill payload and the review routes all
+    need "a review this skill has not been ruled on", and three copies of it would drift into three
+    slightly different notions of what that means.
+
+    `skill_hash` is blank by default, which is what an ordinary live review looks like to the
+    staleness check — unknown, so never reported expired. Pass a hash that does not match the skill
+    on disk to build one the guidance has moved past.
+    """
+    return ReviewRecord(
+        id=review_id,
+        created_at=created_at,
+        skill_id=skill_id,
+        skill_version=2,
+        skill_hash=skill_hash,
+        source="merge_request",
+        ref="acme/payments!1423",
+        url="https://gitlab.example/acme/payments/-/merge_requests/1423",
+        title="Refund handler cleanup",
+        change=CodeChange(
+            repo=RepoRef.parse("gitlab:acme/payments"),
+            files=[
+                FileChange(
+                    path=REVIEWED_PATH,
+                    added=parse_hunk_added_lines(REVIEW_HUNK),
+                    raw_diff=REVIEW_HUNK,
+                )
+            ],
+        ),
+        findings=[
+            Finding(
+                skill_id=skill_id,
+                rule_id="R1",
+                path=REVIEWED_PATH,
+                line=13,
+                severity=Severity.error,
+                message="unwrap on the DB result panics on a normal error path",
+            ),
+            Finding(
+                skill_id=skill_id,
+                path=REVIEWED_PATH,
+                line=14,
+                severity=Severity.info,
+                message="this log line is noisy",
+            ),
+        ],
     )

@@ -282,6 +282,14 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                   {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
                 </Badge>
                 <SourceBadge provenance={c.provenance} />
+                {/* What the case actually asserts, which is the only field that tells one from
+                    another. Adjudicating one review mints several cases from one file, so kind +
+                    source + path renders them as identical rows — and this list is exactly where
+                    the "sharpen against these" link lands. The id stays as the title, for the
+                    times you need to match a row against a gate's output. */}
+                <span className="min-w-0 flex-1 truncate" title={c.id}>
+                  {c.semantic || <span className="font-mono text-xs text-muted">{c.id}</span>}
+                </span>
                 <span className="font-mono text-xs text-muted">{c.path}</span>
                 {c.holdout && (
                   <Badge

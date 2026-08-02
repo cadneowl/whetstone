@@ -24,6 +24,7 @@ the API can show the same warning the CLI does, and it can be tested without a m
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -87,6 +88,79 @@ def billing_of(backend: Backend) -> Billing:
         return "billed"
     # A named preset we know bills, or a custom endpoint we know nothing about.
     return "unknown"
+
+
+def on_this_machine(base_url: str | None) -> bool:
+    """Whether an endpoint is served from the loopback interface.
+
+    Deliberately *not* folded into `billing_of`. A cost warning is shown to everyone, and a
+    loopback address is not proof of free: it is exactly the shape of a local proxy forwarding to
+    a paid API, and telling every such operator "no per-call charge" would be the guess this module
+    exists to refuse. Practice mode is the narrower, opted-into case — see `practice_refusal`.
+    """
+    if not base_url:
+        return False
+    try:
+        host = (urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return True
+    # 127.0.0.0/8 in full: a stub bound to 127.0.0.2 is no less local than one on 127.0.0.1.
+    return host.startswith("127.")
+
+
+def practice_refusal(backend: Backend) -> str:
+    """Why practice mode will not run against `backend` — empty when it is free to run.
+
+    Loopback endpoints pass whatever `billing_of` makes of them. Without that the mode refused the
+    thing it tells you to use: `examples/console-demo` serves a stub under the provider name
+    `demo-stub`, which is not one of the four `LOCAL_PRESETS`, so it classifies as `unknown` and
+    would have been turned away by its own advice. The claim the mode makes is therefore the one it
+    can actually check — *nothing leaves this machine* — and a loopback proxy that forwards to a
+    paid API is a fact only its operator knows.
+
+    See `practice_refusal_for`, which this is the `Backend`-shaped door to.
+
+    Practice mode is a promise about spend, and a promise nothing enforces is worse than no promise
+    at all: the console reported the setting and painted a badge reading "no model, no spend" while
+    every button went on calling a billed backend, so anyone who believed it paid for believing it.
+
+    So the rule is one an operator can check and the console can enforce: **in practice mode the
+    console runs only against a backend that cannot bill.** That is exactly `billing_of(...) ==
+    "local"`, and it treats `unknown` as billed for the reason in the module docstring — guessing
+    "free" about someone's private gateway is the guess that costs money.
+
+    Deliberately *not* "swap in deterministic doubles". A regex reviewer scores every skill the same
+    way whatever its guidance says, so a run against one produces numbers that look like
+    measurements and are not — which would be a worse lie than the one this replaces, not a fix for
+    it. Doubles are how the golden tests and `examples/console-demo` work, and a record from either
+    is flagged `practice_mode` so the gate, the cadence clocks, the sharpening ledger and the
+    distill digest all refuse it as evidence. This makes the console honour the same boundary.
+    """
+    return practice_refusal_for(backend.name, billing_of(backend), backend.base_url)
+
+
+def practice_refusal_for(backend_name: str, billing: Billing, base_url: str | None = None) -> str:
+    """The same refusal, from the three fields a `Plan` already carries.
+
+    Split out so the check can run *before* a job is queued — a launch has a plan in hand but has
+    not yet resolved a client — without the message being written twice and drifting into two
+    different accounts of what practice mode does.
+    """
+    if billing == "local" or on_this_machine(base_url):
+        return ""
+    why = (
+        f"{backend_name} bills per call"
+        if billing == "billed"
+        else f"Whetstone cannot tell whether {backend_name} bills, which counts as billed"
+    )
+    return (
+        f"practice mode is on and {why}, so nothing was run and nothing was charged. "
+        "Practice mode runs only against a backend on this machine — point WHETSTONE_LLM at a "
+        "local one (`ollama`, or the stub `examples/console-demo/serve.py` starts), or turn off "
+        "[ui] practice_mode to run against this backend for real."
+    )
 
 
 def plan_tasks(

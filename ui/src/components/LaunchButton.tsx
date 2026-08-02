@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   useCancelJob,
+  useConsoleConfig,
   useJob,
   useLaunchJob,
   useModelChoice,
@@ -57,6 +58,13 @@ export function LaunchButton({
   const launch = useLaunchJob(kind)
   const cancel = useCancelJob()
   const { data: job } = useJob(jobId)
+  // Every launch route is behind `Writable`, so on a read-only console the whole sequence — plan,
+  // confirm, launch — could only ever end in a 403. The button stays on the page rather than
+  // disappearing, because "this console cannot start work" is a fact worth reading; it is the
+  // silent offer of an action that cannot happen that had to go.
+  const { data: consoleConfig } = useConsoleConfig()
+  const locked = Boolean(consoleConfig?.read_only)
+  const practice = Boolean(consoleConfig?.practice_mode)
 
   // Fold a per-launch model choice into the request sent to both plan and launch, so the two never
   // disagree about which backend the confirmed run will use.
@@ -128,7 +136,7 @@ export function LaunchButton({
             the cost.
           </p>
         ) : shownPlan ? (
-          <PlanBanner plan={shownPlan} />
+          <PlanBanner plan={shownPlan} practice={practice} />
         ) : plan.isPending ? (
           <p className="text-sm text-muted">Checking what this will cost…</p>
         ) : null}
@@ -183,8 +191,14 @@ export function LaunchButton({
     <div>
       <button
         type="button"
-        disabled={disabled}
-        title={disabled ? disabledReason : undefined}
+        disabled={disabled || locked}
+        title={
+          locked
+            ? 'This console is read-only, so it cannot start anything that writes.'
+            : disabled
+              ? disabledReason
+              : undefined
+        }
         onClick={() => setArmed(true)}
         className="rounded-lg border border-line px-3 py-1.5 text-sm transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:border-line disabled:text-muted disabled:hover:text-muted"
       >
@@ -284,14 +298,50 @@ function LaunchModel({
   )
 }
 
-/** The cost banner, worded as the CLI words it. */
-function PlanBanner({ plan }: { plan: Plan }) {
+/**
+ * Whether an endpoint is served from this machine — the loopback allowance practice mode makes.
+ *
+ * Mirrors `preflight.on_this_machine`, and mirrors it *only* to warn early: the server decides,
+ * and it decides again on every launch, so this being wrong costs a misleading sentence rather
+ * than a bill. Exported so the rule is testable rather than eyeballed.
+ */
+export function onThisMachine(baseUrl: string | null | undefined): boolean {
+  if (!baseUrl) return false
+  try {
+    // `URL.hostname` keeps the brackets on an IPv6 literal (`[::1]`); Python's `urlsplit` does not.
+    // Strip them here so both sides compare the same string.
+    const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    return ['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(host) || host.startsWith('127.')
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The cost banner, worded as the CLI words it.
+ *
+ * `practice` is the one thing the plan itself cannot say. The server refuses a billing backend
+ * while practice mode is on — that guard is the authority and it holds whatever the browser
+ * believes — but a refusal only arriving after the confirm click reads as a bug. Both facts are
+ * already on this screen (the mode, and what the backend bills), so say it before the click.
+ */
+function PlanBanner({ plan, practice = false }: { plan: Plan; practice?: boolean }) {
+  const refused = practice && plan.billing !== 'local' && !onThisMachine(plan.base_url)
   return (
     <div className="space-y-2 text-sm">
-      <p className="text-warn">
-        This step will launch LLM interactions, which might involve cost based on your
-        configuration.
-      </p>
+      {refused ? (
+        <p className="text-bad">
+          Practice mode is on and this backend is not free, so this will be refused — nothing will
+          run and nothing will be charged. Point{' '}
+          <code className="font-mono">WHETSTONE_LLM</code> at a local backend, or turn off{' '}
+          <code className="font-mono">[ui] practice_mode</code>.
+        </p>
+      ) : (
+        <p className="text-warn">
+          This step will launch LLM interactions, which might involve cost based on your
+          configuration.
+        </p>
+      )}
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono text-xs">
         <dt className="text-muted">backend</dt>
         <dd>

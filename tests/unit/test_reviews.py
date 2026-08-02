@@ -173,3 +173,102 @@ def test_loading_an_unreadable_record_names_it(tmp_path: Path) -> None:
 def test_a_missing_record_is_distinct_from_a_corrupt_one(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         _store(tmp_path).load("20260701T120000Z-rust-errors-zzzzzz")
+
+
+# --- the cheap counts the inbox and the skill page read -------------------------
+
+
+def test_counts_reports_findings_and_the_reviews_they_sit_on(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.save(_record())
+    store.save(_record(at=AT + timedelta(hours=1)))
+    store.save(_record(skill_id="arch-review", at=AT + timedelta(hours=2)))
+
+    counts = store.counts()
+
+    assert counts["rust-errors"].reviews == 2
+    assert counts["rust-errors"].unruled_findings == 2
+    assert counts["rust-errors"].unruled_reviews == 2
+    assert counts["arch-review"].unruled_findings == 1
+
+
+def test_a_fully_ruled_review_still_counts_as_history_but_wants_nothing(tmp_path: Path) -> None:
+    """Two different questions: the tab says how much review history there is, the inbox says how
+    much of it is waiting on a human. A settled review is the first and not the second."""
+    store = _store(tmp_path)
+    store.save(_record().with_verdict(FindingVerdict(finding_index=0, correct=True, at=AT)))
+
+    counts = store.counts()["rust-errors"]
+
+    assert counts.reviews == 1
+    assert counts.unruled_findings == 0
+    assert counts.unruled_reviews == 0
+
+
+def test_counts_skips_a_record_it_cannot_read(tmp_path: Path) -> None:
+    """The home screen must not go blank because one file on disk is truncated."""
+    store = _store(tmp_path)
+    store.save(_record())
+    (store.root / "20260101T000000Z-rust-errors-bad.json").write_text("{ trunc", encoding="utf-8")
+    assert store.counts()["rust-errors"].unruled_findings == 1
+
+
+def test_counts_never_lets_one_record_subtract_from_another(tmp_path: Path) -> None:
+    """More verdicts than findings is unreachable through this module, but a hand-edited file must
+    not eat into another review's real backlog."""
+    store = _store(tmp_path)
+    store.save(_record())
+    (store.root / "20260101T000000Z-rust-errors-odd.json").write_text(
+        '{"skill_id": "rust-errors", "findings": [], "verdicts": [{"finding_index": 0}]}',
+        encoding="utf-8",
+    )
+    assert store.counts()["rust-errors"].unruled_findings == 1
+
+
+def test_counts_on_an_absent_directory_is_empty(tmp_path: Path) -> None:
+    assert _store(tmp_path).counts() == {}
+
+
+def test_a_review_the_guidance_moved_past_is_not_counted_as_work(tmp_path: Path) -> None:
+    """The whole reason `current` exists.
+
+    Its findings describe a reviewer that no longer runs, and the console already refuses to treat
+    a ruling on one as current — so counting them as pending sends an operator at a screen whose
+    own banner tells them to go away and re-run it. Counted apart, so the queue stays honest.
+    """
+    store = _store(tmp_path)
+    store.save(_record().model_copy(update={"skill_hash": "old"}))
+    store.save(
+        _record(at=AT + timedelta(hours=1)).model_copy(update={"skill_hash": "current"})
+    )
+
+    counts = store.counts({"rust-errors": "current"})["rust-errors"]
+
+    assert counts.reviews == 2
+    assert counts.unruled_findings == 1
+    assert counts.unruled_reviews == 1
+    assert counts.stale_reviews == 1
+
+
+def test_counts_without_a_registry_calls_nothing_stale(tmp_path: Path) -> None:
+    """A caller with nothing to compare against must not guess. Omitting `current` counts every
+    record as live, which is what "I do not know which guidance is on disk" honestly says."""
+    store = _store(tmp_path)
+    store.save(_record().model_copy(update={"skill_hash": "old"}))
+
+    counts = store.counts()["rust-errors"]
+
+    assert counts.stale_reviews == 0
+    assert counts.unruled_findings == 1
+
+
+def test_a_skill_missing_from_the_registry_is_not_reported_stale(tmp_path: Path) -> None:
+    """Same rule as `_is_stale`: absent is not the same as changed. A review whose skill was
+    deleted still holds a real label, and calling it expired would be a claim nothing supports."""
+    store = _store(tmp_path)
+    store.save(_record(skill_id="deleted").model_copy(update={"skill_hash": "whatever"}))
+
+    counts = store.counts({"rust-errors": "current"})["deleted"]
+
+    assert counts.stale_reviews == 0
+    assert counts.unruled_findings == 1

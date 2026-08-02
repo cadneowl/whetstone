@@ -66,6 +66,8 @@ from whetstone.preflight import (
     plan_calls,
     plan_eval,
     plan_tasks,
+    practice_refusal,
+    practice_refusal_for,
 )
 from whetstone.providers.base import ConnectorError
 from whetstone.reviewer.factory import ReviewerChoice, reviewer_for, step_agent
@@ -307,6 +309,11 @@ def launch_eval(
                 trials=trials,
                 backend=backend.name,
                 model=backend.model,
+                # Stamped so the guards that already exist finally fire. Until this, a console in
+                # practice mode wrote records indistinguishable from real ones — so a gate run
+                # against the offline stub counted as publish evidence, which is the same setting
+                # lying a second way.
+                practice_mode=config.ui.practice_mode,
                 # Recorded so the run says which content it scored. `skill_hash` already proves
                 # *that* two runs differ; this says where the scored version came from.
                 git_ref=ref,
@@ -333,7 +340,7 @@ def launch_eval(
             "summary": explain_run(record).model_dump(),
         }
 
-    return _launch(jobs, "eval", skill.id, work, plan)
+    return _launch(jobs, "eval", skill.id, work, plan, config=config)
 
 
 # --- gate ------------------------------------------------------------------------
@@ -466,6 +473,9 @@ def launch_gate(
                 candidate_ref=candidate_ref,
                 backend=backend.name,
                 model=backend.model,
+                # `gates.py` already refuses a practice gate as publish evidence — it just never
+                # saw one from the console, because nothing set the flag.
+                practice_mode=config.ui.practice_mode,
                 sample=_sample(spec, request.sample),
                 wiki_limits=spec.inputs.wiki if spec else None,
                 precedent_limits=spec.inputs.precedents if spec else None,
@@ -526,7 +536,7 @@ def launch_gate(
             "summary": explain_gate(record).model_dump(),
         }
 
-    return _launch(jobs, "gate", candidate.id, work, plan)
+    return _launch(jobs, "gate", candidate.id, work, plan, config=config)
 
 
 # --- improve ---------------------------------------------------------------------
@@ -805,7 +815,7 @@ def launch_improve(
             "shown": len(result.digest.clusters),
         }
 
-    return _launch(jobs, "improve", skill.id, work, plan)
+    return _launch(jobs, "improve", skill.id, work, plan, config=config)
 
 
 class PromptVariable(BaseModel):
@@ -1168,6 +1178,7 @@ def launch_task_eval(
                 verifier,
                 backend=backend.name,
                 model=backend.model,
+                practice_mode=config.ui.practice_mode,
                 executor_identity=choice.identity,
                 llm_calls=getattr(executor, "llm_calls", 0),
                 on_case=on_case,
@@ -1190,7 +1201,7 @@ def launch_task_eval(
             "workspaces": record.workspaces,
         }
 
-    return _launch(jobs, "task-eval", skill.id, work, plan)
+    return _launch(jobs, "task-eval", skill.id, work, plan, config=config)
 
 
 @router.post("/task-gate/plan", response_model=Plan)
@@ -1265,6 +1276,7 @@ def launch_task_gate(
                 candidate_ref="working tree",
                 backend=backend.name,
                 model=backend.model,
+                practice_mode=config.ui.practice_mode,
                 executor_identity=choice.identity,
                 on_base=side("base"),
                 on_candidate=side("cand"),
@@ -1287,7 +1299,7 @@ def launch_task_gate(
             "llm_calls": record.llm_calls,
         }
 
-    return _launch(jobs, "task-gate", skill.id, work, plan)
+    return _launch(jobs, "task-gate", skill.id, work, plan, config=config)
 
 
 class StageProposalRequest(BaseModel):
@@ -1413,6 +1425,7 @@ def launch_review(
                 title=title,
                 backend=backend.name,
                 model=backend.model,
+                practice_mode=config.ui.practice_mode,
                 reviewer=choice.build(client),
             )
         reviews.save(record)
@@ -1437,7 +1450,7 @@ def launch_review(
             "llm_calls": record.llm_calls,
         }
 
-    return _launch(jobs, "review", skill.id, work, plan)
+    return _launch(jobs, "review", skill.id, work, plan, config=config)
 
 
 class JudgeEvalRequest(BaseModel):
@@ -1538,7 +1551,7 @@ def launch_judge_eval(
             "llm_calls": report.total,
         }
 
-    return _launch(jobs, "judge-eval", "judge", work, plan)
+    return _launch(jobs, "judge-eval", "judge", work, plan, config=config)
 
 
 class BaselineRequest(BaseModel):
@@ -1638,6 +1651,7 @@ def launch_baseline(
                 client,
                 backend=backend.name,
                 model=backend.model,
+                practice_mode=config.ui.practice_mode,
                 on_event=on_event,
                 cancel=handle.cancel_event,
                 judge=load_judge(config.judge_dir),
@@ -1660,7 +1674,7 @@ def launch_baseline(
             "llm_calls": record.llm_calls,
         }
 
-    return _launch(jobs, "baseline", skill.id, work, plan)
+    return _launch(jobs, "baseline", skill.id, work, plan, config=config)
 
 
 class DriftRequest(BaseModel):
@@ -1746,7 +1760,7 @@ def launch_drift(
             "uncovered": [mr.ref for mr in report.uncovered],
         }
 
-    return _launch(jobs, "drift", skill.id, work, plan)
+    return _launch(jobs, "drift", skill.id, work, plan, config=config)
 
 
 def _embedding_backend(
@@ -1780,6 +1794,10 @@ def _embedding_backend(
             f"provider {backend.name!r} has no embeddings endpoint — use a local model instead, "
             "e.g. ollama with nomic-embed-text"
         )
+    # The second seam. Embedding jobs — the drift probe and the index build — never touch `_client`,
+    # and an embeddings endpoint bills like any other. A guard that covered only the LLM path would
+    # have left practice mode spending money on two of the console's buttons.
+    _refuse_in_practice(config, backend)
     return provider, backend
 
 
@@ -1910,7 +1928,7 @@ def launch_synthesize(
             "skipped": [{"case_id": s.case_id, "reason": s.reason} for s in skipped],
         }
 
-    return _launch(jobs, "synthesize", skill.id, work, plan)
+    return _launch(jobs, "synthesize", skill.id, work, plan, config=config)
 
 
 class IndexRequest(BaseModel):
@@ -2002,7 +2020,7 @@ def launch_index(
             "paths": ", ".join(paths),
         }
 
-    return _launch(jobs, "index", skill.id, work, plan)
+    return _launch(jobs, "index", skill.id, work, plan, config=config)
 
 
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:
@@ -2256,8 +2274,28 @@ def _waiting(handle: JobHandle, label: str) -> Iterator[None]:
 
 
 def _launch(
-    jobs: JobStore, kind: Any, skill_id: str, work: Any, plan: Plan | None
+    jobs: JobStore,
+    kind: Any,
+    skill_id: str,
+    work: Any,
+    plan: Plan | None,
+    *,
+    config: Config | None = None,
 ) -> Job:
+    """Start a job, refusing at the door anything practice mode will not pay for.
+
+    The refusal belongs here rather than only at the client seam because of *when*, not whether:
+    `work` runs on a background thread, so a guard inside it turns "this console does not spend"
+    into a job that starts, fails, and leaves a red record — which reads as a bug rather than as
+    the setting doing its job. Every launch already builds a `Plan` and passes it through here, and
+    a plan knows what its backend bills, so this is the one place that can say no before anything
+    is queued. The seams inside `_client`/`_embedding_backend` stay as the backstop: they are what
+    catches a future launch path that forgets to come through here with a config.
+    """
+    if config is not None and config.ui.practice_mode and plan is not None:
+        refusal = practice_refusal_for(plan.backend, plan.billing, plan.base_url)
+        if refusal:
+            raise Unprocessable(refusal)
     try:
         return jobs.launch(kind, skill_id, work, plan=plan)
     except JobBusy as exc:
@@ -2559,6 +2597,20 @@ def _pick(provider: str, model: str, base: ModelSelection) -> ModelSelection:
     return ModelSelection(provider=provider, model=backend.model, base_url=backend.base_url or "")
 
 
+def _refuse_in_practice(config: Config, backend: Backend) -> None:
+    """Stop a launch that would spend while practice mode claims it will not.
+
+    A 422 rather than a silent downgrade to a fake: an operator who asked for a score and got one
+    produced by a stand-in would have a number they cannot tell from a real one. Refusing says what
+    happened, costs nothing, and names both ways out.
+    """
+    if not config.ui.practice_mode:
+        return
+    refusal = practice_refusal(backend)
+    if refusal:
+        raise Unprocessable(refusal)
+
+
 def _backend(selection: ModelSelection, spec: StepSpec | None) -> Backend:
     # The console's live model choice layered over the step's own default — not a raw per-request
     # value: the browser picks a provider whose host is fixed, never a base URL of its own.
@@ -2578,6 +2630,10 @@ def _client(
     on_retry: Callable[[str], None] | None = None,
 ) -> Any:
     provider, model, base_url = selection.layer(spec)
+    # The single seam every LLM job passes through, which is why the practice-mode guard lives here
+    # rather than in each of the nine launch paths: a guard added per-caller is one a tenth caller
+    # forgets, and this one exists precisely because a promise about spend went unenforced.
+    _refuse_in_practice(config, _backend(selection, spec))
     try:
         client = build_llm_client(
             provider,

@@ -14,6 +14,7 @@ something new:
 
     propose  a passing gate is sitting there unused — this is free value
     gate     a change is staged and unproven; it cannot ship until measured
+    review   the skill's own findings on a live change are waiting for a verdict
     triage   new signal arrived that nobody has ruled on
     score    the skill has never been measured, or was measured as different content
     improve  it is failing cases we already know about
@@ -35,8 +36,8 @@ from pydantic import BaseModel, Field
 from whetstone.drift import DRIFT_ALARM
 
 ActionKind = Literal[
-    "propose", "gate", "triage", "score", "improve", "drift", "curate", "cadence", "task",
-    "nothing",
+    "propose", "gate", "review", "triage", "score", "improve", "drift", "curate", "cadence",
+    "task", "nothing",
 ]
 
 
@@ -85,6 +86,17 @@ class Attention(BaseModel):
     name: str = ""
     new_signals: int = 0
     signals: list[Signal] = Field(default_factory=list)
+    # Findings on this skill's live reviews still awaiting a verdict, and the reviews they sit on.
+    # Carried even when a higher-ranked action wins the row: an unruled review is the one piece of
+    # evidence here that expires, and a row that only mentioned it when it happened to be today's
+    # headline would hide it behind every staged change.
+    unruled_findings: int = 0
+    unruled_reviews: int = 0
+    # Reviews that already expired — the guidance moved after they ran, so their findings describe
+    # a reviewer nobody runs. Deliberately not folded into the two counts above and deliberately
+    # not an action of its own: it is not work a ruling can finish, it is a re-run, and the row
+    # says so rather than either inflating the queue or dropping the fact silently.
+    stale_reviews: int = 0
     failing_cases: int = 0
     total_cases: int = 0
     recall: float | None = None
@@ -139,21 +151,27 @@ class Inbox(BaseModel):
 _RANK: dict[ActionKind, int] = {
     "propose": 0,
     "gate": 1,
-    "triage": 2,
-    "score": 3,
-    "improve": 4,
+    # Above triage, though both are unruled evidence. A live review is the skill's own output on
+    # real code, asked for by the person now looking at the inbox — the strongest label the project
+    # can obtain, and the only one nobody else can supply. It also decays: the merge request merges,
+    # the head moves, the guidance changes and the findings describe a reviewer that no longer
+    # exists. A mined candidate keeps indefinitely.
+    "review": 2,
+    "triage": 3,
+    "score": 4,
+    "improve": 5,
     # Below improvement — a failing case is a known defect, drift a growing blind spot — but above
     # housekeeping: a corpus that stopped resembling what ships makes every score above suspect,
     # while an unretired solved case only wastes budget.
     # A task skill's "score it" and "it is failing cases" both land here — the same urgency as a
     # review skill's `score`/`improve`, and one kind because the Tasks tab is where both are done.
-    "task": 3,
-    "drift": 5,
-    "curate": 6,
+    "task": 4,
+    "drift": 6,
+    "curate": 7,
     # Last before idle: an overdue routine pass matters — it is the only pressure entropy ever
     # gets — but every action above it is evidence of something already wrong, and evidence
     # outranks a calendar.
-    "cadence": 7,
+    "cadence": 8,
     "nothing": 9,
 }
 
@@ -161,6 +179,8 @@ _RANK: dict[ActionKind, int] = {
 def decide(
     *,
     new_signals: int,
+    unruled_findings: int = 0,
+    unruled_reviews: int = 0,
     staged: bool,
     can_propose: bool,
     blocked_reason: str,
@@ -203,6 +223,18 @@ def decide(
             "gate",
             "Run the gate",
             blocked_reason or "an uncommitted change is on disk but unproven — gate it first",
+        )
+    if unruled_findings:
+        plural = "s" if unruled_findings != 1 else ""
+        spread = (
+            f" across {unruled_reviews} reviews" if unruled_reviews > 1 else " on a live review"
+        )
+        return _action(
+            "review",
+            f"Rule {unruled_findings} finding{plural}",
+            f"{unruled_findings} finding{plural}{spread} nobody has ruled on — the skill's own "
+            "output on real code, and the corpus cannot learn from it until someone says whether "
+            "it was right",
         )
     if new_signals:
         return _action(

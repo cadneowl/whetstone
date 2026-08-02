@@ -48,6 +48,36 @@ def test_the_block_reason_is_carried_through_verbatim() -> None:
     assert action.why == "the branch has nothing main does not"  # type: ignore[attr-defined]
 
 
+def test_unruled_findings_ask_for_a_verdict() -> None:
+    action = _decide(unruled_findings=3, unruled_reviews=1)
+    assert action.kind == "review"  # type: ignore[attr-defined]
+    assert action.label == "Rule 3 findings"  # type: ignore[attr-defined]
+    assert "on a live review" in action.why  # type: ignore[attr-defined]
+
+
+def test_one_unruled_finding_is_not_pluralised() -> None:
+    action = _decide(unruled_findings=1, unruled_reviews=1)
+    assert action.label == "Rule 1 finding"  # type: ignore[attr-defined]
+
+
+def test_findings_spread_over_several_reviews_say_so() -> None:
+    """"11 across 2" is a morning; "11 across 11" is a fortnight of neglect."""
+    action = _decide(unruled_findings=11, unruled_reviews=2)
+    assert "across 2 reviews" in action.why  # type: ignore[attr-defined]
+
+
+def test_a_live_review_outranks_the_mined_queue() -> None:
+    """Both are unruled evidence, but only the review decays — the guidance moves under it and the
+    findings stop describing a reviewer that exists."""
+    assert _decide(unruled_findings=1, new_signals=9).kind == "review"  # type: ignore[attr-defined]
+
+
+def test_a_staged_change_still_outranks_an_unruled_review() -> None:
+    """Finishing what is in flight beats labelling more evidence — the rule the whole ladder is."""
+    action = _decide(staged=True, unruled_findings=5)
+    assert action.kind == "gate"  # type: ignore[attr-defined]
+
+
 def test_new_signal_outranks_known_failures() -> None:
     """Unruled evidence may change what 'failing' even means, so it is looked at first."""
     action = _decide(new_signals=3, failing_cases=4)
@@ -169,6 +199,7 @@ def test_ranks_order_the_pipeline_backwards() -> None:
     ranks = [
         _decide(staged=True, can_propose=True).rank,  # type: ignore[attr-defined]
         _decide(staged=True).rank,  # type: ignore[attr-defined]
+        _decide(unruled_findings=1).rank,  # type: ignore[attr-defined]
         _decide(new_signals=1).rank,  # type: ignore[attr-defined]
         _decide(scored=False).rank,  # type: ignore[attr-defined]
         _decide(failing_cases=1).rank,  # type: ignore[attr-defined]

@@ -205,7 +205,7 @@ def render_run_text(record: RunRecord) -> str:
 def _practice_badge(record: RunRecord) -> str:
     if not record.practice_mode:
         return ""
-    return " <span class='badge practice'>practice mode — no model was called</span>"
+    return " <span class='badge practice'>practice mode — not evidence</span>"
 
 
 def _summary_html(summary: Explanation) -> str:

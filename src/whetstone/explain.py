@@ -104,8 +104,24 @@ def explain_run(record: RunRecord) -> Explanation:
         parts.append(f"caught {sum(1 for c in caught if _ok(c))} of {len(caught)}")
     if quiet:
         parts.append(f"stayed quiet on {sum(1 for c in quiet if _ok(c))} of {len(quiet)}")
-    measured = ", ".join(parts) if parts else "scored no cases"
-    headline = f"{measured} — recall {score.recall:.3f}, false positives {score.fp_rate:.3f}"
+
+    # A run where nothing could be scored must not lead with a metric. An empty confusion reads as
+    # `recall 1.0, fp_rate 0.0` — right for "there was nothing to catch here", catastrophic for "we
+    # never found out" — and the headline is the one line that travels alone, into a notification or
+    # a badge, without the caveat that says the figures are over zero cases. A reviewer pointed at a
+    # backend it cannot authenticate to fails every case, and this used to announce it as
+    # "caught 0 of 2 — recall 1.000": a self-contradiction that reads as a bug in the summary rather
+    # than a broken run.
+    if not score.cases:
+        headline = "scored no cases"
+    elif score.scorable == 0:
+        headline = (
+            f"nothing was measured — all {len(score.cases)} case(s) failed to run, so this run "
+            f"has no recall or false-positive figure worth reading"
+        )
+    else:
+        measured = ", ".join(parts)
+        headline = f"{measured} — recall {score.recall:.3f}, false positives {score.fp_rate:.3f}"
 
     runs_by_id = {c.case_id: c for c in record.cases}
     reasons = [_why_case_failed(c, runs_by_id.get(c.case_id)) for c in failing]
@@ -270,8 +286,8 @@ def _gate_caveats(record: GateRecord) -> list[str]:
     out: list[str] = []
     if record.practice_mode:
         out.append(
-            "this gate ran in practice mode, which scores a regex rather than a model — the "
-            "verdict is about the demo reviewer, not about your guidance"
+            "this gate ran in practice mode, which only ever runs against a stand-in backend — "
+            "the verdict is about that stand-in, not about the reviewer your guidance will get"
         )
     if record.baseline_reused:
         # Said as a caveat rather than buried in the record, because it changes what the delta is:

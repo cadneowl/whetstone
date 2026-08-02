@@ -292,7 +292,10 @@ function EnvironmentBar({
         </Badge>
       )}
       {practice && (
-        <Badge tone="warn" title="Runs use deterministic doubles — no model, no spend">
+        <Badge
+          tone="warn"
+          title="This console will only run against a backend that cannot bill, and nothing it records counts as gate evidence"
+        >
           practice mode
         </Badge>
       )}

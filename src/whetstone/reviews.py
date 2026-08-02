@@ -21,9 +21,10 @@ only query is "show me the recent ones".
 
 from __future__ import annotations
 
+import json
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -327,6 +328,29 @@ def summarize(record: ReviewRecord) -> ReviewSummary:
     )
 
 
+class ReviewCounts(BaseModel):
+    """How many live reviews one skill has, and how much of them is still waiting on a human.
+
+    `reviews` is history — enough to label a tab. The rest is the work, split three ways because
+    they are three different jobs.
+
+    `unruled_findings` and `unruled_reviews` are separate because "11 findings across 2 reviews" is
+    a morning while "11 findings across 11 reviews" is a fortnight of neglect.
+
+    `stale_reviews` is counted *out* of both, and that is the point. A review whose guidance has
+    since been edited describes a reviewer that no longer exists; the console already refuses to
+    treat a ruling on one as current, so counting its findings as pending work sends an operator at
+    a screen that tells them to go away and re-run it. What that review needs is a re-run, which is
+    a different action with a different button — so it gets its own number rather than inflating
+    the one every queue is sorted by.
+    """
+
+    reviews: int = 0
+    unruled_findings: int = 0
+    unruled_reviews: int = 0
+    stale_reviews: int = 0
+
+
 def new_review_id(skill_id: str, created_at: datetime) -> str:
     """Timestamp-prefixed and lexically sortable, with a random suffix so reviews never collide."""
     stamp = created_at.strftime("%Y%m%dT%H%M%SZ")
@@ -379,6 +403,49 @@ class ReviewStore:
         records = [r for r in self._iter() if skill_id is None or r.skill_id == skill_id]
         records.sort(key=lambda r: r.created_at, reverse=True)
         return records[:limit] if limit else records
+
+    def counts(self, current: Mapping[str, str] | None = None) -> dict[str, ReviewCounts]:
+        """Per skill: how many reviews it has, and how much of them is still real work.
+
+        Deliberately not built on `list()`. That validates every record into a `ReviewRecord`,
+        which parses the whole `CodeChange` — every file and every hunk of every review ever run —
+        to arrive at two list lengths. Both callers ask this on a page render (the inbox for every
+        skill, the skill page for one), so it reads the four fields it needs and nothing else.
+
+        `current` maps skill id to the hash of the guidance on disk now (`_current_hashes` in the
+        reviews router builds exactly this). Supplying it moves records whose guidance has moved on
+        into `stale_reviews` instead of the pending counts — see `ReviewCounts`. Omitting it counts
+        everything as live, which is what a caller with no registry to compare against should say.
+
+        An unreadable record is skipped for the same reason `_iter` skips one: a single bad file
+        must not hide the rest of the history, and least of all on the home screen.
+        """
+        counts: dict[str, ReviewCounts] = {}
+        if not self.root.is_dir():
+            return counts
+        for path in sorted(self.root.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                skill_id = str(raw["skill_id"])
+                pending = len(raw.get("findings") or []) - len(raw.get("verdicts") or [])
+                recorded = str(raw.get("skill_hash") or "")
+            except (ValueError, OSError, KeyError, TypeError):
+                continue
+            entry = counts.setdefault(skill_id, ReviewCounts())
+            entry.reviews += 1
+            # Same rule as `_is_stale`: a skill the registry does not know is not reported stale,
+            # because absent is not the same as changed.
+            live = (current or {}).get(skill_id, "")
+            if live and recorded and live != recorded:
+                entry.stale_reviews += 1
+                continue
+            # Negative is not reachable through this module — `build_review` rejects a verdict on a
+            # finding that is not there, and `with_verdict` replaces rather than appends — but a
+            # hand-edited file must not subtract from another review's real backlog.
+            if pending > 0:
+                entry.unruled_findings += pending
+                entry.unruled_reviews += 1
+        return counts
 
     def _iter(self) -> Iterator[ReviewRecord]:
         if not self.root.is_dir():

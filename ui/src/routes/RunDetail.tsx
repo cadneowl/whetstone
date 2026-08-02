@@ -136,7 +136,10 @@ function Header({ run }: { run: RunRecord }) {
         <h1 className="text-lg font-semibold">{run.skill_id}</h1>
         <span className="font-mono text-sm text-muted">v{run.skill_version}</span>
         {run.practice_mode && (
-          <Badge tone="warn" title="Deterministic doubles — no model was called">
+          <Badge
+            tone="warn"
+            title="Recorded in practice mode, so it is not evidence: the gate, the sharpening ledger and the cadence clocks all hold it out"
+          >
             practice mode
           </Badge>
         )}
