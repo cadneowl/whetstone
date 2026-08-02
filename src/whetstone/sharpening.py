@@ -360,11 +360,17 @@ def _check_still_holds(
     None when nothing has scored it since the gate. That is not a pass: it means the fix has not
     been re-measured, and reporting it as holding would let a ledger drift further from the truth
     the longer nobody looked.
+
+    A run that *errored* on the case is the same third state, and used to be the worst version of
+    it. An unscorable case carries no trials, so its confusion is empty and reads as `recall 1.0` —
+    the ledger therefore answered "still holds" most confidently in exactly the situation where it
+    had learned nothing at all, and a reviewer that had stopped working entirely would keep every
+    fix on the books indefinitely.
     """
     outcomes = runs.case_history(skill_id, fix.case_id, limit=1)
     if outcomes:
         latest = outcomes[0]
-        if latest.created_at < fix.at:
+        if latest.created_at < fix.at or latest.error:
             return fix
         passing = (
             latest.recall >= cfg.case_recall_floor

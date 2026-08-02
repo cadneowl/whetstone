@@ -129,3 +129,45 @@ def test_gate_records_carry_per_side_holdout_reports() -> None:
     assert (record.base_holdout is None) == (record.candidate_holdout is None)
     if record.base_holdout is not None:
         assert record.base_holdout.fraction == 0.2
+
+
+def _held_ids(n: int, fraction: float = 0.2) -> list[str]:
+    """`n` case ids the unseeded hash puts in the holdout."""
+    found, i = [], 0
+    while len(found) < n:
+        if partition_of(f"case-{i}", fraction) == "holdout":
+            found.append(f"case-{i}")
+        i += 1
+    return found
+
+
+def test_holdout_report_counts_only_cases_it_could_actually_score() -> None:
+    """The count is not cosmetic — it arms the alarm.
+
+    `holdout_cases` drives `resolution`, which drives `conclusive`. Counting cases the reviewer
+    could not be run on therefore made the report *more* confident the less it had measured: ten
+    holdout cases with nine unscorable resolved to 0.10 and declared itself conclusive, over one
+    case.
+    """
+    held = _held_ids(10)
+    cases = [CaseScore(case_id=held[0], kind="should_catch", trials=[Confusion(tp=1)])]
+    cases += [
+        CaseScore(case_id=c, kind="should_catch", trials=[], error="backend refused tools")
+        for c in held[1:]
+    ]
+    report = holdout_report(SkillScore(skill_id="s", version=1, k=1, cases=cases), 0.2)
+
+    assert report is not None
+    assert report.holdout_cases == 1
+    assert report.resolution == 1.0
+    assert report.conclusive is False
+    assert "too few to say much either way" in report.reading
+
+
+def test_a_holdout_that_errored_away_to_nothing_reports_none() -> None:
+    """Same answer as a holdout that was never drawn: a divergence over nothing is not a number."""
+    cases = [
+        CaseScore(case_id=c, kind="should_catch", trials=[], error="backend refused tools")
+        for c in _held_ids(4)
+    ]
+    assert holdout_report(SkillScore(skill_id="s", version=1, k=1, cases=cases), 0.2) is None

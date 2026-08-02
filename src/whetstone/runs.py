@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS case_runs (
     fp_rate    REAL NOT NULL,
     flaky      INTEGER NOT NULL,
     baseline   INTEGER NOT NULL DEFAULT 0,
+    -- Why the case could not be scored, when it could not be. Indexed rather than left to the
+    -- record file because without it `recall`/`fp_rate` above are a lie: an errored case has no
+    -- trials, so its confusion is empty, and an empty confusion reads as `recall 1.0, fp_rate 0.0`
+    -- — indistinguishable from a flawless one. Every consumer here re-derives "did it pass" from
+    -- those two numbers, so an unscorable case was reported as passing by all of them, in direct
+    -- contradiction of `CaseScore.passed`, which refuses to make that claim on an empty
+    -- measurement. See `pass_history`.
+    error      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (run_id, case_id)
 );
 CREATE INDEX IF NOT EXISTS case_runs_by_case ON case_runs (skill_id, case_id, created_at DESC);
@@ -72,7 +80,7 @@ CREATE INDEX IF NOT EXISTS case_runs_by_case ON case_runs (skill_id, case_id, cr
 # `indexed_files` to the number of record files, so leaving that counter behind says the now-empty
 # index is current and nothing ever refills it. The console showed every run vanish. So the counter
 # goes with the tables, and the next read repopulates from the files, which are the truth.
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _DROP = (
     "DROP TABLE IF EXISTS runs;"
     "DROP TABLE IF EXISTS case_runs;"
@@ -90,6 +98,21 @@ class CaseOutcome(BaseModel):
     recall: float
     fp_rate: float
     flaky: bool
+    # Set when the reviewer could not be run on this case at all. Carried so a reader can tell the
+    # two apart: `recall 1.0` on an errored row is the empty-confusion convention, not a result.
+    error: str = ""
+
+    @property
+    def passed(self) -> bool:
+        """Whether this row *demonstrably* met the bar — the same rule `CaseScore.passed` applies.
+
+        Defined here so the two consumers of this index cannot drift into re-deriving it from
+        `recall`/`fp_rate` alone, which is precisely how an unscorable case came to be reported as
+        a pass by both of them.
+        """
+        if self.error:
+            return False
+        return self.recall >= 1 if self.kind == "should_catch" else self.fp_rate <= 0
 
 
 class RunSummary(BaseModel):
@@ -262,7 +285,7 @@ class RunStore:
             # Baseline probes are excluded: the history view is about how the *skill* fares on
             # this case, and a run with the guidance deliberately stripped is not that.
             rows = conn.execute(
-                "SELECT run_id, case_id, created_at, kind, recall, fp_rate, flaky "
+                "SELECT run_id, case_id, created_at, kind, recall, fp_rate, flaky, error "
                 "FROM case_runs WHERE skill_id = ? AND case_id = ? AND baseline = 0 "
                 "ORDER BY created_at DESC, run_id DESC LIMIT ?",
                 (skill_id, case_id, limit),
@@ -280,13 +303,22 @@ class RunStore:
         Passing is the same rule the score uses: a catch case must have caught it, a no-flag case
         must have stayed quiet. Baseline probes are excluded for the reason `case_history` excludes
         them — a run with the guidance stripped says nothing about what guidance can satisfy.
+
+        **A case the reviewer could not be run on is omitted, not recorded as failing.** Its
+        confusion is empty, which reads as `recall 1.0, fp_rate 0.0` — so before `error` was
+        indexed it came back as a *pass*, and `curation.contradictions` read that as two cases
+        happily passing together and stayed quiet about a pair that had never once been measured
+        together. Recording `False` instead would swap one wrong answer for another: a case that
+        could not be scored has not failed either, and `_never_together` counts a run as shared
+        evidence purely by its presence in both maps. Absent is the only honest third state.
         """
         with self._connect() as conn:
             files = self.record_files()
             if _indexed_file_count(conn) != len(files):
                 _rebuild(conn, self._iter_records(), len(files))
             rows = conn.execute(
-                "SELECT case_id, run_id, kind, recall, fp_rate FROM case_runs "
+                "SELECT case_id, run_id, created_at, kind, recall, fp_rate, flaky, error "
+                "FROM case_runs "
                 "WHERE skill_id = ? AND baseline = 0 AND run_id IN ("
                 "  SELECT id FROM runs WHERE skill_id = ? AND baseline = 0"
                 "  ORDER BY created_at DESC, id DESC LIMIT ?"
@@ -295,8 +327,10 @@ class RunStore:
             ).fetchall()
         history: dict[str, dict[str, bool]] = {}
         for row in rows:
-            passed = row["recall"] >= 1 if row["kind"] == "should_catch" else row["fp_rate"] <= 0
-            history.setdefault(row["case_id"], {})[row["run_id"]] = passed
+            if row["error"]:
+                continue
+            outcome = CaseOutcome(**dict(row))
+            history.setdefault(outcome.case_id, {})[outcome.run_id] = outcome.passed
         return history
 
     def reindex(self) -> int:
@@ -361,7 +395,14 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
                           k, practice_mode, baseline,
                           recall, fp_rate, precision, f2, duration_s, llm_calls)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET created_at=excluded.created_at
+        ON CONFLICT(id) DO UPDATE SET
+            created_at=excluded.created_at, skill_id=excluded.skill_id,
+            skill_version=excluded.skill_version, skill_hash=excluded.skill_hash,
+            guidance_hash=excluded.guidance_hash, backend=excluded.backend,
+            model=excluded.model, judge_hash=excluded.judge_hash, k=excluded.k,
+            practice_mode=excluded.practice_mode, baseline=excluded.baseline,
+            recall=excluded.recall, fp_rate=excluded.fp_rate, precision=excluded.precision,
+            f2=excluded.f2, duration_s=excluded.duration_s, llm_calls=excluded.llm_calls
         """,
         (
             record.id,
@@ -387,7 +428,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
     conn.execute("DELETE FROM case_runs WHERE run_id = ?", (record.id,))
     conn.executemany(
         "INSERT INTO case_runs (run_id, case_id, skill_id, created_at, kind, recall, fp_rate, "
-        "flaky, baseline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "flaky, baseline, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 record.id,
@@ -399,6 +440,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
                 case.confusion.fp_rate,
                 int(case.flaky),
                 int(record.baseline),
+                case.error,
             )
             for case in record.cases
         ],

@@ -177,7 +177,18 @@ function Header({ run }: { run: RunRecord }) {
               label={`holdout recall (${run.holdout.holdout_cases})`}
               value={score(run.holdout.holdout_recall)}
             />
-            <Metric label="divergence" value={run.holdout.divergence.toFixed(2)} />
+            {/* Only when this holdout can carry a reading. The record already decides that —
+                `conclusive` is "fine enough to resolve the floor", `diverging` is "wide enough to
+                matter at any size" — and rendering the raw gap regardless put `divergence -0.67`
+                in headline type beside recall and precision, over a one-case holdout, above a
+                12px caption explaining that it is not evidence. That is the emphasis exactly
+                inverted: the number every scanning eye lands on is the one the model went to
+                trouble to withhold. The caption below still speaks in every state, so nothing is
+                lost by leaving the card out — `reading` says what this holdout can and cannot
+                tell you, including "not yet, and here is why". */}
+            {(run.holdout.conclusive || run.holdout.diverging) && (
+              <Metric label="divergence" value={run.holdout.divergence.toFixed(2)} />
+            )}
           </>
         )}
       </div>

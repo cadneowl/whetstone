@@ -343,7 +343,20 @@ function SkillRow({ skill }: { skill: SkillSummary }) {
 
 function RotBadges({ skill }: { skill: SkillSummary }) {
   const { rot } = skill
-  if (rot.signals === 0) return <span className="text-xs text-good">clear</span>
+  // "no rot", not "no problems". This column reports rot only, and the list is sorted by it — so
+  // an unqualified green "clear" landed on the row of a skill scoring recall 0.33 with a
+  // false-positive rate of 1.00, sitting at the bottom of a list headed "worst first". Both facts
+  // were on the same line, and the one word an eye scanning a status page trusts contradicted the
+  // numbers beside it.
+  if (rot.signals === 0)
+    return (
+      <span
+        className="text-xs text-good"
+        title="No rot signals — no drift alarm, saturation, overdue cadence or dead rules. This says nothing about the skill's score, which is to the left."
+      >
+        no rot
+      </span>
+    )
   return (
     <>
       {rot.drift_alarm && (

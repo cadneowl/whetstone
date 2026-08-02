@@ -8,7 +8,7 @@ import webbrowser
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from pydantic import BaseModel
@@ -66,7 +66,7 @@ from whetstone.providers.gitlab.provider import GitLabConnector
 from whetstone.providers.jira.provider import JiraConnector
 from whetstone.providers.registry import available_providers
 from whetstone.report import render_run_html, render_run_text
-from whetstone.reviewer.factory import ReviewerChoice, reviewer_from_step, step_agent
+from whetstone.reviewer.factory import ReviewerChoice, TaskPlan, reviewer_from_step, step_agent
 from whetstone.reviews import ReviewSource, ReviewStore, ReviewUpload, build_review
 from whetstone.runs import RunStore, stale_version_ids
 from whetstone.scaffold import write_scaffold
@@ -84,7 +84,7 @@ from whetstone.service import (
     stream_defects,
 )
 from whetstone.steps import SamplePolicy, StepError, StepSpec, load_step, load_steps
-from whetstone.tasks import TaskCaseRun, TaskScore
+from whetstone.tasks import TaskCase, TaskCaseRun, TaskScore
 from whetstone.update import refresh_wiki
 from whetstone.vcs import export_tree
 
@@ -532,8 +532,21 @@ def _progress(event: RunEvent) -> None:
 # --- task skills ------------------------------------------------------------------
 
 
-def _task_setup(skill: Path, llm: str | None, model: str | None, base_url: str | None):
+def _task_setup(
+    skill: Path, llm: str | None, model: str | None, base_url: str | None
+) -> tuple[
+    TaskPlan,
+    ReviewerChoice,
+    list[TaskCase],
+    Any,
+    tuple[str | None, str | None, str | None],
+]:
     """Load a task skill and everything needed to run it, or refuse with a usable reason.
+
+    Returns the `TaskPlan` rather than the step spec neither caller was using, because the refusal
+    below is what makes `choice.task` non-None and a guard does not survive a function boundary:
+    handing back `choice` alone left both callers reaching through `choice.task` for a number the
+    type system still believed could be missing.
 
     Shared by `eval task` and `eval task-gate` so the two can never disagree about what a skill's
     step file asked for — the same reason one resolver serves the review CLI and the console.
@@ -563,7 +576,7 @@ def _task_setup(skill: Path, llm: str | None, model: str | None, base_url: str |
         )
     verifier = verifier_for(choice.task.verify, skill)
     pick = _backend_for(policy, llm, model, base_url)
-    return policy, choice, cases, verifier, pick
+    return choice.task, choice, cases, verifier, pick
 
 
 def _verifier_identity(verifier: object) -> str:
@@ -617,12 +630,12 @@ def eval_task(
     from whetstone.service import record_task_eval
 
     sk = load_skill(skill)
-    _, choice, cases, verifier, pick = _task_setup(skill, llm, model, base_url)
+    task, choice, cases, verifier, pick = _task_setup(skill, llm, model, base_url)
     backend = _resolve(*pick)
     plan = plan_tasks(
         backend,
         cases=len(cases),
-        calls_per_case=choice.task.max_calls,
+        calls_per_case=task.max_calls,
         # The *verifier's* identity. `choice.identity` describes the agent doing the work, so the
         # plan read "graded by: agent-task: 12 steps" — naming the thing under test as its own
         # examiner, which is the one thing a grading line must never say.
@@ -686,12 +699,12 @@ def eval_task_gate(
     candidate_skill = load_skill(candidate)
     # The candidate's step file decides how this is run and graded: it is the version being
     # proposed, and gating it under the baseline's rules would measure the wrong thing.
-    _, choice, cases, verifier, pick = _task_setup(candidate, llm, model, base_url)
+    task, choice, cases, verifier, pick = _task_setup(candidate, llm, model, base_url)
     backend = _resolve(*pick)
     plan = plan_tasks(
         backend,
         cases=len(cases),
-        calls_per_case=choice.task.max_calls,
+        calls_per_case=task.max_calls,
         action="eval task-gate",
         sides=2,
         verifier=_verifier_identity(verifier),

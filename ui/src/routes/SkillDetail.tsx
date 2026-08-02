@@ -395,7 +395,13 @@ function EvalLauncher({
   const selected = scopes.find((s) => s.id === scope) ?? scopes[0]!
 
   return (
-    <div className="flex flex-col items-end gap-1.5">
+    // `ml-auto`, not just the header's `justify-between`. The header wraps, and `justify-between`
+    // only spreads items that share a line — a wrapped launch block lands hard against the *left*
+    // edge while its own `items-end`/`text-right` keep pointing the other way, so the caption
+    // renders right-aligned inside a left-hung 320px box and breaks mid-sentence ("…guidance on /
+    // disk."). The title column is wide enough to force that wrap at ordinary widths, so this was
+    // the default rendering rather than an edge case.
+    <div className="ml-auto flex flex-col items-end gap-1.5">
       {scopes.length > 1 && (
         <div className="flex rounded-lg border border-line p-0.5 text-xs">
           {scopes.map((s) => (
