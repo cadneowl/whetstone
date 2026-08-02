@@ -33,6 +33,22 @@ export function selectionFrom(param: string | null, all: readonly string[]): Rea
   return new Set(param.split(',').filter((id) => known.has(id)))
 }
 
+/**
+ * The `cases` to narrow an improve to, or `null` to send none and let it draft from every failure.
+ *
+ * Only a *strict* subset narrows. Everything ticked is the state a fresh visit starts in, and
+ * reading it as "draft from exactly these" is what made a corpus regression undraftable: the batch
+ * was the whole tick list, so every other failure in the run was silently dropped — and when the
+ * batch had meanwhile started passing, the step refused for having nothing to work from at all.
+ */
+export function narrowedCases(
+  selected: ReadonlySet<string>,
+  all: readonly string[],
+): string[] | null {
+  if (selected.size === 0 || selected.size >= all.length) return null
+  return all.filter((id) => selected.has(id))
+}
+
 /** The inverse: `null` to drop the param entirely, which is how "all" stays out of the URL. */
 export function selectionParam(
   selected: ReadonlySet<string>,
@@ -65,8 +81,17 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const graduate = useGraduate(skillId)
   const readOnly = Boolean(config?.read_only)
 
+  // Graduated cases the last run got wrong — selectable for exactly the reasons promoted ones are.
+  // Sharpening a promoted case routinely breaks something already in the corpus, and that
+  // regression is the whole reason the "…with the eval corpus too" button exists. Offering the
+  // batch alone made it visible and then unactionable: the improve request was pinned to the
+  // promoted selection, so a corpus case could never be drafted from, and if the promoted case had
+  // meanwhile started passing the step refused outright — telling the operator to "pick a case the
+  // last run failed" while showing no such case to pick.
+  const regressions = detail.cases.filter(isFailing)
+
   const [params, setParams] = useSearchParams()
-  const ids = pending.map((c) => c.id)
+  const ids = [...pending, ...regressions].map((c) => c.id)
   const selected = selectionFrom(params.get('cases'), ids)
   const batchRun = params.get('run')
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -114,38 +139,40 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   // Holdout cases are scored but can never be gate-targeted (a change may not claim to fix a case
   // the improve loop never saw). Keep them out of the gate's targeted set so it is never refused,
   // and say why rather than let the run fail after minutes of model calls.
-  const heldSelected = pending.filter((c) => selected.has(c.id) && c.holdout)
-  const targetable = pending.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
+  const selectable = [...pending, ...regressions]
+  const heldSelected = selectable.filter((c) => selected.has(c.id) && c.holdout)
+  const targetable = selectable.filter((c) => selected.has(c.id) && !c.holdout).map((c) => c.id)
   // The same blindfold blocks the *improve* step, which is where it actually hurt: a lone promoted
   // case that hashes into the holdout could be scored, seen to miss, and then handed to a drafter
   // forbidden from looking at it — one wasted call and a draft that changed nothing.
   const noneDraftable = selected.size > 0 && heldSelected.length === selected.size
 
-  // Corpus cases the last run got wrong — exactly what the no-batch improve step drafts from, so
-  // exactly what a gate on that draft should be made to prove. Holdout cases are excluded: a change
+  // What a gate on a no-batch draft should be made to prove. Holdout cases are excluded: a change
   // may not claim to fix a case the improve loop was never shown, and the gate refuses such a claim.
-  const failedLastRun = detail.cases
-    .filter((c) =>
-      c.kind === 'should_catch'
-        ? c.last_recall != null && c.last_recall < 1
-        : c.last_fp_rate != null && c.last_fp_rate > 0,
-    )
-    .filter((c) => !c.holdout)
-    .map((c) => c.id)
+  const failedLastRun = regressions.filter((c) => !c.holdout).map((c) => c.id)
 
   // The one request the sharpen step is described by, held here rather than written out at each
   // use: the launch button spends it and the prompt panel renders it, and those two disagreeing
   // about the run, the selection or the steer would make the preview a plausible fiction.
-  const improveRequest: JobRequest = hasBatch
-    ? { skill_id: skillId, run_id: batchRun, cases: [...selected], instruction }
-    : { skill_id: skillId, run_id: latestRunId, instruction }
+  // Narrowed only when the selection is a strict subset. Everything ticked (or nothing) means
+  // "draft from whatever this run got wrong", which is the honest reading of an untouched
+  // selection and the one that keeps a corpus regression in scope. Sending the full tick list
+  // instead pinned the drafter to the promoted cases and silently dropped every other failure.
+  const narrowed = narrowedCases(selected, ids)
+  const improveRequest: JobRequest = {
+    skill_id: skillId,
+    run_id: hasBatch ? batchRun : latestRunId,
+    ...(narrowed ? { cases: narrowed } : {}),
+    instruction,
+  }
 
-  // A strict subset scores just those cases — the cheap, targeted check. All (or none) selected
-  // scores the whole promoted set. Neither touches the graduated corpus unless the second button
-  // is used, so regressions come from there or from the gate.
+  // The score buttons run `scope: 'promoted'`, which accepts promoted ids and refuses any other,
+  // so the selection is intersected rather than passed through — ticking a corpus regression must
+  // not make the batch score fail to launch. Scoring the corpus is the second button's job.
+  const promotedSelected = pending.filter((c) => selected.has(c.id)).map((c) => c.id)
+  const scoreSubset = promotedSelected.length > 0 && promotedSelected.length < pending.length
   // `scoreKey` resets the launch button's cost plan whenever the selection changes.
-  const scoreSubset = selected.size > 0 && selected.size < pending.length
-  const scoreKey = scoreSubset ? [...selected].sort().join(',') : 'all'
+  const scoreKey = scoreSubset ? [...promotedSelected].sort().join(',') : 'all'
 
   // Both score buttons land the same way — the run they produce is what the sharpen step drafts
   // from, whether or not the corpus was underneath it.
@@ -207,11 +234,12 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     <div className="space-y-5">
       <InPlaceNotice skillId={skillId} />
 
-      {hasBatch && (
+      {(hasBatch || regressions.length > 0) && (
         <section className="rounded-lg border border-line bg-surface p-4">
           <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
             <h3 className="text-sm font-medium">
-              Proposed cases ({selected.size} of {pending.length} selected)
+              {hasBatch ? 'Proposed cases' : 'Cases to sharpen'} ({selected.size} of {ids.length}{' '}
+              selected)
             </h3>
             <div className="flex gap-3 text-xs text-muted">
               <button type="button" onClick={() => setSelected(new Set(ids))}>
@@ -219,7 +247,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
               </button>
               <button
                 type="button"
-                onClick={() => setSelected(new Set(pending.filter(isFailing).map((c) => c.id)))}
+                onClick={() => setSelected(new Set(selectable.filter(isFailing).map((c) => c.id)))}
                 title="Select only the cases the last score got wrong"
               >
                 failing
@@ -232,9 +260,9 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           {/* The checkboxes drive the score (a strict subset scores just those, all-or-none scores
               the whole batch so regressions still show), the LLM sharpen, and the gate's targets. */}
           <p className="mb-3 text-xs text-muted">
-            The checkboxes drive what gets scored, sharpened and gate-targeted. Tick a few to score
-            just those; leave all (or none) ticked to score the whole batch, so a regression
-            elsewhere still shows. Caught / missed is from the latest score.
+            The checkboxes drive what gets scored, sharpened and gate-targeted. Tick a few to
+            sharpen from just those; leave all (or none) ticked to draft from everything the last
+            run got wrong. Caught / missed is from the latest score.
             <strong> Graduate</strong> a case once you&rsquo;re satisfied it belongs — that moves it
             into the eval corpus (only some earn it), which needs a fresh gate afterwards.
           </p>
@@ -283,6 +311,59 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
             ))}
           </ul>
           {graduate.error != null && <ErrorNote error={graduate.error} />}
+
+          {/* The corpus cases this work broke. Listed here rather than left to the run drill-down
+              because seeing a regression and being unable to act on it is the state that stalls the
+              loop: sharpening a promoted case routinely breaks something already graduated, and
+              that is precisely the change that must not be committed. */}
+          {regressions.length > 0 && (
+            <div className={hasBatch ? 'mt-4 border-t border-line pt-3' : ''}>
+              {hasBatch && (
+                <p className="mb-2 text-xs">
+                  <span className="text-warn">
+                    {regressions.length} graduated case(s) the last run got wrong
+                  </span>{' '}
+                  <span className="text-muted">
+                    — tick them to sharpen from them too. A change that fixes the batch by breaking
+                    the corpus is the one the gate exists to stop.
+                  </span>
+                </p>
+              )}
+              <ul className="space-y-1.5">
+                {regressions.map((c) => (
+                  <li key={c.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(c.id)}
+                      onChange={() => toggle(c.id)}
+                      aria-label={`select ${c.id}`}
+                    />
+                    <Badge tone={c.kind === 'should_catch' ? 'accent' : 'neutral'}>
+                      {c.kind === 'should_catch' ? 'should catch' : 'should not flag'}
+                    </Badge>
+                    <SourceBadge provenance={c.provenance} />
+                    <Link
+                      to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(c.id)}`}
+                      className="font-mono text-xs text-muted hover:text-ink"
+                    >
+                      {c.id}
+                    </Link>
+                    {c.holdout && (
+                      <Badge
+                        tone="neutral"
+                        title="Holdout — scored on every run, but the gate can't target it and the improve loop never learns from it"
+                      >
+                        holdout
+                      </Badge>
+                    )}
+                    <span className="ml-auto">
+                      <CaseStatus c={c} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
       )}
 
@@ -305,7 +386,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                 request={{
                   skill_id: skillId,
                   scope: 'promoted',
-                  ...(scoreSubset ? { cases: [...selected] } : {}),
+                  ...(scoreSubset ? { cases: promotedSelected } : {}),
                 }}
                 label={scoreSubset ? `Score ${selected.size} selected` : 'Score the promoted batch'}
                 onDone={scored}
@@ -317,7 +398,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                   skill_id: skillId,
                   scope: 'promoted',
                   with_corpus: true,
-                  ...(scoreSubset ? { cases: [...selected] } : {}),
+                  ...(scoreSubset ? { cases: promotedSelected } : {}),
                 }}
                 label="…with the eval corpus too"
                 onDone={scored}
@@ -683,7 +764,7 @@ function CaseStatus({ c }: { c: PendingCase }) {
   )
 }
 
-function isFailing(c: PendingCase): boolean {
+export function isFailing(c: PendingCase): boolean {
   return c.kind === 'should_catch'
     ? c.last_recall != null && c.last_recall < 1
     : c.last_fp_rate != null && c.last_fp_rate > 0
