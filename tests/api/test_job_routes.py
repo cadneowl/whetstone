@@ -237,6 +237,25 @@ def test_a_passing_gate_unlocks_propose(
     assert verdict["can_propose"] is True
 
 
+def test_a_gate_reports_the_delta_it_measured(
+    client: TestClient, steps: Path, gates: GateStore, repo: Path
+) -> None:
+    """A gate is a comparison, and its base side is the last commit — so its transcript is full of
+    `base -> e1 MISSED it (fn)` for every case the candidate was written to fix. With only the word
+    PASS beside that, the honest reading is that the verdict ignores the evidence under it. The
+    numbers are computed by `core.gate.gate`; they used to be dropped on the way out.
+    """
+    _stage_guidance(client)
+    launched = client.post("/api/jobs/gate", json={"skill_id": "rust-errors"}).json()
+
+    result = _await(client, launched["id"], timeout=30)["result"]
+
+    for field in ("recall_old", "recall_new", "fp_rate_old", "fp_rate_new"):
+        assert isinstance(result[field], float), (field, result)
+    for field in ("fixed_cases", "unfixed_cases", "regressed_cases"):
+        assert isinstance(result[field], list), (field, result)
+
+
 # --- improve ---------------------------------------------------------------------
 
 

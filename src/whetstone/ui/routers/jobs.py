@@ -475,6 +475,18 @@ def launch_gate(
             "passed": record.result.passed,
             "reasons": list(record.result.reasons),
             "llm_calls": record.llm_calls,
+            # The delta itself, which a PASS previously kept to itself. A gate is a comparison: the
+            # base side is the last commit and is *expected* to fail the cases the candidate was
+            # written to fix, so its transcript is full of `base → e1 MISSED it (fn)`. With only the
+            # word PASS on screen beside that, the honest reading is that the gate is lying. These
+            # are computed by `core.gate.gate` already; they were dropped on the way out.
+            "recall_old": record.result.recall_old,
+            "recall_new": record.result.recall_new,
+            "fp_rate_old": record.result.fp_rate_old,
+            "fp_rate_new": record.result.fp_rate_new,
+            "fixed_cases": list(record.result.fixed_cases),
+            "unfixed_cases": list(record.result.unfixed_cases),
+            "regressed_cases": list(record.result.regressed_cases),
             # A gate blames a delta on the guidance, which holds only if both sides saw the same
             # things. When an agent investigated differently the verdict is still the verdict —
             # but the operator reading it deserves to know, and this was recorded nowhere they look.
