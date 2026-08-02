@@ -269,6 +269,36 @@ class RunStore:
             ).fetchall()
         return [CaseOutcome(**dict(row)) for row in rows]
 
+    def pass_history(self, skill_id: str, *, runs: int = 20) -> dict[str, dict[str, bool]]:
+        """case id -> run id -> did it pass, over this skill's last `runs` runs.
+
+        One query for the whole corpus rather than `case_history` per case. Every `case_history`
+        call opens a connection and globs the runs directory to check the index is current, so the
+        per-case loop cost cases × runs-on-disk of filesystem work on the most-visited screen in
+        the console — 102ms of a 108ms contradiction check at 120 cases, and linear in both.
+
+        Passing is the same rule the score uses: a catch case must have caught it, a no-flag case
+        must have stayed quiet. Baseline probes are excluded for the reason `case_history` excludes
+        them — a run with the guidance stripped says nothing about what guidance can satisfy.
+        """
+        with self._connect() as conn:
+            files = self.record_files()
+            if _indexed_file_count(conn) != len(files):
+                _rebuild(conn, self._iter_records(), len(files))
+            rows = conn.execute(
+                "SELECT case_id, run_id, kind, recall, fp_rate FROM case_runs "
+                "WHERE skill_id = ? AND baseline = 0 AND run_id IN ("
+                "  SELECT id FROM runs WHERE skill_id = ? AND baseline = 0"
+                "  ORDER BY created_at DESC, id DESC LIMIT ?"
+                ")",
+                (skill_id, skill_id, runs),
+            ).fetchall()
+        history: dict[str, dict[str, bool]] = {}
+        for row in rows:
+            passed = row["recall"] >= 1 if row["kind"] == "should_catch" else row["fp_rate"] <= 0
+            history.setdefault(row["case_id"], {})[row["run_id"]] = passed
+        return history
+
     def reindex(self) -> int:
         """Rebuild the index from the files. Returns the number of records indexed."""
         with self._connect() as conn:

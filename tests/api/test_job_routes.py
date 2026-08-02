@@ -1027,3 +1027,41 @@ def test_pick_model_override_preserves_a_gateway_base_url() -> None:
     assert picked.model == "other-model"
     # No model (or only whitespace) → the default is returned untouched.
     assert _pick("", "  ", gateway) is gateway
+
+
+def test_a_graduated_case_that_failed_can_be_the_only_thing_drafted_from(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    """Sharpening a promoted case routinely breaks something already in the corpus, and that break
+    is what must not be committed. The workspace could not express it — its checkboxes covered the
+    promoted set alone — so this pins the shape the console now sends: narrow to one graduated case
+    id, and the drafter sees that case's failure and nothing else.
+    """
+    run = _failing_run(store)
+
+    plan = client.post(
+        "/api/jobs/improve/plan",
+        json={"skill_id": "rust-errors", "run_id": run, "cases": ["unwrap-in-handler"]},
+    )
+    assert plan.status_code == 200, plan.text
+
+    body = _prompt(client, run_id=run, cases=["unwrap-in-handler"])
+
+    assert body["shown"] == 1
+    assert "unwrap-in-handler" in body["text"]
+    assert "No failures in the last run." not in body["text"]
+
+
+def test_narrowing_to_a_graduated_case_that_passed_is_still_refused(
+    client: TestClient, steps: Path, store: RunStore
+) -> None:
+    """The widening must not turn the refusal off. A call that could only return the guidance
+    unchanged is still a call worth refusing, whichever corpus the case came from."""
+    run = _failing_run(store)
+
+    plan = client.post(
+        "/api/jobs/improve/plan",
+        json={"skill_id": "rust-errors", "run_id": run, "cases": ["unwrap-in-test"]},
+    )
+
+    assert plan.status_code == 422
