@@ -922,11 +922,12 @@ def _git(root: Path, *args: str) -> None:
 
 
 def _git_init(root: Path) -> None:
-    """A git repo with a remote, so the whole loop runs — including the push at the end.
+    """A git repo with a remote, so the workspace looks like a real checkout.
 
-    `origin` is a bare repo inside the workspace rather than a real forge. `Propose MR` therefore
-    genuinely pushes and genuinely reports that no merge-request connector is registered, which is
-    the truthful version of that button.
+    The console never pushes — it writes files and leaves git to the operator (ADR-028) — so the
+    bare `origin` inside the workspace is not there to receive a console push. It is there so
+    `git/status` has a remote to report and so someone following the demo can commit and push the
+    gate-proven change by hand, which is the actual publishing story.
     """
     _git(root, "init", "--initial-branch=main")
     _git(root, "config", "user.name", "Whetstone demo")

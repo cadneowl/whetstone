@@ -80,6 +80,19 @@ suggestion already carries and that was previously discarded; (b) surface the mi
 is shown. The inference cannot be repaired. Hiding it was the fixable part.
 
 ## ADR-008 — Permission to publish guidance is bound to content, not to a branch
+> **Amended by ADR-028 — read this before the paragraphs below.** The console no longer publishes,
+> and `POST /api/git/propose` is gone, so there is no push for this rule to sit at. Specifically,
+> the four paragraphs *"Why the check sits at the push…"*, *"What the guard actually asks"*,
+> *"The one exemption is adding eval cases"* and *"The guard fails closed"* describe a **guard that
+> no longer runs** — they are kept as the record of why it was built and what it had to get right,
+> not as a description of current behaviour. The console badge they mention now reads
+> *gate-proven, with a caveat*, and "the right to propose" in the consequences is today the
+> console's willingness to call a change gate-proven.
+>
+> What still holds, and is the part that mattered: permission is bound to **content, not a branch**;
+> `skill_hash` covers the eval cases so that deleting or gutting one cannot buy a passing score; a
+> practice-mode gate is not evidence; and adding cases needs no gate. See ADR-028.
+
 **Decision:** A gate result is persisted (`gates.py`) carrying the `skill_hash` of the candidate
 skill **as committed**. `GateStore.verdict_for(skill_id, hash)` is the sole authority on C6, and it
 is consulted both by `GET /api/skills/{id}/proposal` and by `POST /api/git/propose`.
@@ -227,6 +240,10 @@ none — an operator who trusts it once and is billed twice over will never trus
 somebody's invoice. CI passes `--yes`, which is the same consent given deliberately.
 
 ## ADR-012 — One branch, addressed by id, for every writer
+
+> **Amended by ADR-028:** the console writes in place and no longer uses `stage()`. The CLI flows
+> named below (`skills improve --apply`, `skills update`, `skills index`) still stage on the branch,
+> and the id-addressing invariant this ADR exists for still holds for all of them.
 
 **Context.** `whetstone skills improve` shipped handing the operator a guidance body and a gate
 command containing `<edited copy>`. Following the documented way of applying it — overwrite
@@ -421,6 +438,12 @@ finding that takes the opposite stance on the same code, and it is genuinely arg
 
 ## ADR-019 — A verdict names the guidance it describes
 
+> **Mechanism amended by ADR-028; the decision is untouched.** The divergence described below is no
+> longer branch-versus-working-tree — the console writes in place, so both halves of the screen read
+> the same files. It did not go away: a run measures the guidance *as it stood when it ran*, and the
+> editor writes a new version the moment you apply. The fix is the same one and is still in force —
+> compare the run's `guidance_hash` against what is on disk and say so when they differ.
+
 **Context.** The editor screen shows two things that look like one thing. The textarea, the diff and
 the C6 proposal panel all describe the **staged branch**; the eval-case list and the improve panel's
 digest describe the **working tree**, because an eval scores the working tree. Once anything is
@@ -472,6 +495,12 @@ outcomes, and nothing for `improve` to read, because `improve` reads runs. Worse
 the skill from the working tree, so a run of the draft was rejected as describing different content
 while a run of the working tree had nothing to say about the draft. **No run existed that satisfied
 it.** The dead end was structural, not a missing button.
+
+> **Spelling amended by ADR-028; the decision is untouched.** `staged: true` is now
+> `scope: "draft"`, and "the draft" is the guidance on disk rather than a branch, because the
+> console edits in place. `scope` is a closed, server-resolved set (`working` · `draft` ·
+> `promoted`) — still a name and never a caller-supplied ref, which is the point the boolean was
+> making.
 
 **Decision.** `POST /jobs/eval` takes `staged: true` and scores what `whetstone/skill/<id>` holds.
 The whole skill folder is loaded, not just `SKILL.md` — a draft may add or change eval cases, and
@@ -860,3 +889,47 @@ is — so a changed grader breaks a task trend the way a changed judge breaks a 
 `GateResult`'s nine fields are meaningful for a task gate and four are not, and putting a recall of
 zero next to a task score would be a number that was never measured sitting in front of the person
 deciding whether to ship.
+
+## ADR-028 — The console writes files; git stays the operator's
+*(There is no ADR-026. The number was skipped in sequence and is left unused rather than
+back-filled, since a reused number is worse than a gap.)*
+
+**Context.** ADR-008 made C6 a property rather than a discipline by storing a gate verdict keyed on
+content and having `POST /api/git/propose` refuse to push anything that verdict did not cover.
+ADR-012 put every writer on one `whetstone/skill/<id>` branch. Together they made the console a
+partial owner of the operator's git: it created branches, assembled commits in a temporary index,
+and pushed.
+
+**Decision.** The console writes skills straight into the working tree (`staging.write_in_place`)
+and does no git at all — no branch, no commit, no push, and no publish endpoint. `POST
+/api/git/propose` is removed. `GET /api/git/status` stays, read-only, so the UI can show repo state.
+The CLI keeps the branch flows that want them (`skills improve --apply`, `skills update`, `skills
+index` still call `staging.stage`), so ADR-012's staging primitives and its id-addressing check are
+unchanged for those paths.
+
+**Why.** Three things were wrong with the console owning git.
+
+- **It was the wrong seam for the guarantee.** Gate records are local and gitignored (D2), so a
+  colleague's passing gate never unlocked your console anyway. The place that can actually block a
+  bad change reaching `main` is CI on the skills repo, where `whetstone eval gate` already exits
+  non-zero on a regression. A local push-refusal was theatre in front of the real gate.
+- **It fought the operator.** A promotion that failed with "uncommitted changes in …" because the
+  operator had unrelated local edits is the console arbitrating a working tree it does not own.
+  Writing files and letting the person commit them removes a whole class of conflict, `409`s and
+  dirty-tree refusals, and makes console edits visible instantly to an editor open on the same file.
+- **Two sources of truth.** With guidance on a branch and promoted cases on disk, the screen showing
+  cases and the screen showing guidance described different versions of the skill, and the
+  "is this run stale?" question had two different answers depending on which half you asked.
+
+**What this costs, stated plainly.** C6 is now **advisory**. `verdict_over` still computes it,
+`GET /api/skills/{id}/proposal` still reports it, the Edit tab still badges **not gated** versus
+**gate-proven**, and the inbox still ranks "Ready to commit" above everything else — but no code
+path refuses an action on it, because there is no action left to refuse. Nothing stops an operator
+committing an ungated change. That is a real reduction in what the project enforces, and the README
+now says so in [Publishing, and what the gate guarantees] rather than describing a refusal that no
+longer happens.
+
+**The invariant that survives, and is the one worth keeping.** Permission is still bound to content,
+never to a branch or a version number: a gate covers a `skill_hash`, and editing one character
+retracts it. That is what stops "gate once, then keep editing", and it is unaffected by who does the
+committing.

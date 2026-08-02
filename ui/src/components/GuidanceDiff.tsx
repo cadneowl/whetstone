@@ -24,10 +24,10 @@ export function GuidanceDiff({
   const removed = rows.filter((r) => r.kind === 'del').length
 
   if (added === 0 && removed === 0) {
-    // This pane compares the textarea against the *branch*, so it empties the moment an edit is
-    // staged — which is also the moment the branch has something to publish. Saying "nothing to
-    // publish" there put a flat contradiction directly above an enabled *Propose MR*, and sent
-    // people looking for a change the console was holding all along.
+    // This pane compares the textarea against what is on disk, so it empties the moment an edit is
+    // applied — which is also the moment there is something worth gating. It therefore says
+    // "no unsaved edits" and points at the gate panel, rather than "nothing to publish": the older
+    // wording put a flat contradiction directly above a change the console was holding all along.
     return (
       <p className="px-3 py-2 text-sm text-muted italic">
         No unsaved edits — this matches the guidance on disk. Gate status is under the panel below.

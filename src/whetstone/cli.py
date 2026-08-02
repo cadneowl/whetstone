@@ -2066,7 +2066,11 @@ def _staging_id(config: Config, skill_dir: Path, sk: Skill) -> str:
 def _apply_proposal(
     skill_dir: Path, sk: Skill, body: str, pages: dict[str, str], targeted: str
 ) -> None:
-    """Stage a proposed guidance change on the skill's branch, as the console's editor does.
+    """Stage a proposed guidance change on the skill's branch.
+
+    A branch rather than the working tree — unlike the console, which writes in place (ADR-028) —
+    because this is the unattended path: the draft arrives without anyone having read it, and a
+    branch is what lets it be diffed and gated before it touches the tree someone is working in.
 
     Routed through `prepare_guidance` rather than written to a file: it preserves the frontmatter
     the body does not carry, bumps the version once per proposal, and validates by loading the
@@ -2074,7 +2078,7 @@ def _apply_proposal(
     `triggers` — and a gate on a skill whose id came from a temp folder name records evidence C6
     can never match.
 
-    `pages` for the same reason the console stages them: the rule the step rewrote may not live in
+    `pages` for the same reason the console writes them: the rule the step rewrote may not live in
     `SKILL.md` at all, and dropping that half here would stage a version bump that changes nothing
     while reporting success.
     """
@@ -2109,7 +2113,7 @@ def _apply_proposal(
         typer.echo("note: the guidance is unchanged, so any existing gate still stands", err=True)
         return
     typer.echo(
-        f"\ngate it, then Propose MR in the console unlocks:\n"
+        f"\ngate it, then merge the branch yourself — a pass is the evidence to do that with:\n"
         f"  whetstone eval gate --repo {config.skills_repo} "
         f"--skill-path {staging.skill_path(config, skill_id)} "
         f"--base-ref {config.git.default_base} --candidate-ref {branch}{targeted}"

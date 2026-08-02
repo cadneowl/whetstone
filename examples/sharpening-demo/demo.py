@@ -126,7 +126,7 @@ def main() -> int:
         blocked=blocked,
     )
     _note("`recall_old -> recall_new` and `fp_old -> fp_new` are the improvement, measured.")
-    _note("A PASS also writes a gate record, which is what unlocks Propose in the console.")
+    _note("A PASS also writes a gate record — what the console reads to call a change gate-proven.")
 
     _banner("5. Feed in a review produced somewhere else — no model call")
     _note("Two findings, one ruled right and one ruled a false positive, both already judged.")
