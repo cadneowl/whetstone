@@ -38,6 +38,17 @@ export function InboxRoute() {
   const busy = rows.filter((a) => a.action.kind !== 'nothing')
   const idle = rows.filter((a) => a.action.kind === 'nothing')
 
+  // The review backlog as a whole, which no row can show.
+  //
+  // This list names one action per skill, ranked by closeness to shipping — so a skill sitting on
+  // four unruled findings *and* a staged change reads as `gate`, and its reviews shrink to a
+  // secondary link. That is right for "what next for this skill" and useless for "I have an hour,
+  // show me everything unruled", which is a mode this product needs precisely because reviews
+  // expire: a mined candidate keeps, a review stops describing a reviewer that exists the moment
+  // the guidance moves.
+  const waiting = rows.reduce((sum, r) => sum + r.unruled_findings, 0)
+  const waitingSkills = rows.filter((r) => r.unruled_findings > 0).length
+
   return (
     <div className="space-y-5">
       <header className="flex flex-wrap items-baseline justify-between gap-3">
@@ -88,6 +99,18 @@ export function InboxRoute() {
             </li>
           ))}
         </ul>
+      )}
+
+      {/* Only once the backlog actually spans skills. With one skill waiting, that skill's own row
+          already carries the button, and a second link to the same work would be noise. */}
+      {waitingSkills > 1 && (
+        <p className="text-sm text-muted">
+          <Link to="/reviews" className="underline decoration-dotted hover:text-accent">
+            {waiting} finding{waiting === 1 ? '' : 's'} waiting across {waitingSkills} skills →
+          </Link>{' '}
+          — every skill's live reviews in one queue, for when you are working the backlog rather
+          than one skill.
+        </p>
       )}
 
       {inbox.unrouted > 0 && (

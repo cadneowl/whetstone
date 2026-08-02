@@ -48,7 +48,18 @@ export function SkillReviews({ skillId }: { skillId: string }) {
 
   return (
     <div className="space-y-5">
-      <ReviewAChange skillId={skillId} />
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <ReviewAChange skillId={skillId} />
+        {/* The cross-skill queue is reachable from here rather than from the top nav: it is the
+            same work seen from a different angle, and this is where someone already ruling would
+            think to look for "and everywhere else". */}
+        <Link
+          to="/reviews"
+          className="ml-auto text-xs text-muted underline decoration-dotted hover:text-accent"
+        >
+          every skill's reviews →
+        </Link>
+      </div>
 
       {items.length === 0 ? (
         <Empty>
