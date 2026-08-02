@@ -1013,10 +1013,15 @@ function FormPane({
           </p>
         </Field>
 
-        <Field label="Region">
+        <Field
+          label="Region"
+          hint="An anchor, not a boundary: matching accepts a finding anywhere in this change and lets the judge decide, so a line or two either way costs nothing. Point it at the code the concern is about."
+        >
           <p className="mb-1 font-mono text-xs break-all">{edits.path}</p>
           {/* Typed entry as well as dragging: dragging is faster, but it is mouse-only and imprecise
-            at the edges of a hunk, and this is the field most likely to be wrong. */}
+            at the edges of a hunk. Precision here used to decide whether a case could ever pass;
+            since the region became an anchor (`core.matching`) it only has to point at the right
+            code, which is why the hint says so rather than leaving people guessing at exactness. */}
           <div className="flex items-center gap-1.5">
             <LineInput
               value={edits.line_range?.[0] ?? null}
@@ -1373,10 +1378,25 @@ function withLine(
   return base
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string
+  /** Hover text on the label, for a field whose meaning is not obvious from its name. */
+  hint?: string
+  children: React.ReactNode
+}) {
   return (
     <div>
-      <p className="mb-1 text-[11px] tracking-wide text-muted uppercase">{label}</p>
+      <p
+        className="mb-1 text-[11px] tracking-wide text-muted uppercase"
+        title={hint}
+        style={hint ? { cursor: 'help' } : undefined}
+      >
+        {label}
+      </p>
       {children}
     </div>
   )

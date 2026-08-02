@@ -9,6 +9,10 @@ already producing the right finding.
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
 from whetstone.core.matching import effective_region, eligible_indices, evaluate_expectation
 from whetstone.core.scoring import score_trial
 from whetstone.domain.change import CodeChange, FileChange
@@ -16,9 +20,11 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalCase, Expectation
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region, RepoRef
-from whetstone.domain.score import Confusion
+from whetstone.domain.run import CaseRun, RunRecord, TrialRecord
+from whetstone.domain.score import Confusion, SkillScore
 from whetstone.judge import DeterministicJudge
 from whetstone.judge.base import Match
+from whetstone.runs import RunStore
 
 REPO = RepoRef.parse("local:t")
 JUDGE = DeterministicJudge()
@@ -310,3 +316,52 @@ class TestTheEvalStillDiscriminates:
 
         assert len(outcome.verdicts) == 3
         assert outcome.unjudged_finding_indices == []
+
+
+class TestItSurvivesTheDisk:
+    """`considered` is what every downstream explanation reads — the drill-down, the dispute corpus
+    that is the judge's ground truth, the triples a distilled judge trains on. Dropped on save, all
+    three fall back to the anchor and quietly describe a run that never happened.
+    """
+
+    def _record(self, outcome: object) -> RunRecord:
+        return RunRecord(
+            id="run-1",
+            created_at=datetime(2026, 8, 1, tzinfo=UTC),
+            skill_id="s",
+            skill_version=1,
+            skill_hash="0" * 64,
+            score=SkillScore(skill_id="s", version=1, k=1, cases=[]),
+            cases=[
+                CaseRun(
+                    case_id="c1",
+                    kind="should_catch",
+                    trials=[TrialRecord(index=0, findings=[_finding(82)], outcomes=[outcome])],
+                )
+            ],
+        )
+
+    def test_both_regions_survive_a_save_and_load(self, tmp_path: Path) -> None:
+        outcome = evaluate_expectation([_finding(82)], _expectation(), JUDGE, _change())
+        store = RunStore(tmp_path / "runs")
+        store.save(self._record(outcome))
+
+        loaded = store.load("run-1").cases[0].trials[0].outcomes[0]
+
+        assert loaded.where is not None and loaded.where.line_range == (73, 73)
+        assert loaded.considered is not None and loaded.considered.line_range == (72, 91)
+        assert loaded.outcome == "tp"
+
+    def test_a_record_written_before_the_field_existed_still_loads(self, tmp_path: Path) -> None:
+        outcome = evaluate_expectation([_finding(82)], _expectation(), JUDGE, _change())
+        store = RunStore(tmp_path / "runs")
+        path = store.save(self._record(outcome))
+
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        del saved["cases"][0]["trials"][0]["outcomes"][0]["considered"]
+        path.write_text(json.dumps(saved), encoding="utf-8")
+
+        loaded = store.load("run-1").cases[0].trials[0].outcomes[0]
+
+        assert loaded.considered is None
+        assert loaded.where is not None and loaded.where.line_range == (73, 73)
