@@ -25,13 +25,16 @@ export function ReviewsIndex() {
   return (
     <div>
       <header className="mb-4">
-        <h1 className="text-lg font-semibold">Reviews</h1>
+        <h1 className="text-lg font-semibold">Every skill's reviews</h1>
+        {/* Says what this screen *is* before what reviews are for. It used to open by describing
+            the ruling and the case it mints — neither of which happens here — so an operator who
+            read it and looked around found a form and a list, and reasonably concluded the feature
+            was missing. It is a queue; the work is one click in, on a review. */}
         <Intro>
-          The skill's own output on a live change, waiting for a verdict — the opposite direction
-          from Triage, which infers what a reviewer <em>should</em> have said. Open one and mark
-          each finding Correct or False positive. Each ruling mints a case the skill must keep
-          getting right, and the skill's own <em>Reviews</em> tab carries that straight into the
-          improve loop.
+          The queue, across every skill: which of a skill's own outputs on live changes is still
+          waiting on a human. Ruling the findings — and minting the cases that come from it —
+          happens on the review itself; a single skill's queue is on its own <em>Reviews</em> tab,
+          which is also where the cases go next.
         </Intro>
       </header>
 
@@ -40,7 +43,12 @@ export function ReviewsIndex() {
       </div>
 
       {groups.length === 0 ? (
-        <Empty>No reviews yet — run one above.</Empty>
+        <Empty>
+          No reviews yet. Run one above, or from a skill's <em>Reviews</em> tab: the skill reads a
+          change and reports what it would say, and ruling each finding right or wrong is what mints
+          the eval cases that hold it to the answer. That ruling happens on the review — this page
+          only says which ones are waiting.
+        </Empty>
       ) : (
         <div className="space-y-5">
           {groups.map((group) => (

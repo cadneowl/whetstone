@@ -40,14 +40,20 @@ export function AppShell() {
             Whetstone
           </NavLink>
           {/* Status leads: the fleet's state of affairs on top. Then the loop as it runs — what
-              needs doing, the signal behind it, the skills it changes, and the evidence it made. */}
+              needs doing, the signal behind it, the skills it changes, and the evidence it made.
+              `/reviews` is deliberately not here. It is the only view that was a sub-view of
+              another — a review is born routed (`skill_id` is required at upload), so it belongs to
+              its skill, where the ruling and the sharpening actually happen. Triage keeps its place
+              because a mined candidate genuinely may match no skill, which is what `inbox.unrouted`
+              counts. The cross-skill review queue is still there and still worth having; it is
+              reached from the inbox and from a skill's Reviews tab, rather than being the page a
+              first-time operator lands on expecting to mint a case and finding a form. */}
           <nav className="flex gap-4 text-sm">
             <Tab to="/status">Status</Tab>
             <Tab to="/" end>
               Inbox
             </Tab>
             <Tab to="/triage">Triage</Tab>
-            <Tab to="/reviews">Reviews</Tab>
             <Tab to="/skills">Skills</Tab>
             <Tab to="/runs">Runs</Tab>
             <Tab to="/judge">Judge</Tab>
