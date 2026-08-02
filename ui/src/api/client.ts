@@ -13,6 +13,8 @@ export type Contradiction = Schemas['Contradiction']
 export type RunRecord = Schemas['RunRecord']
 export type RunListItem = Schemas['RunListItem']
 export type RunSummary = Schemas['RunSummary']
+/** Why a run or gate landed where it did — see `whetstone.explain`. */
+export type Explanation = Schemas['Explanation']
 export type ConsoleConfig = Schemas['ConsoleConfig']
 export type BackendInfo = Schemas['BackendInfo']
 export type ModelChoice = Schemas['ModelChoice']
@@ -126,6 +128,15 @@ export type JobRequest = {
    * scores the whole corpus on both sides before a propose is possible.
    */
   with_corpus?: boolean
+  /**
+   * gate only: measure the baseline again even though an identical measurement is on record.
+   *
+   * The reuse it overrides is sound by construction — the key covers the commit, the case set, the
+   * judge, the reviewer and the model, so a matching record measured the same thing with the same
+   * instrument. This exists for the one input that key cannot see: a provider changing the model
+   * behind a name.
+   */
+  fresh_baseline?: boolean
   /** task-eval only: keep each case's workspace on disk instead of a temp dir. */
   keep_workspaces?: boolean
   /** task-gate only: how far the mean score may fall before the gate fails. */
@@ -311,6 +322,19 @@ export function useRun(id: string) {
   return useQuery({
     queryKey: keys.run(id),
     queryFn: () => get<RunRecord>(`/api/runs/${encodeURIComponent(id)}`),
+  })
+}
+
+/**
+ * Why this run came out where it did — a reading of the record, not part of it.
+ *
+ * A separate query from `useRun` because it is a separate resource on the server, for the reason
+ * given there: the record is evidence and is frozen on disk, while the reading of it improves.
+ */
+export function useRunSummary(id: string) {
+  return useQuery({
+    queryKey: [...keys.run(id), 'summary'],
+    queryFn: () => get<Explanation>(`/api/runs/${encodeURIComponent(id)}/summary`),
   })
 }
 

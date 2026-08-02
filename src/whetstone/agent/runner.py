@@ -61,6 +61,26 @@ class SkillAgent:
         # is too low for this skill, and a side that had to be forced did not investigate the way
         # the other one did.
         self.forced_answers = 0
+        # The same fact about the *last* case alone, which the run-level counter cannot answer.
+        # "The reviewer said nothing" and "the reviewer was cut off mid-investigation and told to
+        # answer anyway" are the same empty finding list and completely different failures: one is
+        # the guidance, the other is `max_steps`. A gate that fails on a case decided this way is
+        # not reporting a regression, and until this existed there was no way to know which it was.
+        #
+        # **Thread-local, because one reviewer instance serves every case and the harness evaluates
+        # cases concurrently when asked to** (`run_skill_recorded(max_workers=…)`, the CLI's
+        # `--workers`). A plain attribute is written by whichever review finished last and read by
+        # whichever thread got there next, so at `--workers 4` a case that answered under its own
+        # steam would be labelled with another case's exhaustion — a note that is worse than no
+        # note, since the whole point is telling one failure from the other. The worker thread that
+        # calls `review` is the one that reads this immediately afterwards, so per-thread is
+        # exactly the right scope.
+        self._local = threading.local()
+
+    @property
+    def last_note(self) -> str:
+        """What the *calling thread's* most recent review had to say about how it was measured."""
+        return getattr(self._local, "note", "")
 
     def bind_cancel(self, cancel: threading.Event | None) -> None:
         """Let a cancelled run stop between agent steps rather than run to the step ceiling."""
@@ -81,10 +101,16 @@ class SkillAgent:
         return lines
 
     def note_trace(self, trace: AgentTrace) -> None:
-        """Fold one case's trace into this instance's running totals."""
+        """Fold one case's trace into this instance's running totals, and remember this one."""
         self.llm_calls += trace.llm_calls
         self.trajectory.update(trace.calls)
         self.forced_answers += 1 if trace.forced else 0
+        self._local.note = (
+            f"the agent used its whole budget of {self._max_steps} investigation step(s) and was "
+            f"made to answer with what it had"
+            if trace.forced
+            else ""
+        )
 
     def reset_trace(self) -> None:
         """Start a fresh trajectory — used between the two sides of a gate, which share one
@@ -96,6 +122,7 @@ class SkillAgent:
         """
         self.trajectory = Counter()
         self.forced_answers = 0
+        self._local.note = ""
 
     def _source_note(self) -> str:
         """What to tell the model about the source tree. Overridden where the framing differs."""

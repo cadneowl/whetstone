@@ -97,6 +97,9 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [notice, setNotice] = useState('')
   const [instruction, setInstruction] = useState('')
+  // Off by default: reusing an identical baseline is sound by construction, and the point of the
+  // cache is not having to think about it. Ticked, this run measures the baseline again.
+  const [freshBaseline, setFreshBaseline] = useState(false)
 
   /** Write workspace state back to the query, leaving `tab` and anything else alone. */
   const patch = (changes: Record<string, string | null>) =>
@@ -541,11 +544,30 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
           )}
           <div className="flex flex-wrap items-center gap-3">
             <LaunchButton
-              key={(hasBatch ? targetable : failedLastRun).join(',')}
+              key={`${(hasBatch ? targetable : failedLastRun).join(',')}|${freshBaseline}`}
               kind="gate"
-              request={{ skill_id: skillId, targeted: hasBatch ? targetable : failedLastRun }}
+              request={{
+                skill_id: skillId,
+                targeted: hasBatch ? targetable : failedLastRun,
+                fresh_baseline: freshBaseline,
+              }}
               label="Run the gate"
             />
+            {/* The baseline is the last commit, so a gate minutes after another one measures
+                content that did not move — it is reused, halving the spend and removing a second
+                sample of a reviewer that may not answer the same way twice. This is the escape
+                hatch for the one input the reuse key cannot see: the model behind a name changing
+                under you. */}
+            <label className="flex items-center gap-1.5 text-xs text-muted">
+              <input
+                type="checkbox"
+                checked={freshBaseline}
+                onChange={(e) => setFreshBaseline(e.target.checked)}
+              />
+              <span title="Off, an identical baseline already on record is reused instead of being measured again — same commit, cases, judge, reviewer and model. Tick this to measure it again anyway.">
+                re-measure the baseline
+              </span>
+            </label>
             {proposal?.verdict.can_propose ? (
               <Badge tone="good" title="A passing gate covers the exact guidance on disk.">
                 gate-proven ✓

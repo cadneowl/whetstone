@@ -17,9 +17,11 @@ filename already encodes.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from collections.abc import Iterator, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -65,6 +67,32 @@ class GateRecord(BaseModel):
     # looks, and this is where someone reading the evidence later can see it. Empty otherwise.
     base_trace: list[str] = Field(default_factory=list)
     candidate_trace: list[str] = Field(default_factory=list)
+    # Per case, what the instrument said about measuring it on that side (`service.case_notes`).
+    # A gate keeps scores, not findings, and this is the one part of the discarded detail that
+    # changes what a verdict means: "1 case(s) regressed" reads very differently once you know the
+    # candidate's answer on that case was cut off at the step ceiling. Absent on older records.
+    base_notes: dict[str, str] = Field(default_factory=dict)
+    candidate_notes: dict[str, str] = Field(default_factory=dict)
+    # Identity of everything that could change the *base* side's score (`BaselineKey`). Stored so a
+    # later gate over the same baseline, case set, judge, reviewer and model can find this
+    # measurement instead of paying to take it again. Empty on records written before the cache.
+    base_key: str = ""
+    # When the base score was actually taken, and by which gate — set only when this gate did *not*
+    # measure it. A record that borrowed a baseline must never read as one that took it, or the
+    # evidence quietly claims a freshness it does not have. Both are carried forward unchanged
+    # through a chain of reuses, so ten gates reusing one measurement all point at the original and
+    # all age from it.
+    base_measured_at: datetime | None = None
+    base_from_gate: str = ""
+
+    @property
+    def baseline_reused(self) -> bool:
+        return bool(self.base_from_gate)
+
+    @property
+    def baseline_taken_at(self) -> datetime:
+        """When the baseline was measured, whoever measured it."""
+        return self.base_measured_at or self.created_at
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -125,6 +153,95 @@ class GateRecord(BaseModel):
     @property
     def targeted(self) -> list[str]:
         return self.config.targeted_cases
+
+
+class BaselineKey(BaseModel):
+    """Everything that could change a gate's base-side score.
+
+    A gate re-scores the baseline every time. That is the right default and the wrong one to make
+    unconditional: the baseline is the *last commit*, which does not change between two gates ten
+    minutes apart, so the second measurement is a second bill and — with a nondeterministic
+    reviewer — a second coin flip that can fail a gate on its own. Two real gates 6.5 minutes apart
+    over identical content disagreed with each other on one case and one of them blocked a
+    publishable change.
+
+    Reuse is only sound if *nothing that feeds the measurement* moved, so this names all of it:
+
+    - `base_hash` — the baseline's guidance, cases and wiki.
+    - `cases_hash` — the set actually scored, which is the **union** of both sides and therefore not
+      implied by `base_hash`. A new candidate case changes the population and forbids reuse.
+    - `judge_hash` — doctrine, cascade and tier-1 model.
+    - `reviewer` + `reviewer_context_digest` — `agent: 8 steps` and `agent: 64 steps` are different
+      instruments, and so is the same agent handed a different context bag.
+    - `backend` + `model` — the same reviewer on a different model is a different measurement.
+    - `k` — a mean of three trials is not a sample of one.
+    - `practice_mode` — a regex must never stand in for a model, in either direction.
+
+    The one input it cannot see is a provider changing the model behind a name, which is why the
+    lookup takes a maximum age as well as a key.
+    """
+
+    base_hash: str
+    cases_hash: str
+    judge_hash: str = ""
+    reviewer: str = ""
+    reviewer_context_digest: str = ""
+    backend: str = ""
+    model: str = ""
+    k: int = 1
+    practice_mode: bool = False
+    # The wiki and precedent budgets the run was given (`StepInputs`), as a digest. They live in
+    # `evaluate/step.yaml`, which no other field here covers: `skill_hash` hashes the skill folder
+    # and the reviewer identity describes an agent's step budget, so raising `inputs.precedents.k`
+    # changed what the built-in reviewer saw while leaving every other part of this key identical.
+    inputs_digest: str = ""
+
+    @property
+    def digest(self) -> str:
+        """A stable content id, independent of the order the fields are declared in.
+
+        `model_dump_json()` emits declaration order, so hashing it directly would make moving a
+        field in the class above silently invalidate every stored key — a cache miss storm, and
+        worse, a *rename* of the identity that nothing would report. Sorting makes the digest a
+        function of the values alone.
+        """
+        return hashlib.sha256(
+            json.dumps(self.model_dump(mode="json"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+
+def reusable_baseline(
+    records: Sequence[GateRecord],
+    key: str,
+    *,
+    max_age: timedelta | None,
+    now: datetime,
+) -> GateRecord | None:
+    """The newest gate whose base-side measurement this gate may reuse, or None.
+
+    A free function over records for the same reason `verdict_over` is one: the rule for what counts
+    as reusable evidence belongs beside the rule for what counts as publishable evidence, where both
+    can be read together, rather than inside a store that happens to hold the files.
+
+    Three refusals, each for a different reason:
+
+    - **no key** — a record written before the cache existed cannot prove what it measured.
+    - **too old** — aged from when the baseline was *taken*, not from the record that borrowed it,
+      so a chain of reuses cannot walk a stale measurement forward indefinitely.
+    - **nothing scored** — a base side whose every case errored has metrics computed over nothing.
+      Reusing it would propagate a measurement that never happened into gates that then read as
+      normal.
+    """
+    if not key:
+        return None
+    fresh = [
+        r
+        for r in records
+        if r.base_key == key and r.base_score.scorable and (
+            max_age is None or now - r.baseline_taken_at <= max_age
+        )
+    ]
+    return max(fresh, key=lambda r: r.baseline_taken_at, default=None)
 
 
 def new_gate_id(skill_id: str, candidate_hash: str, created_at: datetime) -> str:
@@ -366,6 +483,20 @@ class GateStore:
         ]
         records.sort(key=lambda r: r.created_at, reverse=True)
         return records
+
+    def baseline_for(
+        self, skill_id: str, key: str, *, max_age: timedelta | None, now: datetime
+    ) -> GateRecord | None:
+        """A past gate whose base-side score this gate may reuse — see `reusable_baseline`.
+
+        Scans this skill's gates rather than matching on the filename, which encodes the *candidate*
+        hash: the whole point is to find a baseline measured while gating some **other** candidate.
+        That makes it a full read of one skill's gate directory, which is the same cost the C6
+        verdict already pays and is bounded by proposals rather than by runs.
+        """
+        return reusable_baseline(
+            self.list(skill_id=skill_id), key, max_age=max_age, now=now
+        )
 
     def verdict_for(self, skill_id: str, candidate_hash: str) -> Verdict:
         """Whether this exact version of a skill may be published, and — when not — why not."""

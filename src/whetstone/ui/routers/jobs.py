@@ -24,7 +24,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
@@ -44,6 +44,7 @@ from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
 from whetstone.drift import DriftError, compute_drift, drift_inputs
+from whetstone.explain import explain_gate, explain_run
 from whetstone.improve import propose
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.judge.spec import load_judge
@@ -147,6 +148,10 @@ class GateRequest(BaseModel):
     trials: int | None = None
     sample: int | None = None
     targeted: list[str] = Field(default_factory=list)
+    # Measure the baseline again even when an identical one is on record. The reuse is sound by
+    # construction — the key covers every input that could move the number — so this exists for the
+    # case the key cannot see: a suspicion that the model behind a name has changed under you.
+    fresh_baseline: bool = False
     # Per-launch backend; see `EvalRequest.provider` and `_pick`.
     provider: str = ""
     model: str = ""
@@ -323,6 +328,9 @@ def launch_eval(
             "fp_rate": record.score.fp_rate,
             "llm_calls": record.llm_calls,
             "scored": ref or "working tree",
+            # Why it came out this way, case by case, so the answer to "what do I do now" does not
+            # require opening the drill-down and reading judge verdicts one at a time.
+            "summary": explain_run(record).model_dump(),
         }
 
     return _launch(jobs, "eval", skill.id, work, plan)
@@ -341,7 +349,7 @@ def plan_gate_job(
         config,
         selection,
         candidate,
-        EvalRequest(**request.model_dump(exclude={"targeted"})),
+        EvalRequest(**request.model_dump(exclude={"targeted", "fresh_baseline"})),
         _reviewer_choice(config, candidate),
         sides=2,
     )
@@ -443,6 +451,10 @@ def launch_gate(
             return sink
 
         client = _client(config, spec, selection, label=f"gate-{candidate.id}")
+        # `0` and the explicit opt-out both mean "always re-measure", expressed as no store to look
+        # in rather than as a flag threaded through two more layers.
+        hours = config.gate.baseline_max_age_hours
+        reuse = config.gate.reuse_baseline and not request.fresh_baseline and hours > 0
         try:
             record = record_gate(
                 base,
@@ -463,11 +475,26 @@ def launch_gate(
                 on_candidate=side("cand", candidate_ref),
                 cancel=handle.cancel_event,
                 reviewer=choice.build(client),
+                baselines=gates if reuse else None,
+                baseline_max_age=timedelta(hours=hours),
             )
         except RunCancelled as exc:
             # Nothing is saved: half a gate is not a verdict, and a record of one would be evidence
             # C6 could match against content that was never fully measured.
             raise Cancelled from exc
+        if record.baseline_reused:
+            # Said in the transcript, not only in the result: the base section simply does not
+            # appear when the baseline is reused, and an operator watching a gate scroll past needs
+            # to know that is a saving rather than half a run.
+            handle.log(
+                LogLine(
+                    text=(
+                        f"── baseline reused from {record.base_from_gate}, measured "
+                        f"{record.baseline_taken_at.isoformat(timespec='seconds')} — "
+                        f"same commit, cases, judge, reviewer and model ──"
+                    )
+                )
+            )
         gates.save(record)
         handle.progress(1, 1, "done")
         return {
@@ -491,6 +518,12 @@ def launch_gate(
             # things. When an agent investigated differently the verdict is still the verdict —
             # but the operator reading it deserves to know, and this was recorded nowhere they look.
             "trace_diverged": record.trace_diverged,
+            "baseline_reused": record.baseline_reused,
+            "baseline_from_gate": record.base_from_gate,
+            # The whole comparison read back as sentences. Everything above is already true and was
+            # already on screen; what nobody could do quickly was put it together into "this failed
+            # because X, and here is what makes X less believable than it looks".
+            "summary": explain_gate(record).model_dump(),
         }
 
     return _launch(jobs, "gate", candidate.id, work, plan)

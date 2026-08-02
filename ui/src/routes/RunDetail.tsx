@@ -8,7 +8,13 @@ import type {
   RunRecord,
   TrialRecord,
 } from '@/api/client'
-import { useConsoleConfig, useDisputes, useDisputeVerdict, useRun } from '@/api/client'
+import {
+  useConsoleConfig,
+  useDisputes,
+  useDisputeVerdict,
+  useRun,
+  useRunSummary,
+} from '@/api/client'
 import {
   Badge,
   Empty,
@@ -58,6 +64,10 @@ export function RunDetail() {
 
       <Header run={data} />
 
+      {/* Above the per-case evidence, because it says which of those cases to open. Everything in
+          it is derived from what follows — this screen is where you go to disagree with it. */}
+      <Verdict runId={runId} />
+
       <h2 className="mt-6 mb-2 text-xs tracking-wide text-muted uppercase">Cases</h2>
       {data.cases.length === 0 ? (
         <Empty>This run covered no eval cases.</Empty>
@@ -80,6 +90,42 @@ export function RunDetail() {
 
 function rulingKey(caseId: string, trial: number, expectationId: string, findingIndex: number) {
   return `${caseId}|${trial}|${expectationId}|${findingIndex}`
+}
+
+/**
+ * What happened, in sentences — the answer this screen's title asks for.
+ *
+ * Silent while loading and silent on error: it is a reading of a record that is already fully on
+ * screen below, so a failure to produce it must not put an error banner over evidence that loaded
+ * perfectly well.
+ */
+function Verdict({ runId }: { runId: string }) {
+  const { data } = useRunSummary(runId)
+  if (!data) return null
+  return (
+    <section className="mt-4 rounded border border-line border-l-2 bg-panel p-3 text-sm">
+      <p className={data.verdict === 'failed' ? 'font-medium text-bad' : 'font-medium text-good'}>
+        {data.headline}
+      </p>
+      {data.reasons.map((reason) => (
+        <p key={reason} className="mt-1 whitespace-pre-line">
+          {reason}
+        </p>
+      ))}
+      {data.caveats.length > 0 && (
+        <>
+          <p className="mt-3 text-xs tracking-wide text-muted uppercase">
+            Read with these in mind
+          </p>
+          <ul className="mt-1 ml-4 list-disc text-muted">
+            {data.caveats.map((caveat) => (
+              <li key={caveat}>{caveat}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  )
 }
 
 function Header({ run }: { run: RunRecord }) {

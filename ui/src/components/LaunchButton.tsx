@@ -503,6 +503,16 @@ function GateDelta({ r }: { r: Record<string, unknown> }) {
       className="mt-0.5 text-muted"
       title="base is your last commit; candidate is what is on disk. A gate passes when the candidate does not regress — so base failing cases the candidate catches is exactly what a useful gate looks like."
     >
+      {/* Why no base section scrolled past in the transcript. Without saying so, a reused
+          baseline reads as half a run rather than as the saving it is. */}
+      {Boolean(r.baseline_reused) && (
+        <span
+          className="mr-1 text-good"
+          title={`The baseline was measured by gate ${String(r.baseline_from_gate)} and reused: same commit, case set, judge, reviewer and model, so measuring it again would have cost a second bill and a second coin flip for the same answer.`}
+        >
+          baseline reused ·
+        </span>
+      )}
       base → candidate: recall <span className="tabular">{recallOld.toFixed(3)}</span> →{' '}
       <span className="tabular">{recallNew.toFixed(3)}</span> · fp{' '}
       <span className="tabular">{fpOld.toFixed(3)}</span> →{' '}
@@ -511,11 +521,76 @@ function GateDelta({ r }: { r: Record<string, unknown> }) {
   )
 }
 
+export type JobSummary = {
+  verdict: string
+  headline: string
+  reasons: string[]
+  caveats: string[]
+}
+
+/**
+ * The `summary` a finished job carries, or null when it carries none.
+ *
+ * Null is a real answer, not a defect: a job launched by an older build of the server returns a
+ * result without one, and rendering an empty verdict box under it would look like the run declined
+ * to explain itself rather than like a version skew.
+ */
+export function summaryOf(r: Record<string, unknown>): JobSummary | null {
+  const raw = r.summary
+  if (!raw || typeof raw !== 'object') return null
+  const s = raw as Record<string, unknown>
+  if (typeof s.headline !== 'string' || !s.headline) return null
+  const list = (key: string) =>
+    Array.isArray(s[key]) ? (s[key] as unknown[]).filter((x): x is string => typeof x === 'string') : []
+  return {
+    verdict: typeof s.verdict === 'string' ? s.verdict : '',
+    headline: s.headline,
+    reasons: list('reasons'),
+    caveats: list('caveats'),
+  }
+}
+
+/**
+ * What happened, why, and how much to trust it.
+ *
+ * Reasons and caveats are rendered as two lists rather than one because the difference is the whole
+ * point: the first is what to go and fix, the second is how much to believe any of it. A gate that
+ * failed on a case whose candidate answer was cut off at the step ceiling has a reason and a caveat
+ * that completely changes what to do about it, and reading them as one list loses that.
+ */
+function Verdict({ summary }: { summary: JobSummary | null }) {
+  if (!summary) return null
+  return (
+    <div className="mt-2 border-l-2 border-line pl-2">
+      <p className={summary.verdict === 'failed' ? 'text-bad' : 'text-good'}>{summary.headline}</p>
+      {summary.reasons.map((reason) => (
+        // `whitespace-pre-line`: a gate's regression reason carries an indented line per case, and
+        // collapsing it puts the case detail in the middle of the sentence above it.
+        <p key={reason} className="mt-0.5 whitespace-pre-line text-ink">
+          {reason}
+        </p>
+      ))}
+      {summary.caveats.length > 0 && (
+        <>
+          <p className="mt-1.5 text-muted">Read with these in mind</p>
+          <ul className="ml-3 list-disc">
+            {summary.caveats.map((caveat) => (
+              <li key={caveat} className="text-muted">
+                {caveat}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  )
+}
+
 function JobResult({ job }: { job: Job }) {
   const r = job.result as Record<string, unknown>
   if (job.kind === 'eval') {
     return (
-      <p className="mt-2 text-xs">
+      <div className="mt-2 text-xs">
         recall <span className="tabular">{fmt(r.recall)}</span> · fp{' '}
         <span className="tabular">{fmt(r.fp_rate)}</span> · {String(r.llm_calls)} call(s)
         {/* Which content was scored. Two runs of "the same skill" can differ only in this, and a
@@ -530,13 +605,20 @@ function JobResult({ job }: { job: Job }) {
         <a className="text-accent hover:underline" href={`/runs/${String(r.run_id)}`}>
           open the run
         </a>
-      </p>
+        {/* Why it came out this way. The numbers above are the measurement; this is the reading of
+            it, and without it the next step was opening the drill-down and working through judge
+            verdicts one at a time to find out which case failed and for which of four reasons. */}
+        <Verdict summary={summaryOf(r)} />
+      </div>
     )
   }
   if (job.kind === 'gate') {
-    const reasons = (r.reasons as string[]) ?? []
+    const summary = summaryOf(r)
+    // Only when the server sent no summary: its reasons are these reasons, expanded with what
+    // happened to each case, and showing both puts the same sentence on screen twice.
+    const reasons = summary ? [] : ((r.reasons as string[]) ?? [])
     const fixed = (r.fixed_cases as string[]) ?? []
-    const regressed = (r.regressed_cases as string[]) ?? []
+    const regressed = summary ? [] : ((r.regressed_cases as string[]) ?? [])
     return (
       <div className="mt-2 text-xs">
         <p className={r.passed ? 'text-good' : 'text-bad'}>Gate: {r.passed ? 'PASS' : 'FAIL'}</p>
@@ -560,7 +642,10 @@ function JobResult({ job }: { job: Job }) {
             {reason}
           </p>
         ))}
-        {Boolean(r.trace_diverged) && (
+        <Verdict summary={summary} />
+        {/* The summary already carries this one as a caveat; the standalone line stays for a
+            result from a server that sent no summary. */}
+        {!summary && Boolean(r.trace_diverged) && (
           <p
             className="mt-1 text-warn"
             title="This skill runs as an agent, and an agent chooses what to open. The two sides of this gate did not read the same things, so part of the difference may be how it investigated rather than the guidance itself. Open the gate record to compare the trajectories."
