@@ -96,12 +96,12 @@ function Editor({
   /**
    * Whether the case outcomes on this screen describe the guidance in the textarea.
    *
-   * They often do not, and that was the gap. An eval scores the *working tree*; the editor and the
-   * gate below it describe a *staged branch*. Once something is staged the two diverge, and the
-   * screen shows a red MISSED directly beneath a change that already fixed it, with nothing saying
-   * the two halves are about different versions. Gating does not close it either: a gate writes a
-   * gate record, never a run record, so clearing a candidate at recall 1.00 leaves every case row
-   * still reporting the baseline.
+   * They often do not, and that was the gap. A run is a measurement of the guidance *as it stood
+   * when it ran*; the editor writes a new version to disk the moment you save. The two diverge as
+   * soon as you edit, and the screen shows a red MISSED directly beneath a change that already
+   * fixed it, with nothing saying the two halves are about different versions. Gating does not
+   * close it either: a gate writes a gate record, never a run record, so clearing a candidate at
+   * recall 1.00 leaves every case row still reporting the baseline.
    *
    * Computed once here rather than in each panel, so the case list and the improve panel can never
    * disagree about it.
@@ -130,11 +130,7 @@ function Editor({
           and a reader had to work out which. The Improve tab's version is strictly the better one:
           it scopes the draft to the cases you ticked and takes a steering instruction. So the door
           stays, as a pointer, and this tab keeps what is unique to it — the editor. */}
-      <SharpenPointer
-        cases={[...detail.cases, ...detail.pending_cases]}
-        stale={outcomesAreStale}
-        base={proposal.base}
-      />
+      <SharpenPointer cases={[...detail.cases, ...detail.pending_cases]} stale={outcomesAreStale} />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-2">
@@ -159,13 +155,13 @@ function Editor({
             the untested-guidance check can refer to them.
           </p>
           {/* The whole folder is one unit of guidance: every file above reaches the reviewer and is
-              inside `skill_hash`, so all of them are staged together and gated together. Worth
+              inside `skill_hash`, so all of them are saved together and gated together. Worth
               saying, because a rule moving between two files here is invisible in any single one. */}
           {Object.keys(stagedFiles).length > 1 && (
             <p className="text-xs text-muted">
-              This skill's guidance spans {Object.keys(stagedFiles).length} files. All of them go to the
-              reviewer, all of them are covered by the gate, and staging commits them together — fix
-              a rule in the file that holds it.
+              This skill's guidance spans {Object.keys(stagedFiles).length} files. All of them go to
+              the reviewer, all of them are covered by the gate, and saving writes them together —
+              fix a rule in the file that holds it.
             </p>
           )}
         </div>
@@ -217,7 +213,7 @@ function Editor({
           onClick={() =>
             save.mutate({
               skillId,
-              // Every file, in one commit: a rule moved out of `SKILL.md` into a page is only
+              // Every file, in one write: a rule moved out of `SKILL.md` into a page is only
               // coherent if both halves land together.
               edit: {
                 body: drafts[SKILL_FILE] ?? proposal.body,
@@ -253,8 +249,6 @@ function Editor({
         cases={detail.cases}
         scoredBy={scoredBy}
         stale={outcomesAreStale}
-        staged={false}
-        base={proposal.base}
         skillId={skillId}
       />
     </div>
@@ -356,13 +350,11 @@ function FileTabs({
 function SharpenPointer({
   cases,
   stale,
-  base,
 }: {
   // Both kinds: the fields this reads — id, kind, and the two outcomes — are the ones a pending
   // case carries as well.
   cases: (CaseSummary | PendingCase)[]
   stale: boolean
-  base: string
 }) {
   const improve = useImproveSearch()
   const scored = cases.filter((c) => c.last_recall !== null || c.last_fp_rate !== null)
@@ -399,9 +391,9 @@ function SharpenPointer({
       {summary && <p className="text-xs text-muted">{summary}</p>}
       {stale && (
         <p className="mt-2 rounded border border-warn/40 bg-warn/5 px-2.5 py-2 text-xs text-warn">
-          The last run scored the guidance on <code className="font-mono">{base}</code>, not what is
-          on disk now, so a draft would learn from failures your edit may already have fixed. Score
-          it again first — the Improve tab does that as its step 1.
+          The last run scored a different version of this guidance, not what is on disk now, so a
+          draft would learn from failures your edit may already have fixed. Score it again first —
+          the Improve tab does that as its step 1.
         </p>
       )}
       <p className="mt-2 text-xs text-muted">
@@ -565,38 +557,25 @@ function ScoreTheDraft({
 function Provenance({
   scoredBy,
   stale,
-  staged,
-  base,
   skillId,
   pending,
 }: {
   scoredBy: RunSummary | null | undefined
   stale: boolean
-  staged: boolean
-  base: string
   skillId: string
   // Whether this skill's cases live on a triage batch, which decides what scoring the draft has
   // to run against — see `ScoreTheDraft`.
   pending: boolean
 }) {
   if (!scoredBy) {
-    // A never-scored skill *with* a draft is the trap this whole feature exists to remove: the only
-    // visible control was the header's "Run evals", which scores the working tree and therefore
-    // measures everything except the change being worked on. Staleness cannot be detected here —
-    // there is no run to compare against — so the button is offered whenever a draft exists.
+    // This branch used to offer its own "Score the draft" button, for the case of a skill never
+    // scored but carrying staged content. It cannot arise now: the console writes guidance straight
+    // to disk, so there is no staged-versus-working-tree split for a run to measure the wrong side
+    // of, and the header's "Run evals" already scores exactly what the editor just wrote.
     return (
-      <div className="mb-2 space-y-2">
-        <p className="text-xs text-muted">
-          Never scored — run the evals to find out which of these the guidance currently gets wrong.
-        </p>
-        {staged && (
-          <ScoreTheDraft
-            skillId={skillId}
-            viaBatch={pending}
-            note="Scores the branch, not the working tree."
-          />
-        )}
-      </div>
+      <p className="mb-2 text-xs text-muted">
+        Never scored — run the evals to find out which of these the guidance currently gets wrong.
+      </p>
     )
   }
 
@@ -616,9 +595,9 @@ function Provenance({
   return (
     <div className="mb-2 space-y-2 rounded border border-warn/40 bg-warn/5 px-2.5 py-2">
       <p className="text-xs text-warn">
-        These verdicts are from run {link}, which scored the guidance on{' '}
-        <code className="font-mono">{base}</code> — <strong>not what you have staged</strong>. Your
-        draft has never been run against these cases, so a MISSED below may already be fixed.
+        These verdicts are from run {link}, which scored a different version of this guidance —{' '}
+        <strong>not what is on disk now</strong>. Your edit has never been run against these cases,
+        so a MISSED below may already be fixed.
       </p>
       {/* The fix for the question this warning provokes, next to the warning. Telling someone their
           numbers describe the wrong thing and leaving them to work out the remedy is half a
@@ -646,16 +625,12 @@ function PinnedCases({
   pending,
   scoredBy,
   stale,
-  staged,
-  base,
   skillId,
 }: {
   cases: CaseSummary[]
   pending: PendingCase[]
   scoredBy: RunSummary | null | undefined
   stale: boolean
-  staged: boolean
-  base: string
   skillId: string
 }) {
   // Both the graduated cases and the promoted set waiting under `promoted_cases/`. A skill whose
@@ -677,8 +652,6 @@ function PinnedCases({
       <Provenance
         scoredBy={scoredBy}
         stale={stale}
-        staged={staged}
-        base={base}
         skillId={skillId}
         pending={pending.length > 0}
       />
@@ -712,8 +685,7 @@ function PinnedCases({
           <p className="text-xs text-muted">
             Promoted from triage, waiting under <code className="font-mono">promoted_cases/</code>.
             They start gating changes to this guidance once graduated into the eval corpus; until
-            then, score them here.{' '}
-            {staged && <>This scores what you have staged, not {base}.</>}
+            then, score them here.
           </p>
           <ul className="space-y-1">
             {pending.map((c) => (

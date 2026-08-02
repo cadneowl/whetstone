@@ -718,15 +718,18 @@ to fix.
 
 ### `--apply`, and why you want it
 
-`--apply` stages the proposal on `whetstone/skill/<id>` — the same branch the console's guidance
-editor writes to, through the same `prepare_guidance` path. That means the frontmatter is preserved,
-the version is bumped once per proposal, the result is validated by loading it back, and your
-working tree is untouched. It then prints a gate command you can run **as printed**:
+`--apply` stages the proposal on `whetstone/skill/<id>`, through the same `prepare_guidance` path
+the console's editor uses. That means the frontmatter is preserved, the version is bumped once per
+proposal, the result is validated by loading it back, and your working tree is untouched. (The
+console itself writes in place rather than to a branch — see ADR-028. `--apply` keeps the branch
+because this is the unattended path: nobody has read the draft yet, so it should be diffable and
+gateable before it lands in a tree someone is working in.) It then prints a gate command you can run
+**as printed**:
 
 ```
 staged v2 on whetstone/skill/code-review-rust-error-handling (5ae78876bb)
 
-gate it, then Propose MR in the console unlocks:
+gate it, then merge the branch yourself — a pass is the evidence to do that with:
   whetstone eval gate --repo . --skill-path skills/code-review-rust-error-handling \
     --base-ref main --candidate-ref whetstone/skill/code-review-rust-error-handling \
     --targeted unwrap-in-handler
@@ -856,10 +859,14 @@ index:
 uv run whetstone skills update --skill skills/<id> --repo /path/to/source/repo
 ```
 
-The generated wiki is **staged on `whetstone/skill/<id>`**, not written into your checked-out
-folder — the same branch guidance edits go to, so the console and the CLI never disagree about what
-this skill's content is. `--working-tree` writes the files out instead when you just want a look;
-a wiki left only in the working tree is invisible to the console, which reads the branch first.
+The generated wiki is **staged on `whetstone/skill/<id>`** by default, not written into your
+checked-out folder, so a refresh can be reviewed as a diff before it lands in a tree you are working
+in. `--working-tree` writes the files out instead.
+
+**Which you want depends on who is looking.** The console reads and writes the working tree
+(ADR-028), so a wiki left on the branch is invisible there — the skill will look as though it was
+never refreshed. Use `--working-tree` for a refresh you want the console to see and gate; use the
+default when the refresh is unattended and should be diffed before it reaches anyone's checkout.
 
 Substituted into `run`: `{{repo}}`, `{{out_dir}}`, `{{skill_id}}`. It is a **list of arguments,
 never a string** — nothing is re-split on spaces and no shell is involved, so a path containing a
@@ -944,12 +951,13 @@ uv run whetstone skills improve --skill skills/<id> --apply
 uv run whetstone eval gate --repo . --skill-path skills/<id> \
   --base-ref main --candidate-ref whetstone/skill/<id> --targeted <case>
 
-# 4. A passing gate is what unlocks Propose MR in the console.
+# 4. A passing gate is the evidence to merge the branch on. You do the merge.
 ```
 
 Everything after step 1 addresses the skill by id and lands on one branch, so the gate evidence is
-filed where C6 looks for it. Review what was staged with `git diff main whetstone/skill/<id>`, or
-open the guidance editor in the console — it reads the same branch.
+filed where C6 looks for it. Review what was staged with `git diff main whetstone/skill/<id>`. Note
+that the console's guidance editor will *not* show it: the console reads and writes the working tree
+(ADR-028), so a change staged on the branch is invisible there until you merge or check it out.
 
 Check what a skill defines, and that all of it loads:
 

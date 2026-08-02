@@ -12,6 +12,7 @@ that costs them a corpus or a bill.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -492,3 +493,166 @@ def test_pin_un_redacts_which_is_why_the_tutorial_restricts_it() -> None:
     assert plain.redacted["v"] == "<env:TUTORIAL_PROBE>" and "v" not in plain.hashable
     assert pinned.redacted["v"] == "abc123-not-sensitive", "pin shows the value to the model"
     assert pinned.hashable["v"] == "abc123-not-sensitive"
+
+
+# --- the publish model, which the docs described for weeks after it changed ---------
+#
+# The console once owned a `whetstone/skill/<id>` branch and refused to push anything a passing gate
+# did not cover. ADR-028 removed all of it: the console writes the working tree and publishing is
+# the operator's own git. The code said so in three comments and nothing else did — the README still
+# documented a `POST /api/git/propose` that returns 404, a *Propose MR* button that does not exist,
+# and `PUT` endpoints that "stage on the branch" while calling `write_in_place`. A reader following
+# any of it believed the gate was enforced at a seam that no longer exists.
+
+
+def _console_routes() -> list[tuple[str, str]]:
+    """Every method/path the console mounts, read off the routers rather than a running app."""
+    from whetstone.ui.routers import (
+        authoring,
+        candidates,
+        health,
+        inbox,
+        jobs,
+        judge,
+        meta,
+        reviews,
+        runs,
+        skills,
+    )
+
+    return [
+        (method, route.path)
+        for module in (
+            authoring, candidates, health, inbox, jobs, judge, meta, reviews, runs, skills,
+        )
+        for route in module.router.routes
+        for method in sorted(getattr(route, "methods", None) or ())
+    ]
+
+
+def test_the_console_mounts_no_publish_route() -> None:
+    """ADR-028: the console writes files and never commits, branches or pushes.
+
+    Asserted over the mounted routes rather than over the docs, so re-adding a publish endpoint
+    fails here and forces the decision to be made again deliberately — which is the only way the
+    README's "there is deliberately no publish endpoint" stays true.
+    """
+    offenders = [
+        (method, path)
+        for method, path in _console_routes()
+        if method not in ("GET", "HEAD") and ("propose" in path or "push" in path)
+    ]
+    assert offenders == []
+
+
+def test_no_console_router_stages_onto_a_branch() -> None:
+    """The console's half of ADR-028. `staging.stage` still exists and the CLI still uses it for
+    `skills improve --apply`, `skills update` and `skills index`; what changed is that no request
+    handler may. Checked as source text because the seam is "nobody calls this", which no amount of
+    exercising one endpoint can demonstrate.
+    """
+    callers = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src" / "whetstone" / "ui").rglob("*.py")
+        if "staging.stage(" in path.read_text(encoding="utf-8")
+    ]
+    assert callers == []
+
+
+@pytest.mark.parametrize(
+    "doc", [("README.md",), ("docs", "skill-pipeline.md"), ("docs", "authoring-skills.md")]
+)
+def test_the_reader_facing_docs_promise_no_publish_endpoint(doc: tuple[str, ...]) -> None:
+    """`decisions.md` is exempt: it is an append-only record and ADR-008 quotes the route it used to
+    consult, under an "Amended by ADR-028" banner. `ui-console.md` is exempt for the same reason and
+    carries its own warning — see the test below. These three are read as instructions.
+    """
+    assert "git/propose" not in _read(*doc)
+
+
+def test_the_readme_says_the_gate_verdict_is_advisory() -> None:
+    """The gap between what Whetstone claims and what it enforces is the one thing a reader must not
+    get wrong: they may otherwise believe an ungated change cannot reach `main`, when nothing stops
+    it. `gates._unproven` already refuses to overstate a single verdict; this is the same honesty
+    applied to the mechanism as a whole.
+    """
+    readme = _read("README.md")
+    assert "## Publishing, and what the gate guarantees" in readme
+    assert "advisory" in readme
+    assert "Nothing stops you committing an ungated change." in readme
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [("ANTI_ROT_PLAN.md",), ("docs", "ui-console.md"), ("docs", "milestone-1-eval-harness.md")],
+)
+def test_the_superseded_plans_say_they_are_plans(doc: tuple[str, ...]) -> None:
+    """They sit beside genuine reference and read as current: `ui-console.md` still specifies the
+    branch-writing console ADR-028 removed. Deleting them would throw away the design reasoning, so
+    they are labelled instead — but a label that can silently fall off is not a label.
+    """
+    assert "Historical planning document" in _read(*doc)
+
+
+# --- diagrams, which rotted precisely because they could not be diffed --------------
+#
+# The docs shipped seven PNGs with no source file. Two of them described a publish model removed
+# weeks earlier, and one contradicted the alt text sitting beside it — because a binary blob does
+# not appear in a review the way a changed line does. They are now mermaid, which GitHub renders and
+# a reviewer can read in the diff. These two tests keep it that way.
+
+_MERMAID_HEADS = (
+    "flowchart", "graph", "sequenceDiagram", "classDiagram", "stateDiagram",
+    "erDiagram", "journey", "gantt", "pie", "mindmap", "timeline",
+)
+
+
+def _markdown_files() -> list[Path]:
+    return [
+        p
+        for p in ROOT.rglob("*.md")
+        if "node_modules" not in p.parts and ".venv" not in p.parts and ".git" not in p.parts
+    ]
+
+
+def test_no_document_embeds_a_raster_diagram() -> None:
+    """Diagrams are source or they are not reviewable.
+
+    A `![...](something.png)` is a claim nobody can check in a pull request: the reviewer sees a
+    changed byte count. Every diagram here is a fenced mermaid block for that reason, and this test
+    is what stops the next one arriving as an export.
+    """
+    raster = re.compile(r"!\[[^\]]*\]\(([^)]+\.(?:png|jpg|jpeg|gif|webp))\)")
+    offenders = [
+        f"{path.relative_to(ROOT).as_posix()}: {match}"
+        for path in _markdown_files()
+        for match in raster.findall(path.read_text("utf-8"))
+    ]
+    assert offenders == []
+
+
+def test_every_mermaid_block_is_well_formed() -> None:
+    """Structural, not a full parse — the real mermaid parser needs a DOM and a node toolchain this
+    suite deliberately does not depend on. It catches what actually breaks a diagram in practice: an
+    unclosed quoted label, a node bracket left open, or a fence that declares no diagram type. A
+    block that fails any of these renders as an error box on GitHub rather than a picture.
+    """
+    problems: list[str] = []
+    for path in _markdown_files():
+        blocks = re.findall(r"```mermaid\n(.*?)```", path.read_text("utf-8"), re.DOTALL)
+        for index, block in enumerate(blocks, start=1):
+            where = f"{path.relative_to(ROOT).as_posix()} block {index}"
+            lines = [ln for ln in block.splitlines() if ln.strip()]
+            if not lines:
+                problems.append(f"{where}: empty")
+                continue
+            if not lines[0].lstrip().startswith(_MERMAID_HEADS):
+                problems.append(f"{where}: no diagram type, starts {lines[0].strip()!r}")
+            for line in lines:
+                if line.count('"') % 2:
+                    problems.append(f"{where}: odd number of quotes in {line.strip()!r}")
+                if line.count("[") != line.count("]"):
+                    problems.append(f"{where}: unbalanced [] in {line.strip()!r}")
+                if line.count("{") != line.count("}"):
+                    problems.append(f"{where}: unbalanced {{}} in {line.strip()!r}")
+    assert problems == []

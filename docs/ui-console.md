@@ -1,5 +1,14 @@
 # Whetstone — Console UI (implementation plan)
 
+> ⚠️ **Historical planning document — not a description of what ships.** This is the plan the
+> console was built from, kept for the reasoning behind its shape. It has *not* been maintained
+> against the code, and at least one part is now actively wrong: the publish model. Everything here
+> about `whetstone/skill/<id>` branch writes, `PUT` endpoints staging to a branch, and
+> `POST /api/git/propose` was superseded by **ADR-028** — the console writes to the working tree and
+> has no publish endpoint. For what the console actually does today, read the
+> [console section of the README](../README.md#the-console-whetstone-ui); for decisions that are
+> still in force, read [decisions.md](decisions.md).
+
 **Status:** decided (§1), **Phases 0, 1 and 2 shipped** (§12). All open questions from the first
 draft are resolved in §15.
 

@@ -4,7 +4,8 @@
 
 Builds a throwaway skills repo under `examples/console-demo/workspace/`, starts an offline model
 that speaks the OpenAI chat-completions API, points Whetstone at it, and serves the console. Every
-button works — score, draft, gate, stage, propose — because the model is local, instant and free.
+button works — score, draft, save, gate — because the model is local, instant and free. There is no
+publish button: the console writes files and you commit them yourself.
 
     --keep          reuse the workspace from last time instead of rebuilding it
     --port 8790     console port

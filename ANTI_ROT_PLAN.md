@@ -1,5 +1,11 @@
 # ANTI_ROT_PLAN — keeping skills sharp across hundreds of MRs and defects
 
+> **Historical planning document.** The plan the anti-rot loop was built from, kept for its design
+> reasoning and threat model. The status log below stopped being updated on 2026-07-28 and does not
+> describe the current tree. For what ships, read the
+> [anti-rot section of the README](README.md#keeping-skills-sharp-the-anti-rot-loop); for decisions
+> still in force, read [docs/decisions.md](docs/decisions.md).
+
 > **Implementation status (updated 2026-07-28, branch `anti-rot/phase-0`)**
 >
 > - **0.1 — DONE** (commit "Name the judge on every run and gate record"): `judge_identity()` in
