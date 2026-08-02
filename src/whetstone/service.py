@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -1008,6 +1008,12 @@ class CaseDetail(BaseModel):
     history: list[CaseHistoryEntry] = []
     # None when the skill has never been probed, or the probe predates this case.
     baseline: BaselineVerdict | None = None
+    # True when this case is promoted but not yet graduated — it lives in `promoted_cases/`, is
+    # scored by every batch eval and gate, and has no file under `eval_cases/`. Said on the page
+    # because the editors here write to the graduated path and would otherwise refuse with a
+    # "no eval case" that reads like the case does not exist, when in fact it is what the run the
+    # reader just came from was measuring.
+    promoted: bool = False
 
 
 # Rules are id-tagged in bold in the guidance body ("- **R1 — no unchecked panics…**"), which is how
@@ -1340,7 +1346,22 @@ def _case_summary(case: EvalCase, latest: RunRecord | None) -> CaseSummary:
     )
 
 
-def case_detail(skill: Skill, case_id: str, store: RunStore, *, runs: int = 20) -> CaseDetail:
+def case_detail(
+    skill: Skill,
+    case_id: str,
+    store: RunStore,
+    *,
+    runs: int = 20,
+    promoted: Sequence[str] = (),
+) -> CaseDetail:
+    """One case, as the console shows it.
+
+    `skill` must carry the promoted cases as well as the graduated ones — the same overlay every
+    eval and gate scores under (`staging.overlay_cases`). Without it this page is unreachable for
+    exactly the cases an operator is most likely to click: a batch run scores the promoted set, so
+    every case row in that run's drill-down led to "has no eval case", naming the case the run had
+    just measured. `promoted` names which ids are in that state, so the page can say so.
+    """
     case = next((c for c in skill.eval_cases if c.id == case_id), None)
     if case is None:
         raise KeyError(f"skill {skill.id!r} has no eval case {case_id!r}")
@@ -1350,6 +1371,7 @@ def case_detail(skill: Skill, case_id: str, store: RunStore, *, runs: int = 20) 
         diff=case.change.to_unified_diff(),
         history=case_history(case_id, skill.id, store, runs=runs),
         baseline=_baseline_verdict(store, skill.id, case_id),
+        promoted=case_id in set(promoted),
     )
 
 

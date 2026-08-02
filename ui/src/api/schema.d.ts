@@ -1166,7 +1166,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Case */
+        /**
+         * Get Case
+         * @description One case, graduated or promoted.
+         *
+         *     The promoted set is overlaid via `with_promoted_cases`, the same "what is under test" seam the
+         *     eval job and the gate use, so this page resolves exactly the corpus a run was scored against.
+         *     Reading only `eval_cases/` made it 404 for every case in a batch run's drill-down — precisely
+         *     the cases someone has a reason to open, and with a message ("has no eval case") that denied the
+         *     existence of what the run had just measured.
+         */
         get: operations["get_case_api_skills__skill_id__cases__case_id__get"];
         /**
          * Edit Case
@@ -1699,6 +1708,11 @@ export interface components {
              * @default []
              */
             history: components["schemas"]["CaseHistoryEntry"][];
+            /**
+             * Promoted
+             * @default false
+             */
+            promoted: boolean;
             /** Skill Id */
             skill_id: string;
         };

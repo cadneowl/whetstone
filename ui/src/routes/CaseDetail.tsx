@@ -32,7 +32,7 @@ export function CaseDetail() {
   if (error) return <ErrorNote error={error} />
   if (!data) return <Empty>Not found.</Empty>
 
-  const { case: evalCase, diff, history, baseline } = data
+  const { case: evalCase, diff, history, baseline, promoted } = data
   const isCatch = evalCase.kind === 'should_catch'
 
   const overlays: Overlay[] = evalCase.expect.map((e) => ({
@@ -68,6 +68,17 @@ export function CaseDetail() {
           {evalCase.tier === 'archive' && (
             <Badge tone="neutral" title="Retired: drawn at low weight as regression insurance">
               archived
+            </Badge>
+          )}
+          {/* Scored by every batch eval and gate, but with no file under `eval_cases/` yet — so the
+              editors below have nothing to write to. Said here rather than left for the operator to
+              discover as a "no eval case" error on save. */}
+          {promoted && (
+            <Badge
+              tone="warn"
+              title="Promoted from triage and scored, but not yet graduated into the eval corpus. Graduate it from the skill's Inbox to edit or archive it here."
+            >
+              promoted, not graduated
             </Badge>
           )}
           {/* The saturation probe's verdict. For a catch case, "passed with no guidance" means

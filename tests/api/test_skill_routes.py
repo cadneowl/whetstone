@@ -275,3 +275,44 @@ def test_case_writes_cannot_escape_the_corpus(client: TestClient, skills_root: P
             != 200
         )
     assert (skills_root / "rust-errors" / "eval_cases" / "unwrap-in-handler").is_dir()
+
+
+def _promote(skills_root: Path, case_id: str) -> None:
+    """A case as promotion leaves it: under `promoted_cases/`, with no file in `eval_cases/`."""
+    from conftest import CASE_DIFF, CASE_YAML
+
+    folder = skills_root / "rust-errors" / "promoted_cases" / case_id
+    folder.mkdir(parents=True)
+    (folder / "case.yaml").write_text(CASE_YAML.replace("unwrap-in-handler", case_id), "utf-8")
+    (folder / "change.diff").write_text(CASE_DIFF, encoding="utf-8")
+
+
+def test_a_promoted_case_opens_from_the_run_that_scored_it(
+    client: TestClient, skills_root: Path
+) -> None:
+    """A batch eval scores the promoted set, so every case row in that run's drill-down led here.
+    Reading only `eval_cases/` answered "skill has no eval case <id>" — denying the existence of
+    the case the run on the previous screen had just measured, with no hint that it lives one
+    folder over and is waiting to graduate.
+    """
+    _promote(skills_root, "promoted-not-graduated")
+
+    response = client.get("/api/skills/rust-errors/cases/promoted-not-graduated")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["case"]["kind"] == "should_catch"
+    assert "+    let row = db.get(id).unwrap();" in body["diff"]
+    assert body["promoted"] is True
+
+
+def test_a_graduated_case_is_not_labelled_promoted(client: TestClient) -> None:
+    """The flag drives a warning that the editors on the page have nothing to write to. On a
+    graduated case they do, and a badge saying otherwise would send people to the wrong screen."""
+    body = client.get("/api/skills/rust-errors/cases/unwrap-in-handler").json()
+
+    assert body["promoted"] is False
+
+
+def test_a_case_in_neither_place_is_still_404(client: TestClient) -> None:
+    assert client.get("/api/skills/rust-errors/cases/nope").status_code == 404
