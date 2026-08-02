@@ -2031,6 +2031,49 @@ export interface components {
             skills_root: string;
         };
         /**
+         * Contradiction
+         * @description Two active cases the evidence says cannot both be satisfied, and why we think so.
+         *
+         *     Evidence, never a verdict — the same rule `similar_cases` follows at the promotion door.
+         *     Genuinely contradictory cases happen: two reviewers disagreed, or a rule was right in one
+         *     subsystem and wrong in another, and which one the corpus should keep is a judgement about the
+         *     codebase that no amount of token overlap settles. What this removes is the *silence* — a pair
+         *     that can never both pass makes every gate on them unwinnable, and until now nothing said so.
+         */
+        Contradiction: {
+            /**
+             * From History
+             * @default false
+             */
+            from_history: boolean;
+            /**
+             * From Semantics
+             * @default false
+             */
+            from_semantics: boolean;
+            /** Left */
+            left: string;
+            /**
+             * Left Semantic
+             * @default
+             */
+            left_semantic: string;
+            /** Right */
+            right: string;
+            /**
+             * Right Semantic
+             * @default
+             */
+            right_semantic: string;
+            /**
+             * Runs
+             * @default 0
+             */
+            runs: number;
+            /** Why */
+            why: string;
+        };
+        /**
          * DeadRule
          * @description One rule the evidence no longer stands behind, and the case for saying so.
          */
@@ -4776,6 +4819,11 @@ export interface components {
              * @default []
              */
             cases: components["schemas"]["CaseSummary"][];
+            /**
+             * Contradictions
+             * @default []
+             */
+            contradictions: components["schemas"]["Contradiction"][];
             /**
              * Has Runs
              * @default false

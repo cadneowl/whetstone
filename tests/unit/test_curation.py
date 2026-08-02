@@ -11,14 +11,15 @@ from whetstone.corpus.model import CandidateCase
 from whetstone.curation import (
     CurationError,
     RetirementProposal,
+    contradictions,
     discrimination,
     retier_yaml,
     retirement_proposals,
     tier_counts,
 )
-from whetstone.domain.change import CodeChange
-from whetstone.domain.eval_model import EvalCase
-from whetstone.domain.refs import RepoRef
+from whetstone.domain.change import CodeChange, FileChange
+from whetstone.domain.eval_model import EvalCase, Expectation
+from whetstone.domain.refs import Region, RepoRef
 from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
 from whetstone.domain.score import CaseScore, Confusion, SkillScore
 from whetstone.domain.skill import Skill
@@ -36,6 +37,9 @@ def _case(case_id: str, tier: str = "active") -> EvalCase:
 
 def _skill(*cases: EvalCase) -> Skill:
     return Skill(id="s", version=3, eval_cases=list(cases))
+
+
+_skill_of = _skill
 
 
 def _gate(
@@ -436,3 +440,149 @@ def test_a_sometimes_caught_case_still_discriminates() -> None:
         score=SkillScore(skill_id="s", version=3, k=2, cases=[]),
     )
     assert discrimination(_skill(_case("flaky")), probe).flagged == []
+
+
+# --- contradictions -----------------------------------------------------------------
+
+
+PATH = "src/handlers/charge.rs"
+
+
+def _pair_case(case_id: str, kind: str, semantic: str, *, path: str = PATH) -> EvalCase:
+    return EvalCase(
+        id=case_id,
+        kind=kind,  # type: ignore[arg-type]
+        change=CodeChange(repo=REPO, files=[FileChange(path=path)]),
+        expect=[
+            Expectation(
+                id="e1",
+                must="appear" if kind == "should_catch" else "not_appear",
+                where=Region(path=path),
+                semantic=semantic,
+            )
+        ],
+    )
+
+
+class TestContradictions:
+    """A pair that can never both pass makes every gate on them unwinnable, and nothing said so.
+
+    Evidence, never a verdict: which case the corpus keeps is a judgement about the codebase, and
+    two reviewers genuinely disagreeing is a real thing a corpus mined from review history will
+    contain. What this removes is the silence.
+    """
+
+    CATCH = "the parent id mismatch must be reported as a client error, not a 404"
+    NOFLAG = "the parent id mismatch must not be reported as a client error, it is a 404"
+
+    def _skill(self) -> Skill:
+        return _skill_of(
+            _pair_case("catch-it", "should_catch", self.CATCH),
+            _pair_case("leave-it", "should_not_flag", self.NOFLAG),
+        )
+
+    def test_a_pair_that_never_passes_together_is_reported(self) -> None:
+        passes = {
+            "catch-it": {"r1": True, "r2": False, "r3": True},
+            "leave-it": {"r1": False, "r2": True, "r3": False},
+        }
+
+        [found] = contradictions(self._skill(), passes)
+
+        assert {found.left, found.right} == {"catch-it", "leave-it"}
+        assert found.from_history is True
+        assert found.runs == 3
+        assert "never passed together" in found.why
+
+    def test_a_case_that_simply_always_fails_is_not_a_measured_conflict(self) -> None:
+        """It is just failing, which the score already says plainly. Claiming the *history* shows a
+        trade-off would put a second, wrong explanation in front of every genuinely broken case.
+
+        The wording signal still fires — these two really do ask for opposite verdicts on one file
+        — and that is the honest split: what was measured, and what was merely noticed.
+        """
+        passes = {
+            "catch-it": {"r1": True, "r2": True, "r3": True},
+            "leave-it": {"r1": False, "r2": False, "r3": False},
+        }
+
+        [found] = contradictions(self._skill(), passes)
+
+        assert found.from_history is False
+        assert found.from_semantics is True
+
+    def test_an_unrelated_pair_with_no_shared_history_is_not_reported_at_all(self) -> None:
+        skill = _skill_of(
+            _pair_case("a", "should_catch", "unwrap can panic", path="x/A.rs"),
+            _pair_case("b", "should_not_flag", "the ledger write must go through the service"),
+        )
+
+        assert contradictions(skill, {}) == []
+
+    def test_too_few_shared_runs_to_claim_anything(self) -> None:
+        """Two runs that disagree are variance — at k=1 with an agent reviewer, every run is a
+        different draw of the same distribution."""
+        passes = {"catch-it": {"r1": True, "r2": False}, "leave-it": {"r1": False, "r2": True}}
+
+        found = contradictions(self._skill(), passes)
+
+        assert [f.from_history for f in found] == [False]  # wording only, not history
+
+    def test_opposed_wording_carries_a_young_corpus(self) -> None:
+        """No runs at all — which is exactly when a contradiction is cheapest to resolve."""
+        [found] = contradictions(self._skill(), {})
+
+        assert found.from_semantics is True
+        assert found.from_history is False
+        assert found.runs == 0
+        assert "wording alone" in found.why
+
+    def test_two_catch_cases_are_never_flagged_on_wording(self) -> None:
+        """Opposed *verdicts* are the signal. Two cases asking for the same catch are duplicates,
+        which is `similar_cases`' job and a different conversation."""
+        skill = _skill_of(
+            _pair_case("a", "should_catch", self.CATCH),
+            _pair_case("b", "should_catch", self.CATCH),
+        )
+
+        assert contradictions(skill, {}) == []
+
+    def test_different_files_are_not_opposed_on_wording_alone(self) -> None:
+        """The same rule can be right in one subsystem and wrong in another — that is a real thing
+        a corpus should hold, not a contradiction."""
+        skill = _skill_of(
+            _pair_case("a", "should_catch", self.CATCH),
+            _pair_case("b", "should_not_flag", self.NOFLAG, path="other/File.rs"),
+        )
+
+        assert contradictions(skill, {}) == []
+
+    def test_archived_cases_are_left_out(self) -> None:
+        """An archived case is already de-weighted; proposing that it conflict with anything is
+        asking a person to resolve something they have already resolved."""
+        skill = self._skill()
+        skill.eval_cases[1].tier = "archive"
+
+        assert contradictions(skill, {}) == []
+
+    def test_history_outranks_wording(self) -> None:
+        measured = _skill_of(
+            _pair_case("catch-it", "should_catch", self.CATCH),
+            _pair_case("leave-it", "should_not_flag", self.NOFLAG),
+            _pair_case("m1", "should_catch", "an unrelated concern entirely", path="z/M.rs"),
+            _pair_case("m2", "should_not_flag", "an unrelated concern entirely", path="z/M.rs"),
+        )
+        passes = {
+            "m1": {"r1": True, "r2": False, "r3": True},
+            "m2": {"r1": False, "r2": True, "r3": False},
+        }
+
+        found = contradictions(measured, passes)
+
+        assert [f.from_history for f in found] == [True, False]
+
+    def test_both_semantics_are_carried_so_a_person_can_decide(self) -> None:
+        [found] = contradictions(self._skill(), {})
+
+        assert found.left_semantic == self.CATCH
+        assert found.right_semantic == self.NOFLAG

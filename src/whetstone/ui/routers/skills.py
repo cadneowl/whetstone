@@ -19,12 +19,13 @@ from whetstone.core.loader import (
     load_skill,
     load_skills,
 )
-from whetstone.curation import CurationError, retier_yaml
+from whetstone.curation import CurationError, contradictions, retier_yaml
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import CaseTier, EvalKind
 from whetstone.domain.run import RunRecord
 from whetstone.domain.skill import Skill
 from whetstone.naming import describe_unsafe, is_safe_segment
+from whetstone.runs import RunStore
 from whetstone.sampling import partition_for, pinned_partitions
 from whetstone.service import (
     CaseDetail,
@@ -89,7 +90,31 @@ def get_skill(
     pinned = pinned_partitions(skill.eval_cases)
     for case in detail.cases:
         case.holdout = partition_for(case.id, fraction, pinned) == "holdout"
+    detail.contradictions = contradictions(skill, _pass_history(store, skill))
     return detail
+
+
+def _pass_history(store: RunStore, skill: Skill) -> dict[str, dict[str, bool]]:
+    """case id -> run id -> did it pass, read from the case index.
+
+    From the index rather than the records: this is two booleans per case per run, and loading
+    every full `RunRecord` to get them would put every finding and verdict of every trial through
+    the skill page. Baseline probes are already excluded by `case_history` — a run with the
+    guidance stripped says nothing about whether two cases can both be satisfied by guidance.
+    """
+    history: dict[str, dict[str, bool]] = {}
+    for case in skill.eval_cases:
+        outcomes = store.case_history(skill.id, case.id, limit=_CONTRADICTION_WINDOW)
+        history[case.id] = {
+            o.run_id: (o.recall >= 1 if case.kind == "should_catch" else o.fp_rate <= 0)
+            for o in outcomes
+        }
+    return history
+
+
+# How far back the pair evidence looks. Wide enough to span several guidance versions — the claim
+# is "every version so far bought one by losing the other", which needs more than the last edit.
+_CONTRADICTION_WINDOW = 20
 
 
 def _promoted_but_unmerged(

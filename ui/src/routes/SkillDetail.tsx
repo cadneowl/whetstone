@@ -2,9 +2,12 @@ import * as Tabs from '@radix-ui/react-tabs'
 import { useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
+  useConsoleConfig,
+  useSetTier,
   useSkill,
   useTasks,
   type CaseSummary,
+  type Contradiction,
   type PendingCase,
   type SkillDetail as Detail,
 } from '@/api/client'
@@ -162,6 +165,7 @@ export function SkillDetail() {
               anything until graduated, but they are scorable now — via "Promoted cases" in the
               header — and a cases tab that omits them names strictly less than the skill is held to. */}
           {data.pending_cases.length > 0 && <PendingCaseList cases={data.pending_cases} />}
+          <ContradictionList skillId={skill.id} pairs={data.contradictions} />
         </Tabs.Content>
 
         <Tabs.Content value="tasks">
@@ -417,6 +421,81 @@ function PendingCaseList({ cases }: { cases: PendingCase[] }) {
           </li>
         ))}
       </ul>
+    </div>
+  )
+}
+
+/**
+ * Cases the evidence says cannot both be satisfied.
+ *
+ * A pair like this makes every gate on them unwinnable and every improve round a trade — which
+ * reads as the drafter being incompetent rather than the corpus being self-contradictory. Nothing
+ * here decides anything: two reviewers genuinely disagreeing is a real thing a corpus mined from
+ * review history will contain, and which case to keep is a judgement about the codebase. Archiving
+ * rather than deleting for the same reason the case page does it — a conflicting review outcome is
+ * still a review outcome.
+ */
+function ContradictionList({ skillId, pairs }: { skillId: string; pairs: Contradiction[] }) {
+  const setTier = useSetTier(skillId)
+  const { data: config } = useConsoleConfig()
+  if (pairs.length === 0) return null
+
+  return (
+    <div className="mt-5">
+      <h3 className="mb-1 text-xs tracking-wide text-warn uppercase">
+        Cases that may contradict each other ({pairs.length})
+      </h3>
+      <p className="mb-2 max-w-3xl text-sm text-muted">
+        No wording satisfies both, so a gate targeting them cannot pass and each improve round buys
+        one by losing the other. Read both expectations and archive whichever no longer reflects how
+        the code should be reviewed — archiving keeps it as evidence and re-weights the score, so a
+        fresh gate is needed afterwards.
+      </p>
+      <ul className="space-y-2">
+        {pairs.map((pair) => (
+          <li
+            key={`${pair.left}|${pair.right}`}
+            className="rounded-lg border border-warn/40 bg-surface px-3 py-2 text-sm"
+          >
+            <p className="text-xs text-muted">
+              {pair.from_history ? (
+                <Badge tone="warn" title={`Measured across ${pair.runs} run(s)`}>
+                  measured
+                </Badge>
+              ) : (
+                <Badge tone="neutral" title="Flagged on wording alone — no run has scored them together yet">
+                  wording only
+                </Badge>
+              )}{' '}
+              {pair.why}
+            </p>
+            {[
+              { id: pair.left, semantic: pair.left_semantic },
+              { id: pair.right, semantic: pair.right_semantic },
+            ].map((side) => (
+              <div key={side.id} className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <Link
+                  to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(side.id)}`}
+                  className="font-mono text-xs hover:underline"
+                >
+                  {side.id}
+                </Link>
+                {side.semantic && <span className="text-muted">“{side.semantic}”</span>}
+                <button
+                  type="button"
+                  disabled={Boolean(config?.read_only) || setTier.isPending}
+                  onClick={() => setTier.mutate({ caseId: side.id, tier: 'archive' })}
+                  title="Archive this case: kept as evidence, drawn at low weight. Changes skill_hash, so a fresh gate is needed."
+                  className="ml-auto rounded border border-line px-2 py-0.5 text-xs text-muted transition-colors hover:text-ink disabled:opacity-40"
+                >
+                  Archive
+                </button>
+              </div>
+            ))}
+          </li>
+        ))}
+      </ul>
+      {setTier.error != null && <ErrorNote error={setTier.error} />}
     </div>
   )
 }

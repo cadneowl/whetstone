@@ -27,6 +27,9 @@ def make_record(
     version: int = 2,
     skill_hash: str = "hash-a",
     recall_tp: bool = True,
+    # Whether the `should_not_flag` case stayed clean. Lets a fixture express the shape a
+    # contradiction has: two cases that alternate, never passing in the same run.
+    noflag_clean: bool = True,
     created_at: datetime = AT,
 ) -> RunRecord:
     """A record with real findings and verdicts, so drill-down assertions have something to bite."""
@@ -87,7 +90,9 @@ def make_record(
                         findings=[],
                         outcomes=[
                             ExpectationOutcome(
-                                expectation_id="e1", must="not_appear", outcome="tn"
+                                expectation_id="e1",
+                                must="not_appear",
+                                outcome="tn" if noflag_clean else "fp",
                             )
                         ],
                     )

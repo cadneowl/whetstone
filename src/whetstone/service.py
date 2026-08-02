@@ -35,7 +35,7 @@ from whetstone.corpus.builder import (
     write_candidate,
 )
 from whetstone.corpus.model import CandidateCase
-from whetstone.curation import discrimination
+from whetstone.curation import Contradiction, discrimination
 from whetstone.deadrules import dead_rules
 from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import (
@@ -991,6 +991,11 @@ class SkillDetail(BaseModel):
     # cases, then opened the skill that is supposed to be constrained by them and saw only the three
     # that were already there, with nothing on the screen admitting the others existed.
     pending_cases: list[PendingCase] = []
+    # Pairs of active cases the evidence says cannot both be satisfied. A gate targeting both is
+    # unwinnable and every improve round on them trades one for the other, which reads as the
+    # drafter being incompetent rather than the corpus being self-contradictory. Surfaced, never
+    # acted on: which case to keep is a judgement about the codebase.
+    contradictions: list[Contradiction] = []
 
 
 class BaselineVerdict(BaseModel):
