@@ -199,9 +199,10 @@ scored by a program therefore records no precedents, rather than recording ones 
 ```
 
 `line` = line number in the **new** file. Scoring is unchanged: a finding must be structurally
-eligible for an expectation before the judge sees it — same file, inside `line_range` if declared,
-meeting `severity_min` if declared (`core/matching.py:14`) — so a program reporting the right
-problem at the wrong line scores as a miss, exactly as the built-in reviewer would.
+eligible for an expectation before the judge sees it — same file, inside the region, meeting
+`severity_min` if declared (`core/matching.py`). The region is the expectation's `line_range`
+widened to the footprint of the case's change in that file, so a finding a few lines from the
+anchor is judged rather than discarded, and one outside the change is discarded.
 
 **Errors** (same taxonomy as the improve subprocess): `FileNotFoundError` on the program → step
 error; non-zero exit → step error with the stderr tail; unparseable/again-invalid stdout → step
@@ -290,8 +291,10 @@ what makes a history contradict itself.
 
 - **Missing required var** → caught at preflight (§4.3).
 - **Subprocess crash / timeout / bad JSON** → step error; run fails (leaning, §5).
-- **Finding outside an expectation's declared region** → not eligible to satisfy it
-  (`core/matching.py:14`); it scores as a miss, and as noise if nothing else claims it.
+- **Finding outside the case's change** → not eligible to satisfy the expectation
+  (`core/matching.py`); it scores as a miss, and as noise if nothing else claims it. A finding
+  inside the change but away from the expectation's anchor line *is* eligible — see
+  `effective_region`.
 - **Repo not at the declared ref** → the subprocess's problem to detect; we pass `base_ref` so it
   *can*. Optional future: a whetstone-provided checkout helper (§13).
 - **Per-case repo differences.** `change.repo` already varies per case, so a fleet reviewing cases

@@ -381,10 +381,16 @@ Print the same findings contract the built-in reviewer produces, on stdout:
 ```
 
 `line` is a line in the **new** file. Scoring is unchanged from the built-in reviewer's: a finding
-only satisfies an expectation if it is structurally eligible first — same file, inside the
-expectation's `line_range` if it declares one, meeting `severity_min` if it declares one — and only
-then is it put to the judge. So a program that reports the right problem at the wrong line scores as
-a miss, exactly as the built-in reviewer would. A crash, a non-zero exit, unparseable output, or a
+only satisfies an expectation if it is structurally eligible first — same file, inside the region,
+meeting `severity_min` if it declares one — and only then is it put to the judge.
+
+The region is the expectation's `line_range` **widened to everything the case's change touches in
+that file** (`core/matching.py`, `effective_region`). A case built from a review comment anchors to
+the single line the human clicked, and the reviewer names the line it thinks the defect is on;
+holding it to the anchor exactly would measure line-number agreement rather than review quality, and
+would make such a case impossible to pass no matter what the guidance said. So a program reporting
+the right problem a few lines away is put to the judge like any other candidate, and a program
+reporting it outside the change entirely is not. A crash, a non-zero exit, unparseable output, or a
 timeout **fails the run** — a score computed with cases the reviewer silently errored on is not a
 measurement.
 

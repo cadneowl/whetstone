@@ -319,9 +319,14 @@ def _validate(case_yaml: str, diff: str, edits: CaseEdits) -> EvalCase:
 def _check_region(case: EvalCase, diff: str) -> None:
     """The expectation must point somewhere the diff actually changes.
 
-    Both halves matter, because either mistake silently mints an eval case that can never pass: a
-    path typo makes the case unmatchable, and so does a line range that misses every hunk. Catching
-    them here is the difference between "the reviewer regressed" and "the case was wrong".
+    A path typo mints a case that can never pass, and catching it here is the difference between
+    "the reviewer regressed" and "the case was wrong".
+
+    The line range is a weaker claim than it used to be. Matching widens an anchor to the footprint
+    of the change (`core.matching.effective_region`), so a range that misses every hunk no longer
+    makes a case unmatchable — it makes it *unanchored*, which is a different and quieter problem:
+    the operator selected lines the diff does not contain, and nothing downstream would ever say so.
+    Refusing it keeps the anchor meaning what it says.
     """
     changed = {f.path for f in case.change.files}
     for expectation in case.expect:
@@ -340,5 +345,6 @@ def _check_region(case: EvalCase, diff: str) -> None:
             spans = ", ".join(f"{lo}–{hi}" for lo, hi in file.new_line_spans())
             raise SkillLoadError(
                 f"expectation covers lines {rng[0]}–{rng[1]} of {path}, which this diff does not "
-                f"touch; it changes lines {spans}"
+                f"touch; it changes lines {spans}. Point the range at a line the change contains, "
+                f"or clear it to mean the whole file"
             )

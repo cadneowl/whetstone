@@ -2496,6 +2496,7 @@ export interface components {
          *     That asymmetry is deliberate: recording must not add LLM calls.
          */
         ExpectationOutcome: {
+            considered?: components["schemas"]["Region"] | null;
             /**
              * Eligible Finding Indices
              * @default []

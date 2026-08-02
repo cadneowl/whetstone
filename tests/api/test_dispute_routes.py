@@ -129,3 +129,35 @@ def test_a_wrong_address_names_the_wrong_segment(client: TestClient, store: RunS
         response = client.post("/api/runs/run-1/disputes", json=_request(**override))
         assert response.status_code == 422, override
         assert fragment in response.json()["message"], override
+
+
+def test_the_pair_carries_the_region_the_judge_was_actually_shown(
+    client: TestClient, store: RunStore, tmp_path: Path
+) -> None:
+    """The ruling becomes ground truth the judge is measured against, so the pair has to be the
+    input that produced the verdict being ruled on. Minting it from the human's one-line anchor —
+    when matching widened that anchor to the change's footprint before asking — would grade the
+    judge on a question it was never asked, and the disagreement would be scored as its error.
+    """
+    record = _recorded_with_snapshot()
+    outcome = record.cases[0].trials[0].outcomes[0]
+    outcome.considered = Region(path="src/handlers/charge.rs", line_range=(38, 60))
+    store.save(record)
+
+    assert client.post("/api/runs/run-1/disputes", json=_request()).status_code == 201
+
+    [case] = DisputeStore(tmp_path / ".whetstone" / "meta_eval").meta_eval_cases()
+    assert case.expectation.where.line_range == (38, 60)
+
+
+def test_an_old_record_mints_the_pair_it_actually_ran(
+    client: TestClient, store: RunStore, tmp_path: Path
+) -> None:
+    record = _recorded_with_snapshot()
+    record.cases[0].trials[0].outcomes[0].considered = None
+    store.save(record)
+
+    assert client.post("/api/runs/run-1/disputes", json=_request()).status_code == 201
+
+    [case] = DisputeStore(tmp_path / ".whetstone" / "meta_eval").meta_eval_cases()
+    assert case.expectation.where.line_range == (40, 45)

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+
 from pydantic import BaseModel
 
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import Expectation
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region
-from whetstone.judge.llm_judge import JudgeVerdict, LLMJudge, judge_identity
+from whetstone.judge.llm_judge import (
+    _USER_TEMPLATE,
+    DEFAULT_SYSTEM,
+    MATCHING_POLICY,
+    JudgeVerdict,
+    LLMJudge,
+    judge_identity,
+)
 from whetstone.llm import FakeLLMClient
 
 FINDING = Finding(
@@ -82,3 +91,25 @@ def test_judge_identity_is_stable_and_tracks_the_prompt_text() -> None:
     assert before == judge_identity()  # deterministic
     assert len(before) == 64  # sha256 hex
     assert judge_identity("Be stricter.") != before  # a doctrine edit is a different judge
+
+
+def test_judge_identity_covers_the_eligibility_rule() -> None:
+    """The prefilter decides which pairs reach the judge, so it moves scores exactly as the prompts
+    do. Folding it in is what stops a run scored under the old exact-line rule from being compared
+    with one scored after the widening as though they were the same instrument.
+    """
+    without = hashlib.sha256()
+    without.update(DEFAULT_SYSTEM.encode("utf-8"))
+    without.update(b"\0")
+    without.update(_USER_TEMPLATE.encode("utf-8"))
+
+    assert judge_identity() != without.hexdigest()
+
+    with_policy = hashlib.sha256()
+    with_policy.update(DEFAULT_SYSTEM.encode("utf-8"))
+    with_policy.update(b"\0")
+    with_policy.update(_USER_TEMPLATE.encode("utf-8"))
+    with_policy.update(b"\0")
+    with_policy.update(MATCHING_POLICY.encode("utf-8"))
+
+    assert judge_identity() == with_policy.hexdigest()

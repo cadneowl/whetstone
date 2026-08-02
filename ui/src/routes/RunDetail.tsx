@@ -564,32 +564,58 @@ function Expected({ outcome }: { outcome: ExpectationOutcome }) {
           <span className="ml-2">severity ≥ {severityName(outcome.severity_min)}</span>
         )}
       </p>
+      <Widened outcome={outcome} />
     </div>
   )
 }
 
+/**
+ * The anchor is one line — wherever the human left the comment — but eligibility runs against what
+ * the change touches. Saying so is what keeps the page honest: without it a reader sees "lines
+ * 73–73", sees a finding on line 82 accepted, and concludes the score is arbitrary.
+ */
+function Widened({ outcome }: { outcome: ExpectationOutcome }) {
+  const anchor = outcome.where?.line_range
+  const used = outcome.considered?.line_range
+  if (!anchor || !used || (used[0] === anchor[0] && used[1] === anchor[1])) return null
+
+  return (
+    <p
+      className="text-xs text-muted"
+      title="A review comment anchors to one line; the reviewer names the line it thinks the defect is on. Matching accepts any finding inside the change and lets the judge decide, so a case is not lost to a few lines of drift."
+    >
+      matched against lines {used[0]}–{used[1]} — everything this change touches in the file
+    </p>
+  )
+}
+
 const EXCLUSION_TEXT: Record<string, string> = {
-  outside_region: 'outside the expected line range',
+  outside_region: 'outside the lines this change touches',
   below_severity: 'below the required severity',
 }
 
 /**
  * Findings the structural prefilter dropped. A reviewer that flagged the right line one severity
  * too low looks identical to a reviewer that said nothing — opposite problems, opposite fixes.
+ *
+ * Computed against `considered` — the region the run really ran, which is the anchor widened to
+ * what the change touches (see `core.matching`). Reading `where` here would report a finding as
+ * out of range while the run had in fact judged it. Older records carry no `considered`; falling
+ * back to `where` explains those exactly as they ran.
  */
-function excludedFindings(outcome: ExpectationOutcome, trial: TrialRecord) {
-  const where = outcome.where
-  if (!where) return []
+export function excludedFindings(outcome: ExpectationOutcome, trial: TrialRecord) {
+  const region = outcome.considered ?? outcome.where
+  if (!region) return []
   const eligible = new Set(outcome.eligible_finding_indices)
   const out: { index: number; reason: string }[] = []
 
   trial.findings.forEach((finding, index) => {
-    if (eligible.has(index) || finding.path !== where.path) return
+    if (eligible.has(index) || finding.path !== region.path) return
     const inRegion =
-      !where.line_range ||
+      !region.line_range ||
       (finding.line != null &&
-        finding.line >= where.line_range[0] &&
-        finding.line <= where.line_range[1])
+        finding.line >= region.line_range[0] &&
+        finding.line <= region.line_range[1])
     const reason = !inRegion ? 'outside_region' : 'below_severity'
     out.push({ index, reason: EXCLUSION_TEXT[reason]! })
   })

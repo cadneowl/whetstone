@@ -63,6 +63,12 @@ _USER_TEMPLATE = (
     "one-sentence reason."
 )
 
+# The eligibility rule `core.matching` applies before any of these prompts run. Named here because
+# this is where a verdict's identity is assembled, and it belongs to that identity for the same
+# reason the templates do: it decides which pairs reach the judge, so it moves scores. Bump the
+# version when the rule in `core.matching` changes.
+MATCHING_POLICY = "region=change-footprint/1"
+
 # The tier-2 prompt: the same pair, grounded in the code both sentences point at. The diff is the
 # case's own frozen content — deterministic, versioned with the case — and deliberately NOT the
 # live wiki: the reviewer already reads the wiki, and an instrument that shares the subject's
@@ -107,11 +113,19 @@ def judge_identity(
     run's `model` field records the *reviewer's* backend, so without this fold a tier-1 swap
     would be invisible: two runs judged by different models would compare as the same instrument.
     Empty — the default, tier 1 on the run's client — hashes exactly as before the seam existed.
+
+    The eligibility policy folds in too, unconditionally. It decides which pairs are put to the
+    judge at all, so it moves scores exactly as the prompts do: a case whose finding the old
+    exact-line rule filtered out scored a miss, and scores a match now. Runs from before the
+    widening keep the hash they were recorded with, so the console's "compare only within one
+    judge" rule separates them from runs after it without anyone having to remember why.
     """
     h = hashlib.sha256()
     h.update((system or DEFAULT_SYSTEM).encode("utf-8"))
     h.update(b"\0")
     h.update(_USER_TEMPLATE.encode("utf-8"))
+    h.update(b"\0")
+    h.update(MATCHING_POLICY.encode("utf-8"))
     if escalate_below > 0:
         h.update(b"\0cascade\0")
         h.update(f"{escalate_below}".encode())
