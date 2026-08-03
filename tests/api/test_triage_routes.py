@@ -121,6 +121,34 @@ def test_edit_form_is_seeded_with_the_raw_comment(client: TestClient) -> None:
     assert "unwrap" in item["entry"]["diff"]
 
 
+def test_a_candidate_mined_before_the_anchor_fix_still_promotes(
+    config: Config, store: RunStore, candidates_dir: Path, repo: Path
+) -> None:
+    """The shape the queue was already full of when the miner learned to widen a stray anchor.
+
+    A reviewer expanded the collapsed context and commented on line 999, which no hunk touches. The
+    miner of the day wrote that line into the region verbatim, so the candidate sat in the queue
+    looking ordinary and refused at the last step — after a skill was chosen and the expectation
+    rewritten. Re-mining is the only thing that would have repaired it, so seeding does instead.
+    """
+    stale = _candidate("814-t2")
+    stale.expect[0].where = Region(path="src/handlers/charge.rs", line_range=(999, 999))
+    directory = candidates_dir / stale.id
+    write_candidate(stale, directory)
+    (directory / "candidate.json").write_text(stale.model_dump_json(indent=2), encoding="utf-8")
+
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        assert client.get("/api/candidates/814-t2").json()["edits"]["line_range"] is None
+        edits = _edits(client, "814-t2", semantic="unwrap on the handler row can panic")
+        response = client.post("/api/candidates/814-t2/promote", json={"edits": edits})
+
+    assert response.status_code == 200, response.text
+    written = yaml.safe_load(_promoted_case(repo, "rust-errors", "814-t2"))
+    # Whole file: the honest claim, and the one the reviewer's own comment supports.
+    assert "line_range" not in written["expect"][0]["where"]
+
+
 def test_unknown_candidate_is_404(client: TestClient) -> None:
     assert client.get("/api/candidates/nope").status_code == 404
 

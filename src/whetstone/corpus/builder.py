@@ -23,6 +23,7 @@ from whetstone.domain.eval_model import (
     SIGNAL_OPEN,
     SIGNAL_RESOLVED,
     SIGNAL_SUGGESTED_FIX,
+    SOURCE_MINED_MR,
     EvalKind,
     Expectation,
     Provenance,
@@ -282,7 +283,7 @@ def build_candidates(
                 change=reviewed.change.narrowed_to(path),
                 expect=[expectation],
                 provenance=Provenance(
-                    source="gitlab_mr", ref=ref, human_signal=signal.human_signal
+                    source=SOURCE_MINED_MR, ref=ref, human_signal=signal.human_signal
                 ),
                 confidence=signal.confidence,
                 suggested_skill=route_to_skill(path, skills, labels),
@@ -370,7 +371,7 @@ def _fixed_counterpart(
                 semantic=thread.comments[0].body if thread.comments else "",
             )
         ],
-        provenance=Provenance(source="gitlab_mr", ref=ref, human_signal=SIGNAL_SUGGESTED_FIX),
+        provenance=Provenance(source=SOURCE_MINED_MR, ref=ref, human_signal=SIGNAL_SUGGESTED_FIX),
         confidence=_CONF_SUGGESTED_FIX,
         suggested_skill=route_to_skill(path, skills, reviewed.mr.labels),
         rationale=(
@@ -414,7 +415,7 @@ def _clean_merge_candidates(
                         semantic="merged with no review comments; the reviewer should stay silent",
                     )
                 ],
-                provenance=Provenance(source="gitlab_mr", ref=ref, human_signal=SIGNAL_CLEAN),
+                provenance=Provenance(source=SOURCE_MINED_MR, ref=ref, human_signal=SIGNAL_CLEAN),
                 confidence=_CONF_CLEAN,
                 suggested_skill=route_to_skill(file.path, skills, labels),
                 rationale=rationale,

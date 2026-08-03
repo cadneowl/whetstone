@@ -23,8 +23,15 @@ from pydantic import BaseModel
 
 from whetstone.candidates import CandidateEntry
 from whetstone.core.loader import PROMOTED_CASES_DIR, SkillLoadError, load_skill
+from whetstone.corpus.model import CandidateCase
 from whetstone.domain.enums import Severity
-from whetstone.domain.eval_model import CaseTier, EvalCase, EvalKind, Provenance
+from whetstone.domain.eval_model import (
+    SOURCE_MINED_MR,
+    CaseTier,
+    EvalCase,
+    EvalKind,
+    Provenance,
+)
 from whetstone.naming import describe_unsafe, is_safe_segment
 
 CASE_FILE = "case.yaml"
@@ -79,7 +86,19 @@ class PreparedCase(BaseModel):
 
 
 def edits_from(entry: CandidateEntry, *, skill_id: str | None = None) -> CaseEdits:
-    """Seed the edit form from a candidate — what the console shows before anyone touches it."""
+    """Seed the edit form from a candidate — what the console shows before anyone touches it.
+
+    A *mined* region the diff does not touch is seeded as the whole file. Both minting paths already
+    make that call — `build_candidates` for a thread anchored to expanded context, and
+    `candidate_from_finding` for a stray cited line — but only for candidates minted since those
+    guards landed. A queue filled before them still holds anchors that `_check_region` will refuse,
+    and re-mining the corpus is the only other way to reach them. So the fallback runs again on the
+    way *out* of the store, where it also repairs what is already on disk.
+
+    Only for mined regions. A `review_miss` region is one a person typed with the diff in front of
+    them, and widening that would discard what they said; `_check_region` refuses it instead and
+    names the lines the change does touch, which is the answer they can act on.
+    """
     candidate = entry.candidate
     first = candidate.expect[0] if candidate.expect else None
     path = first.where.path if first else (
@@ -91,11 +110,25 @@ def edits_from(entry: CandidateEntry, *, skill_id: str | None = None) -> CaseEdi
         kind=candidate.kind,
         semantic=first.semantic if first else "",
         path=path,
-        line_range=first.where.line_range if first else None,
+        line_range=_anchored_range(candidate, path, first.where.line_range) if first else None,
         severity_min=first.severity_min if first else None,
         expectation_id=first.id if first else "e1",
         rule_id=candidate.suggested_rule_id,
     )
+
+
+def _anchored_range(
+    candidate: CandidateCase, path: str, line_range: tuple[int, int] | None
+) -> tuple[int, int] | None:
+    """A mined `line_range` the change does not touch, reduced to None — meaning the whole file.
+
+    `covers` treats a change carrying no hunk information as covering everything, so a synthesized
+    diff keeps whatever range it was given.
+    """
+    if line_range is None or candidate.provenance.source != SOURCE_MINED_MR:
+        return line_range
+    file = candidate.change.file(path)
+    return line_range if file is None or file.covers(line_range) else None
 
 
 def render_case_yaml(entry: CandidateEntry, edits: CaseEdits) -> str:
