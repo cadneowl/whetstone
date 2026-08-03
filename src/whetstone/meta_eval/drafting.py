@@ -39,7 +39,7 @@ from whetstone.candidates import CandidateEntry
 from whetstone.corpus.model import CandidateCase, Discussion, DiscussionComment
 from whetstone.domain.change import AddedLine, CodeChange, FileChange
 from whetstone.domain.enums import Severity
-from whetstone.domain.eval_model import Expectation, Provenance
+from whetstone.domain.eval_model import SOURCE_MINED_MR, Expectation, Provenance
 from whetstone.domain.finding import Finding
 from whetstone.domain.refs import Region, RepoRef
 from whetstone.judge.base import Judge
@@ -106,7 +106,7 @@ class DraftingCase(BaseModel):
             ],
             discussion=Discussion(mr_title=self.mr_title, comments=list(self.comments)),
             provenance=Provenance(
-                source="gitlab_mr", ref=f"acme/payments!{self.id.split('-')[0]}",
+                source=SOURCE_MINED_MR, ref=f"acme/payments!{self.id.split('-')[0]}",
                 human_signal=self.human_signal,
             ),
             confidence=0.9,

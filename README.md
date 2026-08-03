@@ -2005,7 +2005,7 @@ run. Errors are reported against the field that caused them:
 |---|---|
 | `no target skill chosen` | The skill dropdown is blank |
 | `expectation points at 'x.rs', which this diff does not change` | Path typo; the message lists the files the diff does touch |
-| `expectation covers lines 5000–6000 …, it changes lines 40–43` | The region misses every hunk, so the case could never pass |
+| `expectation covers lines 5000–6000 …, it changes lines 40–43` | A region *you* typed misses every hunk, so it anchors at nothing. A mined region that misses is seeded as the whole file instead — the reviewer commented on expanded context, and there is nothing typed to discard |
 | `line range 45–40 is inverted` | First line after the last |
 | `case id '…' is not usable as a folder name` | Ids become directory names; letters, digits, `.`, `-`, `_` only |
 | `rule id '…' should look like R1 or SEC2` | Rule ids must match the tag shape used in `SKILL.md` |

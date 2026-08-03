@@ -59,6 +59,11 @@ SYNTHETIC_PREFIX = "synthetic-"
 SOURCE_COUNTERFACTUAL = "synthetic-counterfactual"
 SOURCE_MUTATION = "synthetic-mutation"
 
+# Mined from a merge request's review history — nobody typed any part of it. Named because the
+# difference between a machine-derived region and a hand-typed one decides whether a region the
+# diff does not touch is quietly widened or refused to the operator's face (`promote.edits_from`).
+SOURCE_MINED_MR = "gitlab_mr"
+
 # How strong a `should_not_flag` case's evidence is.
 #
 # This distinction is the honest answer to a real weakness in the corpus: a clean merge means nobody

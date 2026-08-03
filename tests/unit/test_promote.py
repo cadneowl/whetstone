@@ -29,6 +29,9 @@ def _entry(
     semantic: str = "nit: use ? here",
     kind: str = "should_catch",
     suggested: str | None = "rust-errors",
+    line_range: tuple[int, int] | None = (41, 41),
+    source: str = "gitlab_mr",
+    human_signal: str = "suggestion applied",
 ) -> CandidateEntry:
     change = CodeChange(
         repo=REPO,
@@ -49,13 +52,11 @@ def _entry(
             Expectation(
                 id="e1",
                 must="appear" if kind == "should_catch" else "not_appear",
-                where=Region(path="src/handlers/charge.rs", line_range=(41, 41)),
+                where=Region(path="src/handlers/charge.rs", line_range=line_range),
                 semantic=semantic,
             )
         ],
-        provenance=Provenance(
-            source="gitlab_mr", ref="acme/payments!812", human_signal="suggestion applied"
-        ),
+        provenance=Provenance(source=source, ref="acme/payments!812", human_signal=human_signal),
         confidence=0.9,
         suggested_skill=suggested,
     )
@@ -75,6 +76,36 @@ def test_edits_are_seeded_from_the_candidate() -> None:
 
 def test_edits_seed_empty_skill_when_unrouted() -> None:
     assert edits_from(_entry(suggested=None)).skill_id == ""
+
+
+def test_a_mined_region_outside_the_diff_is_seeded_as_the_whole_file(tmp_path: Path) -> None:
+    """A reviewer who expands the collapsed context can comment on a line no hunk touches.
+
+    The miner now widens such an anchor to the whole file, but a queue mined before it did still
+    holds the old shape, and every one of those is a candidate the operator can only meet the
+    refusal on — after choosing a skill and rewriting the expectation. Seeding repairs them on read,
+    so the field says "whole file" and Promote goes through.
+    """
+    entry = _entry(line_range=(999, 999))
+    edits = edits_from(entry)
+    assert edits.line_range is None
+
+    edits.semantic = "unwrap on the DB result can panic on a normal error path"
+    prepared = prepare(entry, edits, skills_root=tmp_path)
+    assert prepared.case.expect[0].where.line_range is None
+
+
+def test_a_region_a_person_typed_is_seeded_untouched_and_still_refused(tmp_path: Path) -> None:
+    """The counterpart. A `review_miss` region is one somebody typed with the diff on screen, so
+    widening it would discard what they said — `_check_region` refuses it and names the real lines
+    instead. Pinned here because the repair above must not reach it."""
+    entry = _entry(line_range=(999, 999), source="review_miss", human_signal="finding missed")
+    edits = edits_from(entry)
+    assert edits.line_range == (999, 999)
+
+    edits.semantic = "unwrap on the DB result can panic on a normal error path"
+    with pytest.raises(SkillLoadError, match="which this diff does not touch"):
+        prepare(entry, edits, skills_root=tmp_path)
 
 
 def test_must_is_derived_from_kind_not_asked_for() -> None:
