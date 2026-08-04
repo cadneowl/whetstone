@@ -174,7 +174,17 @@ class Ledger:
         case_id: str = "",
         at: datetime | None = None,
     ) -> int:
-        """Append these verdicts. Returns how many were written."""
+        """Append these verdicts. Returns how many were written.
+
+        **Idempotent per run.** A record that is saved twice — a retry, a re-index, a console job
+        and a CLI invocation over the same run — must not turn one confirmation into two. The
+        ledger's only job is to say how much agreement a claim has accumulated, and evidence that
+        inflates when nothing new happened is worse than no evidence.
+
+        Only when `run_id` identifies the observation, though. The maintainer sweep records with no
+        run id, and two sweeps a week apart are genuinely two observations of the same claim: that
+        is the accumulation this exists to capture, not a duplicate to suppress.
+        """
         rows = [
             LedgerEntry(
                 at=at or datetime.now(UTC),
@@ -188,6 +198,9 @@ class Ledger:
             )
             for v in verdicts
         ]
+        if run_id:
+            seen = {(e.run_id, e.case_id, e.path, e.claim) for e in self.entries()}
+            rows = [r for r in rows if (r.run_id, r.case_id, r.path, r.claim) not in seen]
         if not rows:
             return 0
         self.path.parent.mkdir(parents=True, exist_ok=True)

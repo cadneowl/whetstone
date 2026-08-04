@@ -85,14 +85,14 @@ def check_tree(
         parent = directory.parent
         rel_dir = directory.relative_to(root).as_posix()
         siblings = _names(parent)
-        if not siblings:
+        if _deserted(parent):
             problems.append(
                 Problem(
                     path=rel_dir,
                     code="orphan_dir",
                     message=(
-                        f"{parent.relative_to(root).as_posix() or '.'} holds no files any more — "
-                        f"the code moved and these notes did not, so they now describe nothing"
+                        f"{parent.relative_to(root).as_posix() or '.'} holds nothing but these "
+                        f"notes — the code moved and they did not, so they now describe nothing"
                     ),
                 )
             )
@@ -105,11 +105,26 @@ def check_tree(
 
 
 def _names(directory: Path) -> set[str]:
-    """File names directly in `directory`, excluding `.agents/` itself."""
+    """File names directly in `directory`. What a `## heading` can legitimately name."""
     try:
         return {p.name for p in directory.iterdir() if p.is_file()}
     except OSError:
         return set()
+
+
+def _deserted(directory: Path) -> bool:
+    """Whether `directory` holds nothing at all but its own `.agents/`.
+
+    Subdirectories count as content, and that distinction is the whole check. A parent package —
+    `com/company/hub/`, `payments/` in a repo that keeps every leaf in a subpackage — legitimately
+    holds no files of its own while describing plenty, and flagging it would fail CI on a normal
+    layout. The failure actually worth catching is the folder whose code was moved out from under
+    notes that stayed behind, and that folder is empty of everything.
+    """
+    try:
+        return all(entry.name == AGENTS_DIR for entry in directory.iterdir())
+    except OSError:
+        return False
 
 
 def _check_file(
@@ -273,12 +288,28 @@ def claims_touched(patch: str) -> list[str]:
     """
     touched: list[str] = []
     path = ""
+    old = ""
     in_frontmatter = False
     seen_delimiters = 0
     for line in patch.splitlines():
+        # A rename carries no hunks at all when the content is unchanged, so it never reaches the
+        # `+++` branch — and renaming `qa.md` to `arch-review.md` hands a whole folder's claims to
+        # a different role without editing a byte of them. Moving claims is writing them.
+        if line.startswith(("rename from ", "rename to ")):
+            moved = line.split(" ", 2)[2].strip()
+            if _is_sidecar(moved) and moved not in touched:
+                touched.append(moved)
+            continue
+        if line.startswith("--- "):
+            old = _strip_prefix(line[4:].strip())
+            continue
         if line.startswith("+++ "):
-            path = line[4:].strip()
-            path = path[2:] if path.startswith(("a/", "b/")) else path
+            new = _strip_prefix(line[4:].strip())
+            # `+++ /dev/null` is a deletion. Removing a claim is as much a write as adding one —
+            # more so, since the claim it removes may be the one that was in the way.
+            if new == "/dev/null" and _is_sidecar(old) and old not in touched:
+                touched.append(old)
+            path = old if new == "/dev/null" else new
             in_frontmatter = False
             seen_delimiters = 0
             continue
@@ -301,6 +332,11 @@ def claims_touched(patch: str) -> list[str]:
         if line[:1] in ("+", "-") and not in_frontmatter:
             touched.append(path)
     return touched
+
+
+def _strip_prefix(path: str) -> str:
+    """`a/pay/.agents/x.md` -> `pay/.agents/x.md`, leaving `/dev/null` alone."""
+    return path[2:] if path.startswith(("a/", "b/")) else path
 
 
 def _is_sidecar(path: str) -> bool:

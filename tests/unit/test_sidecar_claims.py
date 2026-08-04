@@ -799,3 +799,115 @@ def test_the_sweep_spends_nothing_on_an_unmoved_folder(tmp_path: Path) -> None:
     assert report.calls == 0
     assert client.seen == []
     assert "unchanged" in report.folders[0].skipped
+
+
+# --- found in review, each one a wrong answer the code gave confidently ---------------------------
+
+
+def test_a_package_directory_holding_only_subdirectories_is_not_an_orphan(tmp_path: Path) -> None:
+    """`com/company/hub/` holds no files of its own and describes plenty.
+
+    The orphan check counted files only, so a normal Java or nested-package layout failed CI on a
+    tree where nothing was wrong.
+    """
+    root = tmp_path / "src"
+    (root / "com" / "hub" / ".agents").mkdir(parents=True)
+    (root / "com" / "hub" / "payments").mkdir()
+    (root / "com" / "hub" / "payments" / "svc.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "com" / "hub" / ".agents" / "context.md").write_text(
+        "---\nstatus: confirmed\n---\n\n- A fact.\n  <!-- src: HUB-1 -->\n", encoding="utf-8"
+    )
+    assert check_tree(root) == []
+
+
+def test_a_folder_holding_nothing_but_its_notes_is_still_an_orphan(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    (root / "gone" / ".agents").mkdir(parents=True)
+    (root / "gone" / ".agents" / "context.md").write_text(
+        "---\nstatus: confirmed\n---\n\n- A fact.\n  <!-- src: HUB-1 -->\n", encoding="utf-8"
+    )
+    assert [p.code for p in check_tree(root)] == ["orphan_dir"]
+
+
+def test_a_bullet_inside_a_code_fence_is_not_a_claim() -> None:
+    """A sidecar that shows a snippet of YAML minted phantom claims from it — which the floor then
+    failed as uncited, and the maintainer tried to verify against the code."""
+    fenced = (
+        "---\nstatus: confirmed\n---\n\n"
+        "- A real claim.\n  <!-- src: A -->\n\n"
+        "```yaml\n- not: a claim\n- also: not one\n```\n\n"
+        "- Another real claim.\n  <!-- src: B -->\n"
+    )
+    assert [c.text for c in parse(fenced).claims] == ["A real claim.", "Another real claim."]
+
+
+def test_renaming_a_sidecar_counts_as_writing_claims() -> None:
+    """A rename carries no hunks when the content is unchanged, so it never reached the diff walk —
+    and renaming `qa.md` to `arch-review.md` hands a folder's claims to a different role."""
+    rename = (
+        "diff --git a/pay/.agents/qa.md b/pay/.agents/arch-review.md\n"
+        "similarity index 100%\nrename from pay/.agents/qa.md\n"
+        "rename to pay/.agents/arch-review.md\n"
+    )
+    assert claims_touched(rename) == ["pay/.agents/qa.md", "pay/.agents/arch-review.md"]
+
+
+def test_deleting_a_sidecar_counts_as_writing_claims() -> None:
+    """Removing a claim is as much a write as adding one — more so, since the claim removed may be
+    the one that was in the way."""
+    deletion = (
+        "diff --git a/pay/.agents/qa.md b/pay/.agents/qa.md\ndeleted file mode 100644\n"
+        "--- a/pay/.agents/qa.md\n+++ /dev/null\n@@ -1,3 +0,0 @@\n"
+        "----\n-status: confirmed\n----\n"
+    )
+    assert claims_touched(deletion) == ["pay/.agents/qa.md"]
+
+
+def test_a_claim_merged_into_a_crlf_file_keeps_crlf() -> None:
+    """A source repository checked out on Windows is CRLF and everything rendered here is LF, so
+    the merge came out mixed — a whole-file rewrite in the diff, and a patch git may refuse."""
+    crlf = "---\r\nstatus: confirmed\r\n---\r\n\r\n- Existing.\r\n  <!-- src: A -->\r\n"
+    merged = with_claim(crlf, "A new fact.", "HUB-2")
+    assert merged.count("\r\n") == merged.count("\n")
+    assert len(parse(merged).claims) == 2
+
+
+def test_an_lf_file_is_not_given_crlf() -> None:
+    merged = with_claim(
+        "---\nstatus: confirmed\n---\n\n- Existing.\n  <!-- src: A -->\n", "New.", "B"
+    )
+    assert "\r" not in merged
+
+
+def test_saving_a_run_twice_does_not_double_its_evidence(tmp_path: Path) -> None:
+    """The ledger's only job is to say how much agreement a claim has accumulated. Evidence that
+    inflates on a retry is worse than none."""
+    ledger = Ledger(tmp_path)
+    verdict = ClaimVerdict(path="a.md", claim="A claim.", status="confirmed", evidence="x")
+    now = datetime.now(UTC)
+    for _ in range(3):
+        ledger.record([verdict], run_id="r1", case_id="c1", at=now)
+    assert ledger.summary()[0].confirmed == 1
+
+
+def test_two_sweeps_of_the_same_claim_still_accumulate(tmp_path: Path) -> None:
+    """Only run-attributed verdicts are deduplicated. Two maintainer sweeps a week apart are two
+    genuine observations, and that accumulation is the point of keeping a history."""
+    ledger = Ledger(tmp_path)
+    verdict = ClaimVerdict(path="a.md", claim="A claim.", status="confirmed", evidence="x")
+    now = datetime.now(UTC)
+    ledger.record([verdict], skill_id="s", at=now)
+    ledger.record([verdict], skill_id="s", at=now + timedelta(days=7))
+    assert ledger.summary()[0].confirmed == 2
+
+
+def test_an_unconfirmed_sidecar_is_not_charged_to_the_budget(tmp_path: Path) -> None:
+    """It is dropped before it is kept, so a withheld claim cannot crowd out an injectable one."""
+    root = tmp_path / "src"
+    (root / "pay" / ".agents").mkdir(parents=True)
+    for name, status in (("context.md", "unconfirmed"), ("arch-review.md", "confirmed")):
+        (root / "pay" / ".agents" / name).write_text(
+            f"---\nstatus: {status}\n---\n\n- {'x' * 400}\n  <!-- src: A -->\n", encoding="utf-8"
+        )
+    got = resolve(root, ["pay/svc.py"], "arch-review", budget=600)
+    assert [f["path"] for f in got["files"]] == ["pay/.agents/arch-review.md"]

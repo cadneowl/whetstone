@@ -194,19 +194,20 @@ class RunStore:
         """
         from whetstone.sidecars.confirm import Ledger
 
-        verdicts = [
-            (case.case_id, verdict)
+        by_case = {
+            case.case_id: case.sidecars.verdicts
             for case in record.cases
-            if case.sidecars is not None
-            for verdict in case.sidecars.verdicts
-        ]
-        if not verdicts:
+            if case.sidecars is not None and case.sidecars.verdicts
+        }
+        if not by_case:
             return
         ledger = Ledger(self.root)
         try:
-            for case_id, verdict in verdicts:
+            # One call per case, not per verdict: `record` reads the ledger to stay idempotent, so
+            # a call per verdict would re-read it once per claim on every save.
+            for case_id, verdicts in by_case.items():
                 ledger.record(
-                    [verdict],
+                    verdicts,
                     run_id=record.id,
                     skill_id=record.skill_id,
                     case_id=case_id,

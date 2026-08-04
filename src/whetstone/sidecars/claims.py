@@ -164,8 +164,19 @@ def _claims(body: str, offset: int) -> list[Claim]:
         )
         current = None
 
+    fenced = False
     for index, line in enumerate(body.splitlines()):
         lineno = offset + index
+        # A fenced block is illustration, not assertion. Without this, a sidecar showing a snippet
+        # of YAML or a diff mints phantom claims from its `- ` lines: the floor then fails the file
+        # as uncited and the maintainer tries to verify a line of sample config against the code.
+        if line.lstrip().startswith(("```", "~~~")):
+            if not fenced:
+                flush()
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
         if line.startswith("## "):
             flush()
             section = line[3:].strip()
@@ -227,9 +238,26 @@ def with_claim(
     if not (existing or "").strip():
         return _new_file(bullet, role=role, section=section, status=status)
 
-    head, body = _head_body(existing or "")
+    current = existing or ""
+    head, body = _head_body(current)
     inserted = _insert(body, bullet, section)
-    return f"{head}\n{inserted}" if head else inserted
+    merged = f"{head}\n{inserted}" if head else inserted
+    return _match_line_endings(merged, current)
+
+
+def _match_line_endings(merged: str, original: str) -> str:
+    """Emit the line ending the file already uses.
+
+    A source repository checked out on Windows is CRLF, and everything rendered here is LF — so the
+    merged file came out mixed, which shows up as a whole-file rewrite in the diff and a patch git
+    may refuse. The conversion is whole-file rather than per-inserted-line, which is safe precisely
+    because it only runs when the original was uniformly CRLF: every untouched line converts back
+    to exactly the bytes it had.
+    """
+    if "\r\n" not in original:
+        return merged
+    flat = merged.replace("\r\n", "\n")
+    return flat.replace("\n", "\r\n")
 
 
 def _head_body(text: str) -> tuple[str, str]:
