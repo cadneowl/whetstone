@@ -65,6 +65,7 @@ from whetstone.llm.embedding import Embedder, build_embedder
 from whetstone.llm.factory import build_llm_client, resolve_backend
 from whetstone.providers.base import IssueConnector, ReviewConnector
 from whetstone.reviewer.base import Reviewer, provenance_of
+from whetstone.reviewer.factory import SidecarPlan
 from whetstone.reviewer.llm_reviewer import LLMReviewer
 from whetstone.reviews import FindingVerdict, ReviewRecord, ReviewSource, new_review_id
 from whetstone.runs import RunStore, RunSummary, new_run_id, stale_version_ids
@@ -203,6 +204,7 @@ def record_eval(
     judge_policy: JudgePolicy | None = None,
     baseline: bool = False,
     reviewer: Reviewer | None = None,
+    sidecars: SidecarPlan | None = None,
 ) -> RunRecord:
     """Score a skill and return the full run record — every finding and every judge verdict.
 
@@ -218,14 +220,15 @@ def record_eval(
     `judge_policy` is the skill's cascade config (`judge:` in evaluate/step.yaml); when it enables
     escalation, low-confidence verdicts are re-judged grounded in the case's diff, and the run's
     `judge_hash` says so.
+
+    `sidecars` binds the skill's `.agents/` declaration to a checkout (`reviewer.factory`). It
+    reaches the built-in reviewer only: a reviewer *program* or an agent collects its own context,
+    and injecting a second, host-resolved set behind its back would make the record's account of
+    what was read wrong for both of them.
     """
     judge_system = judge.system if judge else None
     cascade = judge_policy if judge_policy is not None and judge_policy.enabled else None
     counted = CountingClient(client)
-    # A caller may supply the reviewer — the skill's own `run:` program, resolved by
-    # `reviewer.factory` — in which case the LLM reviewer is not built and the run's client is used
-    # only for the judge. None (the default) keeps every existing caller on the built-in reviewer.
-    prov = provenance_of(reviewer)
     # A fresh trajectory per run: one reviewer instance serves both sides of a gate, and merged
     # reads would hide exactly the divergence the trace exists to expose.
     reset = getattr(reviewer, "reset_trace", None)
@@ -245,7 +248,18 @@ def record_eval(
         # Defaults to this skill's whole case set — which is the full corpus for an unsampled run,
         # and the *unsampled* union a gate passes explicitly so each side sees all of its own cases.
         corpus=precedent_corpus if precedent_corpus is not None else skill.eval_cases,
+        sidecars=sidecars.loader() if sidecars else None,
+        # The built-in reviewer is normally fully described by the run's backend/model and reports
+        # no provenance. Once it reads sidecars it is a different instrument on different inputs,
+        # and `BaselineKey` keys on this digest — so a run with them can never silently reuse a
+        # baseline measured without them, nor an ablation reuse a normal run's.
+        provenance=sidecars.provenance if sidecars else None,
     )
+    # Read off the reviewer that will actually run, not off the caller's argument. A supplied
+    # program or agent answers identically either way; the built-in reviewer does not, because it
+    # only has provenance once sidecars gave it some — and asking the wrong object left the record
+    # claiming the run read nothing while every case in it carries what it read.
+    prov = provenance_of(active_reviewer)
     # Tier-1 verdicts may run on their own backend — the deployment seam for a distilled judge
     # (`judge: {tier1: …}` in evaluate/step.yaml). The reviewer and the grounded tier 2 stay on
     # the run's client: the student takes the bulk calls, the teacher keeps the contested ones.
@@ -405,6 +419,7 @@ def record_baseline(
     judge: JudgeSpec | None = None,
     judge_policy: JudgePolicy | None = None,
     reviewer: Reviewer | None = None,
+    sidecars: SidecarPlan | None = None,
 ) -> RunRecord:
     """Score the skill's active cases with the guidance stripped — the saturation probe.
 
@@ -418,6 +433,9 @@ def record_baseline(
     learnable-from, because nothing here says anything about the guidance.
     """
     return record_eval(
+        # Guidance stripped; local context kept. A `should_catch` case the naked model passes
+        # because a sidecar handed it the answer is exactly a case that stopped measuring the
+        # guidance — which is the verdict this probe exists to produce.
         strip_guidance(skill),
         client,
         trials=trials,
@@ -435,6 +453,7 @@ def record_baseline(
         judge_policy=judge_policy,
         baseline=True,
         reviewer=reviewer,
+        sidecars=sidecars,
     )
 
 
@@ -454,6 +473,7 @@ def record_review(
     principal: str = "",
     now: datetime | None = None,
     reviewer: Reviewer | None = None,
+    sidecars: SidecarPlan | None = None,
 ) -> ReviewRecord:
     """Run a skill over a change that is not an eval case, and record what it said.
 
@@ -469,14 +489,21 @@ def record_review(
     (the default) keeps the built-in LLM reviewer.
     """
     counted = CountingClient(client)
-    prov = provenance_of(reviewer)
     # The same before/after discipline the other two recorders use. `llm_calls` on an agent is its
     # *lifetime* spend, so adding it whole is only correct while every caller happens to build a
     # fresh reviewer per review — true today, and not a property this function can see or enforce.
     reviewer_calls_before = _llm_calls_of(reviewer)
     active_reviewer: Reviewer = reviewer or LLMReviewer(
-        counted, effort=reviewer_effort, embedder=_embedder_for(skill)
+        counted,
+        effort=reviewer_effort,
+        embedder=_embedder_for(skill),
+        # A live review is where local context most earns its keep, and it is also the thing every
+        # eval is a prediction *of*. Injecting sidecars when scoring but not when actually reviewing
+        # would make the corpus measure a reviewer that never ships.
+        sidecars=sidecars.loader() if sidecars else None,
+        provenance=sidecars.provenance if sidecars else None,
     )
+    prov = provenance_of(active_reviewer)
 
     started_at = now or datetime.now(UTC)
     clock = time.perf_counter()
@@ -617,6 +644,7 @@ def gate_skills(
     cancel: threading.Event | None = None,
     reviewer: Reviewer | None = None,
     baseline_for: BaselineLookup | None = None,
+    sidecars: SidecarPlan | None = None,
 ) -> GateOutcome:
     """Score a base and candidate version of a skill and apply the regression gate.
 
@@ -688,7 +716,7 @@ def gate_skills(
             wiki_limits=wiki_limits, precedent_limits=precedent_limits,
             precedent_corpus=base.eval_cases,
             judge=judge, judge_policy=judge_policy, sample=no_draw,
-            on_event=on_base, cancel=cancel, reviewer=reviewer,
+            on_event=on_base, cancel=cancel, reviewer=reviewer, sidecars=sidecars,
         )
         base_score = base_record.score
         base_notes = case_notes(base_record.cases)
@@ -700,7 +728,7 @@ def gate_skills(
         wiki_limits=wiki_limits, precedent_limits=precedent_limits,
         precedent_corpus=candidate.eval_cases,
         judge=judge, judge_policy=judge_policy, sample=no_draw,
-        on_event=on_candidate, cancel=cancel, reviewer=reviewer,
+        on_event=on_candidate, cancel=cancel, reviewer=reviewer, sidecars=sidecars,
     )
     # Read after the candidate side, which reset the trajectory when it started — so this is the
     # candidate's alone, and `base_trace` was captured the same way before it.
@@ -774,6 +802,7 @@ def record_gate(
     reviewer: Reviewer | None = None,
     baselines: GateStore | None = None,
     baseline_max_age: timedelta | None = None,
+    sidecars: SidecarPlan | None = None,
 ) -> GateRecord:
     """Gate a candidate against a baseline and return a storable record of the comparison.
 
@@ -785,7 +814,12 @@ def record_gate(
     the content the verdict authorises publishing.
     """
     counted = CountingClient(client)
-    gate_prov = provenance_of(reviewer)
+    # Sidecars reach the built-in reviewer only, so they describe the instrument only when that is
+    # what runs. Getting this wrong is not cosmetic: `reviewer_context_digest` is both a component
+    # of `BaselineKey` and what `GateStore.verdict_for` checks a stored pass against, so a gate that
+    # recorded the empty digest while `context_digest_for` reported the sidecar one would refuse to
+    # publish for ever, with nothing on screen to say why.
+    gate_prov = sidecars.provenance if (reviewer is None and sidecars) else provenance_of(reviewer)
     # An agent spends the run's backend on its own client, which `counted` never sees. A gate is
     # where that is largest — two sides, every case, up to the step ceiling each — and it was the
     # one recorder still reporting only the judge's calls.
@@ -846,7 +880,7 @@ def record_gate(
         base, candidate, counted, cfg=cfg, trials=trials, sample=sample, wiki_limits=wiki_limits,
         precedent_limits=precedent_limits, judge=judge, judge_policy=judge_policy,
         on_base=on_base, on_candidate=on_candidate, cancel=cancel, reviewer=reviewer,
-        baseline_for=lookup,
+        baseline_for=lookup, sidecars=sidecars,
     )
     duration = time.perf_counter() - clock
 

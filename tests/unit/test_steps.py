@@ -73,12 +73,21 @@ def test_context_needs_something_that_consumes_it(tmp_path: Path) -> None:
     """context: feeds a program or an agent; with neither it would be resolved — a secret read, a
     file loaded — and then silently dropped, because a plain prompt step takes no inputs.
     """
-    _write(tmp_path, "evaluate", "context:\n  source_root: { env: X }\n")
-    with pytest.raises(StepError, match="has no effect without 'run:' or 'agent:'"):
-        load_step(tmp_path, "evaluate")
     _write(tmp_path, "improve", "prompt: prompt.md\ncontext:\n  a: 1\n", "rewrite it")
     with pytest.raises(StepError, match="has no effect without 'run:' or 'agent:'"):
         load_step(tmp_path, "improve")
+
+
+def test_a_plain_evaluate_step_may_declare_context_for_sidecars(tmp_path: Path) -> None:
+    """The built-in reviewer takes an input too: the tree it reads `.agents/` sidecars from.
+
+    Whether anything consumes the bag depends on `SKILL.md` frontmatter, which is invisible from
+    here — so this kind alone defers, and `reviewer.factory` makes the declared-but-ignored call
+    with the skill in hand. Every other step kind keeps the strict rule above.
+    """
+    _write(tmp_path, "evaluate", "context:\n  source_root: { env: X }\n")
+    spec = load_step(tmp_path, "evaluate")
+    assert spec is not None and spec.context == {"source_root": {"env": "X"}}
 
 
 def test_a_non_evaluate_step_may_declare_context_for_what_consumes_it(tmp_path: Path) -> None:

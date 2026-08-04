@@ -111,6 +111,10 @@ cadence_app = typer.Typer(
     help="The routine clocks: which upkeep passes are due, and marking the distill pass done."
 )
 app.add_typer(cadence_app, name="cadence")
+sidecars_app = typer.Typer(
+    help="Per-directory `.agents/` context: install a skill's collector, and see what it resolves."
+)
+app.add_typer(sidecars_app, name="sidecars")
 
 @app.callback()
 def main(
@@ -273,6 +277,20 @@ YesOpt = Annotated[
 ]
 
 
+NoSidecarsOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-sidecars",
+        help=(
+            "Withhold the .agents/ context this skill would normally read, and score without it. "
+            "The ablation: run it against a normal run to find out whether the local context is "
+            "earning its tokens. Recorded as a different measurement, so it can never be compared "
+            "with one by accident."
+        ),
+    ),
+]
+
+
 def _preflight(plan: Plan, assume_yes: bool) -> None:
     """Show what a step will cost and get consent before spending anything.
 
@@ -329,12 +347,23 @@ def _step(skill_dir: Path, kind: str, *, required: bool = False) -> StepSpec | N
     return spec
 
 
-def _reviewer_choice(policy: StepSpec | None, skill_dir: Path) -> ReviewerChoice:
+def _reviewer_choice(
+    policy: StepSpec | None,
+    skill_dir: Path,
+    skill: Skill | None = None,
+    *,
+    sidecars: bool = True,
+) -> ReviewerChoice:
     """The reviewer a CLI eval/gate uses: the skill's own `run:` program when its evaluate step
     names one, else the built-in reviewer. A required context var that is unset is a usable error,
-    not a run that dies partway through — the same discipline the console applies at the plan."""
+    not a run that dies partway through — the same discipline the console applies at the plan.
+
+    `skill` is what lets sidecars resolve: their declaration is in `SKILL.md` frontmatter, not in
+    the step. Passing it is how the CLI and the console stay the same instrument — the console gets
+    it for free from `reviewer_for`, and omitting it here would mean a gate run from the terminal
+    read local context the console's gate did not."""
     try:
-        choice = reviewer_from_step(policy, skill_dir)
+        choice = reviewer_from_step(policy, skill_dir, skill=skill, sidecars=sidecars)
     except ContextError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if choice.context and choice.context.missing:
@@ -444,6 +473,7 @@ def eval_run(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate & summarize; no model call")
     ] = False,
+    no_sidecars: NoSidecarsOpt = False,
     yes: YesOpt = False,
     transcript: TranscriptOpt = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
@@ -466,7 +496,7 @@ def eval_run(
         typer.echo(_dry_summary(sk))
         return
 
-    choice = _reviewer_choice(policy, skill)
+    choice = _reviewer_choice(policy, skill, sk, sidecars=not no_sidecars)
     trials = trials if trials is not None else (policy.trials if policy else 1)
     drawn = _sample_policy(policy, sample, sample_seed)
     limits = policy.inputs.wiki if policy else None
@@ -506,6 +536,7 @@ def eval_run(
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
         reviewer=choice.build(client),
+        sidecars=choice.sidecar,
     )
     if save:
         _store(runs_dir).save(record)
@@ -774,7 +805,7 @@ def eval_baseline(
     # then compared the two runs and concluded which cases "no longer measure the guidance". That
     # difference was the reviewer, not the guidance, and the conclusion it drives is retirement:
     # cases deleted from the corpus on the strength of a comparison that was never like for like.
-    choice = _reviewer_choice(policy, skill)
+    choice = _reviewer_choice(policy, skill, sk)
     pick = _backend_for(policy, llm, model, base_url)
     backend = _resolve(*pick)
     plan = plan_eval(
@@ -811,6 +842,10 @@ def eval_baseline(
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
         reviewer=choice.build(client),
+        # The probe strips the *guidance*, not the local context. A case the naked model catches
+        # because a sidecar told it is precisely a case that stopped measuring the guidance, which
+        # is the question this run exists to ask.
+        sidecars=choice.sidecar,
     )
     _store(runs_dir).save(record)
     found = discrimination(sk, record)
@@ -871,6 +906,7 @@ def eval_gate(
             help="Re-measure the baseline even if an identical one is already on record",
         ),
     ] = False,
+    no_sidecars: NoSidecarsOpt = False,
     gates_dir: GatesDirOpt = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate both sides; no model call")
@@ -917,7 +953,7 @@ def eval_gate(
         # Read from the candidate: a change to how a skill is evaluated travels with the change to
         # the skill, so a branch that widens its own sample is gated using the sample it proposes.
         policy = _step(cand_dir, "evaluate")
-        choice = _reviewer_choice(policy, cand_dir)
+        choice = _reviewer_choice(policy, cand_dir, candidate_skill, sidecars=not no_sidecars)
         gate_trials = trials if trials is not None else (policy.trials if policy else 1)
         drawn = _sample_policy(policy, sample, sample_seed)
         limits = policy.inputs.wiki if policy else None
@@ -967,6 +1003,7 @@ def eval_gate(
             judge=load_judge(load_config().judge_dir),
             judge_policy=policy.judge if policy else None,
             reviewer=choice.build(client),
+            sidecars=choice.sidecar,
             # Only when records are being kept: reusing a baseline out of a store this run will not
             # write back to would take the saving and leave nothing for the next run to reuse.
             baselines=store if (save and reuse) else None,
@@ -1057,7 +1094,7 @@ def review(
     if skill is None:
         raise typer.BadParameter("--skill is required unless you are using --import")
     sk = load_skill(skill)
-    choice = _reviewer_choice(_step(skill, "evaluate"), skill)
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
 
     if mr is not None:
         if not gitlab_url or not project:
@@ -1085,6 +1122,7 @@ def review(
         backend=backend.name,
         model=backend.model,
         reviewer=choice.build(client),
+        sidecars=choice.sidecar,
     )
     _reviews(reviews_dir).save(record)
 
@@ -2831,6 +2869,76 @@ def cadence_done(
     sk = load_skill(skill)
     at = CadenceStore(load_config().cadence_dir).mark(sk.id, kind)  # type: ignore[arg-type]
     typer.echo(f"{sk.id}: {kind} marked done at {at:%Y-%m-%d %H:%M} UTC")
+
+
+@sidecars_app.command("install")
+def sidecars_install(skill: SkillDirOpt) -> None:
+    """Copy the sidecar collector and this skill's declaration into `<skill>/tools/`.
+
+    This is what makes the skill self-contained for the harness that is not Whetstone. Run it in
+    the skill's own repo and commit the result: a user running the skill from Claude Code executes
+    that copy, and it is byte-for-byte the file Whetstone scores with — which is the only reason a
+    gate taken here describes what happens there.
+
+    Re-run it after editing the `sidecar:` block, or after upgrading Whetstone.
+    """
+    from whetstone.sidecars import install
+
+    sk = load_skill(skill)
+    if sk.sidecar.is_empty():
+        raise typer.BadParameter(
+            f"{sk.id} declares no `sidecar:` block in SKILL.md — nothing to install. Add one "
+            f"naming the role whose `.agents/<role>.md` files this skill should read."
+        )
+    script, config = install(skill, sk.sidecar)
+    typer.echo(f"wrote {script}")
+    typer.echo(f"wrote {config}")
+    typer.echo(
+        f"\ncommit both, then from the source tree:\n"
+        f"  git diff --name-only main | python {script.name} --root . --paths -"
+    )
+
+
+@sidecars_app.command("show")
+def sidecars_show(
+    skill: SkillDirOpt,
+    paths: Annotated[
+        list[str] | None,
+        typer.Option("--path", help="A changed path to resolve context for (repeatable)"),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show exactly which `.agents/` files a set of changed paths would pull in.
+
+    The cheap way to answer "why did the reviewer not know that?" without spending a run: it
+    resolves through the same collector a review would, so what it prints is what the model gets.
+    """
+    import json as _json
+
+    from whetstone.sidecars import SidecarError, to_prompt
+
+    sk = load_skill(skill)
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
+    if choice.sidecar is None:
+        raise typer.BadParameter(
+            f"{sk.id} resolves no sidecars"
+            + (f": {'; '.join(choice.problems)}" if choice.problems else "")
+        )
+    try:
+        resolved = choice.sidecar.loader().for_paths(list(paths or []))
+    except SidecarError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_out:
+        typer.echo(_json.dumps(resolved, indent=2, sort_keys=True))
+        return
+    for entry in resolved["files"]:
+        typer.echo(f"  {entry['path']}  ({entry['bytes']:,} bytes)")
+    for drop in resolved["dropped"]:
+        typer.echo(f"  dropped: {drop['path']}  ({drop['reason']})")
+    if not resolved["files"] and not resolved["dropped"]:
+        typer.echo("  (no local context for these paths)")
+    typer.echo(f"\ncontext_hash: {resolved['context_hash'] or '(none)'}")
+    typer.echo(f"{len(to_prompt(resolved)):,} prompt chars")
 
 
 if __name__ == "__main__":

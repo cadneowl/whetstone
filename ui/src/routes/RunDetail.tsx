@@ -342,6 +342,7 @@ function CaseBlock({
             {caseRun.error}
           </p>
         )}
+        <SidecarsBlock sidecars={caseRun.sidecars} />
         {caseRun.trials.map((trial) => (
           <TrialBlock
             key={trial.index}
@@ -354,6 +355,37 @@ function CaseBlock({
           />
         ))}
       </div>
+    </details>
+  )
+}
+
+function SidecarsBlock({ sidecars }: { sidecars: CaseRun['sidecars'] }) {
+  // Absent for every skill that declares no sidecar role, which is most of them. Absent and empty
+  // are different facts and both are worth showing: "the reviewer read nothing here" is the answer
+  // to a surprising miss just as often as "it read this and disagreed anyway".
+  if (!sidecars) return null
+  const { paths, dropped } = sidecars
+  return (
+    <details className="rounded border border-line/60 bg-base px-2.5 py-1.5 text-xs">
+      <summary className="cursor-pointer text-muted">
+        local context: {paths.length} file{paths.length === 1 ? '' : 's'}
+        {dropped.length > 0 && <span className="text-warn"> · {dropped.length} dropped</span>}
+      </summary>
+      <ul className="mt-1.5 space-y-0.5 font-mono text-muted">
+        {paths.map((path) => (
+          <li key={path}>{path}</li>
+        ))}
+        {dropped.map((drop) => (
+          <li key={`${drop.path}:${drop.reason}`} className="text-warn">
+            {drop.path} <span className="text-muted">({drop.reason})</span>
+          </li>
+        ))}
+        {paths.length === 0 && dropped.length === 0 && (
+          <li className="font-sans">
+            none — no <code>.agents/</code> files under the paths this case touches
+          </li>
+        )}
+      </ul>
     </details>
   )
 }

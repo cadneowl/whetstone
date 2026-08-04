@@ -1869,6 +1869,7 @@ export interface components {
              * @enum {string}
              */
             partition: "train" | "holdout";
+            sidecars?: components["schemas"]["CaseSidecars"] | null;
             /**
              * Trials
              * @default []
@@ -1899,6 +1900,36 @@ export interface components {
             readonly recall: number;
             /** Trials */
             trials: components["schemas"]["Confusion"][];
+        };
+        /**
+         * CaseSidecars
+         * @description The per-directory context one case's reviewer was given (`docs/design/sidecars.md` §10).
+         *
+         *     Without this, "the reviewer never loaded it" and "the reviewer read it and disagreed" are
+         *     indistinguishable in a record — and those are opposite diagnoses of the same missed finding.
+         *     They are also the input to the whole maintenance loop, which cannot ask whether a claim is
+         *     doing any work if it cannot tell whether the claim was ever in front of the model.
+         *
+         *     `context_hash` is the identity of the set (content, plus what was dropped). Two measurements of
+         *     a case are comparable iff it matches — which is what makes a source commit that touches nothing
+         *     the case pulls in invalidate nothing.
+         */
+        CaseSidecars: {
+            /**
+             * Context Hash
+             * @default
+             */
+            context_hash: string;
+            /**
+             * Dropped
+             * @default []
+             */
+            dropped: components["schemas"]["DroppedSidecar"][];
+            /**
+             * Paths
+             * @default []
+             */
+            paths: string[];
         };
         /**
          * CaseSummary
@@ -2464,6 +2495,16 @@ export interface components {
              */
             history: components["schemas"]["DriftPoint"][];
             report: components["schemas"]["DriftReport"];
+        };
+        /**
+         * DroppedSidecar
+         * @description A sidecar that matched but did not reach the prompt, and which cap stopped it.
+         */
+        DroppedSidecar: {
+            /** Path */
+            path: string;
+            /** Reason */
+            reason: string;
         };
         /**
          * EditPromotedRequest
@@ -4773,6 +4814,49 @@ export interface components {
             verdict: string;
         };
         /**
+         * SidecarSpec
+         * @description A skill's declaration that it reads per-directory context from the source tree.
+         *
+         *     Sidecars are `.agents/<role>.md` files living beside the code they describe, so the local,
+         *     particular knowledge a large proprietary codebase carries scales with the codebase instead of
+         *     with the skill (`docs/design/sidecars.md`). `role` is the only required part; everything else
+         *     has a default, and a skill that declares no role behaves exactly as it did before this existed.
+         *
+         *     The role id comes from here — frontmatter — and never from the skill's folder name, so forking
+         *     `arch-review` into `arch-review-v2` does not mean renaming sidecars across a monorepo.
+         *
+         *     This block is the *only* place the caps are authored. The standalone collector reads the same
+         *     values from the `sidecar.json` that `whetstone sidecars install` writes out of this model, so
+         *     the two harnesses cannot resolve different files from the same declaration.
+         */
+        SidecarSpec: {
+            /**
+             * Budget
+             * @default 20000
+             */
+            budget: number;
+            /**
+             * Max File Bytes
+             * @default 32000
+             */
+            max_file_bytes: number;
+            /**
+             * Max Files
+             * @default 24
+             */
+            max_files: number;
+            /**
+             * Role
+             * @default
+             */
+            role: string;
+            /**
+             * Scope
+             * @default diff-paths
+             */
+            scope: string;
+        };
+        /**
          * Signal
          * @description One thing that happened in a real review, waiting to become an eval case.
          *
@@ -4886,6 +4970,16 @@ export interface components {
              * @default []
              */
             references: components["schemas"]["Reference"][];
+            /**
+             * @default {
+             *       "budget": 20000,
+             *       "max_file_bytes": 32000,
+             *       "max_files": 24,
+             *       "role": "",
+             *       "scope": "diff-paths"
+             *     }
+             */
+            sidecar: components["schemas"]["SidecarSpec"];
             /**
              * @default {
              *       "labels": [],

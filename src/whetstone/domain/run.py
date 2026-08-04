@@ -201,6 +201,31 @@ class TrialRecord(BaseModel):
         return [i for i in range(len(self.findings)) if i not in matched]
 
 
+class DroppedSidecar(BaseModel):
+    """A sidecar that matched but did not reach the prompt, and which cap stopped it."""
+
+    path: str
+    reason: str
+
+
+class CaseSidecars(BaseModel):
+    """The per-directory context one case's reviewer was given (`docs/design/sidecars.md` §10).
+
+    Without this, "the reviewer never loaded it" and "the reviewer read it and disagreed" are
+    indistinguishable in a record — and those are opposite diagnoses of the same missed finding.
+    They are also the input to the whole maintenance loop, which cannot ask whether a claim is
+    doing any work if it cannot tell whether the claim was ever in front of the model.
+
+    `context_hash` is the identity of the set (content, plus what was dropped). Two measurements of
+    a case are comparable iff it matches — which is what makes a source commit that touches nothing
+    the case pulls in invalidate nothing.
+    """
+
+    paths: list[str] = []
+    dropped: list[DroppedSidecar] = []
+    context_hash: str = ""
+
+
 class CaseRun(BaseModel):
     """Every trial of one eval case."""
 
@@ -218,6 +243,12 @@ class CaseRun(BaseModel):
     # would have said" is not the same as "the skill missed it". `SkillScore.errors` keeps it
     # visible; the gate refuses a candidate that produced more of them than its base.
     error: str = ""
+    # The `.agents/` context this case's reviewer was given, when the skill declares a sidecar role.
+    # None for every skill that does not, which is every skill that predates the feature — absent,
+    # not an empty set, because "read nothing" and "was never asked to read" are different facts.
+    # Recorded once per case rather than per trial: retrieval is a pure function of the case's
+    # paths, so all k trials were handed the identical set.
+    sidecars: CaseSidecars | None = None
 
     @property
     def confusion(self) -> Confusion:

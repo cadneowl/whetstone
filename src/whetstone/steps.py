@@ -454,7 +454,15 @@ def _validate(spec: StepSpec, path: Path) -> None:
     # Not evaluate-only. It was, which meant an improve step could not be given the source root the
     # evaluate step had just reviewed against: the drafter was asked to fix guidance for failures in
     # code it was forbidden from reading. A skill is run one way everywhere or it is two things.
-    takes_context = bool(spec.run or spec.agent.enabled or spec.task.enabled)
+    #
+    # An `evaluate` step is now exempt even with none of those, because the *built-in* reviewer also
+    # takes an input: `source_root`, the tree it reads a skill's `.agents/` sidecars from. Whether
+    # anything consumes that bag depends on `SKILL.md` frontmatter, which is not visible from here —
+    # so the "declared but ignored" check this guard exists for moves to `reviewer.factory`, where
+    # the skill is in hand. Every other step kind keeps the strict rule.
+    takes_context = bool(
+        spec.run or spec.agent.enabled or spec.task.enabled or spec.kind == "evaluate"
+    )
     if spec.context and not takes_context:
         raise StepError(
             f"{path}: 'context:' supplies the inputs a program or an agent needs, so it has no "
