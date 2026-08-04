@@ -911,3 +911,109 @@ def test_an_unconfirmed_sidecar_is_not_charged_to_the_budget(tmp_path: Path) -> 
         )
     got = resolve(root, ["pay/svc.py"], "arch-review", budget=600)
     assert [f["path"] for f in got["files"]] == ["pay/.agents/arch-review.md"]
+
+
+def test_a_claim_edit_cannot_hide_behind_a_long_frontmatter_hunk() -> None:
+    """The first hunk edits metadata inside a frontmatter block whose closing `---` is not in the
+    hunk. Carrying that state across the gap marked the second hunk — a claim edit deep in the
+    body — as frontmatter, which is the exact smuggle the boundary exists to stop."""
+    sneaky = (
+        "diff --git a/pay/.agents/context.md b/pay/.agents/context.md\n"
+        "--- a/pay/.agents/context.md\n+++ b/pay/.agents/context.md\n"
+        "@@ -1,5 +1,5 @@\n"
+        " ---\n-status: unconfirmed\n+status: confirmed\n owner: alice\n team: payments\n"
+        " reviewed: 2026-07-01\n"
+        "@@ -48,2 +48,3 @@\n"
+        " - Old claim.\n   <!-- src: A -->\n+- Injected claim. <!-- src: B -->\n"
+    )
+    assert claims_touched(sneaky) == ["pay/.agents/context.md"]
+
+
+def test_an_added_line_starting_plus_plus_cannot_impersonate_a_file_header() -> None:
+    """Adding a line whose content starts `++ ` renders as `+++ …`, which the old walk read as a
+    header — re-pointing every claim after it at a phantom file. Hunk lengths decide exactly where
+    a hunk ends, so a content line can never be a header."""
+    hijack = (
+        "diff --git a/pay/.agents/context.md b/pay/.agents/context.md\n"
+        "--- a/pay/.agents/context.md\n+++ b/pay/.agents/context.md\n"
+        "@@ -3,3 +3,6 @@\n"
+        " - Old claim.\n   <!-- src: A -->\n"
+        "+++ note\n+- Injected claim.\n+  <!-- src: B -->\n \n"
+    )
+    assert claims_touched(hijack) == ["pay/.agents/context.md"]
+
+
+def test_a_removed_line_starting_dash_dash_cannot_impersonate_a_file_header() -> None:
+    removed = (
+        "diff --git a/pay/.agents/context.md b/pay/.agents/context.md\n"
+        "--- a/pay/.agents/context.md\n+++ b/pay/.agents/context.md\n"
+        "@@ -3,4 +3,4 @@\n"
+        " - Old claim.\n   <!-- src: A -->\n--- stray\n+-- stray edited\n"
+    )
+    assert claims_touched(removed) == ["pay/.agents/context.md"]
+
+
+def test_the_patch_applies_when_the_existing_sidecar_has_no_final_newline(
+    tmp_path: Path,
+) -> None:
+    """`difflib` with `keepends` hands an unterminated last line through bare, and it is not the
+    last row of the diff — the merged claim's lines follow it, so the `-` line concatenated with
+    the next and git rejected the patch as corrupt."""
+    existing = "---\nstatus: confirmed\n---\n\n- Existing.\n  <!-- src: A -->"  # no final \n
+    out = prepare(
+        _entry(),
+        _edits(destination="context", claim="A fact.", claim_source="HUB-1"),
+        skills_root=Path("skills"),
+        sidecar=SidecarTarget(role="arch-review", existing=existing, rule_ids=["R1"]),
+    )
+    assert out.sidecar is not None
+    repo = tmp_path / "hub"
+    (repo / "payments" / "reconciliation" / ".agents").mkdir(parents=True)
+    (repo / "payments" / "reconciliation" / ".agents" / "context.md").write_text(
+        existing, encoding="utf-8", newline=""
+    )
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    patch_file = tmp_path / "claim.patch"
+    patch_file.write_text(out.sidecar.patch, encoding="utf-8", newline="")
+    applied = subprocess.run(
+        ["git", "apply", str(patch_file)], cwd=repo, capture_output=True, text=True
+    )
+    assert applied.returncode == 0, applied.stderr
+    on_disk = (repo / "payments" / "reconciliation" / ".agents" / "context.md").read_text(
+        encoding="utf-8"
+    )
+    assert on_disk == out.sidecar.content
+
+
+def test_a_root_level_sidecar_compares_against_the_root_tree_not_the_commit(
+    tmp_path: Path,
+) -> None:
+    """`subtree_hash(root, ".")` returned the commit sha, which no `confirmed_at_tree` stamp can
+    ever equal — so a root-level sidecar was re-verified forever, silently."""
+    root = tmp_path / "flat"
+    (root / ".agents").mkdir(parents=True)
+    (root / "svc.py").write_text("x = 1\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=root, capture_output=True, text=True
+    ).stdout.strip()
+    sidecar = parse(
+        f"---\nstatus: confirmed\nconfirmed_at_tree: {tree[:12]}\n---\n\n"
+        "- A claim.\n  <!-- src: A -->\n"
+    )
+    assert unchanged_since_confirmed(root, ".", sidecar)
+
+
+def test_duplicate_verdicts_in_one_batch_count_once(tmp_path: Path) -> None:
+    """Whoever produced the batch looked at each claim once; the same key twice in one call is one
+    observation stated twice, whether or not a run id attributes it."""
+    ledger = Ledger(tmp_path)
+    verdict = ClaimVerdict(path="a.md", claim="A claim.", status="confirmed", evidence="x")
+    now = datetime.now(UTC)
+    assert ledger.record([verdict, verdict], run_id="r1", at=now) == 1
+    assert ledger.record([verdict, verdict], at=now) == 1
+    assert ledger.summary()[0].confirmed == 2

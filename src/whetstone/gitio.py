@@ -123,7 +123,11 @@ def subtree_hash(repo: str | Path, path: str, ref: str = "HEAD") -> str | None:
     at all. A caller that cannot get an answer must verify, not skip.
     """
     try:
-        return _text(repo, "rev-parse", f"{ref}:{_posix(path)}" if path not in ("", ".") else ref)
+        # The root is `<ref>^{tree}`, not `<ref>`: a bare ref names the commit, and a commit sha
+        # moves on every commit while the root tree moves only when content does — which is the
+        # comparison a `confirmed_at_tree` stamp at the repository root is making.
+        spec = f"{ref}:{_posix(path)}" if path not in ("", ".") else f"{ref}^{{tree}}"
+        return _text(repo, "rev-parse", spec)
     except GitError:
         return None
 

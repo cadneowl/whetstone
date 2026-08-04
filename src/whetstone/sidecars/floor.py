@@ -281,57 +281,88 @@ def claims_touched(patch: str) -> list[str]:
     answer.
 
     Counting is per file and errs towards *reporting*. A hunk is claim-touching unless every one of
-    its added and removed lines is provably inside the frontmatter, which is tracked by counting
-    delimiters in the surrounding context rather than by parsing — a patch is not a file, and the
-    frontmatter may not be in it at all. An unattributable hunk therefore reads as a claim edit,
-    which is the safe direction for a boundary whose whole job is to be un-sneakable.
+    its added and removed lines is provably inside the frontmatter, and "provably" is literal: the
+    block must open at line 1 of the file *in this hunk*, because a patch is not a file and any
+    weaker rule is spoofable. An unattributable hunk therefore reads as a claim edit, which is the
+    safe direction for a boundary whose whole job is to be un-sneakable.
+
+    Header lines are only headers *between* hunks, which the declared hunk lengths decide exactly.
+    Without that, an added line whose content merely starts `++ ` reads as a `+++` file header and
+    re-points every claim after it at a file that is not a sidecar — a one-line smuggle.
     """
     touched: list[str] = []
     path = ""
     old = ""
     in_frontmatter = False
-    seen_delimiters = 0
+    in_hunk = False
+    remaining_old = remaining_new = 0
+    new_line = 0
     for line in patch.splitlines():
-        # A rename carries no hunks at all when the content is unchanged, so it never reaches the
-        # `+++` branch — and renaming `qa.md` to `arch-review.md` hands a whole folder's claims to
-        # a different role without editing a byte of them. Moving claims is writing them.
-        if line.startswith(("rename from ", "rename to ")):
-            moved = line.split(" ", 2)[2].strip()
-            if _is_sidecar(moved) and moved not in touched:
-                touched.append(moved)
+        if not in_hunk:
+            if line.startswith("diff --git "):
+                path = ""
+                old = ""
+                continue
+            # A rename carries no hunks at all when the content is unchanged, so it never reaches
+            # the `+++` branch — and renaming `qa.md` to `arch-review.md` hands a whole folder's
+            # claims to a different role without editing a byte of them. Moving claims is writing
+            # them.
+            if line.startswith(("rename from ", "rename to ")):
+                moved = line.split(" ", 2)[2].strip()
+                if _is_sidecar(moved) and moved not in touched:
+                    touched.append(moved)
+                continue
+            if line.startswith("--- "):
+                old = _strip_prefix(line[4:].strip())
+                continue
+            if line.startswith("+++ "):
+                new = _strip_prefix(line[4:].strip())
+                # `+++ /dev/null` is a deletion. Removing a claim is as much a write as adding one
+                # — more so, since the claim it removes may be the one that was in the way.
+                if new == "/dev/null" and _is_sidecar(old) and old not in touched:
+                    touched.append(old)
+                path = old if new == "/dev/null" else new
+                continue
+            header = _HUNK.match(line)
+            if header:
+                remaining_old = int(header.group("old") or "1")
+                remaining_new = int(header.group("new") or "1")
+                in_hunk = remaining_old > 0 or remaining_new > 0
+                in_frontmatter = False
+                new_line = int(header.group("start"))
+            elif line.startswith("@@") and _is_sidecar(path) and path not in touched:
+                # A hunk header that does not parse cannot be attributed, and unattributable
+                # reads as a claim edit.
+                touched.append(path)
             continue
-        if line.startswith("--- "):
-            old = _strip_prefix(line[4:].strip())
-            continue
-        if line.startswith("+++ "):
-            new = _strip_prefix(line[4:].strip())
-            # `+++ /dev/null` is a deletion. Removing a claim is as much a write as adding one —
-            # more so, since the claim it removes may be the one that was in the way.
-            if new == "/dev/null" and _is_sidecar(old) and old not in touched:
-                touched.append(old)
-            path = old if new == "/dev/null" else new
-            in_frontmatter = False
-            seen_delimiters = 0
-            continue
+
+        marker = line[:1] if line else " "  # a stripped blank context line is still context
+        if marker not in ("+", "-", " "):
+            continue  # `\ No newline at end of file` consumes no hunk lines
+        if marker in ("-", " "):
+            remaining_old -= 1
+        at = new_line
+        if marker in ("+", " "):
+            remaining_new -= 1
+            new_line += 1
+        if remaining_old <= 0 and remaining_new <= 0:
+            in_hunk = False
         if not _is_sidecar(path) or path in touched:
-            continue
-        if line.startswith("@@"):
-            # A new hunk: the frontmatter state cannot be carried across the gap between hunks, and
-            # assuming it continues would let a claim edit hide behind an earlier metadata hunk.
-            in_frontmatter = seen_delimiters == 1
-            continue
-        if line[:1] not in ("+", "-", " "):
             continue
         body = line[1:]
         if body.strip() == DELIMITER:
-            seen_delimiters += 1
-            in_frontmatter = seen_delimiters == 1
-            if line[:1] in ("+", "-"):
+            # Only a delimiter sitting at line 1 of the new file provably opens frontmatter; one
+            # anywhere else is a close, or a markdown horizontal rule, and proves nothing.
+            in_frontmatter = marker != "-" and at == 1
+            if marker in ("+", "-"):
                 touched.append(path)
             continue
-        if line[:1] in ("+", "-") and not in_frontmatter:
+        if marker in ("+", "-") and not in_frontmatter:
             touched.append(path)
     return touched
+
+
+_HUNK = re.compile(r"^@@ -\d+(?:,(?P<old>\d+))? \+(?P<start>\d+)(?:,(?P<new>\d+))? @@")
 
 
 def _strip_prefix(path: str) -> str:

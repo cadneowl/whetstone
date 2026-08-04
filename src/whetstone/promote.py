@@ -551,16 +551,22 @@ def _patch(path: str, before: str, after: str) -> str:
     old = before.splitlines(keepends=True)
     new = after.splitlines(keepends=True)
     from_file = f"a/{path}" if before else "/dev/null"
-    body = "".join(
-        difflib.unified_diff(old, new, fromfile=from_file, tofile=f"b/{path}", n=3)
-    )
+    lines: list[str] = []
+    for row in difflib.unified_diff(old, new, fromfile=from_file, tofile=f"b/{path}", n=3):
+        if row.endswith("\n"):
+            lines.append(row)
+            continue
+        # `keepends` hands a file's unterminated last line through without a newline. Left as is,
+        # it concatenates with the next diff line and corrupts the whole patch — and it is not
+        # always the last row, because a hand-written sidecar with no final newline shows up here
+        # as a `-` line with the merged lines after it. Git's format for exactly this: terminate
+        # the row and say so on the next line.
+        lines.append(row + "\n")
+        lines.append("\\ No newline at end of file\n")
     header = f"diff --git a/{path} b/{path}\n"
     if not before:
         header += "new file mode 100644\n"
-    # A final line with no newline would make `git apply` reject the whole patch.
-    if body and not body.endswith("\n"):
-        body += "\n\\ No newline at end of file\n"
-    return header + body
+    return header + "".join(lines)
 
 
 def _validate(case_yaml: str, diff: str, edits: CaseEdits) -> EvalCase:

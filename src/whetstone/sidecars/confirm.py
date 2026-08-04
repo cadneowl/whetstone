@@ -198,9 +198,22 @@ class Ledger:
             )
             for v in verdicts
         ]
+        # Within one call, a repeated (path, claim) is one observation stated twice, never two —
+        # whoever produced the verdicts looked at each claim once. Across calls the same key means
+        # the same thing only when `run_id` ties both to one observation, so only then is history
+        # consulted; the maintainer sweep records without one, and two sweeps a week apart are
+        # genuinely two observations.
+        seen: set[tuple[str, str, str, str]] = set()
         if run_id:
             seen = {(e.run_id, e.case_id, e.path, e.claim) for e in self.entries()}
-            rows = [r for r in rows if (r.run_id, r.case_id, r.path, r.claim) not in seen]
+        deduped: list[LedgerEntry] = []
+        for row in rows:
+            key = (row.run_id, row.case_id, row.path, row.claim)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+        rows = deduped
         if not rows:
             return 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
