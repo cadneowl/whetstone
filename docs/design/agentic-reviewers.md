@@ -5,11 +5,20 @@ reviewer program with `run:`, declare an open-ended `context:` bag, and Whetston
 validates required vars at the plan, and forwards it to the program on stdin — wired into both the
 console and the CLI, on **every path that scores**: `eval`, `gate`, the baseline probe and live
 review. Runs, gates and reviews record which reviewer produced them and what it was given.
-**Phase 2** (folding the hashable context slice into
-`skill_hash` for gate reproducibility) is **not built yet**; until it is, a gate with a custom
-reviewer is warned in the plan and the sound configuration is a pinned `source_ref`. The design
-below is the full picture; the "Implementation notes" at the end record what shipped and what did
-not.
+
+**Phase 2 is largely obviated, not pending.** It was specified as folding the hashable context slice
+into `skill_hash`, and it stalled on a real snag (§14): `skill_hash(skill)` is a pure function of the
+`Skill`, but context lives in a *step*. That fold turned out to be unnecessary. The property it
+existed to provide — *a score measured under a different context bag is a different measurement* —
+is enforced instead by `BaselineKey` (`gates.py:160`), which carries `reviewer` +
+`reviewer_context_digest` + `inputs_digest` and therefore refuses to reuse a baseline across a
+changed bag. That is the sounder place for it: `skill_hash` could only ever assert *the same
+snapshot was available*, never *the same content was read*, and for an agent reviewer what gets read
+is chosen at runtime by the model. Residual agent nondeterminism is surfaced by `reviewer_trace` and
+`k>1` variance rather than papered over by a hash. **What genuinely remains** is smaller and is
+tracked in §6.1: a stored gate result is not retracted when the context bag changes under unmoved
+guidance. The design below is the full picture; the "Implementation notes" at the end record what
+shipped and what did not.
 
 **The ask.** A code-review skill over a 400k-file repo cannot pre-bake the repo into a wiki and
 cannot fit it in context. The reviewer needs to **reach the actual source and query it while
@@ -115,7 +124,7 @@ context:
   # machine-specific / secret → resolved from the environment, never committed
   source_root:  { env: HUB_REPO_ROOT, required: true }
   # pinned version so gated runs are reproducible AND hashable (see §6)
-  source_ref:   { env: HUB_REPO_REF }              # e.g. a commit SHA; optional
+  source_ref:   { env: HUB_REPO_REF, pin: true }   # e.g. a commit SHA; optional
   # committed with the skill, relative to the skill folder
   db_schema:    { file: ./references/schema.sql }
   # a plain literal
@@ -130,9 +139,14 @@ Value forms (a small `ContextValue` union):
 | form | meaning | committed? | hashed? (§6) |
 |---|---|---|---|
 | `literal` (scalar/list/map) | the value as written | yes | yes |
-| `{ env: NAME, required: bool }` | read env var `NAME` (the **name** is committed, not the value) | name only | **no** (machine-local) unless it's `source_ref` |
+| `{ env: NAME, required: bool }` | read env var `NAME` (the **name** is committed, not the value) | name only | **no** (machine-local) unless `pin: true` |
 | `{ file: ./path }` | contents of a file under the skill folder | yes | yes (by content) |
-| `{ ref: … }` / `source_ref` | a pinned VCS ref | yes | **yes** |
+| `{ env: NAME, pin: true }` | a pinned VCS ref — not a secret, and it determines what is read | name only | **yes** (value shown in full) |
+
+There is no `{ ref: … }` form and no magic on the key name `source_ref`: pinning is the explicit
+`pin: true` flag, and `_DIRECTIVE_KEYS` (`context.py:46`) rejects anything else outright. Explicit
+beats magic here — a skill can pin any input, and a key called `source_ref` that someone forgot to
+pin fails loudly rather than silently dropping out of the digest.
 
 The `{ env: NAME }` form is the same discipline whetstone already uses for `token_env`
 (`config.py:174`): the skill commits *that it needs* `HUB_REPO_ROOT` and its name; the value lives
@@ -224,11 +238,16 @@ runs*. That's why the wiki is deterministic (glob-keyed) and folded into `skill_
 (`domain/run.py:279`, via `_feed_wiki`/`_feed_index`). Agentic source access is the thing most able
 to break this, so it's handled explicitly:
 
-- **The context declaration is hashed, selectively.** Add `_feed_context(h, skill)` alongside
-  `_feed_wiki`/`_feed_index` in both `skill_hash` and `guidance_hash`. It feeds the **hashable
-  slice**: `literal` values, `file:` contents, and pinned `ref`/`source_ref` — everything that
-  changes *what the reviewer reads*. It does **not** feed machine-local `env:` paths, because a
-  shared gate must survive a teammate whose repo lives at a different absolute path.
+- **The context declaration is digested, selectively — and it landed in the gate, not in
+  `skill_hash`.** `ResolvedContext.hashable` (`context.py:54`) holds the slice that identifies what
+  the reviewer reads: `literal` values, `file:` contents, and `pin: true` env values. Machine-local
+  `env:` paths are excluded, so the digest is identical on two teammates' machines.
+  `ResolvedContext.digest` is recorded as `RunRecord.reviewer_context_digest` and is a component of
+  `BaselineKey` (`gates.py:189`), which is what actually enforces the property: *"`agent: 8 steps`
+  and `agent: 64 steps` are different instruments, and so is the same agent handed a different
+  context bag."* A gate therefore cannot reuse a baseline measured under a different bag.
+  `_feed_context` into `skill_hash` was the original plan and is **not** needed for this — see the
+  status header.
 - **Pin the version, not the path.** `source_root` (a path) is not hashed; `source_ref` (a commit
   SHA) is. For gated runs the reviewer checks out `change.base_ref` (or `source_ref`) so both sides
   read the same snapshot; for **live** reviews it can read HEAD. Changing the pinned ref changes
@@ -242,6 +261,33 @@ to break this, so it's handled explicitly:
 **Bottom line:** the sound configuration is *pinned `source_ref` + a reviewer that reads that
 snapshot*. Live-HEAD reading is supported and fine for live reviews; for gating it's allowed but
 flagged (the plan warns, exactly like the "unknown billing" three-state warning does today).
+
+### 6.1 What still needs doing
+
+**A stored gate result is not retracted when the context bag changes.** `BaselineKey` governs
+*baseline reuse*, so it forces a re-score on the **next** gate; it does not invalidate a pass
+already on disk. Change `source_ref` without touching guidance and `skill_hash` is unmoved, so the
+console still reads `gated`. Impact is bounded — ADR-028 made C6 advisory and no route refuses on it
+— so this is a stale badge, not a bad publish. The fix does not need `skill_hash` either: store
+`reviewer_context_digest` on the gate result and compare it at read time, exactly as `BaselineKey`
+already does. That keeps `skill_hash` a pure function of the `Skill` and sidesteps the §14 snag
+entirely.
+
+**Two defects in the digest itself — found by review, now fixed.** Recorded because both had been
+silently wrong since Phase 1 shipped, and the symptom in each case was a digest that looked fine.
+
+1. **A literal `source:` entered the hashable slice.** `AgentPolicy.source` is `Any` and its
+   docstring invites a literal path; `_agent_context` folds it in as `source_root`, and a
+   non-directive is treated as a literal — which goes into `values`, `redacted` **and** `hashable`.
+   So `source: /Users/alice/hub-backend` and `source: /home/bob/hub-backend` digested differently
+   for identical content, breaking the cross-machine property `context.py` claims and stopping a
+   gate ever reusing a teammate's baseline. The `{ env: … }` form was always correct; only the
+   literal leaked. `_agent_context` now drops `source_root` from `hashable` where it already
+   dropped it from `shown`, since a checkout path is machine-local whichever form declared it.
+2. **`required: true` did not catch an empty string.** `_resolve_env` tested `value is None`, so
+   `export HUB_REPO_REF=` — what a failed shell expansion leaves behind — passed preflight, and
+   with `pin: true` the empty value entered the hashable slice as though it named a snapshot. Empty
+   now counts as unset.
 
 ---
 
@@ -330,9 +376,11 @@ what makes a history contradict itself.
    with no `run:` and no `context:` hashes and behaves byte-identically to today (the same
    "hashes as it did before it existed" property the wiki and pages shipped with). Delivers folder
    access for live reviews immediately.
-2. **Phase 2 — pinned-ref hashing + gate determinism.** `_feed_context`, `source_ref` in the hash,
-   the plan warning when a reviewer reads unpinned HEAD under a gate. Makes agentic reviewers safe
-   to *gate*, not just to run.
+2. ~~**Phase 2 — pinned-ref hashing + gate determinism.**~~ **Superseded.** The goal — making
+   agentic reviewers safe to *gate*, not just to run — was met by putting `reviewer` +
+   `reviewer_context_digest` into `BaselineKey` rather than `_feed_context` into `skill_hash`. See
+   the status header and §6. What remains is the narrower gate-retraction item and the two digest
+   defects in §6.1.
 3. **Phase 3 — endpoint variant (option B) + optional checkout helper.** `extra_body` forwarding
    for gateway users; optionally a whetstone-managed worktree at `source_ref` so the subprocess
    doesn't manage its own checkout.
@@ -391,13 +439,16 @@ implemented as `{ env: NAME, pin: true }` — general and explicit — rather th
   reviewer is a separate claim from `record_eval` *honouring* one, and only the route tests fail
   when the wiring is removed.
 
-**Deferred to Phase 2** (tracked, not done)
-- `_feed_context` into `skill_hash`/`guidance_hash`. This is the one piece with a real design snag:
+**Not done — and `_feed_context` is no longer the plan**
+- `_feed_context` into `skill_hash`/`guidance_hash` was deferred over a real design snag:
   `skill_hash(skill)` is a pure function of the `Skill`, but the context lives in a *step*, and
-  steps are deliberately outside `skill_hash`. Closing it means either loading the resolved context
-  onto the `Skill` at load time or passing a context digest into the hash — a choice worth making
-  on its own rather than smuggling in here. Until then, a custom-reviewer gate is *warned*, not
-  *hash-protected*; pin `source_ref` and treat the warning as the contract.
+  steps are deliberately outside `skill_hash`. Closing it meant either loading the resolved context
+  onto the `Skill` at load time or passing a digest into the hash. **Neither is needed:** the
+  measurement-identity property landed in `BaselineKey` instead (§6), which is the sounder home for
+  it — a hash can assert *the same snapshot was available*, never *the same content was read*, and
+  an agent chooses its own reads. The snag is therefore closed by not needing to solve it.
+- Still open, and much narrower: gate-result retraction on a changed context bag, plus the two
+  digest defects — both in §6.1.
 - The OpenAI-endpoint `extra_body` variant (option B), a Whetstone-provided checkout helper, and a
   separate reviewer-process concurrency cap. (Live review and the baseline probe are **now wired** —
   the reviewer program runs on eval, gate, baseline, and live review alike.)
