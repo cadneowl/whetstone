@@ -656,3 +656,196 @@ def test_every_mermaid_block_is_well_formed() -> None:
                 if line.count("{") != line.count("}"):
                     problems.append(f"{where}: unbalanced {{}} in {line.strip()!r}")
     assert problems == []
+
+
+# --- sidecars: the one place Whetstone reads someone else's source tree ------------
+
+
+def test_the_readme_says_where_local_context_lives() -> None:
+    """A reader deciding where to put per-folder knowledge acts on this.
+
+    Left unsaid, the honest answer from the rest of the README is "a companion page" — which is the
+    38k-character `system-map.md` that motivated sidecars in the first place.
+    """
+    readme = _read("README.md")
+    assert "sidecar: role:" in readme
+    assert "docs/design/sidecars.md" in readme
+
+
+def test_the_amended_no_traversal_claim_is_marked_as_amended() -> None:
+    """ADR-022 and `agentic-reviewers.md` both say Whetstone never walks `source_root`.
+
+    That was true when written and is not any more. The claim is load-bearing — it is the security
+    argument a reader checks before pointing a skill at a private monorepo — so it may not sit
+    unqualified while the code does the opposite.
+    """
+    for doc in ("docs/decisions.md", "docs/design/agentic-reviewers.md"):
+        text = _read(*doc.split("/"))
+        _, _, tail = text.partition("never traverses")
+        assert tail, f"{doc}: the claim moved — re-point this test"
+        assert "ADR-029" in tail[:1200], f"{doc}: the no-traversal claim is not marked as amended"
+
+
+def test_no_module_writes_to_a_source_tree() -> None:
+    """Sidecar *creation* is a PR against the source repo, never a filesystem write.
+
+    The traversal ADR-029 permits is read-only, and Whetstone is never given write access to the
+    code it reviews. A module that wrote there would cross both lines at once, so the grep is crude
+    on purpose: any write API applied to a resolved source root is worth a human look.
+    """
+    writes = re.compile(r"source_root[^\n]*\.(write_text|write_bytes|mkdir|unlink|rmdir)\s*\(")
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src" / "whetstone").rglob("*.py")
+        if writes.search(path.read_text("utf-8"))
+    ]
+    assert offenders == []
+
+
+def test_the_collector_imports_nothing_from_whetstone() -> None:
+    """The claim that makes one collector serve both harnesses.
+
+    It is installed into skill folders and run under Claude Code with no Whetstone on the path, so
+    a single convenience import would break that caller — silently, and only for them.
+
+    Walked as a syntax tree rather than grepped: an import nested inside a function is the form this
+    would actually arrive in, and it is invisible to a check that only reads the top of the file.
+    """
+    import ast
+
+    tree = ast.parse(_read("src", "whetstone", "sidecars", "collect.py"))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        (node.module or "").split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert "whetstone" not in imported, (
+        "collect.py must stay free of Whetstone imports — see docs/design/sidecars.md §3.5"
+    )
+    # And nothing outside the standard library either, for the same reason.
+    assert imported <= {"__future__", "argparse", "hashlib", "json", "sys", "pathlib", "typing"}
+
+
+def test_the_example_ships_the_collector_it_is_scored_with() -> None:
+    """The installed copy in the example must be byte-identical to the canonical collector.
+
+    `sidecars.md` open question 6 leans "copies for v1, with the CI floor asserting they are
+    byte-identical the moment there are two". This is that floor, arriving with the first copy.
+
+    An example whose collector has drifted is worse than no example: it is what someone copies into
+    their own skill folder, and a stale one resolves a different file set than the gate scored.
+    """
+    from whetstone.sidecars import collector_source
+
+    installed = ROOT / "examples/sidecar-review/skills/hub-arch-review/tools/collect_sidecars.py"
+    assert installed.is_file(), "the example must ship the collector it tells people to run"
+    assert installed.read_bytes() == collector_source(), (
+        "re-run `whetstone sidecars install --skill "
+        "examples/sidecar-review/skills/hub-arch-review`"
+    )
+
+
+def test_the_ablation_example_keeps_a_case_that_needs_no_sidecar() -> None:
+    """The control cases are what make the ablation number mean anything.
+
+    Without a `should_catch` whose folders carry no `.agents/` at all, a recall gain and a general
+    improvement in the reviewer are the same measurement. `handler-builds-sql` and
+    `unbounded-poll-retry` are that control, and they only work while their paths stay bare.
+    """
+    from whetstone.core.loader import load_skill
+    from whetstone.sidecars.collect import resolve
+
+    source = ROOT / "examples/sidecar-review/source"
+    skill = load_skill(ROOT / "examples/sidecar-review/skills/hub-arch-review")
+    controls = {"handler-builds-sql", "unbounded-poll-retry"}
+    seen = set()
+    for case in skill.eval_cases:
+        if case.id not in controls:
+            continue
+        seen.add(case.id)
+        paths = [f.path for f in case.change.files]
+        got = resolve(source, paths, skill.sidecar.role)
+        assert got["files"] == [] and got["dropped"] == [], (
+            f"{case.id} is the ablation's control and now resolves local context: "
+            f"{[f['path'] for f in got['files']]}"
+        )
+    assert seen == controls, f"the control cases were renamed or removed: {controls - seen}"
+
+
+def test_the_collector_runs_on_a_python_far_older_than_whetstones() -> None:
+    """The version floor a skill's *users* have to clear, which is not Whetstone's.
+
+    Whetstone requires 3.13. The collector is installed into skill folders and run under Claude
+    Code on whoever's machine that is, so its floor is a demand made of every user of every skill
+    that reads sidecars — and `sidecars.md` open question 7 settles that making the demand is fine
+    *because it is small*. This keeps it small.
+
+    A `match` statement, a 3.11 stdlib call or a runtime `list[str]` would all pass CI here and
+    raise that bar silently, breaking only for the one caller nothing in this repository runs.
+    """
+    import ast
+
+    source = _read("src", "whetstone", "sidecars", "collect.py")
+    ast.parse(source, "collect.py", feature_version=(3, 9))
+
+    # Annotations are strings under `from __future__ import annotations`; anything else is
+    # evaluated at import, and `list[str]` evaluated on 3.8 is a TypeError at load time.
+    tree = ast.parse(source)
+    annotated: set[int] = set()
+    for node in ast.walk(tree):
+        for part in (
+            [node.annotation] if isinstance(node, (ast.AnnAssign, ast.arg)) and node.annotation
+            else [node.returns] if isinstance(node, ast.FunctionDef) and node.returns
+            else []
+        ):
+            annotated.update(id(inner) for inner in ast.walk(part))
+    runtime_generics = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and id(node) not in annotated
+        and isinstance(node.value, ast.Name)
+        and node.value.id in {"list", "dict", "set", "tuple", "type"}
+    ]
+    assert runtime_generics == []
+
+
+def test_the_deterministic_judge_never_reaches_a_scoring_path() -> None:
+    """It cannot tell a complaint from agreement, and on a negative case that decides the score.
+
+    `DeterministicJudge` matches any region-eligible finding whose message contains the pattern, so
+    a reviewer saying *"the unwrap here is safe"* counts as a false positive: the word is there, the
+    region is right, and nothing reads the sentence. That is the strongest claim a regex supports
+    and it is not what a false-positive rate means.
+
+    Harmless as a test double, wrong the moment anything gates on it — and it is exported from
+    `whetstone.judge`, so wiring it in is one import away.
+    """
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src" / "whetstone").rglob("*.py")
+        if "DeterministicJudge(" in path.read_text("utf-8")
+    ]
+    assert offenders == [], (
+        "scoring must use LLMJudge, which asks a negative case whether the reviewer is objecting"
+    )
+
+
+def test_both_reviewers_are_told_that_agreement_is_not_a_finding() -> None:
+    """The reviewer half of the same rule the judge enforces.
+
+    A model handed a sidecar exception reports a finding whose message says the code is fine —
+    "increments the counter, which aligns with the documented exception for R3" — and the honest
+    place to stop that is where the reviewer is told what a finding is. Measured on
+    `examples/sidecar-review/`: recall 0.733 with and without, so the sentence is free.
+    """
+    for module, symbol in (
+        (("src", "whetstone", "reviewer", "llm_reviewer.py"), "never return one to say the code"),
+        (("src", "whetstone", "reviewer", "agent_reviewer.py"), "never list something to say it"),
+    ):
+        assert symbol in _read(*module), f"{module[-1]} no longer says what a finding is not"

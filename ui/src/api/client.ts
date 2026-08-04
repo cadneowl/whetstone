@@ -9,6 +9,10 @@ export type SkillDetail = Schemas['SkillDetail']
 export type CaseDetail = Schemas['CaseDetail']
 export type CaseSummary = Schemas['CaseSummary']
 export type PendingCase = Schemas['PendingCase']
+/** What a skill's `sidecar:` role resolves to right now — the source tree, its notes, its drift. */
+export type SidecarStatus = Schemas['SidecarStatus']
+/** Everything the claim ledger knows about one `.agents/` claim, across runs and sweeps. */
+export type ClaimHistory = Schemas['ClaimHistory']
 export type Contradiction = Schemas['Contradiction']
 export type RunRecord = Schemas['RunRecord']
 export type RunListItem = Schemas['RunListItem']
@@ -202,6 +206,7 @@ export const keys = {
   skill: (id: string) => ['skill', id] as const,
   case: (skillId: string, caseId: string) => ['case', skillId, caseId] as const,
   sharpening: (id: string) => ['sharpening', id] as const,
+  claims: (id: string) => ['claims', id] as const,
   tasks: (id: string) => ['tasks', id] as const,
   runs: (skillId?: string) => ['runs', skillId ?? 'all'] as const,
   run: (id: string) => ['run', id] as const,
@@ -291,6 +296,21 @@ export function useSkill(id: string) {
  * line: the trend moves whenever the corpus, the judge or the model moves, and the healthy loop
  * moves the corpus every week.
  */
+/**
+ * What runs and sweeps have said about this role's `.agents/` claims — disputed first.
+ *
+ * `enabled` so the ledger is read when someone opens the list, not on every visit to the skill
+ * page: the panel above it already carries the count, which is what the page needs to decide
+ * whether there is anything worth opening.
+ */
+export function useSkillClaims(skillId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.claims(skillId),
+    queryFn: () => get<ClaimHistory[]>(`/api/skills/${encodeURIComponent(skillId)}/claims`),
+    enabled,
+  })
+}
+
 export function useSharpening(skillId: string) {
   return useQuery({
     queryKey: keys.sharpening(skillId),

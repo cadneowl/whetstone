@@ -415,3 +415,29 @@ def test_resaving_a_record_refreshes_every_indexed_metric(tmp_path: Path) -> Non
 
     assert store.list(skill_id="s")[0].recall == 0.0
     assert store.load("fixed").score.recall == 0.0
+
+
+
+def _with_declaration(run_id: str, *, enabled: bool) -> RunRecord:
+    from whetstone.sidecars import DECLARATION_KEY
+
+    record = _record(run_id)
+    record.reviewer_context = {DECLARATION_KEY: {"role": "arch-review", "enabled": enabled}}
+    return record
+
+
+def test_an_ablation_run_is_marked_on_its_index_row(tmp_path: Path) -> None:
+    """`--no-sidecars` is already incomparable by digest. This is what stops it being *read* as a
+    normal run in a list whose only visible difference is a lower score."""
+    store = RunStore(tmp_path / "runs")
+    store.save(_with_declaration("ablated", enabled=False))
+    store.save(_with_declaration("normal", enabled=True))
+    by_id = {s.id: s for s in store.list()}
+    assert by_id["ablated"].sidecars_off is True
+    assert by_id["normal"].sidecars_off is False
+
+
+def test_a_run_with_no_sidecar_declaration_is_not_an_ablation(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    store.save(_record("plain"))
+    assert store.list()[0].sidecars_off is False

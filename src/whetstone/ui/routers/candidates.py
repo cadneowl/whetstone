@@ -8,7 +8,7 @@ graduated into the eval corpus. Rejections are recorded with a reason rather tha
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import yaml
@@ -28,8 +28,17 @@ from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import Backend, ModelSelection, build_llm_client, resolve_backend
 from whetstone.naming import is_safe_segment
 from whetstone.preflight import Plan, plan_calls
-from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
+from whetstone.promote import (
+    DESTINATION_FILE,
+    META_FILE,
+    CaseEdits,
+    PreparedCase,
+    SidecarTarget,
+    edits_from,
+    prepare,
+)
 from whetstone.reviewer.factory import step_agent
+from whetstone.sidecars.collect import AGENTS_DIR
 from whetstone.steps import StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
@@ -559,6 +568,19 @@ def commit_promotion(
         dest = config.skills_repo / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
+    if prepared.sidecar is not None:
+        # The claim's delivery — patch, branch, PR body — persisted beside the case that depends
+        # on it. The sidecar itself is never written (it belongs to the source repo, behind a PR),
+        # but until that PR is opened this file is the only artifact saying what was supposed to be
+        # filed: without it, closing the browser after Promote loses the claim while keeping the
+        # case that fails until the claim lands.
+        case_dir = next(
+            (Path(rel).parent for rel in prepared.files if rel.endswith("case.yaml")), None
+        )
+        if case_dir is not None:
+            (config.skills_repo / case_dir / "sidecar.delivery.json").write_text(
+                prepared.sidecar.model_dump_json(indent=2), encoding="utf-8"
+            )
     decision = new_decision("promoted", principal=principal.label)
     decision.skill_id = prepared.skill_id
     decision.case_id = prepared.case_id
@@ -614,7 +636,92 @@ def undo(candidate_id: str, config: ConfigDep) -> QueueItem:
 def prepare_promotion(config: Config, entry: CandidateEntry, edits: CaseEdits) -> PreparedCase:
     """Validate the edits against the skill's current metadata on disk."""
     meta = _meta_yaml(config, edits.skill_id) if edits.rule_id and edits.skill_id else None
-    return prepare(entry, edits, skills_root=relative_skills_root(config), meta_yaml=meta)
+    return prepare(
+        entry,
+        edits,
+        skills_root=relative_skills_root(config),
+        meta_yaml=meta,
+        sidecar=_sidecar_target(config, edits) if edits.writes_sidecar else None,
+    )
+
+
+def _sidecar_target(config: Config, edits: CaseEdits) -> SidecarTarget | None:
+    """The skill's role and whatever sidecar already sits in that folder.
+
+    Resolved through `reviewer_for`, which is the one place that knows how a skill's declaration
+    binds to a source tree — so a claim is filed at exactly the path the reviewer would later read
+    it from. Resolving it here from the raw frontmatter would be a second answer to that question,
+    and the two would eventually disagree about which folder a claim belongs in.
+
+    Returns None when the skill has no role or no resolvable source root; `_check_destination`
+    turns that into the message an operator can act on.
+    """
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.service import rule_ids
+
+    try:
+        skill = load_skill(config.skills_root / edits.skill_id)
+    except (SkillLoadError, OSError):
+        return None
+    if skill.sidecar.is_empty():
+        return None
+    try:
+        plan = reviewer_for(config.skills_root, skill).sidecar
+    except Exception:  # noqa: BLE001 - a broken step must not 500 the triage screen
+        plan = None
+    existing: str | None = None
+    folder_exists: bool | None = None
+    if plan is not None:
+        existing = _existing_sidecar(plan.source_root, edits, skill.sidecar.role)
+        folder_exists = _folder_in_tree(plan.source_root, edits.path)
+    return SidecarTarget(
+        role=skill.sidecar.role,
+        existing=existing,
+        rule_ids=rule_ids(skill),
+        folder_exists=folder_exists,
+    )
+
+
+def _folder_in_tree(source_root: str, path: str) -> bool | None:
+    """Whether the folder a claim would be filed in is actually in the source tree.
+
+    None when the question cannot be answered — an unreadable root, a path that escapes it — so the
+    check is skipped rather than guessed at. Same guard as `_existing_sidecar`: resolved, and
+    refused if it leaves the root.
+    """
+    anchor = Path(source_root).resolve()
+    folder = PurePosixPath(path).parent
+    try:
+        target = (anchor / str(folder)).resolve() if str(folder) != "." else anchor
+        target.relative_to(anchor)
+    except (OSError, ValueError):
+        return None
+    try:
+        return target.is_dir()
+    except OSError:
+        return None
+
+
+def _existing_sidecar(source_root: str, edits: CaseEdits, role: str) -> str | None:
+    """The target file's current contents, read from the source tree — read-only, always.
+
+    The one traversal ADR-029 permits, and the same guard the collector applies: the path is
+    resolved and refused if it leaves the root, so a candidate carrying `../../etc` cannot make
+    triage read outside the tree it was pointed at.
+    """
+    name = DESTINATION_FILE[edits.destination] or f"{role}.md"
+    folder = PurePosixPath(edits.path).parent
+    rel = str(folder / AGENTS_DIR / name) if str(folder) != "." else f"{AGENTS_DIR}/{name}"
+    anchor = Path(source_root).resolve()
+    try:
+        target = (anchor / rel).resolve()
+        target.relative_to(anchor)
+    except (OSError, ValueError):
+        return None
+    try:
+        return target.read_text(encoding="utf-8") if target.is_file() else None
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _meta_yaml(config: Config, skill_id: str) -> str | None:

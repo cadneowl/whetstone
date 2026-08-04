@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -891,3 +893,211 @@ def test_a_draft_backend_failure_is_a_clean_message_not_a_500(
     message = resp.json()["message"]
     assert "switch the model" in message  # the fix the operator can act on
     assert "Could not resolve authentication" in message  # the reason, surfaced not swallowed
+
+
+# --- triage destinations: the claim that leaves this repository -------------------------
+
+
+def _with_sidecar_role(skills_root: Path, source: Path) -> None:
+    """Give `rust-errors` a sidecar role and a source tree, the way a real one declares them."""
+    skill = skills_root / "rust-errors"
+    body = (skill / "SKILL.md").read_text(encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        body.replace('  paths: ["**/*.rs"]', '  paths: ["**/*.rs"]\nsidecar:\n  role: arch-review'),
+        encoding="utf-8",
+    )
+    (skill / "evaluate").mkdir(exist_ok=True)
+    (skill / "evaluate" / "step.yaml").write_text(
+        f"context:\n  source_root: {source.as_posix()!r}\n", encoding="utf-8"
+    )
+    (source / "src" / "handlers").mkdir(parents=True, exist_ok=True)
+
+
+def test_a_rule_destination_writes_no_claim(client: TestClient) -> None:
+    body = client.post(
+        "/api/candidates/812-t0/preview",
+        json={"edits": _edits(client, "812-t0", semantic="unwrap can panic on a normal path")},
+    )
+    assert body.status_code == 200
+    assert body.json()["sidecar"] is None
+
+
+def test_an_exception_destination_previews_the_patch_it_would_send(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        preview = client.post(
+            "/api/candidates/812-t0/preview",
+            json={
+                "edits": _edits(
+                    client,
+                    "812-t0",
+                    semantic="unwrap can panic on a normal path",
+                    destination="exception",
+                    excepts_rule_id="R1",
+                    claim="a validating gateway runs first, so the row cannot be absent here.",
+                    claim_source="acme/payments!812#note_44",
+                )
+            },
+        )
+    assert preview.status_code == 200, preview.text
+    sidecar = preview.json()["sidecar"]
+    assert sidecar["path"] == "src/handlers/.agents/arch-review.md"
+    assert "Excepts R1:" in sidecar["content"]
+    assert sidecar["patch"].startswith("diff --git a/src/handlers/.agents/arch-review.md")
+    assert "acme/payments!812" in sidecar["body"]
+
+
+def test_the_claim_is_never_written_only_previewed(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    """Whetstone writes eval cases into its own repo and patches into nobody's."""
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        promoted = client.post(
+            "/api/candidates/812-t0/promote",
+            json={
+                "edits": _edits(
+                    client,
+                    "812-t0",
+                    semantic="unwrap can panic on a normal path",
+                    destination="context",
+                    claim="the row is inserted by the gateway before this handler ever runs.",
+                    claim_source="acme/payments!812#note_44",
+                )
+            },
+        )
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["prepared"]["sidecar"]["path"] == "src/handlers/.agents/context.md"
+    # The eval case landed; the sidecar did not, in either repository.
+    assert (skills_root / "rust-errors" / "promoted_cases" / "812-t0" / "case.yaml").is_file()
+    assert not (source / "src" / "handlers" / ".agents").exists()
+    assert not (skills_root / "rust-errors" / "src").exists()
+
+
+def test_the_claim_delivery_survives_the_promotion(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    """The patch, branch and PR body are persisted beside the case that depends on the claim.
+
+    They used to exist only in the preview response: promote without copying them and the eval
+    case survived while the claim it fails without was gone — no artifact left to open the PR from.
+    """
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        promoted = client.post(
+            "/api/candidates/812-t0/promote",
+            json={
+                "edits": _edits(
+                    client,
+                    "812-t0",
+                    semantic="unwrap can panic on a normal path",
+                    destination="context",
+                    claim="the row is inserted by the gateway before this handler ever runs.",
+                    claim_source="acme/payments!812#note_44",
+                )
+            },
+        )
+    assert promoted.status_code == 200, promoted.text
+    delivery = (
+        skills_root / "rust-errors" / "promoted_cases" / "812-t0" / "sidecar.delivery.json"
+    )
+    assert delivery.is_file()
+    saved = json.loads(delivery.read_text(encoding="utf-8"))
+    assert saved == promoted.json()["prepared"]["sidecar"]
+    assert saved["patch"].startswith("diff --git a/src/handlers/.agents/context.md")
+    assert saved["branch"] == "whetstone/sidecar/812-t0"
+
+
+def test_a_rule_promotion_writes_no_delivery_file(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        promoted = client.post(
+            "/api/candidates/812-t0/promote",
+            json={"edits": _edits(client, "812-t0", semantic="unwrap can panic on a normal path")},
+        )
+    assert promoted.status_code == 200, promoted.text
+    case_dir = skills_root / "rust-errors" / "promoted_cases" / "812-t0"
+    assert (case_dir / "case.yaml").is_file()
+    assert not (case_dir / "sidecar.delivery.json").exists()
+
+
+def test_undo_leaves_the_claim_alone(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    """It cannot unmerge someone else's repository and must not try."""
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    (source / "src" / "handlers" / ".agents").mkdir(parents=True)
+    landed = source / "src" / "handlers" / ".agents" / "context.md"
+    landed.write_text(
+        "---\nstatus: confirmed\n---\n\n- Already merged upstream.\n  <!-- src: HUB-1 -->\n",
+        encoding="utf-8",
+    )
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        client.post(
+            "/api/candidates/812-t0/promote",
+            json={
+                "edits": _edits(
+                    client, "812-t0", semantic="unwrap can panic on a normal path",
+                    destination="context", claim="a new fact.", claim_source="HUB-2",
+                )
+            },
+        )
+        assert client.delete("/api/candidates/812-t0/decision").status_code == 200
+    assert "Already merged upstream." in landed.read_text(encoding="utf-8")
+    assert not (skills_root / "rust-errors" / "promoted_cases" / "812-t0").exists()
+
+
+def test_a_claim_for_a_folder_this_tree_does_not_have_is_refused(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    """The candidate came from another repository, or the folder was renamed since the merge
+    request. Either way the claim would sit beside code that is not there."""
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    shutil.rmtree(source / "src" / "handlers")
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        refused = client.post(
+            "/api/candidates/812-t0/preview",
+            json={
+                "edits": _edits(
+                    client, "812-t0", semantic="unwrap can panic on a normal path",
+                    destination="context", claim="a fact.", claim_source="HUB-1",
+                )
+            },
+        )
+    assert refused.status_code == 422
+    message = refused.json()["message"]
+    assert "src/handlers" in message
+    assert "source_root" in message  # the fix, not just the complaint
+
+
+def test_a_destination_that_cannot_deliver_is_refused_with_a_usable_reason(
+    client: TestClient,
+) -> None:
+    """`rust-errors` declares no role here, so a claim would be filed where nothing reads it."""
+    refused = client.post(
+        "/api/candidates/812-t0/preview",
+        json={
+            "edits": _edits(
+                client, "812-t0", semantic="unwrap can panic on a normal path",
+                destination="context", claim="a fact.", claim_source="HUB-1",
+            )
+        },
+    )
+    assert refused.status_code == 422
+    assert "sidecar: role:" in refused.json()["message"]

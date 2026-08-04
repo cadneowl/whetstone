@@ -1,0 +1,10 @@
+diff --git a/payments/gateway/stripe.py b/payments/gateway/stripe.py
+--- a/payments/gateway/stripe.py
++++ b/payments/gateway/stripe.py
+@@ -3,4 +3,5 @@ import time
+ import time
+
+-MAX_RETRIES = 3
++# Transient 5xx from the processor rose after their migration; give it more attempts.
++MAX_RETRIES = 6
+ BACKOFF_SECONDS = 0.5

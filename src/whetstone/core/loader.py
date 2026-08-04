@@ -12,7 +12,7 @@ from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import EvalCase, Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
-from whetstone.domain.skill import GuidancePage, Reference, Skill, Triggers
+from whetstone.domain.skill import GuidancePage, Reference, SidecarSpec, Skill, Triggers
 from whetstone.steps import STEP_KINDS
 from whetstone.wiki import WIKI_DIR, WikiError, load_wiki
 
@@ -154,7 +154,35 @@ def load_skill(path: str | Path) -> Skill:
         provenance=_load_provenance(meta.get("provenance")),
         wiki=wiki,
         index=index,
+        sidecar=_load_sidecar(fm.get("sidecar"), path),
     )
+
+
+def _load_sidecar(raw: Any, path: Path) -> SidecarSpec:
+    """`SKILL.md`'s `sidecar:` block — the per-directory context this skill reads from the source.
+
+    Frontmatter rather than `evaluate/step.yaml`, because the standalone collector has to read this
+    declaration when it runs under Claude Code, where a `step.yaml` is a Whetstone concept that is
+    not there. `context:` keeps owning source *access*; frontmatter owns *retrieval*.
+
+    A malformed block is a load error, not a default. Silently reading it as "no sidecars" would
+    score the skill with none of the local context it was written to depend on, and report a clean
+    run for a reviewer that was never given what it needed.
+    """
+    if raw is None:
+        return SidecarSpec()
+    if not isinstance(raw, dict):
+        raise SkillLoadError(f"{path}: 'sidecar' must be a mapping, got {type(raw).__name__}")
+    try:
+        spec = SidecarSpec.model_validate(raw)
+    except ValidationError as exc:
+        raise SkillLoadError(f"{path}: invalid sidecar block: {exc}") from exc
+    if spec.is_empty():
+        raise SkillLoadError(
+            f"{path}: a 'sidecar' block needs a 'role' — it names the `.agents/<role>.md` files "
+            f"this skill reads. Remove the block if the skill reads no local context."
+        )
+    return spec
 
 
 def _load_provenance(raw: Any) -> dict[str, list[Provenance]]:

@@ -29,6 +29,7 @@ from whetstone.sampling import partition_for, pinned_partitions
 from whetstone.service import (
     CaseDetail,
     PendingCase,
+    SidecarStatus,
     SkillDetail,
     SkillSummary,
     case_detail,
@@ -37,6 +38,7 @@ from whetstone.service import (
     step_runtimes,
 )
 from whetstone.sharpening import DEFAULT_WINDOW, SharpeningReport, sharpening_report
+from whetstone.sidecars.confirm import ClaimHistory
 from whetstone.steps import StepError
 from whetstone.taskruns import TaskRunRecord
 from whetstone.ui.deps import (
@@ -107,7 +109,92 @@ def get_skill(
         detail.reviews = counted.reviews
         detail.unruled_findings = counted.unruled_findings
         detail.stale_reviews = counted.stale_reviews
+    detail.sidecar = _sidecar_status(config, skill, _skill_dir(root, skill), store)
     return detail
+
+
+# How many `.agents/` folders one page load may walk. A monorepo is somebody's whole company, and a
+# skill page must not become the slowest screen in the console to print a count on it. Truncation is
+# reported rather than hidden, because a count that silently stopped is worse than no count.
+FOLDER_SCAN_LIMIT = 400
+
+
+def _sidecar_status(
+    config: Config, skill: Skill, skill_dir: Path, store: StoreDep
+) -> SidecarStatus | None:
+    """What this skill's `sidecar:` block resolves to, or None when it declares none.
+
+    Read-only and best-effort throughout: this is a panel on a page, and no part of it may turn a
+    skill that loads into a skill that 500s. Anything unresolvable is reported as unresolved, which
+    is the fact the reader needs anyway.
+    """
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.sidecars import installed_state
+    from whetstone.sidecars.claims import parse
+    from whetstone.sidecars.collect import AGENTS_DIR, CONTEXT_FILE
+    from whetstone.sidecars.confirm import Ledger
+
+    spec = skill.sidecar
+    if spec.is_empty():
+        return None
+    status = SidecarStatus(
+        role=spec.role,
+        scope=spec.scope,
+        budget=spec.budget,
+        max_files=spec.max_files,
+        max_file_bytes=spec.max_file_bytes,
+        confirmations=spec.confirmations,
+    )
+    try:
+        choice = reviewer_for(config.skills_root, skill)
+    except (SkillLoadError, StepError, ContextError, OSError) as exc:
+        status.problems = [str(exc)]
+        return status
+    status.problems = list(choice.problems)
+    declared = (choice.context.redacted if choice.context else {}).get("source_root")
+    status.source_declared = str(declared or "")
+    if choice.sidecar is not None:
+        status.source_root = str(choice.sidecar.source_root)
+        status.source_ok = Path(choice.sidecar.source_root).is_dir()
+    try:
+        status.install_problems = installed_state(skill_dir, spec)
+    except OSError:
+        status.install_problems = []
+
+    if status.source_ok:
+        names = {CONTEXT_FILE, f"{spec.role}.md"}
+        seen = 0
+        for directory in sorted(Path(status.source_root).rglob(AGENTS_DIR)):
+            if seen >= FOLDER_SCAN_LIMIT:
+                status.scan_truncated = True
+                break
+            if not directory.is_dir():
+                continue
+            seen += 1
+            for file in sorted(directory.glob("*.md")):
+                if file.name not in names:
+                    continue
+                try:
+                    sidecar = parse(file.read_text(encoding="utf-8"), path=file.name)
+                except OSError:
+                    continue
+                status.files += 1
+                status.claims += len(sidecar.claims)
+                status.uncited += sum(1 for claim in sidecar.claims if not claim.cited)
+
+    try:
+        # Only the files this role would ever read. Filtering by skill id instead would hide a
+        # contradiction another skill found in a `context.md` that this one also reads — the
+        # role-agnostic file is shared on purpose, and so is the news that it is wrong.
+        suffixes = (f"/{CONTEXT_FILE}", f"/{spec.role}.md")
+        status.disputed = sum(
+            1
+            for history in Ledger(store.root).summary()
+            if history.disputed and history.path.endswith(suffixes)
+        )
+    except (OSError, ValueError):
+        status.disputed = 0
+    return status
 
 
 # How far back the pair evidence looks. Wide enough to span several guidance versions — the claim
@@ -172,6 +259,32 @@ def _holdout_fraction(config: Config, skill_id: str) -> float:
     except StepError:
         spec = None
     return spec.sample.holdout_fraction if spec else SamplePolicy().holdout_fraction
+
+
+@router.get("/{skill_id}/claims", response_model=list[ClaimHistory])
+def get_claims(skill_id: str, root: SkillsRootDep, store: StoreDep) -> list[ClaimHistory]:
+    """What consuming runs and maintainer sweeps have said about this role's `.agents/` claims.
+
+    Disputed first — one `contradicted` from one model on one case is an opinion, and the same
+    verdict from four unrelated runs over a month is a finding, which is exactly what the counts on
+    each row are for. Read-only, and it stays that way: confirmation is automatic, correction is a
+    human editing the sidecar in its own repository (`docs/design/sidecars.md` §8).
+
+    Filtered to the files this role would read rather than to entries this skill recorded, because
+    `context.md` is shared between roles on purpose — and so is the news that one of its claims is
+    wrong.
+    """
+    from whetstone.sidecars.collect import CONTEXT_FILE
+    from whetstone.sidecars.confirm import Ledger
+
+    skill = _load_one(root, skill_id)
+    if skill.sidecar.is_empty():
+        return []
+    suffixes = (f"/{CONTEXT_FILE}", f"/{skill.sidecar.role}.md")
+    try:
+        return [h for h in Ledger(store.root).summary() if h.path.endswith(suffixes)]
+    except (OSError, ValueError):
+        return []
 
 
 @router.get("/{skill_id}/sharpening", response_model=SharpeningReport)

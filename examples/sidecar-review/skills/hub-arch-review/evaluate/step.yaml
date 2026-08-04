@@ -1,0 +1,18 @@
+# How this skill is scored.
+#
+# The built-in reviewer: one call, no `agent:` and no `run:`. That is deliberate here — sidecar
+# injection is host-resolved, so it reaches the built-in reviewer and nothing else. A skill that
+# declares both a `sidecar:` block and an agent is refused at the plan rather than quietly reviewed
+# without them, because Whetstone cannot hash context it did not resolve.
+
+description: Score the hub architecture skill against its eval cases.
+
+# Where the reviewed tree is checked out. `.agents/` files are read from here, per changed path.
+#
+# `required: true` is load-bearing. Unset, every case would resolve to no local context and the run
+# would look clean while reading nothing — and the resulting hash would be a valid-looking identity
+# for context that was never there, which forks gate results by whose machine ran them.
+context:
+  source_root: { env: HUB_ARCH_REVIEW_SOURCE, required: true }
+
+trials: 1

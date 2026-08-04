@@ -325,6 +325,7 @@ def launch_eval(
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
                 reviewer=choice.build(client),
+                sidecars=choice.sidecar,
             )
         except RunCancelled as exc:
             raise Cancelled from exc
@@ -485,6 +486,7 @@ def launch_gate(
                 on_candidate=side("cand", candidate_ref),
                 cancel=handle.cancel_event,
                 reviewer=choice.build(client),
+                sidecars=choice.sidecar,
                 baselines=gates if reuse else None,
                 baseline_max_age=timedelta(hours=hours),
             )
@@ -1427,6 +1429,7 @@ def launch_review(
                 model=backend.model,
                 practice_mode=config.ui.practice_mode,
                 reviewer=choice.build(client),
+                sidecars=choice.sidecar,
             )
         reviews.save(record)
         handle.log(
@@ -1657,6 +1660,7 @@ def launch_baseline(
                 judge=load_judge(config.judge_dir),
                 judge_policy=spec.judge if spec else None,
                 reviewer=choice.build(client),
+                sidecars=choice.sidecar,
             )
         except RunCancelled as exc:
             raise Cancelled from exc

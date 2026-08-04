@@ -1,0 +1,17 @@
+# Control, the second one. A plain R2 violation with no local context on its path.
+id: unbounded-poll-retry
+kind: should_catch
+repo: "gitlab:acme/hub"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/hub!4844"
+  human_signal: "reviewer requested change; capped at MAX_FETCH_ATTEMPTS"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: ingest/feed_client.py
+      line_range: [13, 17]
+    semantic: "retries an external call in an unbounded loop, with no named cap"
+    severity_min: warning

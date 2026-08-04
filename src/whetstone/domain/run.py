@@ -201,6 +201,65 @@ class TrialRecord(BaseModel):
         return [i for i in range(len(self.findings)) if i not in matched]
 
 
+class DroppedSidecar(BaseModel):
+    """A sidecar that matched but did not reach the prompt, and which cap stopped it."""
+
+    path: str
+    reason: str
+
+
+ClaimStatus = Literal["confirmed", "contradicted", "unverifiable"]
+
+
+class ClaimVerdict(BaseModel):
+    """What a consuming run noticed about one claim it was given (`docs/design/sidecars.md` §8).
+
+    A byproduct, never a job. The run already holds both the sidecar and the diff, so asking is
+    close to free — and the effort then tracks how often code is *touched*, which is the correct
+    allocation: hot code gets checked weekly and cold code does not need it.
+
+    `confirmed` **requires** `evidence` naming code. Assent is free and evidence is not, so an
+    uncited confirmation is downgraded to `unverifiable` rather than counted — otherwise the
+    cheapest possible answer ("yes, still true") accumulates into something that looks like
+    verification and is not.
+
+    `claim` is the claim's text *as it appears in the file*, never the model's paraphrase of it.
+    A verdict that cannot be matched back to a real claim is dropped, because a ledger keyed on
+    invented text is worse than no ledger.
+    """
+
+    path: str
+    claim: str
+    status: ClaimStatus
+    evidence: str = ""
+
+
+class CaseSidecars(BaseModel):
+    """The per-directory context one case's reviewer was given (`docs/design/sidecars.md` §10).
+
+    Without this, "the reviewer never loaded it" and "the reviewer read it and disagreed" are
+    indistinguishable in a record — and those are opposite diagnoses of the same missed finding.
+    They are also the input to the whole maintenance loop, which cannot ask whether a claim is
+    doing any work if it cannot tell whether the claim was ever in front of the model.
+
+    `context_hash` is the identity of the set (content, plus what was dropped). Two measurements of
+    a case are comparable iff it matches — which is what makes a source commit that touches nothing
+    the case pulls in invalidate nothing.
+    """
+
+    paths: list[str] = []
+    dropped: list[DroppedSidecar] = []
+    context_hash: str = ""
+    # Folders this case's changed paths name that are not in the source tree at all
+    # (`docs/design/sidecars.md` §12). Distinct from an empty `paths`, which means the folder is
+    # there and keeps no notes: this means the case is pointed somewhere the tree does not have,
+    # so the reviewer could not have had local context however good the notes elsewhere are.
+    missing: list[str] = []
+    # What the reviewer noticed about the claims it was handed, when it was asked. Empty for a run
+    # that loaded no sidecars, and for every reviewer that is not the built-in one.
+    verdicts: list[ClaimVerdict] = []
+
+
 class CaseRun(BaseModel):
     """Every trial of one eval case."""
 
@@ -218,6 +277,12 @@ class CaseRun(BaseModel):
     # would have said" is not the same as "the skill missed it". `SkillScore.errors` keeps it
     # visible; the gate refuses a candidate that produced more of them than its base.
     error: str = ""
+    # The `.agents/` context this case's reviewer was given, when the skill declares a sidecar role.
+    # None for every skill that does not, which is every skill that predates the feature — absent,
+    # not an empty set, because "read nothing" and "was never asked to read" are different facts.
+    # Recorded once per case rather than per trial: retrieval is a pure function of the case's
+    # paths, so all k trials were handed the identical set.
+    sidecars: CaseSidecars | None = None
 
     @property
     def confusion(self) -> Confusion:

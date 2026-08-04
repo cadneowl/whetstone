@@ -44,6 +44,46 @@ class GuidancePage(BaseModel):
     text: str = ""
 
 
+class SidecarSpec(BaseModel):
+    """A skill's declaration that it reads per-directory context from the source tree.
+
+    Sidecars are `.agents/<role>.md` files living beside the code they describe, so the local,
+    particular knowledge a large proprietary codebase carries scales with the codebase instead of
+    with the skill (`docs/design/sidecars.md`). `role` is the only required part; everything else
+    has a default, and a skill that declares no role behaves exactly as it did before this existed.
+
+    The role id comes from here — frontmatter — and never from the skill's folder name, so forking
+    `arch-review` into `arch-review-v2` does not mean renaming sidecars across a monorepo.
+
+    This block is the *only* place the caps are authored. The standalone collector reads the same
+    values from the `sidecar.json` that `whetstone sidecars install` writes out of this model, so
+    the two harnesses cannot resolve different files from the same declaration.
+    """
+
+    role: str = ""
+    # How much of the tree a role pulls in. Only `diff-paths` is implemented; the field is declared
+    # (and hashed) so a skill that later asks for more is not silently scored as if it had not.
+    scope: str = "diff-paths"
+    budget: int = 20_000
+    max_files: int = 24
+    max_file_bytes: int = 32_000
+    # Ask each review, as a byproduct, whether the code still agrees with the claims it was handed
+    # (`docs/design/sidecars.md` §8, `sidecars/confirm.py`).
+    #
+    # **Off by default, because it is not free.** The design argues the marginal cost is ~0 since
+    # the run already holds both the sidecar and the diff — true of tokens, and measured false of
+    # attention. On `examples/sidecar-review/` with `qwen3-coder:30b`, turning it on moved recall
+    # from 0.733 to 0.600 in two runs each, the loss landing on `retry-cap-raised` — the
+    # sidecar-dependent case the tier exists to catch. A stronger model may well absorb the extra
+    # question; that is a thing to measure per deployment, not to assume.
+    # It is in the hashed declaration, so switching it retracts baselines — correct, since it
+    # changes every prompt the skill sends.
+    confirmations: bool = False
+
+    def is_empty(self) -> bool:
+        return not self.role
+
+
 class Skill(BaseModel):
     id: str
     name: str = ""
@@ -66,3 +106,9 @@ class Skill(BaseModel):
     # The committed retrieval index over the eval corpus (`caseindex.py`). Empty for skills that
     # have never built one — retrieval then simply does not happen, the no-wiki precedent.
     index: SkillIndex = SkillIndex()
+    # Per-directory context read from the source tree at review time. Empty for most skills. Unlike
+    # the wiki and the index this is deliberately *not* in `skill_hash`: sidecar content lives in
+    # someone else's repo and changes for reasons that have nothing to do with this skill, so
+    # folding it in would revoke every gate on every unrelated commit. Identity rides
+    # `reviewer_context_digest` (the declaration) and `CaseRun.sidecars` (what each case read).
+    sidecar: SidecarSpec = SidecarSpec()

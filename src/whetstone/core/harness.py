@@ -8,7 +8,13 @@ from whetstone.core.cancel import RunCancelled
 from whetstone.core.scoring import case_score_from_run, record_case
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.finding import Finding
-from whetstone.domain.run import CaseRun, RunEvent
+from whetstone.domain.run import (
+    CaseRun,
+    CaseSidecars,
+    ClaimVerdict,
+    DroppedSidecar,
+    RunEvent,
+)
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.judge.base import Judge
@@ -100,6 +106,7 @@ def run_skill_recorded(
         # A cascading judge grounds its tier-2 calls in this case's own diff, so it is bound per
         # case; a plain judge passes through unchanged.
         record = record_case(case, trials, judge_for_case(judge, case.change), notes)
+        record.sidecars = _sidecars_of(reviewer)
         progress.case_done(case.id, record)
         return record
 
@@ -117,6 +124,37 @@ def run_skill_recorded(
         cases=[case_score_from_run(c) for c in cases],
     )
     return score, cases
+
+
+def _sidecars_of(reviewer: Reviewer) -> CaseSidecars | None:
+    """The `.agents/` context the reviewer was handed for the case it just finished.
+
+    Read off the reviewer immediately after its reviews, the same contract `last_note` uses: one
+    instance serves every case and both sides of a gate, so this is only ever about the last pass.
+    Retrieval is a pure function of the case's paths, so all `k` trials saw the same set and one
+    record per case is the whole truth rather than a sample of it.
+
+    None for every reviewer that resolves no sidecars, which keeps the field absent — rather than
+    an empty set — on every record written by a skill that declares no role.
+
+    `verdicts` are what the last trial said about the claims (`sidecars/confirm.py`). Unlike the
+    resolved set, they are *not* the same across `k` trials — a model asked the same question three
+    times can answer differently — so this records the last one rather than claiming to summarise
+    them. The ledger is where a claim's history accumulates; a run record is a snapshot.
+    """
+    resolved = getattr(reviewer, "last_sidecars", None)
+    if not isinstance(resolved, dict):
+        return None
+    return CaseSidecars(
+        paths=[str(f["path"]) for f in resolved.get("files") or []],
+        dropped=[
+            DroppedSidecar(path=str(d["path"]), reason=str(d["reason"]))
+            for d in resolved.get("dropped") or []
+        ],
+        context_hash=str(resolved.get("context_hash") or ""),
+        missing=[str(m) for m in resolved.get("missing") or []],
+        verdicts=[ClaimVerdict.model_validate(v) for v in resolved.get("verdicts") or []],
+    )
 
 
 def _check_cancelled(cancel: threading.Event | None) -> None:

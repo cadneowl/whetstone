@@ -1,0 +1,11 @@
+owner: "@payments-guild"
+provenance:
+  R1:
+    - source: gitlab_mr
+      ref: "acme/hub!4412#note_18"
+  R2:
+    - source: gitlab_mr
+      ref: "acme/hub!4630#note_7"
+  R3:
+    - source: gitlab_mr
+      ref: "acme/hub!4188#note_31"

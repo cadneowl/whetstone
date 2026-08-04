@@ -648,6 +648,11 @@ it, so it adds no path-handling surface of its own. If a reviewer sends source t
 is the operator's choice; the context bag makes "this reviewer has the whole repo and a network
 model" legible where it previously would not have been.
 
+> **Amended by ADR-029.** Whetstone now does traverse `source_root`, in exactly one place: reading a
+> skill's `.agents/` sidecars. The reason is that a reviewer collecting its own context cannot have
+> what it read hashed, which is the whole identity argument. The walk opens nothing but
+> `.agents/(context|<role>).md`, refuses any path that resolves outside the root, and never writes.
+
 ---
 
 ## ADR-023 — A skill folder is run, not concatenated
@@ -933,3 +938,88 @@ longer happens.
 never to a branch or a version number: a gate covers a `skill_hash`, and editing one character
 retracts it. That is what stops "gate once, then keep editing", and it is unaffected by who does the
 committing.
+
+## ADR-029 — Local context lives with the code, and is identified by what was read
+
+**Context.** A review skill over a large proprietary codebase needs thousands of particulars that
+are neither rules nor recoverable from the source: why the retry cap is 3, which invariant the
+reconciler depends on, why a class is a deliberate god object. ADR-010 gave a skill a `wiki/` for
+repo context, and it is the right shape for a repo-wide summary. It is the wrong shape for this.
+Concentrating this knowledge in the skill folder produced a 38k-character `references/system-map.md`
+that the one-shot reviewer drops on its byte cap and the agent reviewer never chooses to read — the
+knowledge existed, was committed, was hashed, and reached no prompt.
+
+**Decision.** A skill may declare a `sidecar:` role in `SKILL.md` frontmatter. Per-directory context
+then lives in the *source* repo, as `.agents/context.md` (role-agnostic) and `.agents/<role>.md`,
+beside the code it describes. At review time the harness walks each changed path's directory up to
+`source_root`, collects what it passes, and injects it after the wiki — labelled as local facts and
+explicitly not as rules. Cost is O(distinct directories + depth), so knowledge scales with the
+codebase rather than with the skill.
+
+**The harness resolves it; the model never decides whether to read one.** An instruction to go and
+look is a probabilistic behaviour — followed on file 3 of a review, skipped on file 30 of 40 — and
+it makes "considered and dismissed" indistinguishable from "never loaded", which is the ambiguity
+that already makes the dead-rules panel hard to act on. Deterministic, harness-side selection is
+also the only version of this that can be hashed.
+
+**One collector, shared with the harness that is not Whetstone.** These skills also run under Claude
+Code, against a working tree, with no Whetstone installed. If Whetstone resolved sidecars one way and
+that path resolved them another, the gate would be measuring a retrieval nobody runs — ADR-021's
+`patterns/rust.md` failure one level up. So there is exactly one implementation,
+`whetstone/sidecars/collect.py`: standard library only, no Whetstone imports, runnable as a script.
+Whetstone imports it in-process; `whetstone sidecars install` copies it verbatim into a skill's
+`tools/`, and a copy that has drifted from the canonical file is reported at the plan.
+
+**Sidecars are deliberately *not* in `skill_hash`, and this departs from ADR-010.** The wiki is in
+the hash because it is committed with the skill and changes when the skill's author changes it.
+Sidecar content lives in someone else's repository and moves for reasons that have nothing to do
+with this skill, so folding it in would revoke every gate on every unrelated commit to a busy
+monorepo. Identity is split instead, along the seam of what actually varies:
+
+- **What the reviewer read, per case** — a `context_hash` over the resolved contents plus the drop
+  list, on `CaseRun`. Two measurements of a case are comparable iff it matches, so a commit touching
+  nothing that case pulls in invalidates nothing. Hashing *content* rather than a ref is what makes
+  it safe for sidecars to get no VCS handling of their own (below).
+- **What the skill declared** — the role, scope and effective caps, plus the collector's own bytes,
+  fold into `reviewer_context_digest` and therefore into `BaselineKey` and the C6 publish check.
+  The collector is in there because it decides what the declaration *means*, and `skill_hash` covers
+  the body, pages, cases, wiki and index but no `tools/*.py`. Leaving it out would reopen ADR-021's
+  hole exactly one level up from where that ADR closed it.
+
+**Sidecars get no ref mechanism of their own.** They are read from `source_root` exactly as a
+source-aware reviewer reads code: same tree, same state, same moment. Whetstone resolves no ref for
+them because it resolves none for the source either — `source_ref` is recorded and hashed today but
+never read back, and no reviewer path performs a checkout. Giving them their own would be strictly
+worse than having none: two ways to read one tree can diverge, and code from one snapshot judged
+against sidecars from another is a failure mode that does not exist today. When the general answer
+lands, sidecars inherit it.
+
+**This is where Whetstone traverses a source tree, having promised in ADR-022 not to.** That ADR
+states Whetstone passes `source_root` and never walks it, so no path-escape surface is added on its
+side. Sidecars require the walk, and the reason is the one above: if the reviewer collects its own
+context, Whetstone cannot hash what was read and the whole identity argument collapses. The
+traversal is therefore narrow and guarded — only `.agents/(context|<role>).md` is ever opened, every
+candidate is resolved and refused if it leaves `source_root`, the caps are applied before reading
+rather than after, and nothing is ever written. The guard lives in the collector so the Claude Code
+path has it too; Whetstone re-checks what comes back, because the installed copy sits in an editable
+skill folder. Sidecar text is source and leaves the machine on every review, so the plan says which
+tree it comes from before anything is spent (ADR-011).
+
+**An unresolvable source root fails at the plan rather than degrading to an empty set.** An empty
+set produces a valid-looking hash over context that was never read, and forks gate results by
+checkout location. For the same reason a skill that declares a role but no `context: source_root:`
+is refused, as is one whose reviewer is its own agent or program — those collect their own context,
+so attaching the declaration to the digest would claim sidecars shaped a review they never touched.
+
+**The tier is subject to an ablation, and the ablation was built first.** Every other safeguard here
+addresses one claim: is it true, is it still true, did anyone verify it. None of them can see the
+realistic failure, which is not a wrong claim but fifteen files of mediocre context on every run —
+attention diluted, findings quietly worse, invisible because there is no baseline without them.
+`--no-sidecars` scores the corpus with injection withheld and records the run under a different
+context digest, so it can never reuse a normal run's baseline nor be read as one in a trend. If
+recall does not move, the tier is costing tokens and attention for nothing and should be deleted.
+Measure it or delete it — the standard ADR-013 already applies to guidance, applied to this.
+
+**A skill that declares no role behaves exactly as before.** No traversal, no prompt change, no
+digest change, and `CaseRun.sidecars` absent rather than empty — because "read nothing" and "was
+never asked to read" are different facts about a missed finding.

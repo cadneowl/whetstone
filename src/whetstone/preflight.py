@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from whetstone.domain.skill import Skill
 from whetstone.llm.factory import LOCAL_PRESETS, Backend
+from whetstone.sidecars import installed_state
 from whetstone.wiki import WikiLimits, paths_of, retrieve
 
 if TYPE_CHECKING:
@@ -307,6 +308,41 @@ def check_budget(plan: Plan, max_calls: int) -> None:
         )
 
 
+def _describe_sidecars(plan: Plan, choice: ReviewerChoice, skill: Skill | None) -> None:
+    """Say that source-tree context will be read, and from where, before anything is spent.
+
+    Sidecar text is source, and it leaves the machine on every case of every trial on both sides of
+    a gate. `agentic-reviewers.md` §7 asks that a plan name what egress a run will cause; this is
+    that, for the one place Whetstone reads someone else's repo itself.
+
+    Deliberately no file count. Getting one would mean walking the tree for every case at plan
+    time — the work of the run, before the operator has agreed to it — and the honest number is
+    per case anyway. What the operator needs to decide is whether this repo's contents should be
+    going to this backend at all, and the root answers that.
+    """
+    if choice.sidecar is None:
+        return
+    spec = choice.sidecar.spec
+    if not choice.sidecar.enabled:
+        plan.details.append(
+            f"--no-sidecars: the `.agents/{spec.role}.md` context this skill normally reads is "
+            f"withheld. This is the ablation — its score is only meaningful next to a run with it, "
+            f"and it is recorded as a different measurement so the two cannot be confused."
+        )
+        return
+    plan.details.append(
+        f"local context: `.agents/context.md` and `.agents/{spec.role}.md` from "
+        f"{choice.sidecar.source_root}, resolved per case from the paths in each diff and sent "
+        f"with it (up to {spec.max_files} file(s), {spec.budget:,} bytes) — this is source, "
+        f"leaving the machine on every review"
+    )
+    # The installed copy is what the *other* harness runs. Whetstone's own score is correct either
+    # way — it resolves with the canonical collector — so this is a warning, not a refusal: what a
+    # stale copy costs is that the gate stops describing what a user's Claude Code session does.
+    for problem in installed_state(choice.sidecar.skill_dir, spec):
+        plan.details.append(f"sidecar collector: {problem}")
+
+
 def annotate_reviewer(
     plan: Plan,
     choice: ReviewerChoice,
@@ -332,6 +368,7 @@ def annotate_reviewer(
     same things and was saying none of them: the same run, described in full in the browser and not
     at all in the terminal.
     """
+    _describe_sidecars(plan, choice, skill)
     if not choice.custom:
         _describe_builtin(plan, skill, large_prompt_chars)
         return

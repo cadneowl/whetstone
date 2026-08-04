@@ -16,6 +16,7 @@ import { GuidanceEditor } from '@/components/GuidanceEditor'
 import { HealthPanel } from '@/components/HealthPanel'
 import { ImproveWorkspace } from '@/components/ImproveWorkspace'
 import { LaunchButton } from '@/components/LaunchButton'
+import { LocalContext } from '@/components/LocalContext'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 import { SkillReviews } from '@/components/reviews'
 import { SharpeningPanel } from '@/components/SharpeningPanel'
@@ -151,6 +152,10 @@ export function SkillDetail() {
             thing the improve loop ever changes. Each rule shows the merge requests that justified
             it.
           </TabIntro>
+          {/* Above the rules, because the prompt is the rules *plus* these: a screen showing only
+              the first is describing half of what the reviewer reads. Renders nothing at all for a
+              skill that declares no `sidecar:` role, which is most of them. */}
+          <LocalContext sidecar={data.sidecar} skillId={skillId} />
           <Guidance detail={data} />
         </Tabs.Content>
 
@@ -261,6 +266,16 @@ export function SkillDetail() {
                       <span className="tabular">recall {score(run.recall, 2)}</span>
                       <span className="tabular">fp {score(run.fp_rate, 2)}</span>
                       <span className="text-xs text-muted">k={run.k}</span>
+                      {/* A trend is the one place an ablation must never read as a data point:
+                          its lower score is the measurement, not a regression. */}
+                      {run.sidecars_off && (
+                        <Badge
+                          tone="accent"
+                          title="--no-sidecars: this run withheld the local context the skill normally reads, to measure what that context is worth."
+                        >
+                          ablation
+                        </Badge>
+                      )}
                       <span className="ml-auto font-mono text-xs text-muted">{run.model}</span>
                     </Link>
                     {judgeChanged && (

@@ -37,7 +37,9 @@ _SUBMIT_TOOL = ToolSpec(
     name=SUBMIT,
     description=(
         "Report your conclusions and finish. Call this exactly once, with every issue you are "
-        "reporting. Call it with an empty list if the change is fine — that is a real answer."
+        "reporting. Call it with an empty list if the change is fine — that is a real answer. "
+        "A finding is a problem you are reporting: never list something to say it is correct, or "
+        "to explain why it is allowed here. Leave it out instead."
     ),
     input_schema={
         "type": "object",

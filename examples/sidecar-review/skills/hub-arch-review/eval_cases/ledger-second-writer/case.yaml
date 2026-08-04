@@ -1,0 +1,19 @@
+# Sidecar-dependent. The write goes through the repository, so R1 is satisfied and nothing in
+# SKILL.md objects. Only `payments/.agents/context.md` — one level up from the changed file, which
+# is the ancestor walk earning its keep — knows PaymentService owns this table.
+id: ledger-second-writer
+kind: should_catch
+repo: "gitlab:acme/hub"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/hub!4881"
+  human_signal: "reviewer requested change; refunds now call PaymentService.record()"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: payments/refunds/processor.py
+      line_range: [16, 21]
+    semantic: "writes payments_ledger directly instead of going through PaymentService.record()"
+    severity_min: warning

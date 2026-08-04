@@ -53,8 +53,10 @@ from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
 from whetstone.preflight import (
+    Estimate,
     Plan,
     annotate_reviewer,
+    billing_of,
     check_budget,
     plan_calls,
     plan_eval,
@@ -111,6 +113,10 @@ cadence_app = typer.Typer(
     help="The routine clocks: which upkeep passes are due, and marking the distill pass done."
 )
 app.add_typer(cadence_app, name="cadence")
+sidecars_app = typer.Typer(
+    help="Per-directory `.agents/` context: install a skill's collector, and see what it resolves."
+)
+app.add_typer(sidecars_app, name="sidecars")
 
 @app.callback()
 def main(
@@ -273,6 +279,20 @@ YesOpt = Annotated[
 ]
 
 
+NoSidecarsOpt = Annotated[
+    bool,
+    typer.Option(
+        "--no-sidecars",
+        help=(
+            "Withhold the .agents/ context this skill would normally read, and score without it. "
+            "The ablation: run it against a normal run to find out whether the local context is "
+            "earning its tokens. Recorded as a different measurement, so it can never be compared "
+            "with one by accident."
+        ),
+    ),
+]
+
+
 def _preflight(plan: Plan, assume_yes: bool) -> None:
     """Show what a step will cost and get consent before spending anything.
 
@@ -329,12 +349,23 @@ def _step(skill_dir: Path, kind: str, *, required: bool = False) -> StepSpec | N
     return spec
 
 
-def _reviewer_choice(policy: StepSpec | None, skill_dir: Path) -> ReviewerChoice:
+def _reviewer_choice(
+    policy: StepSpec | None,
+    skill_dir: Path,
+    skill: Skill | None = None,
+    *,
+    sidecars: bool = True,
+) -> ReviewerChoice:
     """The reviewer a CLI eval/gate uses: the skill's own `run:` program when its evaluate step
     names one, else the built-in reviewer. A required context var that is unset is a usable error,
-    not a run that dies partway through — the same discipline the console applies at the plan."""
+    not a run that dies partway through — the same discipline the console applies at the plan.
+
+    `skill` is what lets sidecars resolve: their declaration is in `SKILL.md` frontmatter, not in
+    the step. Passing it is how the CLI and the console stay the same instrument — the console gets
+    it for free from `reviewer_for`, and omitting it here would mean a gate run from the terminal
+    read local context the console's gate did not."""
     try:
-        choice = reviewer_from_step(policy, skill_dir)
+        choice = reviewer_from_step(policy, skill_dir, skill=skill, sidecars=sidecars)
     except ContextError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if choice.context and choice.context.missing:
@@ -444,6 +475,7 @@ def eval_run(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate & summarize; no model call")
     ] = False,
+    no_sidecars: NoSidecarsOpt = False,
     yes: YesOpt = False,
     transcript: TranscriptOpt = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
@@ -466,7 +498,7 @@ def eval_run(
         typer.echo(_dry_summary(sk))
         return
 
-    choice = _reviewer_choice(policy, skill)
+    choice = _reviewer_choice(policy, skill, sk, sidecars=not no_sidecars)
     trials = trials if trials is not None else (policy.trials if policy else 1)
     drawn = _sample_policy(policy, sample, sample_seed)
     limits = policy.inputs.wiki if policy else None
@@ -506,6 +538,7 @@ def eval_run(
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
         reviewer=choice.build(client),
+        sidecars=choice.sidecar,
     )
     if save:
         _store(runs_dir).save(record)
@@ -774,7 +807,7 @@ def eval_baseline(
     # then compared the two runs and concluded which cases "no longer measure the guidance". That
     # difference was the reviewer, not the guidance, and the conclusion it drives is retirement:
     # cases deleted from the corpus on the strength of a comparison that was never like for like.
-    choice = _reviewer_choice(policy, skill)
+    choice = _reviewer_choice(policy, skill, sk)
     pick = _backend_for(policy, llm, model, base_url)
     backend = _resolve(*pick)
     plan = plan_eval(
@@ -811,6 +844,10 @@ def eval_baseline(
         judge=load_judge(load_config().judge_dir),
         judge_policy=policy.judge if policy else None,
         reviewer=choice.build(client),
+        # The probe strips the *guidance*, not the local context. A case the naked model catches
+        # because a sidecar told it is precisely a case that stopped measuring the guidance, which
+        # is the question this run exists to ask.
+        sidecars=choice.sidecar,
     )
     _store(runs_dir).save(record)
     found = discrimination(sk, record)
@@ -871,6 +908,7 @@ def eval_gate(
             help="Re-measure the baseline even if an identical one is already on record",
         ),
     ] = False,
+    no_sidecars: NoSidecarsOpt = False,
     gates_dir: GatesDirOpt = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Validate both sides; no model call")
@@ -917,7 +955,7 @@ def eval_gate(
         # Read from the candidate: a change to how a skill is evaluated travels with the change to
         # the skill, so a branch that widens its own sample is gated using the sample it proposes.
         policy = _step(cand_dir, "evaluate")
-        choice = _reviewer_choice(policy, cand_dir)
+        choice = _reviewer_choice(policy, cand_dir, candidate_skill, sidecars=not no_sidecars)
         gate_trials = trials if trials is not None else (policy.trials if policy else 1)
         drawn = _sample_policy(policy, sample, sample_seed)
         limits = policy.inputs.wiki if policy else None
@@ -967,6 +1005,7 @@ def eval_gate(
             judge=load_judge(load_config().judge_dir),
             judge_policy=policy.judge if policy else None,
             reviewer=choice.build(client),
+            sidecars=choice.sidecar,
             # Only when records are being kept: reusing a baseline out of a store this run will not
             # write back to would take the saving and leave nothing for the next run to reuse.
             baselines=store if (save and reuse) else None,
@@ -1057,7 +1096,7 @@ def review(
     if skill is None:
         raise typer.BadParameter("--skill is required unless you are using --import")
     sk = load_skill(skill)
-    choice = _reviewer_choice(_step(skill, "evaluate"), skill)
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
 
     if mr is not None:
         if not gitlab_url or not project:
@@ -1085,6 +1124,7 @@ def review(
         backend=backend.name,
         model=backend.model,
         reviewer=choice.build(client),
+        sidecars=choice.sidecar,
     )
     _reviews(reviews_dir).save(record)
 
@@ -2831,6 +2871,327 @@ def cadence_done(
     sk = load_skill(skill)
     at = CadenceStore(load_config().cadence_dir).mark(sk.id, kind)  # type: ignore[arg-type]
     typer.echo(f"{sk.id}: {kind} marked done at {at:%Y-%m-%d %H:%M} UTC")
+
+
+@sidecars_app.command("install")
+def sidecars_install(skill: SkillDirOpt) -> None:
+    """Copy the sidecar collector and this skill's declaration into `<skill>/tools/`.
+
+    This is what makes the skill self-contained for the harness that is not Whetstone. Run it in
+    the skill's own repo and commit the result: a user running the skill from Claude Code executes
+    that copy, and it is byte-for-byte the file Whetstone scores with — which is the only reason a
+    gate taken here describes what happens there.
+
+    Re-run it after editing the `sidecar:` block, or after upgrading Whetstone.
+    """
+    from whetstone.sidecars import install
+
+    sk = load_skill(skill)
+    if sk.sidecar.is_empty():
+        raise typer.BadParameter(
+            f"{sk.id} declares no `sidecar:` block in SKILL.md — nothing to install. Add one "
+            f"naming the role whose `.agents/<role>.md` files this skill should read."
+        )
+    script, config = install(skill, sk.sidecar)
+    typer.echo(f"wrote {script}")
+    typer.echo(f"wrote {config}")
+    typer.echo(
+        f"\ncommit both, then from the source tree:\n"
+        f"  git diff --name-only main | python {script.name} --root . --paths -"
+    )
+
+
+@sidecars_app.command("verify")
+def sidecars_verify(
+    skill: SkillDirOpt,
+    folder: Annotated[
+        list[str] | None,
+        typer.Option("--folder", help="Only these folders (repeatable) — the post-merge sweep"),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(help="Check at most this many sidecars, least-recently-verified first"),
+    ] = None,
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    effort: Annotated[str, typer.Option()] = "medium",
+    runs_dir: RunsDirOpt = None,
+    record: Annotated[
+        bool,
+        typer.Option("--record/--no-record", help="Append verdicts to the claim ledger"),
+    ] = True,
+    uncovered: Annotated[
+        bool,
+        typer.Option("--uncovered", help="Also print facts no claim covers (noisy; see below)"),
+    ] = False,
+    all_folders: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Check even sidecars whose folder has not moved since they were confirmed",
+        ),
+    ] = False,
+    yes: YesOpt = False,
+) -> None:
+    """Check a source tree's `.agents/` claims against the code — blind (§8).
+
+    Two calls per sidecar. The first reads the folder and writes an independent account of what a
+    reader would need to be told, **without seeing the claims**. The second compares that account
+    against them. Never one call asking "is this still true?": a model shown a plausible claim and
+    a long file agrees, and the loop then costs money to verify nothing.
+
+    Writes no sidecar, ever. Confirmation is automatic and correction is gated — contradictions
+    land in the ledger (`whetstone sidecars claims --disputed`) for a human to act on.
+
+    `--folder` is the post-merge sweep over what a merge touched. `--limit` with neither is the
+    budgeted nightly crawl, spent on the least-recently-verified first, which is the only thing
+    that ever reaches cold code.
+
+    A sidecar whose folder has not moved since its `confirmed_at_tree` stamp is skipped, because
+    git is a Merkle tree and the comparison is free and exact. `--all` checks it anyway. Skipping
+    only ever happens on certainty — no stamp, or not a checkout, means verify.
+
+    Contradictions are the output. `--uncovered` also prints facts the account produced that no
+    claim covers, and it is off by default because most of them are restatement: the blind prompt
+    asks for what a reader would need to be *told* rather than what they would see by reading the
+    file once, and models answer with the second anyway. It is raw material for a human writing the
+    next claim, not a work list.
+    """
+    from whetstone.sidecars.confirm import Ledger
+    from whetstone.sidecars.maintain import sidecar_folders, sweep
+
+    sk = load_skill(skill)
+    if sk.sidecar.is_empty():
+        raise typer.BadParameter(f"{sk.id} declares no `sidecar:` block in SKILL.md")
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
+    if choice.sidecar is None:
+        raise typer.BadParameter(
+            f"{sk.id} resolves no source tree"
+            + (f": {'; '.join(choice.problems)}" if choice.problems else "")
+        )
+    root = choice.sidecar.source_root
+    ledger = Ledger(_store(runs_dir).root)
+    last_seen = {h.path: h.last_seen for h in ledger.summary()}
+
+    targets = sidecar_folders(root, sk.sidecar.role)
+    if folder:
+        wanted = {f.rstrip("/") or "." for f in folder}
+        targets = [t for t in targets if t[0] in wanted]
+    planned = min(len(targets), limit) if limit is not None else len(targets)
+    pick = _backend_for(None, llm, model, base_url)
+    backend = _resolve(*pick)
+    plan = Plan(
+        action="sidecars verify",
+        backend=backend.name,
+        model=backend.model,
+        base_url=backend.base_url,
+        billing=billing_of(backend),
+        estimate=Estimate(
+            calls=planned * 2,
+            basis=(
+                f"{planned} sidecar(s) x 2 calls — one blind account of the folder, one "
+                f"comparison against its claims"
+            ),
+        ),
+    )
+    plan.details.append(f"reads {root} — source, and nothing is written back to it")
+    _preflight(plan, yes)
+    if not planned:
+        typer.echo("nothing to verify")
+        return
+
+    client = _client(*pick, api_key_env, label=f"verify-{sk.id}")
+    report = sweep(
+        client,
+        root,
+        sk.sidecar.role,
+        folders=folder or None,
+        limit=limit,
+        last_seen=last_seen,
+        effort=effort,
+        skip_unchanged=not all_folders,
+    )
+    written = 0
+    for folder_report in report.folders:
+        if folder_report.skipped:
+            typer.echo(f"  {folder_report.sidecar}: {folder_report.skipped}")
+            continue
+        for check in folder_report.checks:
+            if check.verdict == "contradicted":
+                typer.echo(f"! {folder_report.sidecar}\n    {check.claim[:100]}")
+                typer.echo(f"    against: {check.evidence[:110]}")
+        if uncovered:
+            for fact in folder_report.uncovered:
+                typer.echo(f"+ {folder_report.folder}: no claim covers - {fact[:100]}")
+        if record:
+            written += ledger.record(
+                [c.as_ledger_verdict(folder_report.sidecar) for c in folder_report.checks],
+                skill_id=sk.id,
+            )
+    typer.echo(
+        f"\n{len(report.folders)} sidecar(s), {report.calls} llm calls, "
+        f"{report.contradicted} contradicted"
+        + (f", {written} verdict(s) recorded" if record else "")
+    )
+
+
+@sidecars_app.command("claims")
+def sidecars_claims(
+    runs_dir: RunsDirOpt = None,
+    disputed: Annotated[
+        bool, typer.Option("--disputed", help="Only claims something has contradicted")
+    ] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """What consuming runs have said about each `.agents/` claim (`docs/design/sidecars.md` §8).
+
+    Every review that was handed local context is also asked whether the code still agrees with it,
+    which costs one field in a reply it was making anyway. This is the accumulated answer.
+
+    Disputed claims come first: one `contradicted` from one model on one case is an opinion, and
+    the same verdict from four unrelated runs over a month is a finding. Confirmation is automatic
+    and correction is not — a contradiction is a prompt to look, never an edit.
+
+    A confirmation with no code citation is recorded as `unverifiable`, because assent is free.
+    """
+    import json as _json
+
+    from whetstone.sidecars.confirm import Ledger
+
+    ledger = Ledger(_store(runs_dir).root)
+    rows = [h for h in ledger.summary() if h.disputed or not disputed]
+    if json_out:
+        typer.echo(_json.dumps([h.model_dump(mode="json") for h in rows], indent=2))
+        return
+    if not rows:
+        typer.echo(
+            "no claim verdicts recorded yet — they arrive from runs whose skill declares a "
+            "`sidecar:` role and whose cases touch folders carrying `.agents/` files"
+        )
+        return
+    for row in rows:
+        mark = "!" if row.disputed else " "
+        typer.echo(
+            f"{mark} {row.path}\n"
+            f"    {row.claim[:100]}\n"
+            f"    confirmed {row.confirmed}  contradicted {row.contradicted}  "
+            f"unverifiable {row.unverifiable}   last seen {row.last_seen:%Y-%m-%d}"
+        )
+        if row.last_evidence:
+            typer.echo(f"    against: {row.last_evidence[:110]}")
+
+
+@sidecars_app.command("check")
+def sidecars_check(
+    root: Annotated[
+        Path, typer.Option("--root", help="The source tree whose `.agents/` files to check")
+    ] = Path("."),
+    max_file_bytes: Annotated[
+        int | None,
+        typer.Option(help="Override the size cap; defaults to the collector's"),
+    ] = None,
+    patch: Annotated[
+        Path | None,
+        typer.Option(
+            "--patch",
+            help="A unified diff to check for a bot writing claims; '-' reads stdin",
+        ),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """The mechanical floor: everything about a sidecar that is decidable without a model.
+
+    Uncited claims, malformed or off-ladder frontmatter, a file over the size cap, a `## file.md`
+    heading naming a file that is no longer there, an `.agents/` folder whose code has moved away,
+    and a role that disagrees with its own filename.
+
+    Cheap enough for a pre-commit hook and exact enough to block CI: it never asks whether a claim
+    is *true*, which is blind verification's job and needs a model.
+
+    With `--patch`, it also enforces the write boundary — agents may write metadata, agents may
+    never write claims — by reporting which sidecars the diff edits below the frontmatter. Run that
+    form over a bot-authored commit and reject a non-empty answer.
+
+    Exits 1 when anything is wrong, so `whetstone sidecars check --root .` is the whole CI step.
+    """
+    import json as _json
+    import sys
+
+    from whetstone.sidecars.floor import check_tree, claims_touched
+
+    if not root.is_dir():
+        raise typer.BadParameter(f"{root} is not a directory")
+    problems = check_tree(root, **({} if max_file_bytes is None else
+                                   {"max_file_bytes": max_file_bytes}))
+    touched: list[str] = []
+    if patch is not None:
+        text = sys.stdin.read() if str(patch) == "-" else patch.read_text(encoding="utf-8")
+        touched = claims_touched(text)
+
+    if json_out:
+        typer.echo(_json.dumps(
+            {"problems": [p.model_dump() for p in problems], "claims_touched": touched},
+            indent=2,
+        ))
+    else:
+        for problem in problems:
+            typer.echo(str(problem))
+        for path in touched:
+            typer.echo(f"{path}: [bot_claim] this patch edits claims, not just metadata")
+        if not problems and not touched:
+            typer.echo(f"{root}: no sidecar problems")
+    if problems or touched:
+        raise typer.Exit(code=1)
+
+
+@sidecars_app.command("show")
+def sidecars_show(
+    skill: SkillDirOpt,
+    paths: Annotated[
+        list[str] | None,
+        typer.Option("--path", help="A changed path to resolve context for (repeatable)"),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show exactly which `.agents/` files a set of changed paths would pull in.
+
+    The cheap way to answer "why did the reviewer not know that?" without spending a run: it
+    resolves through the same collector a review would, so what it prints is what the model gets.
+    """
+    import json as _json
+
+    from whetstone.sidecars import SidecarError, to_prompt
+
+    sk = load_skill(skill)
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
+    if choice.sidecar is None:
+        raise typer.BadParameter(
+            f"{sk.id} resolves no sidecars"
+            + (f": {'; '.join(choice.problems)}" if choice.problems else "")
+        )
+    try:
+        resolved = choice.sidecar.loader().for_paths(list(paths or []))
+    except SidecarError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if json_out:
+        typer.echo(_json.dumps(resolved, indent=2, sort_keys=True))
+        return
+    missing = resolved.get("missing") or []
+    for entry in resolved["files"]:
+        typer.echo(f"  {entry['path']}  ({entry['bytes']:,} bytes)")
+    for drop in resolved["dropped"]:
+        typer.echo(f"  dropped: {drop['path']}  ({drop['reason']})")
+    for folder in missing:
+        # The orphan signal. Printed here above all: this command exists to answer "why did the
+        # reviewer not know that?", and "the folder you named is not in this tree" is an answer
+        # that no listing of what *was* loaded can give.
+        typer.echo(f"  not in the source tree: {folder or '.'}  (nothing could be read for it)")
+    if not resolved["files"] and not resolved["dropped"] and not missing:
+        typer.echo("  (no local context for these paths)")
+    typer.echo(f"\ncontext_hash: {resolved['context_hash'] or '(none)'}")
+    typer.echo(f"{len(to_prompt(resolved)):,} prompt chars")
 
 
 if __name__ == "__main__":

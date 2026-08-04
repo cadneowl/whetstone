@@ -1,0 +1,14 @@
+diff --git a/payments/reconciliation/job.py b/payments/reconciliation/job.py
+--- a/payments/reconciliation/job.py
++++ b/payments/reconciliation/job.py
+@@ -15,3 +15,10 @@ class ReconciliationJob:
+         return [self._settle(row) for row in rows]
+
++    def unsettled_before(self, cutoff):
++        return self._conn.execute(
++            "SELECT id FROM reconciliation_window "
++            "WHERE settled_at IS NULL AND opened_at < ? ORDER BY id",
++            (cutoff,),
++        ).fetchall()
++
+     def _settle(self, row):

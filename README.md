@@ -369,6 +369,9 @@ skills/<skill-id>/
     index.yaml          #   which source paths each page describes
     pages/*.md
   references/*.md       # guidance that outgrew SKILL.md — read on demand when `agent:` is on
+  tools/                # written by `whetstone sidecars install` when the skill declares a role
+    collect_sidecars.py #   the sidecar collector, so the skill also works outside Whetstone
+    sidecar.json        #   its resolved declaration, so that copy needs no flags
   evaluate/step.yaml    # how this skill is scored (sampling, trials, wiki caps — `agent:`, and
                         #   optionally `run:`, your own reviewer, plus the `context:` it needs)
   improve/step.yaml     # how a guidance change is drafted from failures  (+ prompt.md)
@@ -387,6 +390,18 @@ at them, and `source:` adding sandboxed `read_file`/`grep`/`list_dir` over a che
 on `evaluate`, `improve` and `triage`, and the reference skill uses it on the first two. The cost
 plan for a run, a gate or a baseline says which of the two you are about to get, and warns when the
 concatenation cap is silently dropping pages from every review.
+
+**Knowledge that belongs to the code, not to the skill.** Some of what a reviewer needs is neither a
+rule nor recoverable from the diff: why the retry cap in *this* folder is 3, which invariant the
+reconciler depends on. Collected in the skill folder it becomes one enormous reference page that the
+byte cap drops and an agent never opens. A skill can instead declare `sidecar: role: <name>` in its
+frontmatter, and that knowledge lives in the **source** repo as `.agents/context.md` and
+`.agents/<role>.md` beside the code it describes. Whetstone walks each changed path's directory up
+to `source_root`, loads what it passes, and injects it as local facts — never as rules. What each
+case actually read is hashed onto the record, so a gate cannot be passed against context no gate
+ever scored, and `--no-sidecars` scores the corpus with it withheld so you can find out whether it
+is earning its tokens. Nothing changes for a skill that declares no role. Design:
+[docs/design/sidecars.md](docs/design/sidecars.md).
 
 **Writing one: [docs/authoring-skills.md](docs/authoring-skills.md)** — the working reference for
 these files, organised around the mistakes that are silent (`required:` on a source root, `pin:`

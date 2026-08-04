@@ -29,9 +29,16 @@ from typing import Any
 
 from whetstone.agent.runner import agent_identity
 from whetstone.context import ContextError, ResolvedContext, resolve_context
-from whetstone.domain.skill import Skill
-from whetstone.reviewer.base import Reviewer
+from whetstone.domain.skill import SidecarSpec, Skill
+from whetstone.reviewer.base import Reviewer, ReviewerProvenance
 from whetstone.reviewer.subprocess_reviewer import SubprocessReviewer
+from whetstone.sidecars import (
+    COLLECTOR_KEY,
+    DECLARATION_KEY,
+    SidecarLoader,
+    collector_digest,
+    declaration_of,
+)
 from whetstone.steps import StepError, StepSpec, load_step
 
 
@@ -60,6 +67,9 @@ class ReviewerChoice:
     # directory. Distinct from `context.missing` (a variable nobody set) because the fix is
     # different, and reported the same way: at the plan, before anything is spent.
     problems: list[str] = field(default_factory=list)
+    # Set when the skill declares a `sidecar:` role and a source tree to read it from. None for
+    # every skill that declares neither, which is the unchanged default path.
+    sidecar: SidecarPlan | None = None
 
     @property
     def custom(self) -> bool:
@@ -116,6 +126,46 @@ class ReviewerChoice:
 
 
 @dataclass
+class SidecarPlan:
+    """A skill's `sidecar:` declaration bound to a resolved source tree.
+
+    Kept beside the reviewer choice rather than inside it because every reviewer kind can carry
+    one: the built-in reviewer is the common case and the plan says explicitly that it must not be
+    an afterthought here.
+    """
+
+    spec: SidecarSpec
+    source_root: str
+    # The skill folder, so a plan can check that the *installed* collector still matches the one
+    # Whetstone scores with. Carried here because nothing else downstream knows where the skill is.
+    skill_dir: Path = Path()
+    # False under `--no-sidecars`. The ablation is a standing evaluation mode, not a debug switch:
+    # it is the only safeguard that measures the tier as a whole rather than one claim at a time.
+    enabled: bool = True
+    # The reviewer's whole resolved bag, which by this point carries the declaration and the
+    # collector digest. Kept here so the run record can be told what shaped it without the caller
+    # having to reach back into the choice and reassemble it.
+    context: ResolvedContext | None = None
+
+    def loader(self) -> SidecarLoader:
+        return SidecarLoader(self.source_root, self.spec, enabled=self.enabled)
+
+    @property
+    def provenance(self) -> ReviewerProvenance:
+        """What the run record should say about this instrument.
+
+        `identity` stays empty: the reviewer is still the built-in one, described by the run's
+        backend and model. What changed is the *inputs*, which is exactly what the other two fields
+        are for.
+        """
+        return ReviewerProvenance(
+            identity="",
+            context=dict(self.context.redacted) if self.context else {},
+            context_digest=self.context.digest if self.context else "",
+        )
+
+
+@dataclass
 class AgentPlan:
     """Everything needed to build the agent once a client exists."""
 
@@ -161,17 +211,22 @@ class TaskPlan:
         return self.max_steps + 1
 
 
-def reviewer_for(skills_root: str | Path, skill: Skill) -> ReviewerChoice:
+def reviewer_for(
+    skills_root: str | Path, skill: Skill, *, sidecars: bool = True
+) -> ReviewerChoice:
     """Resolve the reviewer for `skill`, reading its `evaluate` step.
 
     Raises `StepError` for a broken step and `ContextError` for a bad context declaration (an
     unreadable `file:`); both are surfaced by the caller the same way a bad step already is. A
     missing *required* `env:` var is not raised — it lands in `context.missing` for a preflight to
     report — because the fix is a deployment setting, not a broken skill.
+
+    `sidecars=False` is the `--no-sidecars` ablation. It resolves everything else identically, so
+    the only difference between the two runs is the context under test.
     """
     directory = Path(skills_root) / skill.id
     spec = load_step(directory, "evaluate", skill_id=skill.id)
-    return reviewer_from_step(spec, directory)
+    return reviewer_from_step(spec, directory, skill=skill, sidecars=sidecars)
 
 
 def context_digest_for(skills_root: str | Path, skill: Skill) -> str | None:
@@ -195,18 +250,40 @@ def context_digest_for(skills_root: str | Path, skill: Skill) -> str | None:
     return resolved.digest if resolved is not None else ""
 
 
-def reviewer_from_step(spec: StepSpec | None, skill_dir: str | Path) -> ReviewerChoice:
+def reviewer_from_step(
+    spec: StepSpec | None,
+    skill_dir: str | Path,
+    *,
+    skill: Skill | None = None,
+    sidecars: bool = True,
+) -> ReviewerChoice:
     """The reviewer for an already-loaded `evaluate` step — the CLI path, which has the spec and the
-    skill folder in hand and need not address the skill by id under a root."""
-    if spec is None:
-        return ReviewerChoice()
+    skill folder in hand and need not address the skill by id under a root.
+
+    `skill` is optional because most callers only ask "what will review this?", which the step
+    answers on its own. It is required to resolve *sidecars*, whose declaration lives in `SKILL.md`
+    frontmatter — so a caller that omits it gets a choice with no sidecar plan, and one that has the
+    skill in hand gets the whole instrument.
+    """
     directory = Path(skill_dir)
+    if spec is None:
+        return _with_sidecars(ReviewerChoice(), skill, directory, None, enabled=sidecars)
     if spec.task.enabled:
-        return _task_choice(spec, directory)
+        choice = _task_choice(spec, directory)
+        root = choice.task.source_root if choice.task else None
+        return _with_sidecars(choice, skill, directory, root, enabled=sidecars)
     if spec.agent.enabled:
-        return _agent_choice(spec, directory)
+        choice = _agent_choice(spec, directory)
+        root = choice.agent.source_root if choice.agent else None
+        return _with_sidecars(choice, skill, directory, root, enabled=sidecars)
     if not spec.run:
-        return ReviewerChoice()
+        # A step with no `run:`, `agent:` or `task:` is the built-in reviewer — but it may still
+        # declare `context:`, which is how a built-in-reviewer skill says where its source tree is.
+        # Left as None when nothing is declared, so a skill that has no context still reports the
+        # empty digest its stored gate records already carry.
+        resolved = resolve_context(spec.context, skill_dir=directory) if spec.context else None
+        choice = ReviewerChoice(context=resolved)
+        return _with_sidecars(choice, skill, directory, _root_of(resolved), enabled=sidecars)
     resolved = resolve_context(spec.context, skill_dir=directory)
     reviewer = SubprocessReviewer(
         spec.run,
@@ -215,7 +292,99 @@ def reviewer_from_step(spec: StepSpec | None, skill_dir: str | Path) -> Reviewer
         context=resolved,
         wiki_limits=spec.inputs.wiki,
     )
-    return ReviewerChoice(reviewer=reviewer, context=resolved, identity=reviewer.identity)
+    choice = ReviewerChoice(reviewer=reviewer, context=resolved, identity=reviewer.identity)
+    return _with_sidecars(choice, skill, directory, _root_of(resolved), enabled=sidecars)
+
+
+def _root_of(resolved: ResolvedContext | None) -> str | None:
+    raw = resolved.values.get("source_root") if resolved else None
+    return str(raw) if raw else None
+
+
+def _with_sidecars(
+    choice: ReviewerChoice,
+    skill: Skill | None,
+    skill_dir: Path,
+    root: str | None,
+    *,
+    enabled: bool,
+) -> ReviewerChoice:
+    """Bind a skill's `sidecar:` declaration to its source tree, and fold it into the identity.
+
+    Two things enter the hashable slice, and neither is optional:
+
+    - the **declaration** — role, scope and the effective caps — because changing any of them
+      changes what every case reads, and a gate taken under the old ones must not cover the new;
+    - the **collector's own bytes**, because it decides what the declaration *means*. `skill_hash`
+      covers the body, pages, cases, wiki and index — not a `tools/*.py` — so leaving the collector
+      out would reopen the `patterns/rust.md` hole one level up.
+
+    A declared role with no resolvable source tree is a problem reported at the plan, never a quiet
+    fallback to an empty set: an empty set produces a valid-looking hash over context that was never
+    read, and forks gate results by checkout location.
+    """
+    if skill is None or skill.sidecar.is_empty():
+        # The other half of the guard `steps.py` used to enforce alone. A plain `evaluate` step may
+        # now declare `context:` — but only sidecars consume it there, so a bag with no role to read
+        # it is resolved (a file read, maybe a secret) and then dropped, which is exactly the
+        # configured-but-ignored failure that guard exists to prevent. Checked here because whether
+        # anything consumes it depends on frontmatter, which `steps.py` cannot see.
+        if skill is not None and not choice.custom and choice.context and choice.context.values:
+            names = ", ".join(sorted(choice.context.values))
+            choice.problems.append(
+                f"evaluate declares context ({names}) but this skill has no `run:`, no `agent:` "
+                f"and no `sidecar:` block, so nothing reads it — add a `sidecar: role:` to "
+                f"SKILL.md, or remove the `context:`"
+            )
+        return choice
+    if choice.agent is not None or choice.task is not None or choice.reviewer is not None:
+        # Refused rather than ignored. Host-resolved injection reaches the built-in reviewer only —
+        # an agent chooses its own reads and a program collects its own context — so attaching the
+        # declaration to the digest here would say sidecars shaped a review they never touched,
+        # which is a worse lie than the one this whole design exists to stop telling.
+        choice.problems.append(
+            f"this skill declares `sidecar: {skill.sidecar.role}` but is reviewed by its own "
+            f"agent or program, which collects its own context. Whetstone cannot hash what it "
+            f"does not resolve — call `tools/collect_sidecars.py` from the reviewer itself, and "
+            f"remove the `sidecar:` block from SKILL.md"
+        )
+        return choice
+    resolved = choice.context or ResolvedContext()
+    if choice.context is None:
+        choice.context = resolved
+    if not root:
+        # Silent when the variable is merely unset — `context.missing` already carries that, with
+        # the variable's name, and reporting it twice in different words helps nobody.
+        if not any(name == "source_root" for name, _ in resolved.missing):
+            choice.problems.append(
+                f"this skill reads `.agents/{skill.sidecar.role}.md` context from the source tree, "
+                f"but its evaluate step declares no `context: source_root:` — add one, or remove "
+                f"the `sidecar:` block from SKILL.md"
+            )
+        return choice
+    if not Path(root).is_dir():
+        choice.problems.append(
+            f"the source root {root!r} is not a directory — every case would resolve to no local "
+            f"context and the run would look clean while reading nothing"
+        )
+        return choice
+    # Machine-local, whichever form declared it: `/Users/alice/repo` and `/home/bob/repo` must
+    # digest identically for identical content, or a shared gate cannot survive a teammate whose
+    # checkout lives elsewhere. What was actually read is identified per case, by content.
+    resolved.hashable.pop("source_root", None)
+    declaration = declaration_of(skill.sidecar, enabled=enabled)
+    resolved.hashable[DECLARATION_KEY] = declaration
+    resolved.hashable[COLLECTOR_KEY] = collector_digest()
+    # Shown too, so a run record explains why its digest differs from a neighbour's.
+    resolved.redacted[DECLARATION_KEY] = declaration
+    choice.sidecar = SidecarPlan(
+        spec=skill.sidecar,
+        source_root=root,
+        skill_dir=skill_dir,
+        enabled=enabled,
+        context=resolved,
+    )
+    return choice
 
 
 @dataclass

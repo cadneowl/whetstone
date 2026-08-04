@@ -107,6 +107,31 @@ def ref_exists(repo: str | Path, ref: str) -> bool:
     return True
 
 
+def subtree_hash(repo: str | Path, path: str, ref: str = "HEAD") -> str | None:
+    """The tree object for one directory at a ref, or None when git cannot answer.
+
+    Git is already a Merkle tree, so this changes iff something under `path` changed. That makes
+    "has this directory moved since we last verified its notes?" a free, exact comparison rather
+    than a diff — which is what `confirmed_at_tree` in a sidecar's frontmatter is for
+    (`docs/design/sidecars.md` §2.1).
+
+    It scopes work; it does not certify freshness. A whitespace fix moves it, and a semantic change
+    that happens to preserve the tree cannot exist. Erring towards re-checking is the safe
+    direction: the cost is a call, and the cost of the other error is a stale claim read as fact.
+
+    None rather than raising, because the source tree is somebody else's and may not be a checkout
+    at all. A caller that cannot get an answer must verify, not skip.
+    """
+    try:
+        # The root is `<ref>^{tree}`, not `<ref>`: a bare ref names the commit, and a commit sha
+        # moves on every commit while the root tree moves only when content does — which is the
+        # comparison a `confirmed_at_tree` stamp at the repository root is making.
+        spec = f"{ref}:{_posix(path)}" if path not in ("", ".") else f"{ref}^{{tree}}"
+        return _text(repo, "rev-parse", spec)
+    except GitError:
+        return None
+
+
 def read_at(repo: str | Path, ref: str, path: str) -> str:
     """Read one file's contents at a ref. Complements `vcs.export_tree`, which exports a subtree."""
     return _git(repo, "show", f"{ref}:{path}").decode("utf-8")

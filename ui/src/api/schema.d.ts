@@ -1291,6 +1291,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/claims": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Claims
+         * @description What consuming runs and maintainer sweeps have said about this role's `.agents/` claims.
+         *
+         *     Disputed first — one `contradicted` from one model on one case is an opinion, and the same
+         *     verdict from four unrelated runs over a month is a finding, which is exactly what the counts on
+         *     each row are for. Read-only, and it stays that way: confirmation is automatic, correction is a
+         *     human editing the sidecar in its own repository (`docs/design/sidecars.md` §8).
+         *
+         *     Filtered to the files this role would read rather than to entries this skill recorded, because
+         *     `context.md` is shared between roles on purpose — and so is the news that one of its claims is
+         *     wrong.
+         */
+        get: operations["get_claims_api_skills__skill_id__claims_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills/{skill_id}/guidance": {
         parameters: {
             query?: never;
@@ -1789,6 +1818,27 @@ export interface components {
             /** Case Id */
             case_id: string;
             /**
+             * Claim
+             * @default
+             */
+            claim: string;
+            /**
+             * Claim Source
+             * @default
+             */
+            claim_source: string;
+            /**
+             * Destination
+             * @default rule
+             * @enum {string}
+             */
+            destination: "rule" | "context" | "exception";
+            /**
+             * Excepts Rule Id
+             * @default
+             */
+            excepts_rule_id: string;
+            /**
              * Expectation Id
              * @default e1
              */
@@ -1869,6 +1919,7 @@ export interface components {
              * @enum {string}
              */
             partition: "train" | "holdout";
+            sidecars?: components["schemas"]["CaseSidecars"] | null;
             /**
              * Trials
              * @default []
@@ -1899,6 +1950,46 @@ export interface components {
             readonly recall: number;
             /** Trials */
             trials: components["schemas"]["Confusion"][];
+        };
+        /**
+         * CaseSidecars
+         * @description The per-directory context one case's reviewer was given (`docs/design/sidecars.md` §10).
+         *
+         *     Without this, "the reviewer never loaded it" and "the reviewer read it and disagreed" are
+         *     indistinguishable in a record — and those are opposite diagnoses of the same missed finding.
+         *     They are also the input to the whole maintenance loop, which cannot ask whether a claim is
+         *     doing any work if it cannot tell whether the claim was ever in front of the model.
+         *
+         *     `context_hash` is the identity of the set (content, plus what was dropped). Two measurements of
+         *     a case are comparable iff it matches — which is what makes a source commit that touches nothing
+         *     the case pulls in invalidate nothing.
+         */
+        CaseSidecars: {
+            /**
+             * Context Hash
+             * @default
+             */
+            context_hash: string;
+            /**
+             * Dropped
+             * @default []
+             */
+            dropped: components["schemas"]["DroppedSidecar"][];
+            /**
+             * Missing
+             * @default []
+             */
+            missing: string[];
+            /**
+             * Paths
+             * @default []
+             */
+            paths: string[];
+            /**
+             * Verdicts
+             * @default []
+             */
+            verdicts: components["schemas"]["ClaimVerdict"][];
         };
         /**
          * CaseSummary
@@ -1971,6 +2062,82 @@ export interface components {
              * @default
              */
             written: string;
+        };
+        /**
+         * ClaimHistory
+         * @description Everything the ledger knows about one claim.
+         */
+        ClaimHistory: {
+            /** Claim */
+            claim: string;
+            /**
+             * Confirmed
+             * @default 0
+             */
+            confirmed: number;
+            /**
+             * Contradicted
+             * @default 0
+             */
+            contradicted: number;
+            /**
+             * Disputed
+             * @description Worth a human's attention: something with the code in front of it said this is wrong.
+             *
+             *     Serialized rather than left to each caller, so the console and the CLI cannot come to
+             *     different conclusions about which claims are the ones somebody has to look at.
+             */
+            readonly disputed: boolean;
+            /**
+             * Last Evidence
+             * @default
+             */
+            last_evidence: string;
+            /**
+             * Last Seen
+             * Format: date-time
+             */
+            last_seen: string;
+            /** Path */
+            path: string;
+            /**
+             * Unverifiable
+             * @default 0
+             */
+            unverifiable: number;
+        };
+        /**
+         * ClaimVerdict
+         * @description What a consuming run noticed about one claim it was given (`docs/design/sidecars.md` §8).
+         *
+         *     A byproduct, never a job. The run already holds both the sidecar and the diff, so asking is
+         *     close to free — and the effort then tracks how often code is *touched*, which is the correct
+         *     allocation: hot code gets checked weekly and cold code does not need it.
+         *
+         *     `confirmed` **requires** `evidence` naming code. Assent is free and evidence is not, so an
+         *     uncited confirmation is downgraded to `unverifiable` rather than counted — otherwise the
+         *     cheapest possible answer ("yes, still true") accumulates into something that looks like
+         *     verification and is not.
+         *
+         *     `claim` is the claim's text *as it appears in the file*, never the model's paraphrase of it.
+         *     A verdict that cannot be matched back to a real claim is dropped, because a ledger keyed on
+         *     invented text is worse than no ledger.
+         */
+        ClaimVerdict: {
+            /** Claim */
+            claim: string;
+            /**
+             * Evidence
+             * @default
+             */
+            evidence: string;
+            /** Path */
+            path: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "confirmed" | "contradicted" | "unverifiable";
         };
         /** CodeChange */
         CodeChange: {
@@ -2464,6 +2631,16 @@ export interface components {
              */
             history: components["schemas"]["DriftPoint"][];
             report: components["schemas"]["DriftReport"];
+        };
+        /**
+         * DroppedSidecar
+         * @description A sidecar that matched but did not reach the prompt, and which cap stopped it.
+         */
+        DroppedSidecar: {
+            /** Path */
+            path: string;
+            /** Reason */
+            reason: string;
         };
         /**
          * EditPromotedRequest
@@ -3656,6 +3833,7 @@ export interface components {
             files: {
                 [key: string]: string;
             };
+            sidecar?: components["schemas"]["SidecarDelivery"] | null;
             /** Skill Id */
             skill_id: string;
         };
@@ -4632,6 +4810,11 @@ export interface components {
              * @default 0
              */
             recall: number;
+            /**
+             * Sidecars Off
+             * @default false
+             */
+            sidecars_off: boolean;
             /** Skill Hash */
             skill_hash: string;
             /** Skill Id */
@@ -4773,6 +4956,173 @@ export interface components {
             verdict: string;
         };
         /**
+         * SidecarDelivery
+         * @description A sidecar claim on its way to the source repo — as a patch, never as a write.
+         *
+         *     Kept out of `PreparedCase.files` on purpose. `commit_promotion` writes every entry in `files`
+         *     under `skills_repo`, and this file does not live there: it belongs to the reviewed code, in
+         *     front of that folder's CODEOWNERS. Whetstone holds no write credentials on a source repo
+         *     (ADR-028's *git stays the operator's*, surviving contact with a second repo), so what it
+         *     produces is something a person applies.
+         */
+        SidecarDelivery: {
+            /** Body */
+            body: string;
+            /** Branch */
+            branch: string;
+            /** Content */
+            content: string;
+            /**
+             * Creates File
+             * @default false
+             */
+            creates_file: boolean;
+            /** Patch */
+            patch: string;
+            /** Path */
+            path: string;
+            /** Role */
+            role: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * SidecarSpec
+         * @description A skill's declaration that it reads per-directory context from the source tree.
+         *
+         *     Sidecars are `.agents/<role>.md` files living beside the code they describe, so the local,
+         *     particular knowledge a large proprietary codebase carries scales with the codebase instead of
+         *     with the skill (`docs/design/sidecars.md`). `role` is the only required part; everything else
+         *     has a default, and a skill that declares no role behaves exactly as it did before this existed.
+         *
+         *     The role id comes from here — frontmatter — and never from the skill's folder name, so forking
+         *     `arch-review` into `arch-review-v2` does not mean renaming sidecars across a monorepo.
+         *
+         *     This block is the *only* place the caps are authored. The standalone collector reads the same
+         *     values from the `sidecar.json` that `whetstone sidecars install` writes out of this model, so
+         *     the two harnesses cannot resolve different files from the same declaration.
+         */
+        SidecarSpec: {
+            /**
+             * Budget
+             * @default 20000
+             */
+            budget: number;
+            /**
+             * Confirmations
+             * @default false
+             */
+            confirmations: boolean;
+            /**
+             * Max File Bytes
+             * @default 32000
+             */
+            max_file_bytes: number;
+            /**
+             * Max Files
+             * @default 24
+             */
+            max_files: number;
+            /**
+             * Role
+             * @default
+             */
+            role: string;
+            /**
+             * Scope
+             * @default diff-paths
+             */
+            scope: string;
+        };
+        /**
+         * SidecarStatus
+         * @description What a skill's `sidecar:` declaration resolves to right now, for the skill's own page.
+         *
+         *     Every field answers a question that was previously only answerable by running something: is the
+         *     source tree where the skill thinks it is, how much local knowledge does it actually have, is the
+         *     installed collector the one Whetstone scores with, and has anything with the code in front of it
+         *     said a claim is wrong.
+         */
+        SidecarStatus: {
+            /**
+             * Budget
+             * @default 0
+             */
+            budget: number;
+            /**
+             * Claims
+             * @default 0
+             */
+            claims: number;
+            /**
+             * Confirmations
+             * @default false
+             */
+            confirmations: boolean;
+            /**
+             * Disputed
+             * @default 0
+             */
+            disputed: number;
+            /**
+             * Files
+             * @default 0
+             */
+            files: number;
+            /**
+             * Install Problems
+             * @default []
+             */
+            install_problems: string[];
+            /**
+             * Max File Bytes
+             * @default 0
+             */
+            max_file_bytes: number;
+            /**
+             * Max Files
+             * @default 0
+             */
+            max_files: number;
+            /**
+             * Problems
+             * @default []
+             */
+            problems: string[];
+            /** Role */
+            role: string;
+            /**
+             * Scan Truncated
+             * @default false
+             */
+            scan_truncated: boolean;
+            /**
+             * Scope
+             * @default diff-paths
+             */
+            scope: string;
+            /**
+             * Source Declared
+             * @default
+             */
+            source_declared: string;
+            /**
+             * Source Ok
+             * @default false
+             */
+            source_ok: boolean;
+            /**
+             * Source Root
+             * @default
+             */
+            source_root: string;
+            /**
+             * Uncited
+             * @default 0
+             */
+            uncited: number;
+        };
+        /**
          * Signal
          * @description One thing that happened in a real review, waiting to become an eval case.
          *
@@ -4888,6 +5238,17 @@ export interface components {
             references: components["schemas"]["Reference"][];
             /**
              * @default {
+             *       "budget": 20000,
+             *       "confirmations": false,
+             *       "max_file_bytes": 32000,
+             *       "max_files": 24,
+             *       "role": "",
+             *       "scope": "diff-paths"
+             *     }
+             */
+            sidecar: components["schemas"]["SidecarSpec"];
+            /**
+             * @default {
              *       "labels": [],
              *       "paths": []
              *     }
@@ -4957,6 +5318,7 @@ export interface components {
              */
             runs: components["schemas"]["RunSummary"][];
             scored_by?: components["schemas"]["RunSummary"] | null;
+            sidecar?: components["schemas"]["SidecarStatus"] | null;
             skill: components["schemas"]["Skill"];
             /**
              * Stale Reviews
@@ -8104,6 +8466,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TierResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_claims_api_skills__skill_id__claims_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClaimHistory"][];
                 };
             };
             /** @description Validation Error */
