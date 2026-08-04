@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from whetstone.agent.runner import agent_identity
 from whetstone.context import ResolvedContext, resolve_context
 from whetstone.domain.skill import Skill
 from whetstone.reviewer.base import Reviewer
@@ -221,9 +222,9 @@ class StepAgent:
 
     @property
     def identity(self) -> str:
-        root = " +source" if self.source_root else ""
-        extra = f" +{len(self.tools)} tool(s)" if self.tools else ""
-        return f"agent: {self.max_steps} steps{root}{extra}"
+        return agent_identity(
+            "agent", self.max_steps, source=bool(self.source_root), tools=len(self.tools)
+        )
 
     def build(self, client: Any) -> Any:
         from whetstone.agent.step import AgentStep
@@ -294,6 +295,13 @@ def _agent_context(
     root = str(raw_root) if raw_root else None
     # Redacted, not raw: see `AgentPlan.shown`.
     shown = {k: v for k, v in resolved.redacted.items() if k != "source_root"}
+    # A checkout path is machine-local whichever form declared it. The `{ env: … }` form is left out
+    # of the hashable slice by construction, but `agent.source` also takes a literal path — and a
+    # literal *does* enter `hashable`, so `/Users/alice/repo` and `/home/bob/repo` digested
+    # differently for identical content. That breaks the cross-machine property the digest exists
+    # for (see `ResolvedContext.digest`) and stops a gate ever reusing a teammate's baseline. What
+    # the reviewer reads is identified by the pinned ref, never by where the checkout happens to be.
+    resolved.hashable.pop("source_root", None)
 
     problems: list[str] = []
     # A path that is set but wrong is the quiet one. Every source tool answers "no such file" / "no
@@ -318,9 +326,9 @@ def _agent_choice(spec: StepSpec, skill_dir: Path) -> ReviewerChoice:
         shown=shown,
         tools=list(spec.agent.tools),
     )
-    identity = f"agent: {spec.agent.max_steps} steps" + (" +source" if root else "")
-    if spec.agent.tools:
-        identity += f" +{len(spec.agent.tools)} tool(s)"
+    identity = agent_identity(
+        "agent", spec.agent.max_steps, source=bool(root), tools=len(spec.agent.tools)
+    )
     return ReviewerChoice(context=resolved, identity=identity, agent=plan, problems=problems)
 
 
@@ -335,7 +343,7 @@ def _task_choice(spec: StepSpec, skill_dir: Path) -> ReviewerChoice:
         shown=shown,
         tools=list(spec.task.tools),
     )
-    identity = f"agent-task: {spec.task.max_steps} steps" + (" +source" if root else "")
-    if spec.task.tools:
-        identity += f" +{len(spec.task.tools)} tool(s)"
+    identity = agent_identity(
+        "agent-task", spec.task.max_steps, source=bool(root), tools=len(spec.task.tools)
+    )
     return ReviewerChoice(context=resolved, identity=identity, task=plan, problems=problems)
