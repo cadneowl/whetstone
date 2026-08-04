@@ -1,0 +1,11 @@
+diff --git a/ingest/feed_client.py b/ingest/feed_client.py
+--- a/ingest/feed_client.py
++++ b/ingest/feed_client.py
+@@ -12,2 +12,6 @@ class FeedClient:
+     def fetch(self, supplier_id):
+-        return self._http.get(f"/feeds/{supplier_id}")
++        while True:
++            try:
++                return self._http.get(f"/feeds/{supplier_id}")
++            except TimeoutError:
++                time.sleep(1)

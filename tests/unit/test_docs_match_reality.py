@@ -729,3 +729,49 @@ def test_the_collector_imports_nothing_from_whetstone() -> None:
     )
     # And nothing outside the standard library either, for the same reason.
     assert imported <= {"__future__", "argparse", "hashlib", "json", "sys", "pathlib", "typing"}
+
+
+def test_the_example_ships_the_collector_it_is_scored_with() -> None:
+    """The installed copy in the example must be byte-identical to the canonical collector.
+
+    `sidecars.md` open question 6 leans "copies for v1, with the CI floor asserting they are
+    byte-identical the moment there are two". This is that floor, arriving with the first copy.
+
+    An example whose collector has drifted is worse than no example: it is what someone copies into
+    their own skill folder, and a stale one resolves a different file set than the gate scored.
+    """
+    from whetstone.sidecars import collector_source
+
+    installed = ROOT / "examples/sidecar-review/skills/hub-arch-review/tools/collect_sidecars.py"
+    assert installed.is_file(), "the example must ship the collector it tells people to run"
+    assert installed.read_bytes() == collector_source(), (
+        "re-run `whetstone sidecars install --skill "
+        "examples/sidecar-review/skills/hub-arch-review`"
+    )
+
+
+def test_the_ablation_example_keeps_a_case_that_needs_no_sidecar() -> None:
+    """The control cases are what make the ablation number mean anything.
+
+    Without a `should_catch` whose folders carry no `.agents/` at all, a recall gain and a general
+    improvement in the reviewer are the same measurement. `handler-builds-sql` and
+    `unbounded-poll-retry` are that control, and they only work while their paths stay bare.
+    """
+    from whetstone.core.loader import load_skill
+    from whetstone.sidecars.collect import resolve
+
+    source = ROOT / "examples/sidecar-review/source"
+    skill = load_skill(ROOT / "examples/sidecar-review/skills/hub-arch-review")
+    controls = {"handler-builds-sql", "unbounded-poll-retry"}
+    seen = set()
+    for case in skill.eval_cases:
+        if case.id not in controls:
+            continue
+        seen.add(case.id)
+        paths = [f.path for f in case.change.files]
+        got = resolve(source, paths, skill.sidecar.role)
+        assert got["files"] == [] and got["dropped"] == [], (
+            f"{case.id} is the ablation's control and now resolves local context: "
+            f"{[f['path'] for f in got['files']]}"
+        )
+    assert seen == controls, f"the control cases were renamed or removed: {controls - seen}"

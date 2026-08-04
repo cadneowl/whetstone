@@ -1,0 +1,15 @@
+diff --git a/payments/refunds/processor.py b/payments/refunds/processor.py
+--- a/payments/refunds/processor.py
++++ b/payments/refunds/processor.py
+@@ -11,5 +11,11 @@ class RefundProcessor:
+         self._approvals.insert(
+             order_id=order_id,
+             amount_cents=amount_cents,
+             approver=approver,
+         )
++        self._ledger.insert(
++            order_id=order_id,
++            amount_cents=-amount_cents,
++            kind="refund",
++            idempotency_key=f"refund-{order_id}",
++        )

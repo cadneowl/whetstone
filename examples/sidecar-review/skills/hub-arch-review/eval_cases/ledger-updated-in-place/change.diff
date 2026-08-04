@@ -1,0 +1,8 @@
+diff --git a/payments/reconciliation/job.py b/payments/reconciliation/job.py
+--- a/payments/reconciliation/job.py
++++ b/payments/reconciliation/job.py
+@@ -17,2 +17,4 @@ class ReconciliationJob:
+     def _settle(self, row):
++        # Stamp the ledger row so the next window skips it.
++        self._ledger.update_settled_at(row[0], _now())
+         return {"id": row[0], "order_id": row[1], "amount_cents": row[2]}

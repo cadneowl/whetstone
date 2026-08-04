@@ -517,6 +517,36 @@ doesn't move, the tier is costing tokens and attention for nothing.
 
 **Measure it or delete it** — the standard already applied to guidance.
 
+### 9.2 What the first ablation said
+
+`examples/sidecar-review/` is a built fixture: a source tree with five `.agents/` files at three
+depths, and eight cases in three groups — sidecar-dependent catches, sidecar-dependent silences,
+and controls whose folders carry no `.agents/` at all. `qwen3-coder:30b` via Ollama, k=3:
+
+| | recall | fp_rate | F2 |
+|---|---|---|---|
+| sidecars on | **0.800** | 0.333 | 0.800 |
+| `--no-sidecars` | **0.400** | 0.333 | 0.435 |
+
+The gain is entirely on the sidecar-dependent catches (2 of 3, against 0 of 3). **Both controls
+score 1.00 in both arms** — which is the result that matters most here, because attention dilution
+is the failure this ablation exists to detect and it would show up exactly there. FP rate does not
+move: sidecars fix one negative case and break another (below).
+
+**This clears the mechanism, not the tier.** The sidecars and the cases were authored together, so
+the direction is not evidence about anyone's codebase; what it establishes is that the text reaches
+the model, the model reasons from it, the controls hold, and the two arms are distinguishable by
+digest. The efficacy question §9.1 poses still needs a real corpus, and steps 4–7 are still
+downstream of it.
+
+**It also found a failure this document did not predict.** Given an exception, the reviewer reports
+a finding whose message says the code is *fine* — *"increments the counter, which aligns with the
+documented exception for R3"* — rather than staying silent. Scored a false positive, correctly. The
+score cannot distinguish it from the reviewer disagreeing with the sidecar, which is a different bug
+with a different fix; only the message can. `_sidecar_block` now states that honouring an exception
+means reporting nothing, and that instruction is **not** known to be sufficient — this model
+produced the concurrence finding with and without it. Recorded here rather than closed.
+
 ---
 
 ## 10. Records
@@ -619,8 +649,10 @@ Value arrives at step 2. Everything after is earned.
    uninstalled** — that is the second caller, and it is easiest to check before there is anything
    to keep working.
 2. ✅ **`--no-sidecars` ablation** — the flag, and an ablation run recorded as a distinct
-   measurement so it can never be confused with a normal one. **The number is still owed.**
-   → **Exit criterion. If recall doesn't move, stop here.**
+   measurement so it can never be confused with a normal one.
+   → **Exit criterion. If recall doesn't move, stop here.** **Recall moves** — see §9.2. The
+   number is from a built fixture, not a real corpus, so it clears the mechanism and leaves the
+   efficacy question open.
 3. ✅ **Hashing.** `context_hash` per `CaseRun`; the declaration and the collector's own bytes in
    `reviewer_context_digest`, and therefore in `BaselineKey` and the C6 publish check. Gateable.
 4. **Triage destinations** + PR delivery. *Not built.*

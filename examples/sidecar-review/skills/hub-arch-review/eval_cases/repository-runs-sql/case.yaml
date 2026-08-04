@@ -1,0 +1,18 @@
+# Control negative. SQL in the repository layer is where R1 says it belongs, and no sidecar is
+# involved either way. It anchors the false-positive rate: without a case that both arms should
+# stay quiet about, a drop in FP rate could just be a reviewer that got quieter about everything.
+id: repository-runs-sql
+kind: should_not_flag
+repo: "gitlab:acme/hub"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/hub!4802"
+  human_signal: "merged unchanged"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: search/repository.py
+      line_range: [14, 18]
+    semantic: "SQL inside the repository layer is exactly where R1 puts it"

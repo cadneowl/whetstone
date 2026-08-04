@@ -1,0 +1,19 @@
+# Control. A plain R1 violation in a folder with no `.agents/` anywhere on its path, so both arms
+# of the ablation see exactly the same prompt for it. If recall on this case falls when sidecars are
+# on, the tier is diluting attention — which is the failure §9.1 says is otherwise invisible.
+id: handler-builds-sql
+kind: should_catch
+repo: "gitlab:acme/hub"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/hub!4790"
+  human_signal: "reviewer requested change; moved to SearchRepository"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: search/api.py
+      line_range: [13, 18]
+    semantic: "a request handler runs SQL directly instead of going through the repository"
+    severity_min: warning

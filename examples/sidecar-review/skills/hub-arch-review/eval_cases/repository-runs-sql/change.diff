@@ -1,0 +1,15 @@
+diff --git a/search/repository.py b/search/repository.py
+--- a/search/repository.py
++++ b/search/repository.py
+@@ -8,5 +8,11 @@ class SearchRepository:
+     def matching(self, query, limit):
+         return self._conn.execute(
+             "SELECT id, title FROM documents WHERE title LIKE ? LIMIT ?",
+             (f"%{query}%", limit),
+         ).fetchall()
++
++    def by_tag(self, tag, limit):
++        return self._conn.execute(
++            "SELECT id, title FROM documents WHERE tag = ? LIMIT ?",
++            (tag, limit),
++        ).fetchall()

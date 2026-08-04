@@ -1,0 +1,8 @@
+{
+  "budget": 20000,
+  "enabled": true,
+  "max_file_bytes": 32000,
+  "max_files": 24,
+  "role": "arch-review",
+  "scope": "diff-paths"
+}

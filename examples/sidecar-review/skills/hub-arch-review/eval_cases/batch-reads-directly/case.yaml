@@ -1,0 +1,21 @@
+# Sidecar-dependent, in the false-positive direction — the one a central rule cannot express. This
+# is inline SQL outside the repository layer and R1 says flag it. The reconciler's sidecar excepts
+# R1 by name for this package, so the correct review is silence. Without the sidecar, R1 fires.
+#
+# This is what the `exception` triage destination exists to produce: today the only way to stop the
+# reviewer flagging it is to soften R1 for the whole codebase.
+id: batch-reads-directly
+kind: should_not_flag
+repo: "gitlab:acme/hub"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/hub!4925"
+  human_signal: "merged unchanged; batch SQL here is the documented exception"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: payments/reconciliation/job.py
+      line_range: [17, 22]
+    semantic: "direct SQL in the batch reconciler is the documented exception to R1"

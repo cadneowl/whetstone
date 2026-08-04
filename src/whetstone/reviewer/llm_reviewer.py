@@ -185,6 +185,18 @@ def _sidecar_block(resolved: dict[str, Any] | None) -> str:
     A sidecar may assert local facts and may except a numbered rule; it may not quietly repeal one.
     That boundary is stated here as well as enforced at authoring time, because this is the only
     place the model ever sees the two side by side.
+
+    **Honouring an exception means silence, and that has to be said out loud.** A model given an
+    exception and nothing else reports a finding whose message says the code is *fine* — "increments
+    the counter, which aligns with the documented exception for R3" — which is scored a false
+    positive, correctly: the review spoke where it should have been silent. From the score alone it
+    is indistinguishable from the reviewer *disagreeing* with the sidecar, which is a different bug
+    with a different fix.
+
+    The sentence below says it. It is not known to be sufficient: `qwen3-coder:30b` produced the
+    concurrence finding in 3 of 3 trials both with and without it. It stays because it is the
+    correct instruction either way, and `notification-drop-counted` in `examples/sidecar-review/`
+    stays because it is what keeps the behaviour measured rather than assumed.
     """
     if resolved is None:
         return ""
@@ -198,7 +210,8 @@ def _sidecar_block(resolved: dict[str, Any] | None) -> str:
         "Local context for the folders this change touches, from `.agents/` files committed beside "
         "the code. These are facts about this part of the codebase, NOT review guidance: they add "
         "no rules. Where one says it excepts a numbered rule, honour the exception for that folder "
-        "only; otherwise the guidance above is unchanged by anything here. Nearest-folder notes "
+        "only — and honouring it means reporting nothing there, never a finding that says the code "
+        "is fine. Otherwise the guidance above is unchanged by anything here. Nearest-folder notes "
         "come last and are the most specific:\n\n"
         f"{body}"
     )

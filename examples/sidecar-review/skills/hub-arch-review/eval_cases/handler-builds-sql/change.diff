@@ -1,0 +1,13 @@
+diff --git a/search/api.py b/search/api.py
+--- a/search/api.py
++++ b/search/api.py
+@@ -10,2 +10,9 @@ class SearchApi:
+     def get_results(self, request):
+         return self._repo.matching(request.args["q"], int(request.args.get("limit", 20)))
++
++    def get_by_tag(self, request):
++        tag = request.args["tag"]
++        return self._repo._conn.execute(
++            "SELECT id, title FROM documents WHERE tag = ? LIMIT 50",
++            (tag,),
++        ).fetchall()

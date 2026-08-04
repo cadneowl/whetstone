@@ -1,0 +1,20 @@
+# Sidecar-dependent, and it lands in the folder that carries an exception. The reconciler's own
+# sidecar excepts R1 for this package; the append-only invariant it must still honour comes from a
+# *different* file one level up. Catching this means combining two sidecars, not treating the
+# folder as exempt from everything.
+id: ledger-updated-in-place
+kind: should_catch
+repo: "gitlab:acme/hub"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/hub!4917"
+  human_signal: "reviewer requested change; replaced with a compensating row"
+expect:
+  - id: e1
+    must: appear
+    where:
+      path: payments/reconciliation/job.py
+      line_range: [18, 19]
+    semantic: "updates an existing payments_ledger row in place; the ledger is append-only"
+    severity_min: warning

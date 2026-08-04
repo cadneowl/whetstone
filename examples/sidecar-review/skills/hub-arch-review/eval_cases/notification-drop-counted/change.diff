@@ -1,0 +1,10 @@
+diff --git a/notifications/service.py b/notifications/service.py
+--- a/notifications/service.py
++++ b/notifications/service.py
+@@ -13,2 +13,5 @@ class NotificationService:
+     def send(self, user_id, template, payload):
+-        self._transport.push(user_id, template, payload)
++        try:
++            self._transport.push(user_id, template, payload)
++        except TransportError:
++            self._dropped += 1

@@ -1,0 +1,18 @@
+# Sidecar-dependent, false-positive direction, in a second folder — so the exception has to be
+# scoped rather than learned as a general softening of R3. An exception granted here must not make
+# the reviewer quiet about swallowed exceptions in `payments/`.
+id: notification-drop-counted
+kind: should_not_flag
+repo: "gitlab:acme/hub"
+change: change.diff
+provenance:
+  source: gitlab_mr
+  ref: "acme/hub!4869"
+  human_signal: "merged unchanged; best-effort delivery is the design"
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: notifications/service.py
+      line_range: [14, 17]
+    semantic: "counting a dropped transport failure is the documented exception to R3 here"
