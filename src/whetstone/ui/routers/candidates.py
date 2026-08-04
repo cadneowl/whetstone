@@ -568,6 +568,19 @@ def commit_promotion(
         dest = config.skills_repo / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
+    if prepared.sidecar is not None:
+        # The claim's delivery — patch, branch, PR body — persisted beside the case that depends
+        # on it. The sidecar itself is never written (it belongs to the source repo, behind a PR),
+        # but until that PR is opened this file is the only artifact saying what was supposed to be
+        # filed: without it, closing the browser after Promote loses the claim while keeping the
+        # case that fails until the claim lands.
+        case_dir = next(
+            (Path(rel).parent for rel in prepared.files if rel.endswith("case.yaml")), None
+        )
+        if case_dir is not None:
+            (config.skills_repo / case_dir / "sidecar.delivery.json").write_text(
+                prepared.sidecar.model_dump_json(indent=2), encoding="utf-8"
+            )
     decision = new_decision("promoted", principal=principal.label)
     decision.skill_id = prepared.skill_id
     decision.case_id = prepared.case_id

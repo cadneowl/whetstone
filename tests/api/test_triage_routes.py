@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -976,6 +977,59 @@ def test_the_claim_is_never_written_only_previewed(
     assert (skills_root / "rust-errors" / "promoted_cases" / "812-t0" / "case.yaml").is_file()
     assert not (source / "src" / "handlers" / ".agents").exists()
     assert not (skills_root / "rust-errors" / "src").exists()
+
+
+def test_the_claim_delivery_survives_the_promotion(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    """The patch, branch and PR body are persisted beside the case that depends on the claim.
+
+    They used to exist only in the preview response: promote without copying them and the eval
+    case survived while the claim it fails without was gone — no artifact left to open the PR from.
+    """
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        promoted = client.post(
+            "/api/candidates/812-t0/promote",
+            json={
+                "edits": _edits(
+                    client,
+                    "812-t0",
+                    semantic="unwrap can panic on a normal path",
+                    destination="context",
+                    claim="the row is inserted by the gateway before this handler ever runs.",
+                    claim_source="acme/payments!812#note_44",
+                )
+            },
+        )
+    assert promoted.status_code == 200, promoted.text
+    delivery = (
+        skills_root / "rust-errors" / "promoted_cases" / "812-t0" / "sidecar.delivery.json"
+    )
+    assert delivery.is_file()
+    saved = json.loads(delivery.read_text(encoding="utf-8"))
+    assert saved == promoted.json()["prepared"]["sidecar"]
+    assert saved["patch"].startswith("diff --git a/src/handlers/.agents/context.md")
+    assert saved["branch"] == "whetstone/sidecar/812-t0"
+
+
+def test_a_rule_promotion_writes_no_delivery_file(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        promoted = client.post(
+            "/api/candidates/812-t0/promote",
+            json={"edits": _edits(client, "812-t0", semantic="unwrap can panic on a normal path")},
+        )
+    assert promoted.status_code == 200, promoted.text
+    case_dir = skills_root / "rust-errors" / "promoted_cases" / "812-t0"
+    assert (case_dir / "case.yaml").is_file()
+    assert not (case_dir / "sidecar.delivery.json").exists()
 
 
 def test_undo_leaves_the_claim_alone(

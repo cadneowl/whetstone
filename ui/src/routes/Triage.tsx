@@ -63,6 +63,10 @@ export function Triage() {
   const [reason, setReason] = useState('')
   // Text, plus an optional link the forge offered — only a push has one.
   const [notice, setNotice] = useState<{ text: string; url?: string | null } | null>(null)
+  // The claim delivery of the promotion just made. Kept on screen because Promote is the last
+  // moment the operator sees it in this queue — the patch is also saved beside the promoted case,
+  // and this says so.
+  const [promotedSidecar, setPromotedSidecar] = useState<PreparedCase['sidecar'] | null>(null)
   const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set())
 
   const all = useMemo(() => queue?.items ?? [], [queue])
@@ -138,8 +142,12 @@ export function Triage() {
             setNotice({
               text:
                 `${result.prepared.case_id} promoted — ${result.promoted} waiting to graduate` +
-                (tier === 'archive' ? ' (archived: counted at low weight)' : ''),
+                (tier === 'archive' ? ' (archived: counted at low weight)' : '') +
+                (result.prepared.sidecar
+                  ? ' · claim delivery saved beside the case (sidecar.delivery.json)'
+                  : ''),
             })
+            setPromotedSidecar(result.prepared.sidecar ?? null)
             setIndex((i) => Math.min(i, Math.max(0, items.length - 2)))
           },
         },
@@ -157,6 +165,7 @@ export function Triage() {
       {
         onSuccess: () => {
           setNotice({ text: `rejected ${current.entry.candidate.id}` })
+          setPromotedSidecar(null)
           setRejecting(false)
           setReason('')
         },
@@ -238,6 +247,11 @@ export function Triage() {
             </>
           )}
         </p>
+      )}
+      {notice && promotedSidecar && (
+        <div className="mb-3">
+          <SidecarPreview sidecar={promotedSidecar} />
+        </div>
       )}
 
       {all.length === 0 ? (
