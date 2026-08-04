@@ -208,6 +208,32 @@ class DroppedSidecar(BaseModel):
     reason: str
 
 
+ClaimStatus = Literal["confirmed", "contradicted", "unverifiable"]
+
+
+class ClaimVerdict(BaseModel):
+    """What a consuming run noticed about one claim it was given (`docs/design/sidecars.md` §8).
+
+    A byproduct, never a job. The run already holds both the sidecar and the diff, so asking is
+    close to free — and the effort then tracks how often code is *touched*, which is the correct
+    allocation: hot code gets checked weekly and cold code does not need it.
+
+    `confirmed` **requires** `evidence` naming code. Assent is free and evidence is not, so an
+    uncited confirmation is downgraded to `unverifiable` rather than counted — otherwise the
+    cheapest possible answer ("yes, still true") accumulates into something that looks like
+    verification and is not.
+
+    `claim` is the claim's text *as it appears in the file*, never the model's paraphrase of it.
+    A verdict that cannot be matched back to a real claim is dropped, because a ledger keyed on
+    invented text is worse than no ledger.
+    """
+
+    path: str
+    claim: str
+    status: ClaimStatus
+    evidence: str = ""
+
+
 class CaseSidecars(BaseModel):
     """The per-directory context one case's reviewer was given (`docs/design/sidecars.md` §10).
 
@@ -224,6 +250,9 @@ class CaseSidecars(BaseModel):
     paths: list[str] = []
     dropped: list[DroppedSidecar] = []
     context_hash: str = ""
+    # What the reviewer noticed about the claims it was handed, when it was asked. Empty for a run
+    # that loaded no sidecars, and for every reviewer that is not the built-in one.
+    verdicts: list[ClaimVerdict] = []
 
 
 class CaseRun(BaseModel):

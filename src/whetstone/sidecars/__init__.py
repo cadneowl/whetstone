@@ -87,6 +87,9 @@ def declaration_of(spec: SidecarSpec, *, enabled: bool = True) -> dict[str, Any]
         "max_files": spec.max_files,
         "max_file_bytes": spec.max_file_bytes,
         "enabled": enabled,
+        # In here because it changes the prompt of every case, and a gate taken with the review
+        # asked one question must not cover a reviewer being asked two.
+        "confirmations": spec.confirmations,
     }
 
 

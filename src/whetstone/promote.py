@@ -13,10 +13,11 @@ case that cannot be read is never committed.
 
 from __future__ import annotations
 
+import difflib
 import re
 import tempfile
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel
@@ -33,6 +34,8 @@ from whetstone.domain.eval_model import (
     Provenance,
 )
 from whetstone.naming import describe_unsafe, is_safe_segment
+from whetstone.sidecars.claims import with_claim
+from whetstone.sidecars.collect import AGENTS_DIR, CONTEXT_FILE
 
 CASE_FILE = "case.yaml"
 DIFF_FILE = "change.diff"
@@ -43,6 +46,40 @@ META_FILE = "meta.yaml"
 # reported as a declared rule forever and, having no findings to cite it, as a permanently untested
 # one.
 _RULE_ID = re.compile(r"^[A-Z][A-Z0-9]*[0-9]$")
+
+
+Destination = Literal["rule", "context", "exception"]
+
+# Where a destination's claim lands. A `context` claim is a fact about the subsystem that every
+# role needs, so it goes in the role-agnostic file — the reason `context.md` was factored out at
+# all. An `exception` narrows a rule belonging to *this* skill, so it goes in the role's own file:
+# excepting R1 for the arch reviewer must not silence the QA reviewer, which reads a different one.
+DESTINATION_FILE: dict[str, str] = {"context": CONTEXT_FILE, "exception": ""}
+
+
+class SidecarDelivery(BaseModel):
+    """A sidecar claim on its way to the source repo — as a patch, never as a write.
+
+    Kept out of `PreparedCase.files` on purpose. `commit_promotion` writes every entry in `files`
+    under `skills_repo`, and this file does not live there: it belongs to the reviewed code, in
+    front of that folder's CODEOWNERS. Whetstone holds no write credentials on a source repo
+    (ADR-028's *git stays the operator's*, surviving contact with a second repo), so what it
+    produces is something a person applies.
+    """
+
+    # Repo-relative inside the **source** repo, not the skills repo.
+    path: str
+    role: str
+    # The whole file after the claim is added — what review sees, and what `patch` applies to.
+    content: str
+    # A unified diff, `git apply`-able from the source repo root.
+    patch: str
+    branch: str
+    title: str
+    body: str
+    # True when the folder had no sidecar for this role yet, which is what the PR body should say:
+    # a first claim in a folder is a different review from a line added to an established file.
+    creates_file: bool = False
 
 
 class CaseEdits(BaseModel):
@@ -68,12 +105,36 @@ class CaseEdits(BaseModel):
     # insurance. The evidence (provenance, ref) is preserved either way; only the draw weight
     # differs. See `curation.similar_cases` for how the console surfaces the duplicates.
     tier: CaseTier = "active"
+    # Where the *judgment* goes. Triage has always had one destination while the decision being
+    # made had three, and that is what made the sidecar tier unfillable: a "the reviewer flagged X
+    # but X is correct here" signal had nowhere to go except softening the central rule, which
+    # degrades it everywhere to fix one folder.
+    #
+    # `reject` is not here — it is a different endpoint, which records a decision and writes no
+    # case at all. Every destination that *does* write, writes the eval case: it is the evidence
+    # the reviewer missed something there, and what the ablation uses to show the claim is
+    # load-bearing.
+    destination: Destination = "rule"
+    # The sidecar claim, for `context` and `exception`. Prose about this folder, in the words
+    # someone reading the code would need.
+    claim: str = ""
+    # Provenance for the claim — a review comment, a ticket, an ADR. Required, because blind
+    # verification needs something to check against beyond the claim's own plausibility, and the
+    # dead-claim sweep needs to ask whether the originating constraint still holds.
+    claim_source: str = ""
+    # The rule an `exception` narrows. Named, so exceptions stay countable: three folders excepting
+    # the same rule is the signal that the rule, not the folders, is what needs changing.
+    excepts_rule_id: str = ""
 
     @property
     def must(self) -> str:
         """Derived, never asked for: a `should_catch` case whose expectation says `not_appear` is
         incoherent, so the UI has no way to express it."""
         return "appear" if self.kind == "should_catch" else "not_appear"
+
+    @property
+    def writes_sidecar(self) -> bool:
+        return self.destination in DESTINATION_FILE
 
 
 class PreparedCase(BaseModel):
@@ -83,6 +144,9 @@ class PreparedCase(BaseModel):
     case_id: str
     files: dict[str, str]
     case: EvalCase
+    # The sidecar this promotion also produces, when the destination is `context` or `exception`.
+    # Deliberately not in `files` — see `SidecarDelivery`.
+    sidecar: SidecarDelivery | None = None
 
 
 def edits_from(entry: CandidateEntry, *, skill_id: str | None = None) -> CaseEdits:
@@ -252,12 +316,29 @@ def _check_semantic(entry: CandidateEntry, edits: CaseEdits) -> None:
         )
 
 
+class SidecarTarget(BaseModel):
+    """What `prepare` needs to render a claim: the skill's role, and what is already on disk.
+
+    Resolved by the caller rather than here, because finding it means reading the skill's
+    `evaluate` step and the source tree — neither of which this module knows about, and both of
+    which have to be resolved identically for the console and the CLI.
+    """
+
+    role: str
+    # The target file's current contents in the source repo, or None when the folder has none yet.
+    existing: str | None = None
+    # Rules the skill actually declares, so an `Excepts R9` on a skill with no R9 is caught here
+    # rather than becoming an exception that narrows nothing and is never noticed.
+    rule_ids: list[str] = []
+
+
 def prepare(
     entry: CandidateEntry,
     edits: CaseEdits,
     *,
     skills_root: Path | str,
     meta_yaml: str | None = None,
+    sidecar: SidecarTarget | None = None,
 ) -> PreparedCase:
     """Render and validate an edited candidate. Raises `SkillLoadError` if it wouldn't load.
 
@@ -265,6 +346,10 @@ def prepare(
     `meta_yaml` is the skill's current metadata, needed only when `edits.rule_id` is set — the
     updated copy is returned in `files` so the rule's evidence lands in the same commit as the case
     that demonstrates it, rather than in a follow-up nobody makes.
+
+    `sidecar` is required when the destination is `context` or `exception`, and unused otherwise.
+    What comes back for those is a *patch*, in `PreparedCase.sidecar` and never in `files` — the
+    file belongs to the reviewed repository, and Whetstone does not write there.
     """
     if not edits.skill_id:
         raise SkillLoadError("no target skill chosen for this candidate")
@@ -284,6 +369,7 @@ def prepare(
             f"rule id {edits.rule_id!r} should look like R1 or SEC2 — uppercase, ending in a "
             "digit, matching how rules are tagged in SKILL.md"
         )
+    _check_destination(edits, sidecar)
 
     if edits.line_range is not None:
         lo, hi = edits.line_range
@@ -319,7 +405,162 @@ def prepare(
         case_id=edits.case_id,
         files=files,
         case=case,
+        sidecar=(
+            _delivery(entry, edits, sidecar)
+            if edits.writes_sidecar and sidecar is not None
+            else None
+        ),
     )
+
+
+def _check_destination(edits: CaseEdits, target: SidecarTarget | None) -> None:
+    """Refuse a destination that cannot produce what it promises.
+
+    Configured-but-ignored is the failure shape being avoided in both directions: a claim typed
+    against a `rule` destination is silently discarded, and an `exception` on a skill with no role
+    would write a file nothing ever reads.
+    """
+    if not edits.writes_sidecar:
+        extra = [
+            name
+            for name, value in (("claim", edits.claim), ("excepts_rule_id", edits.excepts_rule_id))
+            if value.strip()
+        ]
+        if extra:
+            raise SkillLoadError(
+                f"destination is 'rule', so {' and '.join(extra)} would be discarded — choose "
+                f"'context' or 'exception' to file a claim beside the code, or clear the field"
+            )
+        return
+
+    if target is None or not target.role:
+        raise SkillLoadError(
+            f"destination {edits.destination!r} files a claim in `.agents/`, but "
+            f"{edits.skill_id!r} declares no `sidecar: role:` in SKILL.md — add one, or send this "
+            f"to 'rule'"
+        )
+    if not edits.claim.strip():
+        raise SkillLoadError(
+            "a context or exception destination needs a claim: it is what the reviewer will read "
+            "in that folder, and an empty one files nothing"
+        )
+    if not edits.claim_source.strip():
+        raise SkillLoadError(
+            "every claim carries its source and is rejected without one — a review comment, a "
+            "ticket, an ADR. Verification needs something to check against beyond the claim's own "
+            "plausibility, and the dead-claim sweep needs to know what the claim was for"
+        )
+    if edits.destination == "exception":
+        rule = edits.excepts_rule_id.strip()
+        if not rule:
+            raise SkillLoadError(
+                "an exception must name the rule it excepts: unnamed, it is a rule quietly "
+                "repealed in one folder, and nothing can count how often that has happened"
+            )
+        if not _RULE_ID.match(rule):
+            raise SkillLoadError(
+                f"excepted rule id {rule!r} should look like R1 or SEC2, matching how rules are "
+                f"tagged in SKILL.md"
+            )
+        if target.rule_ids and rule not in target.rule_ids:
+            declared = ", ".join(target.rule_ids)
+            raise SkillLoadError(
+                f"{edits.skill_id!r} declares no rule {rule!r}, so this exception would narrow "
+                f"nothing. It declares: {declared}"
+            )
+
+
+def _delivery(
+    entry: CandidateEntry, edits: CaseEdits, target: SidecarTarget
+) -> SidecarDelivery:
+    """The claim, its file, and the patch that adds it. `_check_destination` has already run."""
+    changed = PurePosixPath(edits.path)
+    folder = changed.parent
+    # `exception` is folder-level and `context` is filed under the file it came from. An exception
+    # that holds for one file and not its neighbours is a rule that needs changing, not a folder
+    # that is a different kind of place — which is the only thing an exception is for.
+    section = "" if edits.destination == "exception" else changed.name
+    name = DESTINATION_FILE[edits.destination] or f"{target.role}.md"
+    path = str(folder / AGENTS_DIR / name) if str(folder) != "." else f"{AGENTS_DIR}/{name}"
+
+    content = with_claim(
+        target.existing,
+        edits.claim,
+        edits.claim_source,
+        role="" if name == CONTEXT_FILE else target.role,
+        section=section,
+        excepts=edits.excepts_rule_id.strip(),
+    )
+    creates = not (target.existing or "").strip()
+    return SidecarDelivery(
+        path=path,
+        role=target.role,
+        content=content,
+        patch=_patch(path, target.existing or "", content),
+        branch=f"whetstone/sidecar/{edits.case_id}",
+        title=_title(edits, str(folder)),
+        creates_file=creates,
+        body=_pr_body(entry, edits, path=path, folder=str(folder), creates=creates),
+    )
+
+
+def _title(edits: CaseEdits, folder: str) -> str:
+    where = folder if folder != "." else "the repository root"
+    if edits.destination == "exception":
+        return f"{AGENTS_DIR}: {edits.excepts_rule_id} does not apply in {where}"
+    return f"{AGENTS_DIR}: record local context for {where}"
+
+
+def _pr_body(
+    entry: CandidateEntry, edits: CaseEdits, *, path: str, folder: str, creates: bool
+) -> str:
+    """The pull request this claim goes out as.
+
+    Addressed to the folder's owners, because they are the only people who can say whether the
+    claim is true. The ticket is in the body for the same reason the claim carries its source: a
+    reviewer asked to accept an assertion about their own code needs to see where it came from.
+    """
+    provenance = entry.candidate.provenance
+    origin = provenance.ref or provenance.source or "triage"
+    lead = (
+        f"Adds `{path}` — the first `{AGENTS_DIR}/` note in `{folder}`."
+        if creates
+        else f"Adds one claim to `{path}`."
+    )
+    kind = (
+        f"It excepts **{edits.excepts_rule_id}** for this folder only. The rule stays strict "
+        f"everywhere else."
+        if edits.destination == "exception"
+        else "It records a fact about this folder that is not recoverable from the code."
+    )
+    return (
+        f"{lead}\n\n{kind}\n\n"
+        f"> {edits.claim.strip()}\n\n"
+        f"**Source:** {edits.claim_source.strip()}\n"
+        f"**Origin:** {origin}\n\n"
+        f"This note is read by automated review of changes under `{folder}`; it adds no rules of "
+        f"its own. It came with an eval case (`{edits.case_id}`) that fails without it, which is "
+        f"what keeps it from being decoration.\n\n"
+        f"Please reject it if it is wrong — it will be read as fact by every future review of this "
+        f"folder."
+    )
+
+
+def _patch(path: str, before: str, after: str) -> str:
+    """A `git apply`-able unified diff. New files diff against /dev/null, as git writes them."""
+    old = before.splitlines(keepends=True)
+    new = after.splitlines(keepends=True)
+    from_file = f"a/{path}" if before else "/dev/null"
+    body = "".join(
+        difflib.unified_diff(old, new, fromfile=from_file, tofile=f"b/{path}", n=3)
+    )
+    header = f"diff --git a/{path} b/{path}\n"
+    if not before:
+        header += "new file mode 100644\n"
+    # A final line with no newline would make `git apply` reject the whole patch.
+    if body and not body.endswith("\n"):
+        body += "\n\\ No newline at end of file\n"
+    return header + body
 
 
 def _validate(case_yaml: str, diff: str, edits: CaseEdits) -> EvalCase:

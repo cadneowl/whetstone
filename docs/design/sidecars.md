@@ -1,8 +1,10 @@
 # Sidecars: per-directory skill knowledge that lives with the code
 
-**Status:** **Steps 1–3 built** (retrieval, the `--no-sidecars` ablation, and hashing); steps 4–7
-are not. §14 marks each. The exit criterion at step 2 has *not* been answered — that needs a real
-corpus with real sidecars, and it is the decision this whole design is subject to. Builds on
+**Status:** **All seven steps built** — §14 marks each, and §9.2 records what the fixture measured
+and the two costs it turned up that this document did not predict. The exit criterion at step 2 is
+answered *on a built fixture* (`examples/sidecar-review/`), which clears the mechanism and leaves
+the efficacy question where it was: it needs a real corpus with sidecars written by the people who
+own the code, and that is still the decision this whole design is subject to. Builds on
 [`agentic-reviewers.md`](./agentic-reviewers.md), whose Phase 1 shipped: this doc reuses that
 design's `context:` bag, `source_root` and `pin: true` rather than inventing a parallel mechanism,
 and marks the one place it deliberately departs from it (§11). It does **not** depend on
@@ -521,31 +523,40 @@ doesn't move, the tier is costing tokens and attention for nothing.
 
 `examples/sidecar-review/` is a built fixture: a source tree with five `.agents/` files at three
 depths, and eight cases in three groups — sidecar-dependent catches, sidecar-dependent silences,
-and controls whose folders carry no `.agents/` at all. `qwen3-coder:30b` via Ollama, k=3:
+and controls whose folders carry no `.agents/` at all. `qwen3-coder:30b` via Ollama, k=3, two runs
+of each arm:
 
-| | recall | fp_rate | F2 |
-|---|---|---|---|
-| sidecars on | **0.800** | 0.333 | 0.800 |
-| `--no-sidecars` | **0.400** | 0.333 | 0.435 |
+| | recall | fp_rate |
+|---|---|---|
+| sidecars on | **0.733**, 0.733 | 0.444, 0.444 |
+| `--no-sidecars` | **0.400**, 0.533 | 0.000, 0.222 |
 
-The gain is entirely on the sidecar-dependent catches (2 of 3, against 0 of 3). **Both controls
-score 1.00 in both arms** — which is the result that matters most here, because attention dilution
-is the failure this ablation exists to detect and it would show up exactly there. FP rate does not
-move: sidecars fix one negative case and break another (below).
+**Recall goes up and false positives go up with it**, and neither half is noise. The recall gain is
+entirely on the sidecar-dependent catches — `ledger-second-writer` and `retry-cap-raised` both move
+0.00 → 1.00 — which is the tier doing exactly what it is for. The false-positive cost is almost
+entirely one case, for one understood reason, below.
 
 **This clears the mechanism, not the tier.** The sidecars and the cases were authored together, so
-the direction is not evidence about anyone's codebase; what it establishes is that the text reaches
-the model, the model reasons from it, the controls hold, and the two arms are distinguishable by
-digest. The efficacy question §9.1 poses still needs a real corpus, and steps 4–7 are still
-downstream of it.
+the direction of the recall result is not evidence about anyone's codebase; what it establishes is
+that the text reaches the model, the model reasons from it, and the two arms are distinguishable by
+digest. The efficacy question §9.1 poses still needs a real corpus.
 
-**It also found a failure this document did not predict.** Given an exception, the reviewer reports
-a finding whose message says the code is *fine* — *"increments the counter, which aligns with the
-documented exception for R3"* — rather than staying silent. Scored a false positive, correctly. The
-score cannot distinguish it from the reviewer disagreeing with the sidecar, which is a different bug
-with a different fix; only the message can. `_sidecar_block` now states that honouring an exception
-means reporting nothing, and that instruction is **not** known to be sufficient — this model
-produced the concurrence finding with and without it. Recorded here rather than closed.
+**Two costs this document did not predict.**
+
+*Concurrence findings.* Given an exception, the reviewer reports a finding whose message says the
+code is *fine* — *"increments the counter, which aligns with the documented exception for R3"* —
+rather than staying silent. Scored a false positive, correctly, and it is most of the FP gap above.
+The score cannot distinguish it from the reviewer disagreeing with the sidecar, which is a different
+bug with a different fix; only the message can. `_sidecar_block` now states that honouring an
+exception means reporting nothing, and that instruction is **not** known to be sufficient — this
+model produced the concurrence finding with and without it. Recorded rather than closed.
+
+*The confirmation loop is not free.* §8 argues its marginal cost is ≈ 0 because the run already
+holds both the sidecar and the code. True of tokens, false of attention: asking for claim verdicts
+moved recall 0.733 → 0.600, twice, and the case it lost was `retry-cap-raised`. So
+`sidecar: confirmations:` defaults to **false** and is part of the hashed declaration, which makes
+turning it on retract baselines rather than quietly change what was being measured. §8 is amended
+by that: *a byproduct with no marginal cost* is the intent, not the measurement.
 
 ---
 
@@ -655,10 +666,24 @@ Value arrives at step 2. Everything after is earned.
    efficacy question open.
 3. ✅ **Hashing.** `context_hash` per `CaseRun`; the declaration and the collector's own bytes in
    `reviewer_context_digest`, and therefore in `BaselineKey` and the C6 publish check. Gateable.
-4. **Triage destinations** + PR delivery. *Not built.*
-5. **Consumer confirmations** — structured output, ledger, no writes. *Not built.*
-6. **Maintainer skill** — blind verification, post-merge, cold crawl. *Not built.*
-7. **Mechanical CI floor** — orphan check, citation check, bot-write boundary. *Not built.*
+4. ✅ **Triage destinations** + PR delivery. `rule | context | exception` on `CaseEdits`, with
+   `reject` staying the separate endpoint it already was. Every destination still writes the eval
+   case. A claim comes back as `PreparedCase.sidecar` — a patch, a branch, a title and a PR body —
+   and never in `files`, which `commit_promotion` writes under `skills_repo`.
+5. ✅ **Consumer confirmations** — `sidecars/confirm.py`, a per-claim verdict asked as a byproduct,
+   matched back to a real claim or dropped, appended to a ledger on save. **Opt-in**, against this
+   document's expectation: see §9.2.
+6. ✅ **Maintainer skill** — `sidecars/maintain.py` and `whetstone sidecars verify`. Two calls: a
+   blind account of the folder, then a comparison. Post-merge with `--folder`, cold crawl with
+   `--limit`, least-recently-verified first. Writes no sidecar.
+7. ✅ **Mechanical CI floor** — `sidecars/floor.py` and `whetstone sidecars check`. Uncited claims,
+   off-ladder frontmatter, oversized files, orphaned headings and folders, role/filename mismatch,
+   and the bot-write boundary from a diff. Exits 1; no model.
+
+**Also built, and not in the original plan:** the trust ladder is now *enforced*, in `collect.py`
+rather than in Whetstone's half, so the Claude Code caller climbs it too. An `unconfirmed` sidecar
+is dropped with a reason and the drop is hashed — promoting a claim later therefore invalidates the
+runs taken while it was withheld, which is the same discipline every other cap already follows.
 
 ---
 

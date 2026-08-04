@@ -53,8 +53,10 @@ from whetstone.judge.spec import load_judge
 from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import PRESETS, Backend, build_llm_client, resolve_backend
 from whetstone.preflight import (
+    Estimate,
     Plan,
     annotate_reviewer,
+    billing_of,
     check_budget,
     plan_calls,
     plan_eval,
@@ -2897,6 +2899,239 @@ def sidecars_install(skill: SkillDirOpt) -> None:
         f"\ncommit both, then from the source tree:\n"
         f"  git diff --name-only main | python {script.name} --root . --paths -"
     )
+
+
+@sidecars_app.command("verify")
+def sidecars_verify(
+    skill: SkillDirOpt,
+    folder: Annotated[
+        list[str] | None,
+        typer.Option("--folder", help="Only these folders (repeatable) — the post-merge sweep"),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(help="Check at most this many sidecars, least-recently-verified first"),
+    ] = None,
+    llm: LlmOpt = None,
+    model: ModelOpt = None,
+    base_url: BaseUrlOpt = None,
+    api_key_env: KeyEnvOpt = None,
+    effort: Annotated[str, typer.Option()] = "medium",
+    runs_dir: RunsDirOpt = None,
+    record: Annotated[
+        bool,
+        typer.Option("--record/--no-record", help="Append verdicts to the claim ledger"),
+    ] = True,
+    uncovered: Annotated[
+        bool,
+        typer.Option("--uncovered", help="Also print facts no claim covers (noisy; see below)"),
+    ] = False,
+    yes: YesOpt = False,
+) -> None:
+    """Check a source tree's `.agents/` claims against the code — blind (§8).
+
+    Two calls per sidecar. The first reads the folder and writes an independent account of what a
+    reader would need to be told, **without seeing the claims**. The second compares that account
+    against them. Never one call asking "is this still true?": a model shown a plausible claim and
+    a long file agrees, and the loop then costs money to verify nothing.
+
+    Writes no sidecar, ever. Confirmation is automatic and correction is gated — contradictions
+    land in the ledger (`whetstone sidecars claims --disputed`) for a human to act on.
+
+    `--folder` is the post-merge sweep over what a merge touched. `--limit` with neither is the
+    budgeted nightly crawl, spent on the least-recently-verified first, which is the only thing
+    that ever reaches cold code.
+
+    Contradictions are the output. `--uncovered` also prints facts the account produced that no
+    claim covers, and it is off by default because most of them are restatement: the blind prompt
+    asks for what a reader would need to be *told* rather than what they would see by reading the
+    file once, and models answer with the second anyway. It is raw material for a human writing the
+    next claim, not a work list.
+    """
+    from whetstone.sidecars.confirm import Ledger
+    from whetstone.sidecars.maintain import sidecar_folders, sweep
+
+    sk = load_skill(skill)
+    if sk.sidecar.is_empty():
+        raise typer.BadParameter(f"{sk.id} declares no `sidecar:` block in SKILL.md")
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
+    if choice.sidecar is None:
+        raise typer.BadParameter(
+            f"{sk.id} resolves no source tree"
+            + (f": {'; '.join(choice.problems)}" if choice.problems else "")
+        )
+    root = choice.sidecar.source_root
+    ledger = Ledger(_store(runs_dir).root)
+    last_seen = {h.path: h.last_seen for h in ledger.summary()}
+
+    targets = sidecar_folders(root, sk.sidecar.role)
+    if folder:
+        wanted = {f.rstrip("/") or "." for f in folder}
+        targets = [t for t in targets if t[0] in wanted]
+    planned = min(len(targets), limit) if limit is not None else len(targets)
+    pick = _backend_for(None, llm, model, base_url)
+    backend = _resolve(*pick)
+    plan = Plan(
+        action="sidecars verify",
+        backend=backend.name,
+        model=backend.model,
+        base_url=backend.base_url,
+        billing=billing_of(backend),
+        estimate=Estimate(
+            calls=planned * 2,
+            basis=(
+                f"{planned} sidecar(s) x 2 calls — one blind account of the folder, one "
+                f"comparison against its claims"
+            ),
+        ),
+    )
+    plan.details.append(f"reads {root} — source, and nothing is written back to it")
+    _preflight(plan, yes)
+    if not planned:
+        typer.echo("nothing to verify")
+        return
+
+    client = _client(*pick, api_key_env, label=f"verify-{sk.id}")
+    report = sweep(
+        client,
+        root,
+        sk.sidecar.role,
+        folders=folder or None,
+        limit=limit,
+        last_seen=last_seen,
+        effort=effort,
+    )
+    written = 0
+    for folder_report in report.folders:
+        if folder_report.skipped:
+            typer.echo(f"  {folder_report.sidecar}: {folder_report.skipped}")
+            continue
+        for check in folder_report.checks:
+            if check.verdict == "contradicted":
+                typer.echo(f"! {folder_report.sidecar}\n    {check.claim[:100]}")
+                typer.echo(f"    against: {check.evidence[:110]}")
+        if uncovered:
+            for fact in folder_report.uncovered:
+                typer.echo(f"+ {folder_report.folder}: no claim covers - {fact[:100]}")
+        if record:
+            written += ledger.record(
+                [c.as_ledger_verdict(folder_report.sidecar) for c in folder_report.checks],
+                skill_id=sk.id,
+            )
+    typer.echo(
+        f"\n{len(report.folders)} sidecar(s), {report.calls} llm calls, "
+        f"{report.contradicted} contradicted"
+        + (f", {written} verdict(s) recorded" if record else "")
+    )
+
+
+@sidecars_app.command("claims")
+def sidecars_claims(
+    runs_dir: RunsDirOpt = None,
+    disputed: Annotated[
+        bool, typer.Option("--disputed", help="Only claims something has contradicted")
+    ] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """What consuming runs have said about each `.agents/` claim (`docs/design/sidecars.md` §8).
+
+    Every review that was handed local context is also asked whether the code still agrees with it,
+    which costs one field in a reply it was making anyway. This is the accumulated answer.
+
+    Disputed claims come first: one `contradicted` from one model on one case is an opinion, and
+    the same verdict from four unrelated runs over a month is a finding. Confirmation is automatic
+    and correction is not — a contradiction is a prompt to look, never an edit.
+
+    A confirmation with no code citation is recorded as `unverifiable`, because assent is free.
+    """
+    import json as _json
+
+    from whetstone.sidecars.confirm import Ledger
+
+    ledger = Ledger(_store(runs_dir).root)
+    rows = [h for h in ledger.summary() if h.disputed or not disputed]
+    if json_out:
+        typer.echo(_json.dumps([h.model_dump(mode="json") for h in rows], indent=2))
+        return
+    if not rows:
+        typer.echo(
+            "no claim verdicts recorded yet — they arrive from runs whose skill declares a "
+            "`sidecar:` role and whose cases touch folders carrying `.agents/` files"
+        )
+        return
+    for row in rows:
+        mark = "!" if row.disputed else " "
+        typer.echo(
+            f"{mark} {row.path}\n"
+            f"    {row.claim[:100]}\n"
+            f"    confirmed {row.confirmed}  contradicted {row.contradicted}  "
+            f"unverifiable {row.unverifiable}   last seen {row.last_seen:%Y-%m-%d}"
+        )
+        if row.last_evidence:
+            typer.echo(f"    against: {row.last_evidence[:110]}")
+
+
+@sidecars_app.command("check")
+def sidecars_check(
+    root: Annotated[
+        Path, typer.Option("--root", help="The source tree whose `.agents/` files to check")
+    ] = Path("."),
+    max_file_bytes: Annotated[
+        int | None,
+        typer.Option(help="Override the size cap; defaults to the collector's"),
+    ] = None,
+    patch: Annotated[
+        Path | None,
+        typer.Option(
+            "--patch",
+            help="A unified diff to check for a bot writing claims; '-' reads stdin",
+        ),
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """The mechanical floor: everything about a sidecar that is decidable without a model.
+
+    Uncited claims, malformed or off-ladder frontmatter, a file over the size cap, a `## file.md`
+    heading naming a file that is no longer there, an `.agents/` folder whose code has moved away,
+    and a role that disagrees with its own filename.
+
+    Cheap enough for a pre-commit hook and exact enough to block CI: it never asks whether a claim
+    is *true*, which is blind verification's job and needs a model.
+
+    With `--patch`, it also enforces the write boundary — agents may write metadata, agents may
+    never write claims — by reporting which sidecars the diff edits below the frontmatter. Run that
+    form over a bot-authored commit and reject a non-empty answer.
+
+    Exits 1 when anything is wrong, so `whetstone sidecars check --root .` is the whole CI step.
+    """
+    import json as _json
+    import sys
+
+    from whetstone.sidecars.floor import check_tree, claims_touched
+
+    if not root.is_dir():
+        raise typer.BadParameter(f"{root} is not a directory")
+    problems = check_tree(root, **({} if max_file_bytes is None else
+                                   {"max_file_bytes": max_file_bytes}))
+    touched: list[str] = []
+    if patch is not None:
+        text = sys.stdin.read() if str(patch) == "-" else patch.read_text(encoding="utf-8")
+        touched = claims_touched(text)
+
+    if json_out:
+        typer.echo(_json.dumps(
+            {"problems": [p.model_dump() for p in problems], "claims_touched": touched},
+            indent=2,
+        ))
+    else:
+        for problem in problems:
+            typer.echo(str(problem))
+        for path in touched:
+            typer.echo(f"{path}: [bot_claim] this patch edits claims, not just metadata")
+        if not problems and not touched:
+            typer.echo(f"{root}: no sidecar problems")
+    if problems or touched:
+        raise typer.Exit(code=1)
 
 
 @sidecars_app.command("show")

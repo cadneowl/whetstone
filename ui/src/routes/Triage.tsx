@@ -15,6 +15,7 @@ import {
   type Batch,
   type CaseEdits,
   type EvalKind,
+  type PreparedCase,
   type PromotedCase,
   type QueueItem,
 } from '@/api/client'
@@ -41,8 +42,8 @@ import { SIGNALS, SignalBadge, signalMeta } from '@/components/signals'
 const TRIAGE_INTRO = (
   <>
     Signal mined from merge requests, waiting to become eval cases. For each one: check the evidence
-    in the middle, fix the fields on the right — <em>rewrite the expected finding</em>, which arrives
-    as the raw review comment — then Promote. Promoted cases land under{' '}
+    in the middle, fix the fields on the right — <em>rewrite the expected finding</em>, which
+    arrives as the raw review comment — then Promote. Promoted cases land under{' '}
     <code className="font-mono">promoted_cases/</code>: score the skill against them to see what it
     misses, then graduate the ones that earn a place in the eval corpus. Reject anything the miner
     guessed wrong.
@@ -350,7 +351,13 @@ function PromotedBatch({ batch, readOnly }: { batch: Batch; readOnly: boolean })
   // Scoring runs per skill, so a selection spanning two skills has no single request to make.
   const skillsChosen = [...new Set(chosen.map((c) => c.skill_id))]
   const skillsAll = [...new Set(cases.map((c) => c.skill_id))]
-  const scoreSkill = chosen.length ? (skillsChosen.length === 1 ? skillsChosen[0] : null) : (skillsAll.length === 1 ? skillsAll[0] : null)
+  const scoreSkill = chosen.length
+    ? skillsChosen.length === 1
+      ? skillsChosen[0]
+      : null
+    : skillsAll.length === 1
+      ? skillsAll[0]
+      : null
   // Ticking nothing means the whole promoted set, which both score buttons share — they differ
   // only in whether the graduated corpus goes underneath it.
   const pickedCases = chosen.length ? { cases: chosen.map((c) => c.case_id) } : {}
@@ -521,8 +528,8 @@ function PromotedBatch({ batch, readOnly }: { batch: Batch; readOnly: boolean })
             The first scores <em>only</em> these promoted case(s) — the cheap check that the skill
             catches them yet, at a cost that does not grow as the corpus does. The second puts the
             graduated eval corpus underneath: the regression view, and it costs every case in it.
-            Leaving it out is a spend decision, not a gap — the gate scores the whole corpus on
-            both sides before anything can be proposed.
+            Leaving it out is a spend decision, not a gap — the gate scores the whole corpus on both
+            sides before anything can be proposed.
           </p>
         )}
       </div>
@@ -576,6 +583,14 @@ function PromotedEditor({
           expectation_id: promoted.expectation_id || 'e1',
           rule_id: promoted.rule_id ?? '',
           semantic_drafted_by: promoted.provenance.semantic_drafted_by ?? '',
+          // Always `rule` here, and deliberately: this edits a case that is already promoted, and
+          // its claim — if it had one — went out as a pull request the moment it was promoted.
+          // Re-filing it on every wording tweak would open a second PR against someone else's
+          // repository for a change they never made.
+          destination: 'rule',
+          claim: '',
+          claim_source: '',
+          excepts_rule_id: '',
         },
       },
       { onSuccess: onDone },
@@ -935,7 +950,7 @@ function FormPane({
   onValidate: () => void
   busy: boolean
   error: unknown
-  validated: { case_id: string } | null
+  validated: PreparedCase | null
 }) {
   const candidate = item.entry.candidate
   const rawComment = item.edits.semantic
@@ -994,6 +1009,13 @@ function FormPane({
             className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
           />
         </Field>
+
+        <DestinationField
+          edits={edits}
+          onChange={onChange}
+          readOnly={readOnly}
+          defaultSource={candidate.provenance.ref ?? ''}
+        />
 
         <Field label="Evidence for rule">
           {/* Optional. Set it and the source MR is filed under that rule in the skill's meta.yaml,
@@ -1218,6 +1240,7 @@ function FormPane({
             Valid — would commit {validated.case_id}
           </p>
         )}
+        {validated?.sidecar && !error && <SidecarPreview sidecar={validated.sidecar} />}
 
         {rejecting ? (
           <div className="space-y-2 rounded-lg border border-bad/40 p-3">
@@ -1376,6 +1399,171 @@ function withLine(
   const base: [number, number] = current ? [current[0], current[1]] : [value, value]
   base[index] = value
   return base
+}
+
+/**
+ * The claim a `context` or `exception` promotion produces, shown before anyone commits to it.
+ *
+ * This is the one artifact of a promotion that leaves Whetstone's own repository, and it is
+ * addressed to people who did not ask for it. Showing the exact patch — rather than "a sidecar
+ * will be filed" — is the difference between a reviewable pull request and a surprise.
+ */
+function SidecarPreview({ sidecar }: { sidecar: NonNullable<PreparedCase['sidecar']> }) {
+  return (
+    <details className="rounded border border-accent/40 bg-accent/5 px-2 py-1.5 text-xs">
+      <summary className="cursor-pointer text-accent">
+        {sidecar.creates_file ? 'Creates' : 'Adds a claim to'}{' '}
+        <span className="font-mono">{sidecar.path}</span> — in the source repo, as a pull request
+      </summary>
+      <p className="mt-2 text-muted">
+        Branch <span className="font-mono">{sidecar.branch}</span>. Whetstone never writes to a
+        source repo; apply this with <span className="font-mono">git apply</span> and open the PR.
+      </p>
+      <pre className="mt-2 max-h-64 overflow-auto rounded border border-line bg-canvas p-2 font-mono text-[11px] whitespace-pre">
+        {sidecar.patch}
+      </pre>
+    </details>
+  )
+}
+
+type Destination = NonNullable<CaseEdits['destination']>
+
+const DESTINATIONS: { value: Destination; label: string; blurb: string }[] = [
+  {
+    value: 'rule',
+    label: 'rule',
+    blurb: 'The guidance should say this everywhere. Writes the eval case, and nothing else.',
+  },
+  {
+    value: 'context',
+    label: 'context',
+    blurb:
+      'A fact about this folder that is not recoverable from the code, and holds nowhere else. ' +
+      'Writes the eval case and a claim beside the code.',
+  },
+  {
+    value: 'exception',
+    label: 'exception',
+    blurb:
+      'The reviewer was right in general and wrong here. Narrows one rule for this folder only, ' +
+      'instead of softening it for the whole codebase.',
+  },
+]
+
+/**
+ * Where the judgment goes. Triage had one destination while the decision being made had three,
+ * which is what left a "flagged X, but X is correct here" signal with nowhere to go except
+ * weakening the central rule — the way a rule set rots.
+ *
+ * The claim itself is delivered as a pull request against the source repo, never written: that
+ * file belongs to the reviewed code, in front of its own CODEOWNERS.
+ */
+function DestinationField({
+  edits,
+  onChange,
+  readOnly,
+  defaultSource,
+}: {
+  edits: CaseEdits
+  onChange: (e: CaseEdits) => void
+  readOnly: boolean
+  defaultSource: string
+}) {
+  const destination = edits.destination ?? 'rule'
+  const filesClaim = destination === 'context' || destination === 'exception'
+  const chosen = DESTINATIONS.find((d) => d.value === destination)
+
+  const pick = (value: Destination) =>
+    onChange({
+      ...edits,
+      destination: value,
+      // Seeded from the candidate's own provenance, because a claim with no source is refused and
+      // the MR it came from is the answer nine times in ten. Cleared going back to `rule`, where
+      // a stray claim is refused rather than silently dropped.
+      claim_source: value === 'rule' ? '' : edits.claim_source || defaultSource,
+      claim: value === 'rule' ? '' : edits.claim,
+      excepts_rule_id: value === 'exception' ? edits.excepts_rule_id : '',
+    })
+
+  return (
+    <Field label="Destination">
+      <div className="flex gap-3">
+        {DESTINATIONS.map((option) => (
+          <label key={option.value} className="flex items-center gap-1.5">
+            <input
+              type="radio"
+              checked={destination === option.value}
+              onChange={() => pick(option.value)}
+              disabled={readOnly}
+            />
+            <span>{option.label}</span>
+          </label>
+        ))}
+      </div>
+      <p className="mt-1 text-xs text-muted">{chosen?.blurb}</p>
+      {filesClaim && (
+        <div className="mt-2 space-y-2 border-l-2 border-line pl-3">
+          {destination === 'exception' && (
+            <div>
+              <label className="mb-1 block text-[11px] tracking-wide text-muted uppercase">
+                Excepts rule
+              </label>
+              <input
+                value={edits.excepts_rule_id ?? ''}
+                onChange={(e) =>
+                  onChange({ ...edits, excepts_rule_id: e.target.value.toUpperCase() })
+                }
+                disabled={readOnly}
+                placeholder="R1"
+                className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
+              />
+              <p className="mt-1 text-xs text-muted">
+                Named, so exceptions stay countable — three folders excepting the same rule means
+                the rule needs changing, not the folders.
+              </p>
+            </div>
+          )}
+          <div>
+            <label className="mb-1 block text-[11px] tracking-wide text-muted uppercase">
+              Claim
+            </label>
+            <textarea
+              value={edits.claim ?? ''}
+              onChange={(e) => onChange({ ...edits, claim: e.target.value })}
+              disabled={readOnly}
+              rows={3}
+              placeholder={
+                destination === 'exception'
+                  ? 'why the rule does not hold in this folder'
+                  : 'what a reader of this folder would need to be told'
+              }
+              className="w-full rounded border border-line bg-canvas px-2 py-1 text-xs"
+            />
+            <p className="mt-1 text-xs text-muted">
+              Goes out as a pull request against the source repo, in front of that folder&rsquo;s
+              owners. Every future review of these paths reads it as fact.
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-[11px] tracking-wide text-muted uppercase">
+              Claim source
+            </label>
+            <input
+              value={edits.claim_source ?? ''}
+              onChange={(e) => onChange({ ...edits, claim_source: e.target.value })}
+              disabled={readOnly}
+              placeholder="HUB-45814#r411 @ 9f2c1ab"
+              className="w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-xs"
+            />
+            <p className="mt-1 text-xs text-muted">
+              Required. Verification needs something to check the claim against besides its own
+              plausibility, and the dead-claim sweep needs to know what it was recording.
+            </p>
+          </div>
+        </div>
+      )}
+    </Field>
+  )
 }
 
 function Field({

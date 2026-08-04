@@ -67,6 +67,18 @@ class SidecarSpec(BaseModel):
     budget: int = 20_000
     max_files: int = 24
     max_file_bytes: int = 32_000
+    # Ask each review, as a byproduct, whether the code still agrees with the claims it was handed
+    # (`docs/design/sidecars.md` §8, `sidecars/confirm.py`).
+    #
+    # **Off by default, because it is not free.** The design argues the marginal cost is ~0 since
+    # the run already holds both the sidecar and the diff — true of tokens, and measured false of
+    # attention. On `examples/sidecar-review/` with `qwen3-coder:30b`, turning it on moved recall
+    # from 0.733 to 0.600 in two runs each, the loss landing on `retry-cap-raised` — the
+    # sidecar-dependent case the tier exists to catch. A stronger model may well absorb the extra
+    # question; that is a thing to measure per deployment, not to assume.
+    # It is in the hashed declaration, so switching it retracts baselines — correct, since it
+    # changes every prompt the skill sends.
+    confirmations: bool = False
 
     def is_empty(self) -> bool:
         return not self.role

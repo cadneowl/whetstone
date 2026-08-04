@@ -8,7 +8,7 @@ graduated into the eval corpus. Rejections are recorded with a reason rather tha
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import yaml
@@ -28,8 +28,17 @@ from whetstone.llm.base import LLMClient
 from whetstone.llm.factory import Backend, ModelSelection, build_llm_client, resolve_backend
 from whetstone.naming import is_safe_segment
 from whetstone.preflight import Plan, plan_calls
-from whetstone.promote import META_FILE, CaseEdits, PreparedCase, edits_from, prepare
+from whetstone.promote import (
+    DESTINATION_FILE,
+    META_FILE,
+    CaseEdits,
+    PreparedCase,
+    SidecarTarget,
+    edits_from,
+    prepare,
+)
 from whetstone.reviewer.factory import step_agent
+from whetstone.sidecars.collect import AGENTS_DIR
 from whetstone.steps import StepError, StepSpec, load_step
 from whetstone.ui.deps import (
     ConfigDep,
@@ -614,7 +623,67 @@ def undo(candidate_id: str, config: ConfigDep) -> QueueItem:
 def prepare_promotion(config: Config, entry: CandidateEntry, edits: CaseEdits) -> PreparedCase:
     """Validate the edits against the skill's current metadata on disk."""
     meta = _meta_yaml(config, edits.skill_id) if edits.rule_id and edits.skill_id else None
-    return prepare(entry, edits, skills_root=relative_skills_root(config), meta_yaml=meta)
+    return prepare(
+        entry,
+        edits,
+        skills_root=relative_skills_root(config),
+        meta_yaml=meta,
+        sidecar=_sidecar_target(config, edits) if edits.writes_sidecar else None,
+    )
+
+
+def _sidecar_target(config: Config, edits: CaseEdits) -> SidecarTarget | None:
+    """The skill's role and whatever sidecar already sits in that folder.
+
+    Resolved through `reviewer_for`, which is the one place that knows how a skill's declaration
+    binds to a source tree — so a claim is filed at exactly the path the reviewer would later read
+    it from. Resolving it here from the raw frontmatter would be a second answer to that question,
+    and the two would eventually disagree about which folder a claim belongs in.
+
+    Returns None when the skill has no role or no resolvable source root; `_check_destination`
+    turns that into the message an operator can act on.
+    """
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.service import rule_ids
+
+    try:
+        skill = load_skill(config.skills_root / edits.skill_id)
+    except (SkillLoadError, OSError):
+        return None
+    if skill.sidecar.is_empty():
+        return None
+    try:
+        plan = reviewer_for(config.skills_root, skill).sidecar
+    except Exception:  # noqa: BLE001 - a broken step must not 500 the triage screen
+        plan = None
+    existing: str | None = None
+    if plan is not None:
+        existing = _existing_sidecar(plan.source_root, edits, skill.sidecar.role)
+    return SidecarTarget(
+        role=skill.sidecar.role, existing=existing, rule_ids=rule_ids(skill)
+    )
+
+
+def _existing_sidecar(source_root: str, edits: CaseEdits, role: str) -> str | None:
+    """The target file's current contents, read from the source tree — read-only, always.
+
+    The one traversal ADR-029 permits, and the same guard the collector applies: the path is
+    resolved and refused if it leaves the root, so a candidate carrying `../../etc` cannot make
+    triage read outside the tree it was pointed at.
+    """
+    name = DESTINATION_FILE[edits.destination] or f"{role}.md"
+    folder = PurePosixPath(edits.path).parent
+    rel = str(folder / AGENTS_DIR / name) if str(folder) != "." else f"{AGENTS_DIR}/{name}"
+    anchor = Path(source_root).resolve()
+    try:
+        target = (anchor / rel).resolve()
+        target.relative_to(anchor)
+    except (OSError, ValueError):
+        return None
+    try:
+        return target.read_text(encoding="utf-8") if target.is_file() else None
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _meta_yaml(config: Config, skill_id: str) -> str | None:

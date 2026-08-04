@@ -178,7 +178,42 @@ class RunStore:
         with self._connect() as conn:
             _upsert(conn, record)
             _set_indexed_file_count(conn, len(self.record_files()))
+        self._record_claims(record)
         return path
+
+    def _record_claims(self, record: RunRecord) -> None:
+        """Append this run's sidecar claim verdicts to the ledger.
+
+        Here rather than in `record_eval`, because a run that is not stored must not leave a trace
+        in the ledger either: `--no-save` exists so an experiment can be run without moving
+        anything, and a verdict recorded from a discarded run would be evidence about a claim from
+        a measurement nobody kept.
+
+        Best effort. A ledger that cannot be written is a lost byproduct, and failing the save of a
+        run that took minutes to produce would trade something valuable for something cheap.
+        """
+        from whetstone.sidecars.confirm import Ledger
+
+        verdicts = [
+            (case.case_id, verdict)
+            for case in record.cases
+            if case.sidecars is not None
+            for verdict in case.sidecars.verdicts
+        ]
+        if not verdicts:
+            return
+        ledger = Ledger(self.root)
+        try:
+            for case_id, verdict in verdicts:
+                ledger.record(
+                    [verdict],
+                    run_id=record.id,
+                    skill_id=record.skill_id,
+                    case_id=case_id,
+                    at=record.created_at,
+                )
+        except OSError:
+            return
 
     def load(self, run_id: str) -> RunRecord:
         path = self.path_for(run_id)

@@ -74,14 +74,17 @@ that simply got better are indistinguishable. A test keeps their paths bare.
 
 `qwen3-coder:30b` via Ollama, k=3, all 8 cases:
 
-| | recall | fp_rate | F2 |
-|---|---|---|---|
-| sidecars on | **0.800** | 0.333 | 0.800 |
-| `--no-sidecars` | **0.400** | 0.333 | 0.435 |
+Two runs of each arm, shipped defaults:
 
-Recall doubles. The whole gain is on the three sidecar-dependent catches (2 of 3 caught, 0 of 3
-without); both controls score 1.00 in **both** arms, so nothing was diluted. False-positive rate
-does not move — sidecars fix one negative case and break another, which is the next paragraph.
+| | recall | fp_rate |
+|---|---|---|
+| sidecars on | **0.733**, 0.733 | 0.444, 0.444 |
+| `--no-sidecars` | **0.400**, 0.533 | 0.000, 0.222 |
+
+**Recall goes up, and false positives go up with it.** Neither half is noise. The recall gain lands
+entirely on the two sidecar-dependent catches — `ledger-second-writer` and `retry-cap-raised` both
+go from 0.00 to 1.00 — and the false-positive cost lands almost entirely on one case, for one
+understood reason, below.
 
 Read the messages, not just the score. With sidecars the reviewer says *"violates the documented
 cap of 3 retries for the card processor... requires a contract change"* and *"bypasses idempotency
@@ -89,23 +92,70 @@ checks"* — reasoning that appears in no file but the sidecar. Without them it 
 *"may indicate a lack of proper retry logic"*, and on `ledger-second-writer` it says nothing at all.
 
 **This is a mechanism test, not evidence about your codebase.** The sidecars and the cases were
-written together, so the direction of the result is not a surprise and should not be quoted as one.
-What it does establish is that the wire is connected end to end: the text reaches the model, the
-model uses it, the controls do not degrade, and the two arms record different digests so neither can
-reuse the other's baseline. The number that decides whether the tier is worth its tokens has to come
-from a real corpus with sidecars written by the people who own the code.
+written together, so the direction of the recall result is not a surprise and should not be quoted
+as one. What it establishes is that the wire is connected end to end: the text reaches the model,
+the model reasons from it, and the two arms record different digests so neither can reuse the
+other's baseline. The number that decides whether the tier is worth its tokens has to come from a
+real corpus with sidecars written by the people who own the code.
 
-## What it found that the design did not predict
+## Two costs it found that the design did not predict
 
-`notification-drop-counted` is a **concurrence finding**: given an exception, the reviewer reported
-a finding whose message says the code is *fine* — "increments the counter, which aligns with the
-documented exception for R3" — in 3 of 3 trials. It is scored a false positive, correctly: the
-review spoke where it should have been silent. From the score alone it is indistinguishable from
-the reviewer *disagreeing* with the sidecar, which is a different bug with a different fix.
+**Concurrence findings.** Given an exception, the reviewer reports a finding whose message says the
+code is *fine* — "increments the counter, which aligns with the documented exception for R3" — and
+that is scored a false positive, correctly: the review spoke where it should have been silent.
+`notification-drop-counted` produces it in 3 of 3 trials, and it is most of the false-positive gap
+in the table above. From the score alone it is indistinguishable from the reviewer *disagreeing*
+with the sidecar, which is a different bug with a different fix; only the message tells them apart.
 
 `_sidecar_block` now says that honouring an exception means reporting nothing. That instruction is
 **not** known to be sufficient — this model produced the concurrence finding with and without it.
 The case stays so the behaviour is measured rather than assumed.
+
+**Asking for claim confirmations costs recall.** `sidecars.md` §8 argues the confirmation loop is
+close to free, because the run already holds both the sidecar and the code. True of tokens, false
+of attention:
+
+| `sidecar: confirmations:` | recall |
+|---|---|
+| `false` — the default | 0.733, 0.733 |
+| `true` | 0.600, 0.600 |
+
+Two runs each, identical both times, and the case it loses is `retry-cap-raised` — the
+sidecar-dependent catch the tier exists for. So the field defaults to **off**, and it sits in the
+hashed declaration, so turning it on retracts baselines rather than quietly changing what was
+measured. Turn it on where you have measured that your model absorbs the extra question.
+
+## The rest of the loop, against this same tree
+
+**Where claims come from.** Triage has three destinations that write, not one. `rule` is the old
+behaviour. `context` and `exception` also file a claim beside the code — and produce a *patch*,
+never a write: the file belongs to the reviewed repository and Whetstone holds no credentials there.
+
+```bash
+# a claim's target folder is the parent of the case's path, so this lands in
+# payments/reconciliation/.agents/ — and the eval case is still written either way
+whetstone sidecars show --skill examples/sidecar-review/skills/hub-arch-review --path payments/reconciliation/job.py
+```
+
+**Keeping them honest.** The maintainer sweep reads a folder and writes an account of what a reader
+would need to be told — **without seeing the claims** — and only then compares. One call asking "is
+this still true?" would anchor and confirm.
+
+```bash
+whetstone sidecars verify --skill examples/sidecar-review/skills/hub-arch-review --llm ollama --model qwen3-coder:30b
+whetstone sidecars claims --disputed
+```
+
+Change `MAX_RETRIES` to 6 in `source/payments/gateway/stripe.py` and re-run the first command: both
+claims in that folder come back `contradicted`, cited against the line that moved. Nothing is
+rewritten — confirmation is automatic, correction is a human's.
+
+**The floor.** Everything decidable without a model, cheap enough for a pre-commit hook:
+
+```bash
+whetstone sidecars check --root examples/sidecar-review/source           # exits 1 on any problem
+git diff | whetstone sidecars check --root . --patch -                   # agents may not write claims
+```
 
 ## Notes on the ablation itself
 

@@ -59,7 +59,14 @@ _HASH_PREFIX = b"whetstone/sidecars/1\0"
 
 # Why a candidate did not make it into the prompt. Reported per file, because "the reviewer never
 # loaded it" and "the reviewer read it and disagreed" are different facts about a missed finding.
-DROP_REASONS = ("max_files", "max_file_bytes", "budget", "escapes_root")
+DROP_REASONS = ("max_files", "max_file_bytes", "budget", "escapes_root", "unconfirmed")
+
+# The trust ladder's injectable rungs (`docs/design/sidecars.md` §9). An `unconfirmed` sidecar is
+# agent-authored or bootstrap-decomposed and has had nothing independent agree with it, so it is
+# never put in front of a consuming run. Enforced *here* rather than in Whetstone's half for the
+# same reason the traversal guard is: the other caller has to have it too, and a ladder that only
+# one harness climbs is not a ladder.
+INJECTABLE = ("confirmed", "load-bearing")
 
 
 class SidecarError(ValueError):
@@ -124,7 +131,14 @@ def resolve(
             # the CI floor fails it where splitting it is cheap.
             dropped.append({"path": rel, "reason": "max_file_bytes"})
             continue
-        kept.append({"path": rel, "text": _read(target, rel), "bytes": size})
+        text = _read(target, rel)
+        if _status(text) not in INJECTABLE:
+            # Dropped, and therefore *hashed* as dropped: a set that withheld an unconfirmed claim
+            # is a different measurement from one that never had it, and promoting the claim later
+            # has to invalidate the runs taken before it counted.
+            dropped.append({"path": rel, "reason": "unconfirmed"})
+            continue
+        kept.append({"path": rel, "text": text, "bytes": size})
 
     total = sum(int(f["bytes"]) for f in kept)
     while total > budget and kept:
@@ -256,6 +270,31 @@ def _within(anchor: Path, rel: str) -> Path | None:
     except ValueError:
         return None
     return resolved
+
+
+def _status(text: str) -> str:
+    """The `status:` a sidecar's frontmatter declares, or `confirmed` when it does not say.
+
+    Scanned rather than parsed: this file may not import a YAML library, and the ladder is one
+    scalar on one line. A `status` that is a nested structure is not something the format has a
+    meaning for, so whatever this returns for it will fail the `INJECTABLE` test — which is the
+    safe direction for a value nobody can read.
+
+    **Unstated means confirmed**, and that direction is deliberate. The other default would empty
+    the sidecar set of every folder written before the ladder existed, and a review that reads
+    nothing looks exactly like a review of clean code. Permissive here, strict at the CI floor,
+    which requires the key explicitly (`sidecars/floor.py`).
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "confirmed"
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "status":
+            return value.strip().strip("\"'") or "confirmed"
+    return "confirmed"
 
 
 def _read(target: Path, rel: str) -> str:

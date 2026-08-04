@@ -286,14 +286,14 @@ def test_a_skill_without_the_block_resolves_exactly_as_before(tmp_path: Path) ->
 def _reviewed_prompt(tmp_path: Path, *, enabled: bool = True) -> str:
     """Run one review against a recording client and return the system prompt it was given."""
     from whetstone.llm.fake_client import FakeLLMClient
-    from whetstone.reviewer.llm_reviewer import LLMFindingList, LLMReviewer
+    from whetstone.reviewer.llm_reviewer import LLMReviewer
 
     source = _source(tmp_path)
     seen: list[str] = []
 
     def record(system: str, user: str, schema: type) -> object:
         seen.append(system)
-        return LLMFindingList(findings=[])
+        return schema(findings=[])
 
     reviewer = LLMReviewer(
         FakeLLMClient(record),
@@ -315,13 +315,13 @@ def test_absence_is_stated_rather_than_left_blank(tmp_path: Path) -> None:
     have said."""
     (tmp_path / "empty").mkdir()
     from whetstone.llm.fake_client import FakeLLMClient
-    from whetstone.reviewer.llm_reviewer import LLMFindingList, LLMReviewer
+    from whetstone.reviewer.llm_reviewer import LLMReviewer
 
     seen: list[str] = []
 
     def record(system: str, user: str, schema: type) -> object:
         seen.append(system)
-        return LLMFindingList(findings=[])
+        return schema(findings=[])
 
     reviewer = LLMReviewer(
         FakeLLMClient(record), sidecars=SidecarLoader(tmp_path / "empty", SidecarSpec(role=ROLE))
@@ -338,13 +338,13 @@ def test_the_ablation_withholds_the_text_from_the_prompt(tmp_path: Path) -> None
 def test_a_reviewer_with_no_loader_says_nothing_about_sidecars(tmp_path: Path) -> None:
     """Zero behaviour change for the skills that exist today."""
     from whetstone.llm.fake_client import FakeLLMClient
-    from whetstone.reviewer.llm_reviewer import LLMFindingList, LLMReviewer
+    from whetstone.reviewer.llm_reviewer import LLMReviewer
 
     seen: list[str] = []
 
     def record(system: str, user: str, schema: type) -> object:
         seen.append(system)
-        return LLMFindingList(findings=[])
+        return schema(findings=[])
 
     reviewer = LLMReviewer(FakeLLMClient(record))
     reviewer.review(Skill(id="arch"), _change())
@@ -363,10 +363,10 @@ def test_a_run_records_what_each_case_was_given(tmp_path: Path) -> None:
     from whetstone.domain.refs import Region
     from whetstone.judge.base import Match
     from whetstone.llm.fake_client import FakeLLMClient
-    from whetstone.reviewer.llm_reviewer import LLMFindingList, LLMReviewer
+    from whetstone.reviewer.llm_reviewer import LLMReviewer
 
     def quiet(system: str, user: str, schema: type) -> object:
-        return LLMFindingList(findings=[])
+        return schema(findings=[])
 
     class NoMatch:
         def match(self, finding: object, expectation: object) -> Match:
@@ -401,7 +401,6 @@ def test_a_run_records_the_same_digest_the_publish_check_computes(
     together.
     """
     from whetstone.llm.fake_client import FakeLLMClient
-    from whetstone.reviewer.llm_reviewer import LLMFindingList
     from whetstone.service import record_eval
 
     monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
@@ -417,7 +416,7 @@ def test_a_run_records_the_same_digest_the_publish_check_computes(
     assert choice.sidecar is not None
 
     def quiet(system: str, user: str, schema: type) -> object:
-        return LLMFindingList(findings=[])
+        return schema(findings=[])
 
     record = record_eval(skill, FakeLLMClient(quiet), sidecars=choice.sidecar)
     assert record.reviewer_context_digest == context_digest_for(root, skill) != ""

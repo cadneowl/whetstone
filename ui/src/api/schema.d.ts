@@ -1789,6 +1789,27 @@ export interface components {
             /** Case Id */
             case_id: string;
             /**
+             * Claim
+             * @default
+             */
+            claim: string;
+            /**
+             * Claim Source
+             * @default
+             */
+            claim_source: string;
+            /**
+             * Destination
+             * @default rule
+             * @enum {string}
+             */
+            destination: "rule" | "context" | "exception";
+            /**
+             * Excepts Rule Id
+             * @default
+             */
+            excepts_rule_id: string;
+            /**
              * Expectation Id
              * @default e1
              */
@@ -1930,6 +1951,11 @@ export interface components {
              * @default []
              */
             paths: string[];
+            /**
+             * Verdicts
+             * @default []
+             */
+            verdicts: components["schemas"]["ClaimVerdict"][];
         };
         /**
          * CaseSummary
@@ -2002,6 +2028,39 @@ export interface components {
              * @default
              */
             written: string;
+        };
+        /**
+         * ClaimVerdict
+         * @description What a consuming run noticed about one claim it was given (`docs/design/sidecars.md` §8).
+         *
+         *     A byproduct, never a job. The run already holds both the sidecar and the diff, so asking is
+         *     close to free — and the effort then tracks how often code is *touched*, which is the correct
+         *     allocation: hot code gets checked weekly and cold code does not need it.
+         *
+         *     `confirmed` **requires** `evidence` naming code. Assent is free and evidence is not, so an
+         *     uncited confirmation is downgraded to `unverifiable` rather than counted — otherwise the
+         *     cheapest possible answer ("yes, still true") accumulates into something that looks like
+         *     verification and is not.
+         *
+         *     `claim` is the claim's text *as it appears in the file*, never the model's paraphrase of it.
+         *     A verdict that cannot be matched back to a real claim is dropped, because a ledger keyed on
+         *     invented text is worse than no ledger.
+         */
+        ClaimVerdict: {
+            /** Claim */
+            claim: string;
+            /**
+             * Evidence
+             * @default
+             */
+            evidence: string;
+            /** Path */
+            path: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "confirmed" | "contradicted" | "unverifiable";
         };
         /** CodeChange */
         CodeChange: {
@@ -3697,6 +3756,7 @@ export interface components {
             files: {
                 [key: string]: string;
             };
+            sidecar?: components["schemas"]["SidecarDelivery"] | null;
             /** Skill Id */
             skill_id: string;
         };
@@ -4814,6 +4874,37 @@ export interface components {
             verdict: string;
         };
         /**
+         * SidecarDelivery
+         * @description A sidecar claim on its way to the source repo — as a patch, never as a write.
+         *
+         *     Kept out of `PreparedCase.files` on purpose. `commit_promotion` writes every entry in `files`
+         *     under `skills_repo`, and this file does not live there: it belongs to the reviewed code, in
+         *     front of that folder's CODEOWNERS. Whetstone holds no write credentials on a source repo
+         *     (ADR-028's *git stays the operator's*, surviving contact with a second repo), so what it
+         *     produces is something a person applies.
+         */
+        SidecarDelivery: {
+            /** Body */
+            body: string;
+            /** Branch */
+            branch: string;
+            /** Content */
+            content: string;
+            /**
+             * Creates File
+             * @default false
+             */
+            creates_file: boolean;
+            /** Patch */
+            patch: string;
+            /** Path */
+            path: string;
+            /** Role */
+            role: string;
+            /** Title */
+            title: string;
+        };
+        /**
          * SidecarSpec
          * @description A skill's declaration that it reads per-directory context from the source tree.
          *
@@ -4835,6 +4926,11 @@ export interface components {
              * @default 20000
              */
             budget: number;
+            /**
+             * Confirmations
+             * @default false
+             */
+            confirmations: boolean;
             /**
              * Max File Bytes
              * @default 32000
@@ -4973,6 +5069,7 @@ export interface components {
             /**
              * @default {
              *       "budget": 20000,
+             *       "confirmations": false,
              *       "max_file_bytes": 32000,
              *       "max_files": 24,
              *       "role": "",

@@ -8,7 +8,13 @@ from whetstone.core.cancel import RunCancelled
 from whetstone.core.scoring import case_score_from_run, record_case
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.finding import Finding
-from whetstone.domain.run import CaseRun, CaseSidecars, DroppedSidecar, RunEvent
+from whetstone.domain.run import (
+    CaseRun,
+    CaseSidecars,
+    ClaimVerdict,
+    DroppedSidecar,
+    RunEvent,
+)
 from whetstone.domain.score import SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.judge.base import Judge
@@ -130,6 +136,11 @@ def _sidecars_of(reviewer: Reviewer) -> CaseSidecars | None:
 
     None for every reviewer that resolves no sidecars, which keeps the field absent — rather than
     an empty set — on every record written by a skill that declares no role.
+
+    `verdicts` are what the last trial said about the claims (`sidecars/confirm.py`). Unlike the
+    resolved set, they are *not* the same across `k` trials — a model asked the same question three
+    times can answer differently — so this records the last one rather than claiming to summarise
+    them. The ledger is where a claim's history accumulates; a run record is a snapshot.
     """
     resolved = getattr(reviewer, "last_sidecars", None)
     if not isinstance(resolved, dict):
@@ -141,6 +152,7 @@ def _sidecars_of(reviewer: Reviewer) -> CaseSidecars | None:
             for d in resolved.get("dropped") or []
         ],
         context_hash=str(resolved.get("context_hash") or ""),
+        verdicts=[ClaimVerdict.model_validate(v) for v in resolved.get("verdicts") or []],
     )
 
 

@@ -22,6 +22,7 @@ from whetstone.llm.embedding import Embedder
 from whetstone.reviewer.base import ReviewerProvenance
 from whetstone.sidecars import SidecarLoader
 from whetstone.sidecars import to_prompt as sidecars_to_prompt
+from whetstone.sidecars.confirm import verdicts_from
 from whetstone.wiki import Retrieved, WikiLimits, paths_of, retrieve
 
 
@@ -38,6 +39,27 @@ class LLMFinding(BaseModel):
 
 class LLMFindingList(BaseModel):
     findings: list[LLMFinding]
+
+
+class LLMClaim(BaseModel):
+    """One verdict on a `.agents/` claim the reviewer was handed."""
+
+    path: str
+    claim: str
+    status: Literal["confirmed", "contradicted", "unverifiable"] = "unverifiable"
+    evidence: str = ""
+
+
+class LLMFindingsWithClaims(LLMFindingList):
+    """The response shape used **only** when sidecars actually loaded.
+
+    A separate model rather than an optional field on `LLMFindingList`, because the schema is part
+    of the prompt: adding a claims field to the shape every review returns would change what the
+    model is asked for on every skill in the world, including the ones that declare no role. The
+    no-sidecar path has to stay byte-identical, and this is the cheapest way to guarantee it.
+    """
+
+    claims: list[LLMClaim] = []
 
 
 class LLMReviewer:
@@ -91,6 +113,8 @@ class LLMReviewer:
         # and `BaselineKey` keys on this digest — so a run with sidecars must never reuse a baseline
         # measured without them, nor the other way round.
         self.provenance = provenance or ReviewerProvenance()
+        # Opt-in, and read off the loader so the declaration is the only place it is authored.
+        self._confirmations = bool(sidecars is not None and sidecars.spec.confirmations)
         self._vector_memo: dict[str, list[float]] = {}
         self.last_precedents: list[PrecedentRef] = []
         # What the last `review` was handed, for the record. Read immediately after the call that
@@ -104,12 +128,21 @@ class LLMReviewer:
         self.last_precedents = list(precedents.refs)
         sidecars = None if self._sidecars is None else self._sidecars.for_paths(paths)
         self.last_sidecars = sidecars
+        # Asked for only when this skill opted in *and* there are claims to have a view about. See
+        # `LLMFindingsWithClaims`: a skill with no role must produce the same request it always did,
+        # and `SidecarSpec.confirmations` records that the extra question is not free.
+        loaded = bool((sidecars or {}).get("files")) and self._confirmations
+        schema = LLMFindingsWithClaims if loaded else LLMFindingList
         result = self._client.structured(
-            _system_prompt(skill, context, precedents, sidecars),
+            _system_prompt(skill, context, precedents, sidecars, confirmations=loaded),
             _user_prompt(change),
-            LLMFindingList,
+            schema,
             effort=self._effort,
         )
+        if loaded and sidecars is not None:
+            sidecars["verdicts"] = [
+                v.model_dump() for v in verdicts_from(getattr(result, "claims", []), sidecars)
+            ]
         return [
             Finding(
                 skill_id=skill.id,
@@ -222,6 +255,8 @@ def _system_prompt(
     context: Retrieved,
     precedents: Precedents | None = None,
     sidecars: dict[str, Any] | None = None,
+    *,
+    confirmations: bool = False,
 ) -> str:
     name = skill.name or skill.id
     parts = [
@@ -279,7 +314,38 @@ def _system_prompt(
         "file, a severity (info|warning|error), a short message, the rule id if the guidance names "
         "one, and your confidence 0-1. If nothing applies, return an empty list."
     )
+    if confirmations:
+        parts.append(_claims_request())
     return "\n\n".join(parts)
+
+
+def _claims_request() -> str:
+    """The second thing a run with sidecars can be asked for: whether the notes are still true.
+
+    Asked last, after the review is fully specified, so it reads as a postscript and not as part of
+    the job. It is meant to be a byproduct — the code and the notes are already both in context.
+
+    **Opt-in, because that intent is not what was measured.** `sidecars.md` §8 argues the marginal
+    cost is ~0; that is true of tokens and false of attention. Adding this paragraph to
+    `examples/sidecar-review/` on `qwen3-coder:30b` moved recall from 0.733 to 0.600 — two runs
+    each, identical both times — and the loss landed on `retry-cap-raised`, the sidecar-dependent
+    case the whole tier exists to catch. So `SidecarSpec.confirmations` defaults to False and a
+    deployment turns it on having measured it there.
+
+    `confirmed` is defined as *requiring* a code citation in the instruction as well as being
+    enforced afterwards, because a model told only that the field exists will fill it with assent.
+    """
+    return (
+        "Separately, and only after the review above: for each claim in the local context that "
+        "this change gives you evidence about, report whether the code still agrees with it. Use "
+        "`confirmed` ONLY with a specific file and line from this change that shows it holds — an "
+        "uncited confirmation is discarded. Use `contradicted` with the code that disagrees. Say "
+        "nothing at all about a claim this change gives you no evidence either way about; silence "
+        "is the correct answer for most of them, and a guess is worse than none. Quote each claim "
+        "as it is written, and give the `.agents/` file path it came from. This does not change "
+        "the review: never withhold a finding because a claim would excuse it, and never report a "
+        "finding in order to explain a claim."
+    )
 
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
