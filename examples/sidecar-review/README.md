@@ -78,13 +78,20 @@ Two runs of each arm, shipped defaults:
 
 | | recall | fp_rate |
 |---|---|---|
-| sidecars on | **0.733**, 0.733 | 0.444, 0.444 |
-| `--no-sidecars` | **0.400**, 0.533 | 0.000, 0.222 |
+| sidecars on | **0.733**, 0.733 | 0.667, 0.667 |
+| `--no-sidecars` | **0.400**, 0.600 | 0.444, 0.667 |
 
-**Recall goes up, and false positives go up with it.** Neither half is noise. The recall gain lands
+**Recall goes up. False positives do not move once measured properly.** The recall gain lands
 entirely on the two sidecar-dependent catches — `ledger-second-writer` and `retry-cap-raised` both
-go from 0.00 to 1.00 — and the false-positive cost lands almost entirely on one case, for one
-understood reason, below.
+go from 0.00 to 1.00.
+
+> **These numbers replaced an earlier set, because the judge was wrong.** A `not_appear`
+> expectation's `semantic` is a *justification* ("SQL in the repository layer is exactly where R1
+> puts it"), and the judge was being asked "do these describe the same underlying issue?" — a
+> complaint against a statement that there is nothing to complain about. It answered on wording,
+> the same objection scoring `fp` or `tn` depending on whether it said "outside" or "in", so the
+> false-positive rate of every negative case in the project was closer to a coin flip than a
+> measurement. Fixed in `judge/llm_judge.py`; the old figures here were 0.444 / 0.000-0.222.
 
 Read the messages, not just the score. With sidecars the reviewer says *"violates the documented
 cap of 3 retries for the card processor... requires a contract change"* and *"bypasses idempotency
@@ -101,15 +108,18 @@ real corpus with sidecars written by the people who own the code.
 ## Two costs it found that the design did not predict
 
 **Concurrence findings.** Given an exception, the reviewer reports a finding whose message says the
-code is *fine* — "increments the counter, which aligns with the documented exception for R3" — and
-that is scored a false positive, correctly: the review spoke where it should have been silent.
-`notification-drop-counted` produces it in 3 of 3 trials, and it is most of the false-positive gap
-in the table above. From the score alone it is indistinguishable from the reviewer *disagreeing*
-with the sidecar, which is a different bug with a different fix; only the message tells them apart.
+code is *fine* — "increments the counter, which aligns with the documented exception for R3" —
+instead of staying silent. `notification-drop-counted` produces it in 3 of 3 trials.
 
 `_sidecar_block` now says that honouring an exception means reporting nothing. That instruction is
 **not** known to be sufficient — this model produced the concurrence finding with and without it.
-The case stays so the behaviour is measured rather than assumed.
+
+But it is no longer scored as a false positive, and that is the right answer rather than a
+concession: a reviewer saying "this is correct" has reported no problem, so counting it as a
+complaint makes praise and objection the same event. The judge now asks a negative case two
+separate questions — *is the reviewer objecting?* and *is it about this code?* — and combines them
+in Python. `notification-drop-counted` answers no to the first and is correctly not counted, while
+`batch-reads-directly` and `repository-runs-sql`, which really are mistaken objections, are.
 
 **Asking for claim confirmations costs recall.** `sidecars.md` §8 argues the confirmation loop is
 close to free, because the run already holds both the sidecar and the code. True of tokens, false

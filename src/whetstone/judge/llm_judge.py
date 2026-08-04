@@ -18,6 +18,36 @@ class JudgeVerdict(BaseModel):
     reason: str
 
 
+class NegativeVerdict(BaseModel):
+    """The `not_appear` shape: two separate questions, combined here rather than by the model.
+
+    Asking one combined question — "is this finding a false positive?" — fails on every model tried,
+    and fails in a way that reads as success. The judge answers the sub-questions correctly and then
+    overrules itself on a third question nobody asked:
+
+        "The reviewer **is objecting** to direct database access, **but** the code being reviewed
+         is explicitly placed inside the repository layer" -> matched=false
+
+    That is the judge grading whether the reviewer was *right*. A wrong objection is precisely what
+    a false positive is, so grading correctness inverts the measurement — and inverts it towards
+    `fp_rate 0.000`, which looks like a clean run rather than a broken instrument.
+
+    Two prompt rewrites did not shift it. What does is refusing to ask for the conclusion: the
+    model is good at "is this an objection?" and at "is it about this code?", so it answers those
+    and the `and` happens in Python, where no amount of conviction about the reviewer being wrong
+    can reach it.
+    """
+
+    objecting: bool
+    about_this_code: bool
+    confidence: float
+    reason: str
+
+    @property
+    def matched(self) -> bool:
+        return self.objecting and self.about_this_code
+
+
 class LLMJudge:
     """Semantic matcher: decides whether a reviewer finding refers to the same underlying issue an
     expectation describes. Region/severity prefiltering happens upstream in `core.matching`; this
@@ -37,11 +67,20 @@ class LLMJudge:
         self._system = system or DEFAULT_SYSTEM
 
     def match(self, finding: Finding, expectation: Expectation) -> Match:
+        prompt = _user_prompt(finding, expectation)
+        # Branched rather than passing `X if … else Y` as the schema: the client's return type
+        # follows the schema it is handed, and a union widens it back to `BaseModel`.
+        if expectation.must == "not_appear":
+            negative = self._client.structured(
+                self._system, prompt, NegativeVerdict, effort=self._effort
+            )
+            return Match(
+                matched=negative.matched,
+                confidence=negative.confidence,
+                reason=negative.reason,
+            )
         verdict = self._client.structured(
-            self._system,
-            _user_prompt(finding, expectation),
-            JudgeVerdict,
-            effort=self._effort,
+            self._system, prompt, JudgeVerdict, effort=self._effort
         )
         return Match(matched=verdict.matched, confidence=verdict.confidence, reason=verdict.reason)
 
@@ -52,6 +91,16 @@ DEFAULT_SYSTEM = (
     "location — not merely the same file or a superficially similar wording."
 )
 
+# Agreement is not a finding. Stated in the user templates rather than in `DEFAULT_SYSTEM` because
+# a deployment may replace the system prompt with its own `JUDGE.md`, and this is not doctrine a
+# deployment gets to opt out of: a reviewer that says "this is correct" has reported no issue, and
+# scoring that as though it had makes praise and complaint the same event.
+_AGREEMENT_RULE = (
+    "A finding that reports no problem is not a finding about an issue. If the reviewer is saying "
+    "the code is correct, or explaining why something is permitted here, that is agreement — "
+    "answer matched=false however closely its wording resembles the text above."
+)
+
 # A template constant rather than an f-string in `_user_prompt`, so the judge's full prompt text is
 # hashable as `judge_identity()` without risk of the hashed shape drifting from the rendered one.
 _USER_TEMPLATE = (
@@ -59,8 +108,46 @@ _USER_TEMPLATE = (
     "Expected location: {where}\n\n"
     "Reviewer finding: {message}\n"
     "Reviewer location: {path} line {line}\n\n"
-    "Do they describe the same underlying issue? Return matched (bool), confidence 0-1, and a "
-    "one-sentence reason."
+    "Do they describe the same underlying issue? " + _AGREEMENT_RULE + " Return matched (bool), "
+    "confidence 0-1, and a one-sentence reason."
+)
+
+# The `not_appear` twin, and it exists because asking the `appear` question of a negative case is
+# malformed. A `not_appear` expectation's `semantic` is a *justification* — "SQL inside the
+# repository layer is exactly where R1 puts it", "the error is mapped and propagated, so there is
+# nothing to flag" — and asking "do these describe the same underlying issue?" compares a complaint
+# against a statement that there is nothing to complain about. The judge then answers on wording,
+# and on `examples/sidecar-review/` it answered opposite ways to near-identical complaints:
+#
+#   "Direct database access detected OUTSIDE the repository layer. The SQL query is executed
+#    directly in the repository method"                                        -> matched, fp
+#   "Direct database access detected IN repository layer. This violates R1 which prohibits direct
+#    database access outside the repository layer"                             -> not matched, tn
+#
+# The same complaint, scored both ways, which made the false-positive rate of every negative case
+# closer to a coin flip than a measurement. The question a negative case actually wants is not
+# "same issue?" but "is this a complaint about that code?", so it is asked directly.
+# Worded around a failure the first version of it walked straight into. Opening with "this code is
+# correct" and asking "is the finding complaining?" got answers like *"the reviewer incorrectly
+# identifies the code as violating R1, so matched=false"* — the judge had started grading whether
+# the reviewer was **right**, and a wrong complaint is exactly what a false positive is. Every
+# genuine false positive in the corpus scored clean, and the run reported `fp_rate 0.000`, which is
+# the shape of wrongness that looks like success. So the question leads with the finding, states
+# outright that correctness is not what is being asked, and names both wrong answers.
+_NOT_APPEAR_TEMPLATE = (
+    "Reviewer finding: {message}\n"
+    "Reviewer location: {path} line {line}\n\n"
+    "That finding may or may not be about the following code, which is under review:\n"
+    "{semantic}\n"
+    "Location: {where}\n\n"
+    "Answer two separate questions. Do not combine them, and do not consider whether the reviewer "
+    "is correct — that is a third question and it is not being asked.\n"
+    "- objecting: is the reviewer reporting a problem at all? False when it says the code is "
+    "correct, or explains why something is permitted here. That is agreement, and agreement is "
+    "not a finding however closely its wording resembles the description above.\n"
+    "- about_this_code: is the finding about the code described above, rather than about something "
+    "else in the same file?\n"
+    "Return objecting (bool), about_this_code (bool), confidence 0-1, and a one-sentence reason."
 )
 
 # The eligibility rule `core.matching` applies before any of these prompts run. Named here because
@@ -83,8 +170,28 @@ GROUNDED_TEMPLATE = (
     "```\n{diff}\n```\n\n"
     "Judging from the code itself: do the expected issue and the reviewer finding describe the "
     "same underlying problem? Two comments about the same line are not the same issue unless "
-    "they concern the same defect. Return matched (bool), confidence 0-1, and a one-sentence "
-    "reason."
+    "they concern the same defect. " + _AGREEMENT_RULE + " Return matched (bool), confidence 0-1, "
+    "and a one-sentence reason."
+)
+
+# Tier 2's `not_appear` twin, for the same reason tier 1 has one: escalating a malformed question
+# to a better-informed model produces a confident answer to the wrong question.
+GROUNDED_NOT_APPEAR_TEMPLATE = (
+    "Reviewer finding: {message}\n"
+    "Reviewer location: {path} line {line}\n\n"
+    "That finding may or may not be about the following code, which is under review:\n"
+    "{semantic}\n"
+    "Location: {where}\n\n"
+    "The code change both refer to:\n"
+    "```\n{diff}\n```\n\n"
+    "Answer two separate questions. Do not combine them, and do not consider whether the reviewer "
+    "is correct — that is a third question and it is not being asked.\n"
+    "- objecting: is the reviewer reporting a problem at all? False when it says the code is "
+    "correct, or explains why something is permitted here. That is agreement, and agreement is "
+    "not a finding however closely its wording resembles the description above.\n"
+    "- about_this_code: is the finding about the code described above, rather than about something "
+    "else in the same file?\n"
+    "Return objecting (bool), about_this_code (bool), confidence 0-1, and a one-sentence reason."
 )
 
 
@@ -125,12 +232,19 @@ def judge_identity(
     h.update(b"\0")
     h.update(_USER_TEMPLATE.encode("utf-8"))
     h.update(b"\0")
+    # Unconditionally, not only when a negative case is in the corpus: a hash that depended on
+    # which cases a run happened to contain would make two runs of the same skill compare as
+    # different instruments the moment one of them sampled no `should_not_flag` case.
+    h.update(_NOT_APPEAR_TEMPLATE.encode("utf-8"))
+    h.update(b"\0")
     h.update(MATCHING_POLICY.encode("utf-8"))
     if escalate_below > 0:
         h.update(b"\0cascade\0")
         h.update(f"{escalate_below}".encode())
         h.update(b"\0")
         h.update(GROUNDED_TEMPLATE.encode("utf-8"))
+        h.update(b"\0")
+        h.update(GROUNDED_NOT_APPEAR_TEMPLATE.encode("utf-8"))
     if tier1_model:
         h.update(b"\0tier1\0")
         h.update(tier1_model.encode("utf-8"))
@@ -138,9 +252,11 @@ def judge_identity(
 
 
 def _user_prompt(finding: Finding, expectation: Expectation) -> str:
+    """The question to put to the judge, which is not the same question in both directions."""
     rng = expectation.where.line_range
     where = f"{expectation.where.path}" + (f" lines {rng[0]}-{rng[1]}" if rng else "")
-    return _USER_TEMPLATE.format(
+    template = _NOT_APPEAR_TEMPLATE if expectation.must == "not_appear" else _USER_TEMPLATE
+    return template.format(
         semantic=expectation.semantic,
         where=where,
         message=finding.message,

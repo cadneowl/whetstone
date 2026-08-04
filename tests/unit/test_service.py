@@ -46,11 +46,17 @@ def _flag_handler(flag_tests: bool):
     """Build a fake-LLM handler: catches the two real defects (the unwrap and the swallowed error),
     optionally also flagging the idiomatic unwrap in test files."""
 
-    from whetstone.judge.llm_judge import JudgeVerdict
+    from whetstone.judge.llm_judge import JudgeVerdict, NegativeVerdict
 
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
         if schema is JudgeVerdict:  # judge call — fake always agrees
             return JudgeVerdict(matched=True, confidence=1.0, reason="same issue")
+        # A `not_appear` expectation is asked two questions instead of one, so the fake has to
+        # answer the shape it was handed rather than the one it remembers.
+        if schema is NegativeVerdict:
+            return NegativeVerdict(
+                objecting=True, about_this_code=True, confidence=1.0, reason="objects"
+            )
         # reviewer call — emit a finding on the file actually under review
         if "charge_test.rs" in user:
             if not flag_tests:
@@ -180,11 +186,15 @@ def _catch_case(case_id: str, path: str) -> EvalCase:
 
 def _flags_only(path: str):
     """A reviewer that catches exactly one file's unwrap and is blind to every other."""
-    from whetstone.judge.llm_judge import JudgeVerdict
+    from whetstone.judge.llm_judge import JudgeVerdict, NegativeVerdict
 
     def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
         if schema is JudgeVerdict:
             return JudgeVerdict(matched=True, confidence=1.0, reason="same issue")
+        if schema is NegativeVerdict:
+            return NegativeVerdict(
+                objecting=True, about_this_code=True, confidence=1.0, reason="objects"
+            )
         if path in user:
             return LLMFindingList(
                 findings=[LLMFinding(path=path, line=41, message="unwrap panics")]

@@ -16,6 +16,13 @@ So there is one implementation, and both callers use *this file*. Whetstone impo
 `whetstone sidecars install` copies it verbatim into a skill's `tools/` for the other caller, and
 `sidecars.installed_state` reports at the plan when the two have drifted.
 
+**Python 3.9+ is required wherever a sidecar-reading skill runs** — a settled decision, not a
+regret (`docs/design/sidecars.md` open question 7). A second implementation in another language is
+the one thing the paragraph above exists to forbid, so a Node or JVM shop accepts the dependency.
+That is only a fair trade while the dependency stays small: nothing here may use a language feature
+or stdlib call newer than 3.9, and a test pins that, because raising the floor here raises it for
+every user of every skill and breaks only the caller this repository never runs.
+
 The algorithm, in two phases (see `docs/design/sidecars.md` §3):
 
     Phase A  walk each changed path's directory up to the root, collecting *candidate paths only*

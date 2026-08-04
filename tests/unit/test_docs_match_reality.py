@@ -775,3 +775,41 @@ def test_the_ablation_example_keeps_a_case_that_needs_no_sidecar() -> None:
             f"{[f['path'] for f in got['files']]}"
         )
     assert seen == controls, f"the control cases were renamed or removed: {controls - seen}"
+
+
+def test_the_collector_runs_on_a_python_far_older_than_whetstones() -> None:
+    """The version floor a skill's *users* have to clear, which is not Whetstone's.
+
+    Whetstone requires 3.13. The collector is installed into skill folders and run under Claude
+    Code on whoever's machine that is, so its floor is a demand made of every user of every skill
+    that reads sidecars — and `sidecars.md` open question 7 settles that making the demand is fine
+    *because it is small*. This keeps it small.
+
+    A `match` statement, a 3.11 stdlib call or a runtime `list[str]` would all pass CI here and
+    raise that bar silently, breaking only for the one caller nothing in this repository runs.
+    """
+    import ast
+
+    source = _read("src", "whetstone", "sidecars", "collect.py")
+    ast.parse(source, "collect.py", feature_version=(3, 9))
+
+    # Annotations are strings under `from __future__ import annotations`; anything else is
+    # evaluated at import, and `list[str]` evaluated on 3.8 is a TypeError at load time.
+    tree = ast.parse(source)
+    annotated: set[int] = set()
+    for node in ast.walk(tree):
+        for part in (
+            [node.annotation] if isinstance(node, (ast.AnnAssign, ast.arg)) and node.annotation
+            else [node.returns] if isinstance(node, ast.FunctionDef) and node.returns
+            else []
+        ):
+            annotated.update(id(inner) for inner in ast.walk(part))
+    runtime_generics = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and id(node) not in annotated
+        and isinstance(node.value, ast.Name)
+        and node.value.id in {"list", "dict", "set", "tuple", "type"}
+    ]
+    assert runtime_generics == []

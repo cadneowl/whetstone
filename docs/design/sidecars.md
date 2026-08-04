@@ -528,13 +528,22 @@ of each arm:
 
 | | recall | fp_rate |
 |---|---|---|
-| sidecars on | **0.733**, 0.733 | 0.444, 0.444 |
-| `--no-sidecars` | **0.400**, 0.533 | 0.000, 0.222 |
+| sidecars on | **0.733**, 0.733 | 0.667, 0.667 |
+| `--no-sidecars` | **0.400**, 0.600 | 0.444, 0.667 |
 
-**Recall goes up and false positives go up with it**, and neither half is noise. The recall gain is
-entirely on the sidecar-dependent catches — `ledger-second-writer` and `retry-cap-raised` both move
-0.00 → 1.00 — which is the tier doing exactly what it is for. The false-positive cost is almost
-entirely one case, for one understood reason, below.
+**Recall goes up; false positives do not move.** The recall gain is entirely on the
+sidecar-dependent catches — `ledger-second-writer` and `retry-cap-raised` both move 0.00 → 1.00 —
+which is the tier doing exactly what it is for.
+
+> **An earlier version of this table was measured by a broken judge.** A `not_appear` expectation's
+> `semantic` is a justification, and the judge was asked whether it and the finding "describe the
+> same underlying issue" — a complaint compared against a statement that there is nothing to
+> complain about. It answered on wording: the same objection scored `fp` or `tn` depending on
+> whether it said "outside the repository layer" or "in repository layer". Every negative case in
+> the project was affected, not only these. Fixed by asking a negative case two questions —
+> *is the reviewer objecting?* and *is it about this code?* — and combining them in code, because
+> asked for the conclusion the judge grades whether the reviewer was *right*, and a wrong objection
+> is exactly what a false positive is.
 
 **This clears the mechanism, not the tier.** The sidecars and the cases were authored together, so
 the direction of the recall result is not evidence about anyone's codebase; what it establishes is
@@ -545,11 +554,15 @@ digest. The efficacy question §9.1 poses still needs a real corpus.
 
 *Concurrence findings.* Given an exception, the reviewer reports a finding whose message says the
 code is *fine* — *"increments the counter, which aligns with the documented exception for R3"* —
-rather than staying silent. Scored a false positive, correctly, and it is most of the FP gap above.
-The score cannot distinguish it from the reviewer disagreeing with the sidecar, which is a different
-bug with a different fix; only the message can. `_sidecar_block` now states that honouring an
-exception means reporting nothing, and that instruction is **not** known to be sufficient — this
-model produced the concurrence finding with and without it. Recorded rather than closed.
+rather than staying silent. `_sidecar_block` now states that honouring an exception means reporting
+nothing, and that instruction is **not** known to be sufficient: this model produced the
+concurrence finding with and without it.
+
+It is no longer *scored* as a false positive, and that is a correction rather than a concession. A
+reviewer saying "this is correct" has reported no problem; counting it as a complaint makes praise
+and objection the same event, and leaves the score unable to distinguish a reviewer that honoured
+an exception from one that ignored it. The judge's `objecting` question is where that distinction
+now lives.
 
 *The confirmation loop is not free.* §8 argues its marginal cost is ≈ 0 because the run already
 holds both the sidecar and the code. True of tokens, false of attention: asking for claim verdicts
@@ -750,6 +763,14 @@ sidecar names the right folder.
    drift, and each is separately hashed. A plugin-level shared tool fixes drift and breaks
    self-containment. Leaning: copies for v1 (there is one role skill), with the CI floor asserting
    they are byte-identical the moment there are two.
-7. **A repo with no Python.** The collector is stdlib Python 3.9+, which most Claude Code users
-   have and a Node or JVM shop may not. A second implementation is the one thing §3.5 exists to
-   forbid, so the answer is probably a prebuilt binary or accepting the dependency — not a rewrite.
+7. ~~**A repo with no Python.**~~ **Settled: accept the dependency.** Running a skill that reads
+   sidecars requires Python where the skill runs. No prebuilt binary, and above all no second
+   implementation — that is the one thing §3.5 exists to forbid, and a Node port would diverge from
+   the scored collector on exactly the edge cases nobody tests.
+
+   What makes the demand cheap is how small it is, and that is worth keeping small deliberately.
+   Whetstone itself needs 3.13; the collector parses under 3.7, imports only `argparse`, `hashlib`,
+   `json`, `sys`, `pathlib` and `typing`, and evaluates no builtin generics at runtime. The stated
+   floor is **3.9**, and `test_docs_match_reality` pins it — a `match` statement or a 3.11 stdlib
+   call would otherwise pass CI here and raise the bar for every user of every sidecar-reading
+   skill, breaking only for the one caller nothing in this repository runs.

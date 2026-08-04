@@ -29,7 +29,13 @@ from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import Expectation
 from whetstone.domain.finding import Finding
 from whetstone.judge.base import Judge, Match, PriorVerdict
-from whetstone.judge.llm_judge import DEFAULT_SYSTEM, GROUNDED_TEMPLATE, JudgeVerdict
+from whetstone.judge.llm_judge import (
+    DEFAULT_SYSTEM,
+    GROUNDED_NOT_APPEAR_TEMPLATE,
+    GROUNDED_TEMPLATE,
+    JudgeVerdict,
+    NegativeVerdict,
+)
 from whetstone.llm.base import Effort, LLMClient
 
 DEFAULT_MAX_DIFF_BYTES = 2_000
@@ -50,18 +56,31 @@ class GroundedJudge:
     def match(self, finding: Finding, expectation: Expectation, *, diff: str) -> Match:
         rng = expectation.where.line_range
         where = f"{expectation.where.path}" + (f" lines {rng[0]}-{rng[1]}" if rng else "")
+        # Same split as tier 1: a negative case is asked whether the finding *objects*, in two
+        # parts, rather than whether it describes the same issue as a sentence saying there is
+        # none. Escalating a malformed question to a better-grounded model only buys a more
+        # confident answer to the wrong question.
+        negative = expectation.must == "not_appear"
+        prompt = (GROUNDED_NOT_APPEAR_TEMPLATE if negative else GROUNDED_TEMPLATE).format(
+            semantic=expectation.semantic,
+            where=where,
+            message=finding.message,
+            path=finding.path,
+            line=finding.line,
+            diff=diff,
+        )
+        if negative:
+            answer = self._client.structured(
+                self._system, prompt, NegativeVerdict, effort=self._effort
+            )
+            return Match(
+                matched=answer.matched,
+                confidence=answer.confidence,
+                reason=answer.reason,
+                tier=2,
+            )
         verdict = self._client.structured(
-            self._system,
-            GROUNDED_TEMPLATE.format(
-                semantic=expectation.semantic,
-                where=where,
-                message=finding.message,
-                path=finding.path,
-                line=finding.line,
-                diff=diff,
-            ),
-            JudgeVerdict,
-            effort=self._effort,
+            self._system, prompt, JudgeVerdict, effort=self._effort
         )
         return Match(
             matched=verdict.matched, confidence=verdict.confidence, reason=verdict.reason, tier=2
