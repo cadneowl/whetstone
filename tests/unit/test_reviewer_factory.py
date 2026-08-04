@@ -128,3 +128,42 @@ def test_a_task_skill_names_itself_the_same_way_in_both_places(tmp_path: Path) -
     )
     choice = reviewer_from_step(load_step(skill, "evaluate", skill_id="skill"), skill)
     assert choice.identity == "agent-task: 4 steps"
+
+
+def test_context_digest_for_tells_nothing_hashable_from_cannot_be_told(tmp_path: Path) -> None:
+    """`""` and `None` mean different things to `GateStore.verdict_for`, so the seam matters.
+
+    A built-in-reviewer skill has nothing hashable and digests as `""` — which is what its gate
+    records already carry, so the check is a no-op for it. A skill whose step will not load says
+    nothing about what was measured, and must not turn into a publishing block.
+    """
+    from whetstone.reviewer.factory import context_digest_for
+
+    plain = tmp_path / "plain"
+    (plain / "evaluate").mkdir(parents=True)
+    (plain / "evaluate" / "step.yaml").write_text("description: config only\n", encoding="utf-8")
+    (plain / "SKILL.md").write_text("---\nid: plain\n---\n\nbody\n", encoding="utf-8")
+    assert context_digest_for(tmp_path, Skill(id="plain")) == ""
+
+    # No `evaluate` step at all — also nothing hashable, not a failure.
+    (tmp_path / "bare").mkdir()
+    assert context_digest_for(tmp_path, Skill(id="bare")) == ""
+
+    broken = tmp_path / "broken"
+    (broken / "evaluate").mkdir(parents=True)
+    (broken / "evaluate" / "step.yaml").write_text(
+        'run: ["python", "r.py"]\ncontext:\n  schema: { file: ./nope.sql }\n', encoding="utf-8"
+    )
+    assert context_digest_for(tmp_path, Skill(id="broken")) is None
+
+
+def test_context_digest_for_reports_a_real_digest(tmp_path: Path) -> None:
+    from whetstone.reviewer.factory import context_digest_for
+
+    skill = tmp_path / "prog"
+    (skill / "evaluate").mkdir(parents=True)
+    (skill / "evaluate" / "step.yaml").write_text(
+        'run: ["python", "r.py"]\ncontext:\n  api: https://internal/spec\n', encoding="utf-8"
+    )
+    digest = context_digest_for(tmp_path, Skill(id="prog"))
+    assert digest and len(digest) == 64

@@ -264,14 +264,27 @@ flagged (the plan warns, exactly like the "unknown billing" three-state warning 
 
 ### 6.1 What still needs doing
 
-**A stored gate result is not retracted when the context bag changes.** `BaselineKey` governs
-*baseline reuse*, so it forces a re-score on the **next** gate; it does not invalidate a pass
-already on disk. Change `source_ref` without touching guidance and `skill_hash` is unmoved, so the
-console still reads `gated`. Impact is bounded — ADR-028 made C6 advisory and no route refuses on it
-— so this is a stale badge, not a bad publish. The fix does not need `skill_hash` either: store
-`reviewer_context_digest` on the gate result and compare it at read time, exactly as `BaselineKey`
-already does. That keeps `skill_hash` a pure function of the `Skill` and sidesteps the §14 snag
-entirely.
+**A stored gate result was not retracted when the context bag changed — now fixed.**
+`BaselineKey` governs *baseline reuse*, so it forces a re-score on the **next** gate; it did not
+invalidate a pass already on disk. Change `source_ref` without touching guidance, and `skill_hash`
+is unmoved, so the console went on reading `gated` for a measurement nobody would take again.
+
+`GateStore.verdict_for` now takes the skill's current `context_digest` and refuses a record measured
+under a different one, quoting the gate it is refusing on so the reason is *"gated, but against
+other inputs"* rather than *"never gated"*. `reviewer_context_digest` was already on `GateRecord`;
+only the read-time comparison was missing. `skill_hash` is untouched and stays a pure function of
+the `Skill`, so the §14 snag is sidestepped rather than solved.
+
+Three properties keep this from disturbing anything that worked before:
+
+- **A skill with no hashable context digests as `""` on both sides.** The built-in reviewer — no
+  `run:`, no `agent:`, no `task:` — is unaffected, the same "landing this invalidates nothing"
+  property `skill_hash` holds for the wiki and the index.
+- **`None` means "could not be told" and is permissive.** `context_digest_for` returns it when the
+  `evaluate` step will not load, because refusing to publish over a question we failed to ask would
+  turn a broken step into a publishing block. Distinct from `""`, which is a real answer.
+- **Callers that pass nothing keep today's behaviour exactly.** The parameter is keyword-only and
+  optional; `TaskGateRecord` carries no digest and task gates are untouched.
 
 **Two defects in the digest itself — found by review, now fixed.** Recorded because both had been
 silently wrong since Phase 1 shipped, and the symptom in each case was a digest that looked fine.

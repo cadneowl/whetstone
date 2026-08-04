@@ -499,11 +499,40 @@ class GateStore:
             self.list(skill_id=skill_id), key, max_age=max_age, now=now
         )
 
-    def verdict_for(self, skill_id: str, candidate_hash: str) -> Verdict:
-        """Whether this exact version of a skill may be published, and — when not — why not."""
+    def verdict_for(
+        self, skill_id: str, candidate_hash: str, *, context_digest: str | None = None
+    ) -> Verdict:
+        """Whether this exact version of a skill may be published, and — when not — why not.
+
+        `context_digest` is the reviewer-context identity the skill has *now*. Supplied, a gate
+        measured under different inputs no longer justifies publishing: `skill_hash` covers the
+        guidance, cases, wiki and index, but not what a source-reading reviewer was pointed at, so
+        repointing `source_ref` at another snapshot left a stored pass reading as current evidence
+        for a measurement nobody would take again. `BaselineKey` already refuses to *reuse* such a
+        baseline; this is the same fact applied to evidence already on disk.
+
+        `None` means "cannot be determined" and is deliberately permissive — it keeps today's
+        behaviour for every caller that does not resolve a context, and for a skill whose context
+        cannot be resolved at all, where refusing would block on a question we failed to ask.
+
+        A skill with no hashable context digests as `""` on both sides, so nothing changes for the
+        built-in reviewer — the same "landing this invalidates nothing" property `skill_hash` holds
+        for the wiki and the index.
+        """
         # One scan. Reading the directory twice to ask two questions about the same records was
         # both slower and a place for the two answers to disagree.
-        return verdict_over(self._matching(skill_id, candidate_hash))
+        records = self._matching(skill_id, candidate_hash)
+        if context_digest is None or not records:
+            return verdict_over(records)
+        measured_here = [r for r in records if r.reviewer_context_digest == context_digest]
+        if measured_here:
+            return verdict_over(measured_here)
+        return Verdict(
+            can_propose=False,
+            latest=_as_record(records[0]),
+            reason="this version has been gated, but the reviewer was given different inputs "
+            "than it has now — re-gate, so the evidence describes what would actually run",
+        )
 
     def _iter(self, pattern: str) -> Iterator[GateRecord]:
         if not self.root.is_dir():

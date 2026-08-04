@@ -28,11 +28,11 @@ from pathlib import Path
 from typing import Any
 
 from whetstone.agent.runner import agent_identity
-from whetstone.context import ResolvedContext, resolve_context
+from whetstone.context import ContextError, ResolvedContext, resolve_context
 from whetstone.domain.skill import Skill
 from whetstone.reviewer.base import Reviewer
 from whetstone.reviewer.subprocess_reviewer import SubprocessReviewer
-from whetstone.steps import StepSpec, load_step
+from whetstone.steps import StepError, StepSpec, load_step
 
 
 @dataclass
@@ -172,6 +172,27 @@ def reviewer_for(skills_root: str | Path, skill: Skill) -> ReviewerChoice:
     directory = Path(skills_root) / skill.id
     spec = load_step(directory, "evaluate", skill_id=skill.id)
     return reviewer_from_step(spec, directory)
+
+
+def context_digest_for(skills_root: str | Path, skill: Skill) -> str | None:
+    """The reviewer-context identity this skill has right now, or None when it cannot be told.
+
+    For `GateStore.verdict_for`, which uses it to stop a stored pass from covering a version whose
+    reviewer would now read different inputs. `None` rather than `""` on failure, and the
+    difference matters: `""` is the real answer for a skill with no hashable context and would
+    correctly invalidate a gate taken with one, whereas a step we could not even load says nothing
+    about what was measured. Refusing to publish over a question we failed to ask would turn a
+    broken `evaluate` step into a publishing block, which is not what C6 is for.
+    """
+    try:
+        resolved = reviewer_for(skills_root, skill).context
+    except (StepError, ContextError, OSError):
+        return None
+    # `context` is None for the built-in reviewer — no `run:`, no `agent:`, no `task:` — and for a
+    # skill with no `evaluate` step at all. That is not "cannot be told": it is a skill with nothing
+    # hashable, whose digest is `""`, which is what its gate records already carry. Returning `""`
+    # is what keeps the default path byte-identical to before this check existed.
+    return resolved.digest if resolved is not None else ""
 
 
 def reviewer_from_step(spec: StepSpec | None, skill_dir: str | Path) -> ReviewerChoice:

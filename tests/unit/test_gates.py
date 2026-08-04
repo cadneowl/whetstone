@@ -273,3 +273,61 @@ def test_a_gate_that_fixed_a_named_case_carries_no_such_caveat(tmp_path: Path) -
     verdict = store.verdict_for("s", "c")
     assert verdict.can_propose is True
     assert "breaks nothing" not in verdict.caveat
+
+
+# --- the reviewer's inputs, not just its guidance ---------------------------------
+
+
+def _with_context(digest: str) -> GateRecord:
+    return _record().model_copy(update={"reviewer_context_digest": digest})
+
+
+def test_a_gate_taken_against_other_inputs_is_not_evidence(tmp_path: Path) -> None:
+    """`skill_hash` covers guidance, cases, wiki and index — not what a reviewer was pointed at.
+
+    Repoint `source_ref` at another snapshot and the guidance is untouched, so the stored pass went
+    on reading as current evidence for a measurement nobody would take again.
+    """
+    store = _store(tmp_path)
+    store.save(_with_context("digest-of-snapshot-one"))
+
+    verdict = store.verdict_for("rust-errors", HASH_A, context_digest="digest-of-snapshot-two")
+    assert verdict.can_propose is False
+    assert "different inputs" in verdict.reason
+    # Still quotes the gate it is refusing on, rather than reading as "never gated".
+    assert verdict.latest is not None
+
+
+def test_the_same_inputs_still_justify_publishing(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.save(_with_context("digest-of-snapshot-one"))
+    assert store.verdict_for(
+        "rust-errors", HASH_A, context_digest="digest-of-snapshot-one"
+    ).can_propose
+
+
+def test_a_skill_with_no_hashable_context_is_unaffected(tmp_path: Path) -> None:
+    """The built-in reviewer digests as `""`, which is what its records already carry.
+
+    Same property `skill_hash` holds for the wiki and the index: landing this invalidates nothing.
+    """
+    store = _store(tmp_path)
+    store.save(_record())
+    assert store.verdict_for("rust-errors", HASH_A, context_digest="").can_propose
+
+
+def test_an_unresolvable_context_does_not_block_publishing(tmp_path: Path) -> None:
+    """None means "could not be told", and refusing over a question we failed to ask would turn a
+    broken `evaluate` step into a publishing block."""
+    store = _store(tmp_path)
+    store.save(_with_context("digest-of-snapshot-one"))
+    assert store.verdict_for("rust-errors", HASH_A, context_digest=None).can_propose
+    assert store.verdict_for("rust-errors", HASH_A).can_propose
+
+
+def test_an_ungated_version_still_says_it_was_never_gated(tmp_path: Path) -> None:
+    """The context check must not turn "no gate" into "gated under other inputs"."""
+    store = _store(tmp_path)
+    verdict = store.verdict_for("rust-errors", HASH_A, context_digest="anything")
+    assert verdict.can_propose is False
+    assert "no gate has been run" in verdict.reason
