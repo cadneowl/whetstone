@@ -32,7 +32,8 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from whetstone.domain.run import ClaimStatus, ClaimVerdict
-from whetstone.sidecars.claims import Claim, parse
+from whetstone.gitio import subtree_hash
+from whetstone.sidecars.claims import Claim, Sidecar, parse
 from whetstone.sidecars.collect import AGENTS_DIR, CONTEXT_FILE
 
 # How much of a folder's code one blind account is allowed to read. A folder that does not fit is
@@ -233,6 +234,30 @@ def compare(
     return result if isinstance(result, Comparison) else Comparison()
 
 
+def unchanged_since_confirmed(source_root: str | Path, folder: str, sidecar: Sidecar) -> bool:
+    """Whether nothing under `folder` has moved since this sidecar was last confirmed.
+
+    Git is already a Merkle tree, so `confirmed_at_tree` compared against the directory's current
+    tree object answers this exactly and for free — the reason §2.1 stores a subtree hash rather
+    than a commit sha, and the only part of that design that pays for itself on every sweep.
+
+    False whenever the answer is not certain: no stamp, not a checkout, git unavailable. A sweep
+    that skips on doubt verifies nothing while reporting that it did, which is the failure mode
+    this whole loop exists to avoid.
+    """
+    stamped = sidecar.frontmatter.get("confirmed_at_tree")
+    if not isinstance(stamped, str) or not stamped.strip():
+        return False
+    current = subtree_hash(source_root, folder)
+    if not current:
+        return False
+    # Prefix comparison, because the stamp is routinely written short (`9f2c1ab`) the way every
+    # other sha in a commit message is, and demanding the full 40 would make the field unusable by
+    # the humans who maintain it.
+    stamp = stamped.strip()
+    return len(stamp) >= 7 and current.startswith(stamp)
+
+
 def sweep_folder(
     client: Any,
     source_root: str | Path,
@@ -241,6 +266,7 @@ def sweep_folder(
     *,
     max_bytes: int = DEFAULT_CODE_BYTES,
     effort: str = "medium",
+    skip_unchanged: bool = False,
 ) -> FolderReport:
     """One folder, two calls. Returns a report; writes nothing anywhere."""
     root = Path(source_root)
@@ -248,9 +274,16 @@ def sweep_folder(
         text = (root / sidecar_path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         return FolderReport(folder=folder, sidecar=sidecar_path, skipped=f"unreadable: {exc}")
-    claims = parse(text, path=sidecar_path).claims
+    parsed = parse(text, path=sidecar_path)
+    claims = parsed.claims
     if not claims:
         return FolderReport(folder=folder, sidecar=sidecar_path, skipped="no claims to check")
+    if skip_unchanged and unchanged_since_confirmed(root, folder, parsed):
+        return FolderReport(
+            folder=folder,
+            sidecar=sidecar_path,
+            skipped="unchanged since it was last confirmed",
+        )
 
     code, read, truncated = read_folder(root, folder, max_bytes=max_bytes)
     account = blind_account(client, folder, code, effort=effort)
@@ -278,12 +311,18 @@ def sweep(
     last_seen: dict[str, datetime] | None = None,
     max_bytes: int = DEFAULT_CODE_BYTES,
     effort: str = "medium",
+    skip_unchanged: bool = False,
 ) -> SweepReport:
     """Sweep some or all of a tree's sidecars.
 
     `folders` narrows to the post-merge case — the directories a merge touched. Without it the
     whole tree is eligible and `limit` makes it the budgeted nightly crawl, spent
     least-recently-verified first.
+
+    `skip_unchanged` spends nothing on a folder whose tree has not moved since its notes were last
+    confirmed. Applied after `limit`, deliberately: the budget is a bound on what may be spent, not
+    a quota to fill, and re-slicing to reach `limit` folders that all need work would turn a cheap
+    crawl into an expensive one on exactly the repositories where most notes are current.
     """
     targets = sidecar_folders(source_root, role)
     if folders is not None:
@@ -297,7 +336,13 @@ def sweep(
     report = SweepReport()
     for folder, sidecar_path in targets:
         result = sweep_folder(
-            client, source_root, folder, sidecar_path, max_bytes=max_bytes, effort=effort
+            client,
+            source_root,
+            folder,
+            sidecar_path,
+            max_bytes=max_bytes,
+            effort=effort,
+            skip_unchanged=skip_unchanged,
         )
         report.folders.append(result)
         if not result.skipped:

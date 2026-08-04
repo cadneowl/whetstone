@@ -7,6 +7,7 @@ after it has been.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.eval_model import Expectation, Provenance
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.run import ClaimVerdict
+from whetstone.gitio import subtree_hash
 from whetstone.promote import CaseEdits, SidecarTarget, prepare
 from whetstone.sidecars.claims import parse, render_claim, with_claim
 from whetstone.sidecars.collect import resolve
@@ -33,6 +35,7 @@ from whetstone.sidecars.maintain import (
     stale_first,
     sweep,
     sweep_folder,
+    unchanged_since_confirmed,
 )
 
 DIFF = (
@@ -719,3 +722,80 @@ def test_a_sidecar_with_no_claims_costs_no_calls(tmp_path: Path) -> None:
     report = sweep(client, root, "arch-review", folders=["pay"])
     assert report.calls == 0
     assert client.seen == []
+
+
+# --- step 6: git's Merkle tree scoping the sweep --------------------------------------------------
+
+
+def _git_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    (root / "pay" / ".agents").mkdir(parents=True)
+    (root / "pay" / "stripe.py").write_text("MAX_RETRIES = 3\n", encoding="utf-8")
+    (root / "pay" / ".agents" / "arch-review.md").write_text(
+        "---\nstatus: confirmed\n---\n\n- Retries cap at 3.\n  <!-- src: HUB-1 -->\n",
+        encoding="utf-8",
+    )
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    return root
+
+
+def _stamp(root: Path, value: str) -> None:
+    path = root / "pay" / ".agents" / "arch-review.md"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "status: confirmed", f"status: confirmed\nconfirmed_at_tree: {value}"
+        ),
+        encoding="utf-8",
+    )
+
+
+def _sidecar_of(root: Path) -> object:
+    return parse((root / "pay" / ".agents" / "arch-review.md").read_text(encoding="utf-8"))
+
+
+def test_an_unmoved_folder_is_skipped_because_git_can_prove_it(tmp_path: Path) -> None:
+    root = _git_tree(tmp_path)
+    current = subtree_hash(root, "pay")
+    assert current
+    _stamp(root, current[:7])
+    assert unchanged_since_confirmed(root, "pay", _sidecar_of(root))  # type: ignore[arg-type]
+
+
+def test_a_folder_that_moved_is_checked_again(tmp_path: Path) -> None:
+    root = _git_tree(tmp_path)
+    _stamp(root, subtree_hash(root, "pay") or "")
+    (root / "pay" / "stripe.py").write_text("MAX_RETRIES = 6\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "raise"],
+        cwd=root, check=True, capture_output=True,
+    )
+    assert not unchanged_since_confirmed(root, "pay", _sidecar_of(root))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("stamp", ["", "   ", "abc"])
+def test_skipping_only_ever_happens_on_certainty(tmp_path: Path, stamp: str) -> None:
+    """A sweep that skips on doubt verifies nothing while reporting that it did."""
+    root = _git_tree(tmp_path)
+    if stamp:
+        _stamp(root, stamp)
+    assert not unchanged_since_confirmed(root, "pay", _sidecar_of(root))  # type: ignore[arg-type]
+
+
+def test_a_tree_that_is_not_a_checkout_is_always_verified(tmp_path: Path) -> None:
+    root = tmp_path / "plain"
+    (root / "pay" / ".agents").mkdir(parents=True)
+    sidecar = parse("---\nstatus: confirmed\nconfirmed_at_tree: 9f2c1ab\n---\n")
+    assert not unchanged_since_confirmed(root, "pay", sidecar)
+
+
+def test_the_sweep_spends_nothing_on_an_unmoved_folder(tmp_path: Path) -> None:
+    root = _git_tree(tmp_path)
+    _stamp(root, subtree_hash(root, "pay") or "")
+    client = _BlindClient([], [])
+    report = sweep(client, root, "arch-review", skip_unchanged=True)
+    assert report.calls == 0
+    assert client.seen == []
+    assert "unchanged" in report.folders[0].skipped

@@ -114,9 +114,7 @@ function Verdict({ runId }: { runId: string }) {
       ))}
       {data.caveats.length > 0 && (
         <>
-          <p className="mt-3 text-xs tracking-wide text-muted uppercase">
-            Read with these in mind
-          </p>
+          <p className="mt-3 text-xs tracking-wide text-muted uppercase">Read with these in mind</p>
           <ul className="mt-1 ml-4 list-disc text-muted">
             {data.caveats.map((caveat) => (
               <li key={caveat}>{caveat}</li>
@@ -240,9 +238,13 @@ function Header({ run }: { run: RunRecord }) {
         </li>
         {run.reviewer_context_digest && (
           <li
-            title={`Inputs the reviewer program was given — ${Object.entries(run.reviewer_context ?? {})
+            title={`Inputs the reviewer program was given — ${Object.entries(
+              run.reviewer_context ?? {},
+            )
               .map(([k, v]) => `${k}=${String(v)}`)
-              .join(', ')}. An environment value shows as its source, never its contents. The hash covers only the inputs that identify what the reviewer read (literals, file contents, pinned refs), so it is stable across machines.`}
+              .join(
+                ', ',
+              )}. An environment value shows as its source, never its contents. The hash covers only the inputs that identify what the reviewer read (literals, file contents, pinned refs), so it is stable across machines.`}
           >
             context <code className="font-mono">{run.reviewer_context_digest.slice(0, 12)}</code>
           </li>
@@ -255,8 +257,7 @@ function Header({ run }: { run: RunRecord }) {
           className="mt-2 text-xs text-muted"
           title="An agent decides for itself what to open, so it is a less fixed instrument than a single call. Two runs can differ because it investigated differently rather than because the guidance changed — this is what makes that visible."
         >
-          the agent read:{' '}
-          <code className="font-mono">{run.reviewer_trace!.join(' · ')}</code>
+          the agent read: <code className="font-mono">{run.reviewer_trace!.join(' · ')}</code>
         </p>
       )}
       {run.score.errors > 0 && (
@@ -365,11 +366,14 @@ function SidecarsBlock({ sidecars }: { sidecars: CaseRun['sidecars'] }) {
   // to a surprising miss just as often as "it read this and disagreed anyway".
   if (!sidecars) return null
   const { paths, dropped } = sidecars
+  const verdicts = sidecars.verdicts ?? []
+  const disputed = verdicts.filter((v) => v.status === 'contradicted').length
   return (
     <details className="rounded border border-line/60 bg-base px-2.5 py-1.5 text-xs">
       <summary className="cursor-pointer text-muted">
         local context: {paths.length} file{paths.length === 1 ? '' : 's'}
         {dropped.length > 0 && <span className="text-warn"> · {dropped.length} dropped</span>}
+        {disputed > 0 && <span className="text-bad"> · {disputed} contradicted</span>}
       </summary>
       <ul className="mt-1.5 space-y-0.5 font-mono text-muted">
         {paths.map((path) => (
@@ -386,6 +390,22 @@ function SidecarsBlock({ sidecars }: { sidecars: CaseRun['sidecars'] }) {
           </li>
         )}
       </ul>
+      {verdicts.length > 0 && (
+        // What this review noticed about the claims it was given. Shown here rather than only in
+        // the ledger because this is where a surprising result is being diagnosed, and "the
+        // reviewer thought that claim was wrong" is one of the available explanations for it.
+        <ul className="mt-2 space-y-1 border-t border-line/60 pt-1.5 font-sans">
+          {verdicts.map((verdict) => (
+            <li key={`${verdict.path}:${verdict.claim}`}>
+              <span className={verdict.status === 'contradicted' ? 'text-bad' : 'text-muted'}>
+                {verdict.status}
+              </span>{' '}
+              <span className="text-muted">{verdict.claim}</span>
+              {verdict.evidence && <div className="text-muted italic">— {verdict.evidence}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
     </details>
   )
 }

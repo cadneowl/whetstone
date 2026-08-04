@@ -2926,6 +2926,13 @@ def sidecars_verify(
         bool,
         typer.Option("--uncovered", help="Also print facts no claim covers (noisy; see below)"),
     ] = False,
+    all_folders: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Check even sidecars whose folder has not moved since they were confirmed",
+        ),
+    ] = False,
     yes: YesOpt = False,
 ) -> None:
     """Check a source tree's `.agents/` claims against the code — blind (§8).
@@ -2941,6 +2948,10 @@ def sidecars_verify(
     `--folder` is the post-merge sweep over what a merge touched. `--limit` with neither is the
     budgeted nightly crawl, spent on the least-recently-verified first, which is the only thing
     that ever reaches cold code.
+
+    A sidecar whose folder has not moved since its `confirmed_at_tree` stamp is skipped, because
+    git is a Merkle tree and the comparison is free and exact. `--all` checks it anyway. Skipping
+    only ever happens on certainty — no stamp, or not a checkout, means verify.
 
     Contradictions are the output. `--uncovered` also prints facts the account produced that no
     claim covers, and it is off by default because most of them are restatement: the blind prompt
@@ -3000,6 +3011,7 @@ def sidecars_verify(
         limit=limit,
         last_seen=last_seen,
         effort=effort,
+        skip_unchanged=not all_folders,
     )
     written = 0
     for folder_report in report.folders:
