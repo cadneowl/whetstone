@@ -3178,11 +3178,17 @@ def sidecars_show(
     if json_out:
         typer.echo(_json.dumps(resolved, indent=2, sort_keys=True))
         return
+    missing = resolved.get("missing") or []
     for entry in resolved["files"]:
         typer.echo(f"  {entry['path']}  ({entry['bytes']:,} bytes)")
     for drop in resolved["dropped"]:
         typer.echo(f"  dropped: {drop['path']}  ({drop['reason']})")
-    if not resolved["files"] and not resolved["dropped"]:
+    for folder in missing:
+        # The orphan signal. Printed here above all: this command exists to answer "why did the
+        # reviewer not know that?", and "the folder you named is not in this tree" is an answer
+        # that no listing of what *was* loaded can give.
+        typer.echo(f"  not in the source tree: {folder or '.'}  (nothing could be read for it)")
+    if not resolved["files"] and not resolved["dropped"] and not missing:
         typer.echo("  (no local context for these paths)")
     typer.echo(f"\ncontext_hash: {resolved['context_hash'] or '(none)'}")
     typer.echo(f"{len(to_prompt(resolved)):,} prompt chars")

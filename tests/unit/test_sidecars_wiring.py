@@ -443,3 +443,54 @@ def test_the_installed_collector_is_what_a_declared_skill_carries(tmp_path: Path
     assert installed_state(skill_dir, skill.sidecar)  # not installed yet
     install(skill_dir, skill.sidecar)
     assert installed_state(skill_dir, skill.sidecar) == []
+
+
+def test_show_names_a_folder_that_is_not_in_the_source_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`sidecars show` exists to answer "why did the reviewer not know that?", and "the folder you
+    named is not in this tree" is an answer no listing of what *was* loaded can give."""
+    from typer.testing import CliRunner
+
+    from whetstone.cli import app
+
+    source = _source(tmp_path)
+    monkeypatch.setenv("HUB_ROOT", str(source))
+    root = tmp_path / "skills"
+    _skill_folder(
+        root,
+        "arch",
+        frontmatter=f"sidecar:\n  role: {ROLE}\n",
+        step="context:\n  source_root: { env: HUB_ROOT }\n",
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "sidecars", "show", "--skill", str(root / "arch"),
+            "--path", "payments/Gateway.java", "--path", "gone/Nowhere.java",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "payments/.agents/context.md" in result.output
+    assert "not in the source tree: gone" in result.output
+
+
+def test_a_missing_folder_makes_it_a_different_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same files loaded, different tree — and the hash has to say so, or a case scored where its
+    folder is absent silently reuses the baseline of one scored where it is present."""
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = tmp_path / "skills"
+    _skill_folder(
+        root,
+        "arch",
+        frontmatter=f"sidecar:\n  role: {ROLE}\n",
+        step="context:\n  source_root: { env: HUB_ROOT }\n",
+    )
+    loader = reviewer_for(root, load_skill(root / "arch")).sidecar.loader()
+    here = loader.for_paths(["payments/Gateway.java"])
+    plus_absent = loader.for_paths(["payments/Gateway.java", "gone/Nowhere.java"])
+    assert [f["path"] for f in here["files"]] == [f["path"] for f in plus_absent["files"]]
+    assert plus_absent["missing"] == ["gone"]
+    assert plus_absent["context_hash"] != here["context_hash"]
