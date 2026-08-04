@@ -670,11 +670,36 @@ def _sidecar_target(config: Config, edits: CaseEdits) -> SidecarTarget | None:
     except Exception:  # noqa: BLE001 - a broken step must not 500 the triage screen
         plan = None
     existing: str | None = None
+    folder_exists: bool | None = None
     if plan is not None:
         existing = _existing_sidecar(plan.source_root, edits, skill.sidecar.role)
+        folder_exists = _folder_in_tree(plan.source_root, edits.path)
     return SidecarTarget(
-        role=skill.sidecar.role, existing=existing, rule_ids=rule_ids(skill)
+        role=skill.sidecar.role,
+        existing=existing,
+        rule_ids=rule_ids(skill),
+        folder_exists=folder_exists,
     )
+
+
+def _folder_in_tree(source_root: str, path: str) -> bool | None:
+    """Whether the folder a claim would be filed in is actually in the source tree.
+
+    None when the question cannot be answered — an unreadable root, a path that escapes it — so the
+    check is skipped rather than guessed at. Same guard as `_existing_sidecar`: resolved, and
+    refused if it leaves the root.
+    """
+    anchor = Path(source_root).resolve()
+    folder = PurePosixPath(path).parent
+    try:
+        target = (anchor / str(folder)).resolve() if str(folder) != "." else anchor
+        target.relative_to(anchor)
+    except (OSError, ValueError):
+        return None
+    try:
+        return target.is_dir()
+    except OSError:
+        return None
 
 
 def _existing_sidecar(source_root: str, edits: CaseEdits, role: str) -> str | None:

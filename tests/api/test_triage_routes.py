@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1058,6 +1059,31 @@ def test_undo_leaves_the_claim_alone(
         assert client.delete("/api/candidates/812-t0/decision").status_code == 200
     assert "Already merged upstream." in landed.read_text(encoding="utf-8")
     assert not (skills_root / "rust-errors" / "promoted_cases" / "812-t0").exists()
+
+
+def test_a_claim_for_a_folder_this_tree_does_not_have_is_refused(
+    config: Config, store: RunStore, candidates_dir: Path, skills_root: Path, tmp_path: Path
+) -> None:
+    """The candidate came from another repository, or the folder was renamed since the merge
+    request. Either way the claim would sit beside code that is not there."""
+    source = tmp_path / "hub"
+    _with_sidecar_role(skills_root, source)
+    shutil.rmtree(source / "src" / "handlers")
+    config.candidates.dir = candidates_dir
+    with TestClient(create_app(config, store=store)) as client:
+        refused = client.post(
+            "/api/candidates/812-t0/preview",
+            json={
+                "edits": _edits(
+                    client, "812-t0", semantic="unwrap can panic on a normal path",
+                    destination="context", claim="a fact.", claim_source="HUB-1",
+                )
+            },
+        )
+    assert refused.status_code == 422
+    message = refused.json()["message"]
+    assert "src/handlers" in message
+    assert "source_root" in message  # the fix, not just the complaint
 
 
 def test_a_destination_that_cannot_deliver_is_refused_with_a_usable_reason(

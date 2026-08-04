@@ -330,6 +330,15 @@ class SidecarTarget(BaseModel):
     # Rules the skill actually declares, so an `Excepts R9` on a skill with no R9 is caught here
     # rather than becoming an exception that narrows nothing and is never noticed.
     rule_ids: list[str] = []
+    # Whether the folder the claim would be filed in is actually in the source tree. `None` means
+    # the caller could not resolve one, and the check is skipped rather than guessed at.
+    #
+    # This is `docs/design/sidecars.md` §13's "refuse a promotion from a repo the skill does not
+    # declare", answered by the tree instead of by a slug. A skill declares a `source_root`, never a
+    # repository name, so a slug comparison would have to guess a provider from a remote URL and
+    # would refuse correct promotions whenever it guessed wrong. The folder either exists or it does
+    # not, and the harm is the same either way: a claim filed beside code that is not there.
+    folder_exists: bool | None = None
 
 
 def prepare(
@@ -450,6 +459,15 @@ def _check_destination(edits: CaseEdits, target: SidecarTarget | None) -> None:
             "ticket, an ADR. Verification needs something to check against beyond the claim's own "
             "plausibility, and the dead-claim sweep needs to know what the claim was for"
         )
+    if target.folder_exists is False:
+        folder = PurePosixPath(edits.path).parent
+        raise SkillLoadError(
+            f"the source tree this skill reads has no {str(folder)!r} — a claim filed there would "
+            f"sit beside code that is not in this repository, and no review would ever read it. "
+            f"Either this candidate came from a different repository than {edits.skill_id!r} "
+            f"reviews, or the folder was renamed since the merge request. Send it to 'rule', or "
+            f"point the skill's `context: source_root:` at the tree this change belongs to"
+        )
     if edits.destination == "exception":
         rule = edits.excepts_rule_id.strip()
         if not rule:
@@ -490,6 +508,10 @@ def _delivery(
         role="" if name == CONTEXT_FILE else target.role,
         section=section,
         excepts=edits.excepts_rule_id.strip(),
+        # The rung this file is minted at rests on the eval case shipped with it: it fails without
+        # the claim, which is the ablation §9 names as evidence, and it is checkable by anyone
+        # reading the sidecar later.
+        confirmed_by=f"case/{edits.case_id}",
     )
     creates = not (target.existing or "").strip()
     return SidecarDelivery(

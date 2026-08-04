@@ -40,6 +40,17 @@ export function RunsIndex() {
                   </Badge>
                 )}
                 {summary.practice_mode && <Badge tone="warn">practice</Badge>}
+                {/* An ablation is already incomparable by digest. This is what stops it being
+                    *read* as a normal run in a list where the only visible difference is a lower
+                    score — which is exactly what an ablation is supposed to produce. */}
+                {summary.sidecars_off && (
+                  <Badge
+                    tone="accent"
+                    title="--no-sidecars: this run withheld the local context the skill normally reads, to measure what that context is worth. Its lower score is the measurement, not a regression."
+                  >
+                    ablation
+                  </Badge>
+                )}
                 <span className="ml-auto flex items-baseline gap-4">
                   <span className="tabular">recall {score(summary.recall, 2)}</span>
                   <span className="tabular">fp {score(summary.fp_rate, 2)}</span>

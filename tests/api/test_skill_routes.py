@@ -393,3 +393,63 @@ def test_a_healthy_corpus_reports_no_contradictions(client: TestClient, store: R
         store.save(make_record(f"run-{i}", recall_tp=True, created_at=AT + timedelta(hours=i)))
 
     assert client.get("/api/skills/rust-errors").json()["contradictions"] == []
+
+
+# --- the sidecar panel: what a skill reads from beside the code --------------------------
+
+
+def test_a_skill_with_no_sidecar_role_says_nothing_about_sidecars(client: TestClient) -> None:
+    """Every field of this is inert for the skills that declare no role, which is most of them."""
+    assert client.get("/api/skills/rust-errors").json()["sidecar"] is None
+
+
+def _declare_sidecar(skills_root: Path, source: Path) -> None:
+    skill = skills_root / "rust-errors"
+    body = (skill / "SKILL.md").read_text(encoding="utf-8")
+    (skill / "SKILL.md").write_text(
+        body.replace('  paths: ["**/*.rs"]', '  paths: ["**/*.rs"]\nsidecar:\n  role: arch-review'),
+        encoding="utf-8",
+    )
+    (skill / "evaluate").mkdir(exist_ok=True)
+    (skill / "evaluate" / "step.yaml").write_text(
+        f"context:\n  source_root: {source.as_posix()!r}\n", encoding="utf-8"
+    )
+
+
+def test_the_panel_counts_what_the_role_would_actually_read(
+    client: TestClient, skills_root: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "hub"
+    (source / "pay" / ".agents").mkdir(parents=True)
+    (source / "pay" / ".agents" / "context.md").write_text(
+        "---\nstatus: confirmed\n---\n\n- A cited fact.\n  <!-- src: HUB-1 -->\n\n- Uncited.\n",
+        encoding="utf-8",
+    )
+    # A different role's file in the same folder: this skill never reads it, so it must not count.
+    (source / "pay" / ".agents" / "qa.md").write_text(
+        "---\nstatus: confirmed\n---\n\n- Someone else's.\n  <!-- src: HUB-2 -->\n",
+        encoding="utf-8",
+    )
+    _declare_sidecar(skills_root, source)
+
+    panel = client.get("/api/skills/rust-errors").json()["sidecar"]
+    assert panel["role"] == "arch-review"
+    assert panel["source_ok"] is True
+    assert panel["files"] == 1  # context.md only
+    assert panel["claims"] == 2
+    assert panel["uncited"] == 1
+    assert panel["problems"] == []
+    # Nothing has been installed into the skill's tools/, and the panel says so rather than
+    # implying the other harness is running the same collector.
+    assert panel["install_problems"]
+
+
+def test_the_panel_says_when_the_source_tree_is_not_there(
+    client: TestClient, skills_root: Path, tmp_path: Path
+) -> None:
+    """The silent failure: every case resolves to no local context and the run looks clean."""
+    _declare_sidecar(skills_root, tmp_path / "not-a-checkout")
+
+    panel = client.get("/api/skills/rust-errors").json()["sidecar"]
+    assert panel["source_ok"] is False
+    assert any("not a directory" in problem for problem in panel["problems"])

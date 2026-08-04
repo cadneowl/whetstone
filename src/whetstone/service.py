@@ -1147,6 +1147,42 @@ class StepRuntime(BaseModel):
     warning: str = ""
 
 
+class SidecarStatus(BaseModel):
+    """What a skill's `sidecar:` declaration resolves to right now, for the skill's own page.
+
+    Every field answers a question that was previously only answerable by running something: is the
+    source tree where the skill thinks it is, how much local knowledge does it actually have, is the
+    installed collector the one Whetstone scores with, and has anything with the code in front of it
+    said a claim is wrong.
+    """
+
+    role: str
+    scope: str = "diff-paths"
+    budget: int = 0
+    max_files: int = 0
+    max_file_bytes: int = 0
+    confirmations: bool = False
+    # As declared — an env var name, never its value, the way `ResolvedContext` shows it.
+    source_declared: str = ""
+    # Resolved, and whether it is a directory. A `source_root` that does not resolve is the failure
+    # this panel exists to catch: every case resolves to no local context and the run looks clean.
+    source_root: str = ""
+    source_ok: bool = False
+    # What the plan would refuse or warn about, in the plan's own words.
+    problems: list[str] = []
+    # Installed-collector drift, from `sidecars.installed_state`.
+    install_problems: list[str] = []
+    # `.agents/` files under the tree this role would read, and the claims in them. Counting stops
+    # at `folder_scan_limit`, because this is a page load against somebody's monorepo.
+    files: int = 0
+    claims: int = 0
+    uncited: int = 0
+    scan_truncated: bool = False
+    # Claims something has contradicted, from the ledger — the queue `whetstone sidecars claims
+    # --disputed` prints, counted here so the page can point at it.
+    disputed: int = 0
+
+
 class SkillDetail(BaseModel):
     skill: Skill
     # How each step runs, in pipeline order. Empty only for a skill with no step files at all.
@@ -1184,6 +1220,11 @@ class SkillDetail(BaseModel):
     reviews: int = 0
     unruled_findings: int = 0
     stale_reviews: int = 0
+    # Set only for a skill that declares a `sidecar:` role. What the skill reads from beside the
+    # code, whether the tree it reads is actually there, and whether the copy the *other* harness
+    # runs is current — none of which appeared on any screen, so a skill whose local context was
+    # silently resolving to nothing looked identical to one with no local context to read.
+    sidecar: SidecarStatus | None = None
 
 
 class BaselineVerdict(BaseModel):

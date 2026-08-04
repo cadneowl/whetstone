@@ -502,11 +502,24 @@ unconfirmed  →  confirmed  →  load-bearing
 ```
 
 - **unconfirmed** — agent-authored or bootstrap-decomposed. **Never injected into a consuming run.**
-- **confirmed** — blind verification agreed, with a citation. Injected.
+- **confirmed** — something independent of whatever wrote the claim has agreed, with evidence.
+  Injected.
 - **load-bearing** — human-promoted, or an ablation showed a finding depends on it.
 
 Agents may write freely; nothing they write is believed until something independent agrees. Same
 ladder as `working → draft → promoted`, pointed at a different artifact.
+
+**Two things reach `confirmed`, and the rung means the same in both.** Blind verification agreeing
+with a citation (§8) is one. The other is a claim filed from triage (§6): a human wrote it from a
+merge request where a reviewer asked for the change, it ships as a pull request the folder's
+CODEOWNERS have to accept, and it arrives with an eval case that fails without it. That is an
+independent party and an ablation, which is what the rung asserts — the earlier wording named only
+the first path and read as though the second were skipping a step.
+
+What makes this checkable rather than asserted is `confirmed_by`, which a minted sidecar now
+carries: `case/<id>`, naming the eval case whose failure is the evidence. A file that says
+`confirmed` without saying what confirmed it is asking every later reader, and every maintainer
+sweep, to take the generator's word for it.
 
 ### 9.1 `--no-sidecars` is a standing evaluation mode, built first
 
@@ -622,7 +635,7 @@ should say how many sidecars will be sent and from which repo.
 | sidecar unreadable / not utf-8 | fail the run, naming the file — same as a bad guidance page |
 | `budget` or `max_files` exceeded | drop general-first, deterministically, name the drops in-prompt; the drop list is hashed, so the truncated set is a *different* measurement, not a silently worse one |
 | single sidecar over `max_file_bytes` | drop it with a named reason, and fail it at the CI floor (§8) where it is cheap to split |
-| case path absent from the resolved source tree | resolve to no sidecar, **report it** — that is the orphan signal surfacing through evals |
+| case path absent from the resolved source tree | resolve to no sidecar, **report it** — `CaseSidecars.missing`, hashed, shown in the drill-down. The *directory*, not the file: a diff that creates a file names a path the tree does not have yet, which is ordinary. A directory that is not there is the orphan signal, and it is otherwise indistinguishable from a folder that keeps no notes |
 | role declared, no sidecars anywhere | valid; behaves exactly like today |
 | sidecar edited mid-gate | `context_hash` differs between sides → refuse the comparison |
 | collector script missing / non-zero exit / unparseable | fail the run naming it — it is the retrieval path, and a review without it is not the reviewer being gated |
@@ -643,8 +656,12 @@ should say how many sidecars will be sent and from which repo.
 - `src/whetstone/core/loader.py` — parse the `sidecar:` frontmatter block into the `Skill` model.
 - `src/whetstone/reviewer/llm_reviewer.py` — inject alongside `render_pages` (:128); the built-in
   reviewer is the common case and must not be an afterthought.
-- `src/whetstone/agent/runner.py` — `_system` (:134) lists sidecars as *given* context, not as files
-  to fetch; agent mode must not reintroduce model-decided retrieval.
+- ~~`src/whetstone/agent/runner.py` — `_system` lists sidecars as *given* context.~~ **Refused
+  instead.** A skill that declares a `sidecar:` role *and* is reviewed by its own agent or program
+  is rejected at the plan: an agent chooses its own reads and a program collects its own context, so
+  attaching the declaration to the digest there would say sidecars shaped a review they never
+  touched — a worse lie than the one this design exists to stop telling. Such a reviewer calls
+  `tools/collect_sidecars.py` itself.
 - `src/whetstone/domain/run.py` — `_feed_context` for the `sidecar:` declaration; `CaseRun.sidecars`.
 - `src/whetstone/promote.py` — `CaseEdits.destination` + `excepts_rule_id`; the branch at :312;
   `PreparedCase.sidecar` as a **separate field** — *not* in `files`, which `commit_promotion`
@@ -655,9 +672,14 @@ should say how many sidecars will be sent and from which repo.
 - `ui/src/api/client.ts`, the triage screen — the destination control and its pre-fill.
 - `docs/decisions.md` — an ADR for the §11 departure and the per-case hash choice.
 
-**Free validation to add while there:** `prepare()` should refuse a promotion whose
-`candidate.change.repo` is not among the skill's declared sources — four lines next to the
-`_RULE_ID` check (`promote.py:282`), and much cheaper before there are promotions in flight.
+**Free validation, built — but keyed on the tree, not on a slug.** The plan here was for `prepare()`
+to refuse a promotion whose `candidate.change.repo` is not among the skill's declared sources. A
+skill declares a `source_root` and never a repository name, so that comparison would have had to
+guess a provider from a remote URL and would refuse correct promotions whenever it guessed wrong.
+What is built instead refuses a claim destination whose **folder is not in the source tree**
+(`SidecarTarget.folder_exists`), which catches the wrong-repo case and the renamed-folder case
+together, cannot misfire on a naming convention, and names the same harm: a claim filed beside code
+that is not there.
 
 ---
 

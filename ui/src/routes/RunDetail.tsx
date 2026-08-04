@@ -93,6 +93,36 @@ function rulingKey(caseId: string, trial: number, expectationId: string, finding
 }
 
 /**
+ * One shown context input, as text.
+ *
+ * Not every value is a string: a sidecar declaration is an object of role, scope and effective
+ * caps, and `String(...)` renders that as `[object Object]` — which tells the reader nothing about
+ * the very inputs this tooltip exists to name.
+ */
+/**
+ * Whether this run withheld the local context its skill declares.
+ *
+ * Read from the shown context, which *is* the declaration the digest was taken over — so this
+ * answer cannot disagree with the run's own identity.
+ */
+function sidecarsWithheld(run: RunRecord): boolean {
+  const declaration = (run.reviewer_context ?? {})['__whetstone_sidecar__']
+  return (
+    typeof declaration === 'object' &&
+    declaration !== null &&
+    (declaration as Record<string, unknown>).enabled === false
+  )
+}
+
+function describeContextValue(value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  if (typeof value !== 'object') return String(value)
+  return Object.entries(value as Record<string, unknown>)
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .join(' ')
+}
+
+/**
  * What happened, in sentences — the answer this screen's title asks for.
  *
  * Silent while loading and silent on error: it is a reading of a record that is already fully on
@@ -139,6 +169,16 @@ function Header({ run }: { run: RunRecord }) {
             title="Recorded in practice mode, so it is not evidence: the gate, the sharpening ledger and the cadence clocks all hold it out"
           >
             practice mode
+          </Badge>
+        )}
+        {/* Said at the top, where the numbers are, rather than left to be inferred from a digest
+            that differs. The whole value of an ablation depends on nobody reading it as a run. */}
+        {sidecarsWithheld(run) && (
+          <Badge
+            tone="accent"
+            title="--no-sidecars: the local context this skill normally reads was withheld, to measure what it is worth. Compare it against a normal run of the same guidance; never read it as one."
+          >
+            ablation · no local context
           </Badge>
         )}
         <a
@@ -241,7 +281,7 @@ function Header({ run }: { run: RunRecord }) {
             title={`Inputs the reviewer program was given — ${Object.entries(
               run.reviewer_context ?? {},
             )
-              .map(([k, v]) => `${k}=${String(v)}`)
+              .map(([k, v]) => `${k}=${describeContextValue(v)}`)
               .join(
                 ', ',
               )}. An environment value shows as its source, never its contents. The hash covers only the inputs that identify what the reviewer read (literals, file contents, pinned refs), so it is stable across machines.`}
@@ -343,7 +383,7 @@ function CaseBlock({
             {caseRun.error}
           </p>
         )}
-        <SidecarsBlock sidecars={caseRun.sidecars} />
+        <SidecarsBlock sidecars={caseRun.sidecars} withheld={sidecarsWithheld(run)} />
         {caseRun.trials.map((trial) => (
           <TrialBlock
             key={trial.index}
@@ -360,46 +400,106 @@ function CaseBlock({
   )
 }
 
-function SidecarsBlock({ sidecars }: { sidecars: CaseRun['sidecars'] }) {
+/** Why a cap stopped a sidecar, in the words of someone who has to decide what to do about it. */
+const DROP_REASON: Record<string, string> = {
+  max_files: 'over max_files — the most general folders are dropped first',
+  max_file_bytes:
+    'over max_file_bytes — this file has grown into the central system map sidecars exist to break up. Split it.',
+  budget: 'over budget — general goes first, nearest survives',
+  escapes_root: 'resolved outside source_root and was refused',
+  unconfirmed: 'status is unconfirmed, so the trust ladder withholds it from a scored run',
+}
+
+function SidecarsBlock({
+  sidecars,
+  withheld,
+}: {
+  sidecars: CaseRun['sidecars']
+  withheld: boolean
+}) {
   // Absent for every skill that declares no sidecar role, which is most of them. Absent and empty
   // are different facts and both are worth showing: "the reviewer read nothing here" is the answer
   // to a surprising miss just as often as "it read this and disagreed anyway".
   if (!sidecars) return null
   const { paths, dropped } = sidecars
+  const missing = sidecars.missing ?? []
   const verdicts = sidecars.verdicts ?? []
   const disputed = verdicts.filter((v) => v.status === 'contradicted').length
   return (
     <details className="rounded border border-line/60 bg-base px-2.5 py-1.5 text-xs">
       <summary className="cursor-pointer text-muted">
-        local context: {paths.length} file{paths.length === 1 ? '' : 's'}
+        local context: {withheld ? 'withheld' : `${paths.length} file${paths.length === 1 ? '' : 's'}`}
         {dropped.length > 0 && <span className="text-warn"> · {dropped.length} dropped</span>}
+        {missing.length > 0 && <span className="text-warn"> · {missing.length} not in the tree</span>}
         {disputed > 0 && <span className="text-bad"> · {disputed} contradicted</span>}
       </summary>
+
       <ul className="mt-1.5 space-y-0.5 font-mono text-muted">
-        {paths.map((path) => (
-          <li key={path}>{path}</li>
+        {paths.map((path, i) => (
+          <li key={path} className="flex items-baseline gap-2">
+            <span className={i === paths.length - 1 ? 'text-ink' : undefined}>{path}</span>
+            {/* Ordering is the rule that explains everything else here: root-first, so the
+                nearest folder's text sits closest to the question and survives every cap. */}
+            {i === paths.length - 1 && paths.length > 1 && (
+              <span
+                className="font-sans text-[10px] text-muted"
+                title="Nearest-last: the most specific folder's notes sit closest to the question, and are the last thing any cap would drop."
+              >
+                nearest
+              </span>
+            )}
+          </li>
         ))}
         {dropped.map((drop) => (
-          <li key={`${drop.path}:${drop.reason}`} className="text-warn">
+          <li key={`${drop.path}:${drop.reason}`} className="text-warn" title={DROP_REASON[drop.reason]}>
             {drop.path} <span className="text-muted">({drop.reason})</span>
           </li>
         ))}
-        {paths.length === 0 && dropped.length === 0 && (
+        {missing.map((folder) => (
+          <li key={`missing:${folder}`} className="text-warn">
+            {folder || '.'}{' '}
+            <span className="font-sans text-muted">
+              — not in the source tree, so nothing could be read for it
+            </span>
+          </li>
+        ))}
+        {paths.length === 0 && dropped.length === 0 && missing.length === 0 && (
+          // On an ablation the files exist and were held back on purpose. Saying "none" there
+          // would report the withholding as an absence — which is the one thing an ablation must
+          // never be mistaken for.
           <li className="font-sans">
-            none — no <code>.agents/</code> files under the paths this case touches
+            {withheld ? (
+              <>
+                withheld — this run is the <code>--no-sidecars</code> arm, so nothing was injected
+                however much local context these folders carry
+              </>
+            ) : (
+              <>
+                none — no <code>.agents/</code> files under the paths this case touches
+              </>
+            )}
           </li>
         )}
       </ul>
+
+      {missing.length > 0 && (
+        // The orphan signal (§12). A case pointed at a folder the tree does not have is not the
+        // same as a folder that keeps no notes, and the difference decides what to fix: the case,
+        // or `source_root`.
+        <p className="mt-1.5 border-t border-line/60 pt-1.5 font-sans text-muted">
+          Either this case outlived the folder it was mined from, or the skill's{' '}
+          <code>source_root</code> points at a different tree.
+        </p>
+      )}
+
       {verdicts.length > 0 && (
         // What this review noticed about the claims it was given. Shown here rather than only in
         // the ledger because this is where a surprising result is being diagnosed, and "the
         // reviewer thought that claim was wrong" is one of the available explanations for it.
-        <ul className="mt-2 space-y-1 border-t border-line/60 pt-1.5 font-sans">
+        <ul className="mt-2 space-y-1.5 border-t border-line/60 pt-1.5 font-sans">
           {verdicts.map((verdict) => (
             <li key={`${verdict.path}:${verdict.claim}`}>
-              <span className={verdict.status === 'contradicted' ? 'text-bad' : 'text-muted'}>
-                {verdict.status}
-              </span>{' '}
+              <ClaimStatusPill status={verdict.status} />{' '}
               <span className="text-muted">{verdict.claim}</span>
               {verdict.evidence && <div className="text-muted italic">— {verdict.evidence}</div>}
             </li>
@@ -407,6 +507,37 @@ function SidecarsBlock({ sidecars }: { sidecars: CaseRun['sidecars'] }) {
         </ul>
       )}
     </details>
+  )
+}
+
+type ClaimStyle = { className: string; title: string }
+
+const UNVERIFIABLE: ClaimStyle = {
+  className: 'border-line text-muted',
+  title: 'No code citation, so it is recorded as assent rather than evidence.',
+}
+
+const CLAIM_STATUS: Record<string, ClaimStyle> = {
+  contradicted: {
+    className: 'border-bad/50 text-bad',
+    title: 'A review with this code in front of it said the claim no longer holds — worth a look, never an automatic edit.',
+  },
+  confirmed: {
+    className: 'border-good/50 text-good',
+    title: 'The review cited code showing the claim still holds. A confirmation with no citation is recorded as unverifiable instead.',
+  },
+  unverifiable: UNVERIFIABLE,
+}
+
+function ClaimStatusPill({ status }: { status: string }) {
+  const style = CLAIM_STATUS[status] ?? UNVERIFIABLE
+  return (
+    <span
+      className={`rounded-full border px-1.5 py-px text-[10px] ${style.className}`}
+      title={style.title}
+    >
+      {status}
+    </span>
   )
 }
 

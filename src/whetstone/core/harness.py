@@ -152,6 +152,7 @@ def _sidecars_of(reviewer: Reviewer) -> CaseSidecars | None:
             for d in resolved.get("dropped") or []
         ],
         context_hash=str(resolved.get("context_hash") or ""),
+        missing=[str(m) for m in resolved.get("missing") or []],
         verdicts=[ClaimVerdict.model_validate(v) for v in resolved.get("verdicts") or []],
     )
 

@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS runs (
     k             INTEGER NOT NULL,
     practice_mode INTEGER NOT NULL,
     baseline      INTEGER NOT NULL DEFAULT 0,
+    -- A `--no-sidecars` ablation: the skill declares local context and this run withheld it. It is
+    -- already a different measurement by digest, which stops it being *compared* with a normal run
+    -- — this is what stops it being *read* as one, in a list where the only visible difference is
+    -- a lower score (`docs/design/sidecars.md` §9.1).
+    sidecars_off  INTEGER NOT NULL DEFAULT 0,
     recall        REAL NOT NULL,
     fp_rate       REAL NOT NULL,
     precision     REAL NOT NULL,
@@ -80,7 +85,7 @@ CREATE INDEX IF NOT EXISTS case_runs_by_case ON case_runs (skill_id, case_id, cr
 # `indexed_files` to the number of record files, so leaving that counter behind says the now-empty
 # index is current and nothing ever refills it. The console showed every run vanish. So the counter
 # goes with the tables, and the next read repopulates from the files, which are the truth.
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _DROP = (
     "DROP TABLE IF EXISTS runs;"
     "DROP TABLE IF EXISTS case_runs;"
@@ -130,6 +135,10 @@ class RunSummary(BaseModel):
     k: int = 1
     practice_mode: bool = False
     baseline: bool = False
+    # This run withheld the local context its skill normally reads (`--no-sidecars`). Carried on the
+    # index row so a list can say so: the ablation is the measurement §9.1 asks for, and its whole
+    # value depends on nobody reading its lower score as a regression.
+    sidecars_off: bool = False
     recall: float = 0.0
     fp_rate: float = 0.0
     precision: float = 0.0
@@ -422,21 +431,35 @@ def stale_version_ids(summaries: Iterable[RunSummary]) -> set[str]:
     return {s.id for s in summaries if (s.skill_id, s.skill_version) in ambiguous}
 
 
+def sidecars_withheld(record: RunRecord) -> bool:
+    """Whether this run is a `--no-sidecars` ablation of a skill that declares local context.
+
+    Read from the shown context rather than from a flag on the record, because that dict *is* the
+    declaration the digest was taken over: anything that could make this answer disagree with the
+    measurement's identity would have had to change the identity too.
+    """
+    from whetstone.sidecars import DECLARATION_KEY
+
+    declaration = (record.reviewer_context or {}).get(DECLARATION_KEY)
+    return isinstance(declaration, dict) and declaration.get("enabled") is False
+
+
 def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
     score = record.score
     conn.execute(
         """
         INSERT INTO runs (id, created_at, skill_id, skill_version, skill_hash, guidance_hash,
                           backend, model, judge_hash,
-                          k, practice_mode, baseline,
+                          k, practice_mode, baseline, sidecars_off,
                           recall, fp_rate, precision, f2, duration_s, llm_calls)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             created_at=excluded.created_at, skill_id=excluded.skill_id,
             skill_version=excluded.skill_version, skill_hash=excluded.skill_hash,
             guidance_hash=excluded.guidance_hash, backend=excluded.backend,
             model=excluded.model, judge_hash=excluded.judge_hash, k=excluded.k,
             practice_mode=excluded.practice_mode, baseline=excluded.baseline,
+            sidecars_off=excluded.sidecars_off,
             recall=excluded.recall, fp_rate=excluded.fp_rate, precision=excluded.precision,
             f2=excluded.f2, duration_s=excluded.duration_s, llm_calls=excluded.llm_calls
         """,
@@ -453,6 +476,7 @@ def _upsert(conn: sqlite3.Connection, record: RunRecord) -> None:
             record.k,
             int(record.practice_mode),
             int(record.baseline),
+            int(sidecars_withheld(record)),
             score.recall,
             score.fp_rate,
             score.precision,

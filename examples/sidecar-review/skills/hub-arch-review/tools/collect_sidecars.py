@@ -106,6 +106,7 @@ def resolve(
 
     kept: list[dict[str, Any]] = []
     dropped: list[dict[str, str]] = []
+    missing = _missing_folders(anchor, paths)
 
     # Phase A — candidates, no reads.
     candidates: list[str] = []
@@ -160,11 +161,39 @@ def resolve(
         "role": role,
         "files": kept,
         "dropped": dropped,
-        "context_hash": context_hash(kept, dropped),
+        "missing": missing,
+        "context_hash": context_hash(kept, dropped, missing),
     }
 
 
-def context_hash(files: list[dict[str, Any]], dropped: list[dict[str, str]]) -> str:
+def _missing_folders(anchor: Path, paths: list[str]) -> list[str]:
+    """Changed paths whose own directory is not in the source tree at all.
+
+    `docs/design/sidecars.md` §12: a case path absent from the resolved source tree resolves to no
+    sidecar and **is reported** — the orphan signal surfacing through evals. Without it, a case
+    pointed at a folder that has since been renamed, and a `source_root` aimed at the wrong
+    repository entirely, both look exactly like a folder that simply keeps no notes.
+
+    The *directory*, not the file: a diff that creates a file names a path the tree does not have
+    yet, and that is ordinary rather than a defect. A directory that is not there is not ordinary.
+    """
+    out: list[str] = []
+    for raw in paths:
+        parts = _normalise(raw)
+        if parts is None:
+            continue
+        folder = "/".join(parts[:-1])
+        target = _within(anchor, folder) if folder else anchor
+        if (target is None or not target.is_dir()) and folder not in out:
+            out.append(folder)
+    return sorted(out)
+
+
+def context_hash(
+    files: list[dict[str, Any]],
+    dropped: list[dict[str, str]],
+    missing: list[str] | None = None,
+) -> str:
     """Identity of what actually reached the prompt: the ordered contents, plus what was left out.
 
     Content, never a ref. That is what makes sidecars safe to read with no VCS handling of their
@@ -176,10 +205,18 @@ def context_hash(files: list[dict[str, Any]], dropped: list[dict[str, str]]) -> 
     The drop list is in here because a truncated set is a *different* measurement, not a quietly
     worse one — which is the whole reason dropping is an acceptable answer to a cap.
 
-    Empty when nothing was loaded and nothing was dropped, which reads the same as "this skill
-    declares no sidecars" — the same convention `ResolvedContext.digest` uses.
+    So is the missing-folder list, for the same reason and one more: a case scored against a tree
+    that does not contain its folder is not comparable with one scored against a tree that does,
+    and the difference is invisible in the loaded set — both are empty.
+
+    Empty when nothing was loaded, nothing was dropped and nothing was missing, which reads the
+    same as "this skill declares no sidecars" — the convention `ResolvedContext.digest` uses.
+
+    `missing` is fed in only when non-empty, so every hash taken before it existed still describes
+    the same measurement. A tree that has every folder is unaffected; one that does not was always
+    a different measurement and now says so.
     """
-    if not files and not dropped:
+    if not files and not dropped and not missing:
         return ""
     h = hashlib.sha256()
     h.update(_HASH_PREFIX)
@@ -193,6 +230,9 @@ def context_hash(files: list[dict[str, Any]], dropped: list[dict[str, str]]) -> 
         h.update(drop["path"].encode("utf-8"))
         h.update(b"\0")
         h.update(drop["reason"].encode("utf-8"))
+    for folder in missing or []:
+        h.update(b"\0missing\0")
+        h.update(folder.encode("utf-8"))
     return h.hexdigest()
 
 
@@ -368,6 +408,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
+    if result["missing"]:
+        # stderr, never the prompt: it is a fact about the checkout for whoever ran this, and the
+        # model reviewing the diff can do nothing with it.
+        print(
+            "note: not in this source tree, so they pull in no local context: "
+            + ", ".join(result["missing"]),
+            file=sys.stderr,
+        )
     body = to_prompt(result)
     if not body:
         # An explicit sentinel, not silence. It is what makes "the collector ran and found nothing"

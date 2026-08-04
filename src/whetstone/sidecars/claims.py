@@ -217,6 +217,7 @@ def with_claim(
     section: str = "",
     excepts: str = "",
     status: str = "confirmed",
+    confirmed_by: str = "",
 ) -> str:
     """`existing` with one claim added — the whole new file, ready to be delivered as a patch.
 
@@ -227,16 +228,20 @@ def with_claim(
     re-render — would reformat a file Whetstone does not own on every unrelated promotion, and turn
     a one-line PR into an unreviewable one.
 
-    `status` is written only when the file is new. A claim added to an existing sidecar inherits
-    that file's rung and does not move it — the alternative, demoting the file because one new
-    bullet is unverified, would silence everything already known about the folder to make room for
-    the newest thing said about it. What justifies the inheritance is that delivery is a pull
-    request in front of the folder's CODEOWNERS: a claim that lands has been agreed to by someone
-    who is not the thing that wrote it, which is what `confirmed` means (§9).
+    `status` and `confirmed_by` are written only when the file is new. A claim added to an existing
+    sidecar inherits that file's rung and does not move it — the alternative, demoting the file
+    because one new bullet is unverified, would silence everything already known about the folder to
+    make room for the newest thing said about it. What justifies the inheritance is that delivery is
+    a pull request in front of the folder's CODEOWNERS: a claim that lands has been agreed to by
+    someone who is not the thing that wrote it, which is what `confirmed` means (§9). `confirmed_by`
+    is where that reasoning is written down rather than assumed — for a triage-born claim it names
+    the eval case that fails without it, which is the ablation §9 asks for, on file.
     """
     bullet = render_claim(text, source, excepts=excepts)
     if not (existing or "").strip():
-        return _new_file(bullet, role=role, section=section, status=status)
+        return _new_file(
+            bullet, role=role, section=section, status=status, confirmed_by=confirmed_by
+        )
 
     current = existing or ""
     head, body = _head_body(current)
@@ -276,11 +281,16 @@ def _head_body(text: str) -> tuple[str, str]:
     return "", text
 
 
-def _new_file(bullet: str, *, role: str, section: str, status: str) -> str:
+def _new_file(bullet: str, *, role: str, section: str, status: str, confirmed_by: str) -> str:
     front: dict[str, Any] = {}
     if role:
         front["role"] = role
     front["status"] = status
+    if confirmed_by:
+        # What the rung rests on, in the field §2.1 has for exactly this. A file that says
+        # `confirmed` without saying what confirmed it is asking every later reader — and every
+        # maintainer sweep — to take the word of whoever generated it.
+        front["confirmed_by"] = confirmed_by
     rendered = yaml.safe_dump(front, sort_keys=False, allow_unicode=True).strip()
     tail = f"## {section}\n\n{bullet}\n" if section else f"{bullet}\n"
     return f"{DELIMITER}\n{rendered}\n{DELIMITER}\n\n{tail}"

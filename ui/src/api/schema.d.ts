@@ -1291,6 +1291,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/claims": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Claims
+         * @description What consuming runs and maintainer sweeps have said about this role's `.agents/` claims.
+         *
+         *     Disputed first — one `contradicted` from one model on one case is an opinion, and the same
+         *     verdict from four unrelated runs over a month is a finding, which is exactly what the counts on
+         *     each row are for. Read-only, and it stays that way: confirmation is automatic, correction is a
+         *     human editing the sidecar in its own repository (`docs/design/sidecars.md` §8).
+         *
+         *     Filtered to the files this role would read rather than to entries this skill recorded, because
+         *     `context.md` is shared between roles on purpose — and so is the news that one of its claims is
+         *     wrong.
+         */
+        get: operations["get_claims_api_skills__skill_id__claims_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills/{skill_id}/guidance": {
         parameters: {
             query?: never;
@@ -1947,6 +1976,11 @@ export interface components {
              */
             dropped: components["schemas"]["DroppedSidecar"][];
             /**
+             * Missing
+             * @default []
+             */
+            missing: string[];
+            /**
              * Paths
              * @default []
              */
@@ -2028,6 +2062,49 @@ export interface components {
              * @default
              */
             written: string;
+        };
+        /**
+         * ClaimHistory
+         * @description Everything the ledger knows about one claim.
+         */
+        ClaimHistory: {
+            /** Claim */
+            claim: string;
+            /**
+             * Confirmed
+             * @default 0
+             */
+            confirmed: number;
+            /**
+             * Contradicted
+             * @default 0
+             */
+            contradicted: number;
+            /**
+             * Disputed
+             * @description Worth a human's attention: something with the code in front of it said this is wrong.
+             *
+             *     Serialized rather than left to each caller, so the console and the CLI cannot come to
+             *     different conclusions about which claims are the ones somebody has to look at.
+             */
+            readonly disputed: boolean;
+            /**
+             * Last Evidence
+             * @default
+             */
+            last_evidence: string;
+            /**
+             * Last Seen
+             * Format: date-time
+             */
+            last_seen: string;
+            /** Path */
+            path: string;
+            /**
+             * Unverifiable
+             * @default 0
+             */
+            unverifiable: number;
         };
         /**
          * ClaimVerdict
@@ -4733,6 +4810,11 @@ export interface components {
              * @default 0
              */
             recall: number;
+            /**
+             * Sidecars Off
+             * @default false
+             */
+            sidecars_off: boolean;
             /** Skill Hash */
             skill_hash: string;
             /** Skill Id */
@@ -4953,6 +5035,94 @@ export interface components {
             scope: string;
         };
         /**
+         * SidecarStatus
+         * @description What a skill's `sidecar:` declaration resolves to right now, for the skill's own page.
+         *
+         *     Every field answers a question that was previously only answerable by running something: is the
+         *     source tree where the skill thinks it is, how much local knowledge does it actually have, is the
+         *     installed collector the one Whetstone scores with, and has anything with the code in front of it
+         *     said a claim is wrong.
+         */
+        SidecarStatus: {
+            /**
+             * Budget
+             * @default 0
+             */
+            budget: number;
+            /**
+             * Claims
+             * @default 0
+             */
+            claims: number;
+            /**
+             * Confirmations
+             * @default false
+             */
+            confirmations: boolean;
+            /**
+             * Disputed
+             * @default 0
+             */
+            disputed: number;
+            /**
+             * Files
+             * @default 0
+             */
+            files: number;
+            /**
+             * Install Problems
+             * @default []
+             */
+            install_problems: string[];
+            /**
+             * Max File Bytes
+             * @default 0
+             */
+            max_file_bytes: number;
+            /**
+             * Max Files
+             * @default 0
+             */
+            max_files: number;
+            /**
+             * Problems
+             * @default []
+             */
+            problems: string[];
+            /** Role */
+            role: string;
+            /**
+             * Scan Truncated
+             * @default false
+             */
+            scan_truncated: boolean;
+            /**
+             * Scope
+             * @default diff-paths
+             */
+            scope: string;
+            /**
+             * Source Declared
+             * @default
+             */
+            source_declared: string;
+            /**
+             * Source Ok
+             * @default false
+             */
+            source_ok: boolean;
+            /**
+             * Source Root
+             * @default
+             */
+            source_root: string;
+            /**
+             * Uncited
+             * @default 0
+             */
+            uncited: number;
+        };
+        /**
          * Signal
          * @description One thing that happened in a real review, waiting to become an eval case.
          *
@@ -5148,6 +5318,7 @@ export interface components {
              */
             runs: components["schemas"]["RunSummary"][];
             scored_by?: components["schemas"]["RunSummary"] | null;
+            sidecar?: components["schemas"]["SidecarStatus"] | null;
             skill: components["schemas"]["Skill"];
             /**
              * Stale Reviews
@@ -8295,6 +8466,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TierResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_claims_api_skills__skill_id__claims_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClaimHistory"][];
                 };
             };
             /** @description Validation Error */

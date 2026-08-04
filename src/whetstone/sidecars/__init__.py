@@ -122,7 +122,13 @@ class SidecarLoader:
     def for_paths(self, paths: list[str]) -> dict[str, Any]:
         """The resolved sidecar set for these changed paths."""
         if not self._enabled:
-            return {"role": self._spec.role, "files": [], "dropped": [], "context_hash": ""}
+            return {
+                "role": self._spec.role,
+                "files": [],
+                "dropped": [],
+                "missing": [],
+                "context_hash": "",
+            }
         key = tuple(paths)
         hit = self._memo.get(key)
         if hit is None:

@@ -185,8 +185,44 @@ def test_an_oversized_sidecar_is_dropped_not_read(tmp_path: Path) -> None:
 def test_missing_sidecars_are_normal_and_hash_to_nothing(tmp_path: Path) -> None:
     (tmp_path / "payments").mkdir()
     got = resolve(tmp_path, ["payments/P.java"], ROLE)
-    assert got == {"role": ROLE, "files": [], "dropped": [], "context_hash": ""}
+    assert got == {
+        "role": ROLE,
+        "files": [],
+        "dropped": [],
+        "missing": [],
+        "context_hash": "",
+    }
     assert to_prompt(got) == ""
+
+
+def test_a_folder_that_is_not_in_the_tree_is_reported(tmp_path: Path) -> None:
+    """`docs/design/sidecars.md` §12: the orphan signal, surfacing through evals.
+
+    A case pointed at a folder the tree does not have looks exactly like a folder that keeps no
+    notes, and the two want opposite fixes — the case, or `source_root`.
+    """
+    _tree(tmp_path, {"a/.agents/context.md": "known"})
+    got = resolve(tmp_path, ["a/File.java", "gone/Other.java"], ROLE)
+    assert got["missing"] == ["gone"]
+    assert [f["path"] for f in got["files"]] == ["a/.agents/context.md"]
+
+
+def test_a_new_file_in_an_existing_folder_is_not_missing(tmp_path: Path) -> None:
+    """A diff that creates a file names a path the tree does not have yet, which is ordinary."""
+    _tree(tmp_path, {"a/.agents/context.md": "known"})
+    assert resolve(tmp_path, ["a/BrandNew.java"], ROLE)["missing"] == []
+
+
+def test_a_missing_folder_changes_the_measurement(tmp_path: Path) -> None:
+    """It is hashed, because a case scored against a tree without its folder is not comparable
+    with one scored against a tree that has it — and both load nothing, so nothing else says so."""
+    _tree(tmp_path, {"a/.agents/context.md": "known"})
+    (tmp_path / "present").mkdir()
+    here = resolve(tmp_path, ["present/P.java"], ROLE)
+    gone = resolve(tmp_path, ["absent/P.java"], ROLE)
+    assert here["context_hash"] == ""
+    assert gone["context_hash"] != ""
+    assert to_prompt(gone) == ""  # the model is told nothing; this is a fact about the checkout
 
 
 def test_a_missing_source_root_is_an_error_never_an_empty_set(tmp_path: Path) -> None:

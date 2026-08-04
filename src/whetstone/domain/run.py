@@ -250,6 +250,11 @@ class CaseSidecars(BaseModel):
     paths: list[str] = []
     dropped: list[DroppedSidecar] = []
     context_hash: str = ""
+    # Folders this case's changed paths name that are not in the source tree at all
+    # (`docs/design/sidecars.md` §12). Distinct from an empty `paths`, which means the folder is
+    # there and keeps no notes: this means the case is pointed somewhere the tree does not have,
+    # so the reviewer could not have had local context however good the notes elsewhere are.
+    missing: list[str] = []
     # What the reviewer noticed about the claims it was handed, when it was asked. Empty for a run
     # that loaded no sidecars, and for every reviewer that is not the built-in one.
     verdicts: list[ClaimVerdict] = []

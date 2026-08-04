@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 from whetstone.domain.run import ClaimStatus, ClaimVerdict
 from whetstone.sidecars.claims import Claim, parse
@@ -275,7 +275,12 @@ class ClaimHistory(BaseModel):
     # The most recent evidence *against* the claim, which is the only text a human needs to decide.
     last_evidence: str = ""
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def disputed(self) -> bool:
-        """Worth a human's attention: something with the code in front of it said this is wrong."""
+        """Worth a human's attention: something with the code in front of it said this is wrong.
+
+        Serialized rather than left to each caller, so the console and the CLI cannot come to
+        different conclusions about which claims are the ones somebody has to look at.
+        """
         return self.contradicted > 0

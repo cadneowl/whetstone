@@ -913,6 +913,62 @@ def test_an_unconfirmed_sidecar_is_not_charged_to_the_budget(tmp_path: Path) -> 
     assert [f["path"] for f in got["files"]] == ["pay/.agents/arch-review.md"]
 
 
+def test_a_minted_sidecar_says_what_its_rung_rests_on() -> None:
+    """`confirmed` with nothing saying what confirmed it asks every later reader, and every
+    maintainer sweep, to take the generator's word for it. The eval case is the evidence."""
+    out = prepare(
+        _entry(),
+        _edits(destination="context", claim="A fact.", claim_source="HUB-1"),
+        skills_root=Path("skills"),
+        sidecar=TARGET,
+    )
+    assert out.sidecar is not None
+    front = parse(out.sidecar.content).frontmatter
+    assert front["status"] == "confirmed"
+    assert front["confirmed_by"] == "case/ledger-updated"
+
+
+def test_a_claim_added_to_an_existing_file_does_not_restamp_it() -> None:
+    """The rung is the file's, and one new bullet must not move it in either direction."""
+    existing = (
+        "---\nrole: arch-review\nstatus: load-bearing\nconfirmed_by: run/2026-07-14/812\n---\n\n"
+        "- Existing.\n  <!-- src: A -->\n"
+    )
+    out = prepare(
+        _entry(),
+        _edits(destination="context", claim="A fact.", claim_source="HUB-1"),
+        skills_root=Path("skills"),
+        sidecar=SidecarTarget(role="arch-review", existing=existing, rule_ids=["R1"]),
+    )
+    assert out.sidecar is not None
+    front = parse(out.sidecar.content).frontmatter
+    assert front["status"] == "load-bearing"
+    assert front["confirmed_by"] == "run/2026-07-14/812"
+
+
+def test_a_claim_for_a_folder_the_source_tree_does_not_have_is_refused() -> None:
+    """`docs/design/sidecars.md` §13, keyed on the tree rather than a repo slug: the claim would sit
+    beside code that is not in this repository, and no review would ever read it."""
+    with pytest.raises(SkillLoadError, match="no 'payments/reconciliation'"):
+        prepare(
+            _entry(),
+            _edits(destination="context", claim="A fact.", claim_source="HUB-1"),
+            skills_root=Path("skills"),
+            sidecar=SidecarTarget(role="arch-review", rule_ids=["R1"], folder_exists=False),
+        )
+
+
+def test_a_rule_destination_is_unaffected_by_a_folder_that_is_not_there() -> None:
+    """It files nothing beside the code, so the source tree has no say in it."""
+    out = prepare(
+        _entry(),
+        _edits(),
+        skills_root=Path("skills"),
+        sidecar=SidecarTarget(role="arch-review", rule_ids=["R1"], folder_exists=False),
+    )
+    assert out.sidecar is None
+
+
 def test_a_claim_edit_cannot_hide_behind_a_long_frontmatter_hunk() -> None:
     """The first hunk edits metadata inside a frontmatter block whose closing `---` is not in the
     hunk. Carrying that state across the gap marked the second hunk — a claim edit deep in the
