@@ -813,3 +813,39 @@ def test_the_collector_runs_on_a_python_far_older_than_whetstones() -> None:
         and node.value.id in {"list", "dict", "set", "tuple", "type"}
     ]
     assert runtime_generics == []
+
+
+def test_the_deterministic_judge_never_reaches_a_scoring_path() -> None:
+    """It cannot tell a complaint from agreement, and on a negative case that decides the score.
+
+    `DeterministicJudge` matches any region-eligible finding whose message contains the pattern, so
+    a reviewer saying *"the unwrap here is safe"* counts as a false positive: the word is there, the
+    region is right, and nothing reads the sentence. That is the strongest claim a regex supports
+    and it is not what a false-positive rate means.
+
+    Harmless as a test double, wrong the moment anything gates on it — and it is exported from
+    `whetstone.judge`, so wiring it in is one import away.
+    """
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src" / "whetstone").rglob("*.py")
+        if "DeterministicJudge(" in path.read_text("utf-8")
+    ]
+    assert offenders == [], (
+        "scoring must use LLMJudge, which asks a negative case whether the reviewer is objecting"
+    )
+
+
+def test_both_reviewers_are_told_that_agreement_is_not_a_finding() -> None:
+    """The reviewer half of the same rule the judge enforces.
+
+    A model handed a sidecar exception reports a finding whose message says the code is fine —
+    "increments the counter, which aligns with the documented exception for R3" — and the honest
+    place to stop that is where the reviewer is told what a finding is. Measured on
+    `examples/sidecar-review/`: recall 0.733 with and without, so the sentence is free.
+    """
+    for module, symbol in (
+        (("src", "whetstone", "reviewer", "llm_reviewer.py"), "never return one to say the code"),
+        (("src", "whetstone", "reviewer", "agent_reviewer.py"), "never list something to say it"),
+    ):
+        assert symbol in _read(*module), f"{module[-1]} no longer says what a finding is not"

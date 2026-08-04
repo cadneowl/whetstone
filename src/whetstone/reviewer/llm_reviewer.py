@@ -312,7 +312,9 @@ def _system_prompt(
         "Report every issue the guidance would flag, including low-confidence ones; a later step "
         "filters for importance. For each finding give the file path, the line number in the NEW "
         "file, a severity (info|warning|error), a short message, the rule id if the guidance names "
-        "one, and your confidence 0-1. If nothing applies, return an empty list."
+        "one, and your confidence 0-1. If nothing applies, return an empty list. A finding is a "
+        "problem you are reporting — never return one to say the code is correct, or to explain "
+        "why something is allowed here. That is not a finding; leave it out."
     )
     if confirmations:
         parts.append(_claims_request())
