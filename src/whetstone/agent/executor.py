@@ -57,12 +57,7 @@ class AgentExecutor(SkillAgent):
     # `TaskPolicy.max_steps`.
     DEFAULT_MAX_STEPS = 20
 
-    @property
-    def identity(self) -> str:
-        root = " +source" if self._root else ""
-        count = len(self._skill_tools.declared) if self._skill_tools else 0
-        extra = f" +{count} tool(s)" if count else ""
-        return f"agent-task: {self._max_steps} steps{root}{extra}"
+    KIND = "agent-task"
 
     def execute(
         self, skill: Skill, case: TaskCase, workspace: Path

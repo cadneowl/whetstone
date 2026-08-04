@@ -23,6 +23,23 @@ from whetstone.domain.skill import Skill
 from whetstone.llm.tools import ToolClient
 
 
+def agent_identity(kind: str, max_steps: int, *, source: bool, tools: int) -> str:
+    """How an agent names itself — in a preflight plan and in the run record alike.
+
+    One implementation because this string is not a label: it lands in `RunRecord.reviewer` and is a
+    component of `BaselineKey` (`gates.py`), so it decides whether a gate may reuse a baseline. It
+    had six hand-rolled copies across `agent/` and `reviewer/factory.py` — the plan-side ones
+    counting `spec.agent.tools` and the record-side ones counting `SkillTools.declared`. They
+    agreed, but nothing made them, and a divergence would have shown the operator one instrument
+    while filing the measurement under another.
+    """
+    return (
+        f"{kind}: {max_steps} steps"
+        + (" +source" if source else "")
+        + (f" +{tools} tool(s)" if tools else "")
+    )
+
+
 class SkillAgent:
     """Common state and prompt assembly for running a skill as an agent."""
 
@@ -31,6 +48,18 @@ class SkillAgent:
     # match `AgentPolicy.max_steps` and `TaskPolicy.max_steps`, and are declared here so they cannot
     # drift apart from the policy they mirror.
     DEFAULT_MAX_STEPS = 12
+    # What this agent is called in a record. Subclasses set it; `identity` does the rest.
+    KIND = "agent"
+
+    @property
+    def identity(self) -> str:
+        """See `agent_identity` — shared so a plan and a record cannot describe it differently."""
+        return agent_identity(
+            self.KIND,
+            self._max_steps,
+            source=bool(self._root),
+            tools=len(self._skill_tools.declared) if self._skill_tools else 0,
+        )
 
     def __init__(
         self,

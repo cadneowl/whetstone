@@ -70,13 +70,6 @@ class AgentStep(SkillAgent):
         self.note_trace(trace)
         return answer, trace
 
-    @property
-    def identity(self) -> str:
-        root = " +source" if self._root else ""
-        count = len(self._skill_tools.declared) if self._skill_tools else 0
-        extra = f" +{count} tool(s)" if count else ""
-        return f"agent: {self._max_steps} steps{root}{extra}"
-
     def _source_note(self) -> str:
         return (
             "\n# The source tree\n\nA read-only checkout is available through `read_file`, "

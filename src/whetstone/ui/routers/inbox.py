@@ -21,6 +21,7 @@ from whetstone.domain.skill import Skill
 from whetstone.drift import DriftStore
 from whetstone.gates import GateStore
 from whetstone.inbox import Attention, Inbox, Retirement, Signal, decide
+from whetstone.reviewer.factory import context_digest_for
 from whetstone.reviews import ReviewCounts
 from whetstone.runs import CorruptRecord, RunStore
 from whetstone.taskruns import TaskRunStore
@@ -305,5 +306,9 @@ def _proposal_state(
     # left the inbox looking a passing gate up under a hash nothing ever records, so it went on
     # saying "run the gate" after every run of the gate.
     under_test = on_disk if promoted is None else staging.merge_cases(on_disk, promoted)
-    verdict = GateStore(config.gates_dir).verdict_for(skill_id, skill_hash(under_test))
+    verdict = GateStore(config.gates_dir).verdict_for(
+        skill_id,
+        skill_hash(under_test),
+        context_digest=context_digest_for(config.skills_root, on_disk),
+    )
     return pending, verdict.can_propose, verdict.reason, on_disk

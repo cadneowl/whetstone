@@ -97,13 +97,6 @@ class AgentReviewer(SkillAgent):
         self.last_trace: AgentTrace | None = None
 
     @property
-    def identity(self) -> str:
-        root = " +source" if self._root else ""
-        count = len(self._skill_tools.declared) if self._skill_tools else 0
-        extra = f" +{count} tool(s)" if count else ""
-        return f"agent: {self._max_steps} steps{root}{extra}"
-
-    @property
     def provenance(self) -> ReviewerProvenance:
         return ReviewerProvenance(
             identity=self.identity, context=dict(self._redacted), context_digest=self._digest

@@ -65,7 +65,17 @@ class SubprocessReviewer:
 
     @property
     def identity(self) -> str:
-        """How a run record names this reviewer, so a score is attributable to what produced it."""
+        """How a run record names this reviewer, so a score is attributable to what produced it.
+
+        The whole argv, not just the program: `r.py --mode strict` and `r.py --mode loose` are
+        different instruments, and this string is a component of `BaselineKey`, so collapsing them
+        would let a gate reuse the wrong baseline.
+
+        It is therefore stored and displayed **verbatim** — nothing here is redacted. That is safe
+        because `run:` lives in a committed `step.yaml`: an argument worth hiding is already in git
+        long before it reaches a run record. Secrets belong in `context:` as `{ env: NAME }`, which
+        commits only the name and records only `<env:NAME>`.
+        """
         return "subprocess: " + " ".join(self._run)
 
     @property
@@ -107,9 +117,14 @@ class SubprocessReviewer:
         try:
             result = LLMFindingList.model_validate(json.loads(stdout))
         except (json.JSONDecodeError, ValueError) as exc:
+            # `stderr` too, not just `stdout`. A program that exits 0 and prints something
+            # unparseable has usually already said why on stderr — "could not reach source root",
+            # "model refused" — and reporting only the stdout snippet threw away the one line that
+            # explains the failure. The non-zero path has always shown it; this path did not.
+            tail = (stderr or "").strip()[-800:]
             raise StepError(
                 "reviewer must print a JSON object with a 'findings' list on stdout; "
-                f"got {stdout[:200]!r}"
+                f"got {stdout[:200]!r}" + (f"\nstderr:\n{tail}" if tail else "")
             ) from exc
         return [
             Finding(

@@ -138,3 +138,17 @@ def test_missing_program_raises(tmp_path: Path) -> None:
 def test_identity_names_the_program(tmp_path: Path) -> None:
     reviewer = SubprocessReviewer(["python", "rev.py"], cwd=tmp_path, timeout_s=5)
     assert reviewer.identity == "subprocess: python rev.py"
+
+
+def test_unparseable_output_reports_stderr_too(tmp_path: Path) -> None:
+    """A program that exits 0 with unusable stdout has usually already said why on stderr.
+
+    The non-zero path always showed it; this one threw away the single line that explained the
+    failure, leaving "got 'not json'" as the whole diagnosis.
+    """
+    code = (
+        'import sys; sys.stderr.write("could not reach source root, reviewed blind"); '
+        'print("not json")'
+    )
+    with pytest.raises(StepError, match="could not reach source root"):
+        _reviewer(tmp_path, code).review(_skill(), _change())

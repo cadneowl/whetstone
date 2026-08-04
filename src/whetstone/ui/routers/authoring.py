@@ -28,6 +28,7 @@ from whetstone.config import Config
 from whetstone.domain.run import guidance_hash, skill_hash
 from whetstone.domain.skill import Skill
 from whetstone.gates import Verdict
+from whetstone.reviewer.factory import context_digest_for
 from whetstone.ui.deps import (
     ConfigDep,
     GatesDep,
@@ -149,7 +150,13 @@ def get_proposal(skill_id: str, config: ConfigDep, gates: GatesDep) -> Proposal:
         guidance_hash=guidance_hash(on_disk),
         body=on_disk.body,
         pages={page.path: page.text for page in on_disk.pages},
-        verdict=gates.verdict_for(skill_id, disk_hash),
+        verdict=gates.verdict_for(
+            skill_id,
+            disk_hash,
+            # What the reviewer would be pointed at now. `skill_hash` cannot see it, so without
+            # this a gate taken against another snapshot still reads as evidence for this one.
+            context_digest=context_digest_for(config.skills_root, on_disk),
+        ),
     )
 
 

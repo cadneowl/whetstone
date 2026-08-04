@@ -125,3 +125,20 @@ def test_digest_covers_the_hashable_slice_only(tmp_path: Path) -> None:
 
 def test_digest_is_empty_when_nothing_hashable_is_declared(tmp_path: Path) -> None:
     assert resolve_context({}, skill_dir=tmp_path).digest == ""
+
+
+def test_empty_env_counts_as_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`export HUB_REPO_REF=` is what a failed shell expansion leaves behind.
+
+    Read as a value it defeated the preflight that exists to refuse an unset variable, and a pinned
+    empty string entered the hashable slice as though it named a snapshot.
+    """
+    monkeypatch.setenv("SRC", "")
+    r = resolve_context({"source_root": {"env": "SRC", "required": True}}, skill_dir=tmp_path)
+    assert r.missing == [("source_root", "SRC")]
+    assert "source_root" not in r.values
+
+    monkeypatch.setenv("REF", "")
+    pinned = resolve_context({"source_ref": {"env": "REF", "pin": True}}, skill_dir=tmp_path)
+    assert pinned.hashable == {}
+    assert pinned.digest == ""

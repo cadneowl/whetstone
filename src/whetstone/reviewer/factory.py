@@ -27,11 +27,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from whetstone.context import ResolvedContext, resolve_context
+from whetstone.agent.runner import agent_identity
+from whetstone.context import ContextError, ResolvedContext, resolve_context
 from whetstone.domain.skill import Skill
 from whetstone.reviewer.base import Reviewer
 from whetstone.reviewer.subprocess_reviewer import SubprocessReviewer
-from whetstone.steps import StepSpec, load_step
+from whetstone.steps import StepError, StepSpec, load_step
 
 
 @dataclass
@@ -173,6 +174,27 @@ def reviewer_for(skills_root: str | Path, skill: Skill) -> ReviewerChoice:
     return reviewer_from_step(spec, directory)
 
 
+def context_digest_for(skills_root: str | Path, skill: Skill) -> str | None:
+    """The reviewer-context identity this skill has right now, or None when it cannot be told.
+
+    For `GateStore.verdict_for`, which uses it to stop a stored pass from covering a version whose
+    reviewer would now read different inputs. `None` rather than `""` on failure, and the
+    difference matters: `""` is the real answer for a skill with no hashable context and would
+    correctly invalidate a gate taken with one, whereas a step we could not even load says nothing
+    about what was measured. Refusing to publish over a question we failed to ask would turn a
+    broken `evaluate` step into a publishing block, which is not what C6 is for.
+    """
+    try:
+        resolved = reviewer_for(skills_root, skill).context
+    except (StepError, ContextError, OSError):
+        return None
+    # `context` is None for the built-in reviewer — no `run:`, no `agent:`, no `task:` — and for a
+    # skill with no `evaluate` step at all. That is not "cannot be told": it is a skill with nothing
+    # hashable, whose digest is `""`, which is what its gate records already carry. Returning `""`
+    # is what keeps the default path byte-identical to before this check existed.
+    return resolved.digest if resolved is not None else ""
+
+
 def reviewer_from_step(spec: StepSpec | None, skill_dir: str | Path) -> ReviewerChoice:
     """The reviewer for an already-loaded `evaluate` step — the CLI path, which has the spec and the
     skill folder in hand and need not address the skill by id under a root."""
@@ -221,9 +243,9 @@ class StepAgent:
 
     @property
     def identity(self) -> str:
-        root = " +source" if self.source_root else ""
-        extra = f" +{len(self.tools)} tool(s)" if self.tools else ""
-        return f"agent: {self.max_steps} steps{root}{extra}"
+        return agent_identity(
+            "agent", self.max_steps, source=bool(self.source_root), tools=len(self.tools)
+        )
 
     def build(self, client: Any) -> Any:
         from whetstone.agent.step import AgentStep
@@ -294,6 +316,13 @@ def _agent_context(
     root = str(raw_root) if raw_root else None
     # Redacted, not raw: see `AgentPlan.shown`.
     shown = {k: v for k, v in resolved.redacted.items() if k != "source_root"}
+    # A checkout path is machine-local whichever form declared it. The `{ env: … }` form is left out
+    # of the hashable slice by construction, but `agent.source` also takes a literal path — and a
+    # literal *does* enter `hashable`, so `/Users/alice/repo` and `/home/bob/repo` digested
+    # differently for identical content. That breaks the cross-machine property the digest exists
+    # for (see `ResolvedContext.digest`) and stops a gate ever reusing a teammate's baseline. What
+    # the reviewer reads is identified by the pinned ref, never by where the checkout happens to be.
+    resolved.hashable.pop("source_root", None)
 
     problems: list[str] = []
     # A path that is set but wrong is the quiet one. Every source tool answers "no such file" / "no
@@ -318,9 +347,9 @@ def _agent_choice(spec: StepSpec, skill_dir: Path) -> ReviewerChoice:
         shown=shown,
         tools=list(spec.agent.tools),
     )
-    identity = f"agent: {spec.agent.max_steps} steps" + (" +source" if root else "")
-    if spec.agent.tools:
-        identity += f" +{len(spec.agent.tools)} tool(s)"
+    identity = agent_identity(
+        "agent", spec.agent.max_steps, source=bool(root), tools=len(spec.agent.tools)
+    )
     return ReviewerChoice(context=resolved, identity=identity, agent=plan, problems=problems)
 
 
@@ -335,7 +364,7 @@ def _task_choice(spec: StepSpec, skill_dir: Path) -> ReviewerChoice:
         shown=shown,
         tools=list(spec.task.tools),
     )
-    identity = f"agent-task: {spec.task.max_steps} steps" + (" +source" if root else "")
-    if spec.task.tools:
-        identity += f" +{len(spec.task.tools)} tool(s)"
+    identity = agent_identity(
+        "agent-task", spec.task.max_steps, source=bool(root), tools=len(spec.task.tools)
+    )
     return ReviewerChoice(context=resolved, identity=identity, task=plan, problems=problems)

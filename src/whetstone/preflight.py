@@ -372,6 +372,18 @@ def annotate_reviewer(
             f"price those calls, only count them, so the cost of the run is this many invocations "
             f"at whatever each one spends"
         )
+        # The payload carries every companion page, on every invocation. The built-in reviewer caps
+        # this (`render_pages`/`MAX_PAGE_BYTES`); a program gets the lot, deliberately — it decides
+        # what to use. Said out loud because a skill that grew to a hundred kilobytes of pages is
+        # sending all of them per case, and nothing else in the plan would reveal that.
+        pages = skill.pages if skill else []
+        if pages:
+            size = sum(len(p.text) for p in pages)
+            plan.details.append(
+                f"each invocation carries this skill's {len(pages)} companion page(s) "
+                f"(~{size:,} chars) alongside the diff — unbudgeted, because your program chooses "
+                f"what to read"
+            )
     if choice.context and choice.context.redacted:
         shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
         plan.details.append(f"reviewer context: {shown}")

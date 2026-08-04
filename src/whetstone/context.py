@@ -123,7 +123,12 @@ def _resolve_env(out: ResolvedContext, name: str, decl: dict[str, Any]) -> None:
         raise ContextError(f"context {name!r}: 'env' must name an environment variable")
     pinned = bool(decl.get("pin"))
     value = os.getenv(env_var)
-    if value is None:
+    if not value:
+        # Empty counts as unset, not as a value. `export HUB_REPO_REF=` is what a failed shell
+        # expansion leaves behind, and it used to pass `required:` — the preflight that exists to
+        # refuse an unset variable would report nothing, and with `pin: true` the empty string
+        # entered the hashable slice as though it were a real pinned ref. There is no use for an
+        # empty context value that is worth keeping either form of that.
         if decl.get("required"):
             out.missing.append((name, env_var))
         return
