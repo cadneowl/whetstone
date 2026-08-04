@@ -656,3 +656,76 @@ def test_every_mermaid_block_is_well_formed() -> None:
                 if line.count("{") != line.count("}"):
                     problems.append(f"{where}: unbalanced {{}} in {line.strip()!r}")
     assert problems == []
+
+
+# --- sidecars: the one place Whetstone reads someone else's source tree ------------
+
+
+def test_the_readme_says_where_local_context_lives() -> None:
+    """A reader deciding where to put per-folder knowledge acts on this.
+
+    Left unsaid, the honest answer from the rest of the README is "a companion page" — which is the
+    38k-character `system-map.md` that motivated sidecars in the first place.
+    """
+    readme = _read("README.md")
+    assert "sidecar: role:" in readme
+    assert "docs/design/sidecars.md" in readme
+
+
+def test_the_amended_no_traversal_claim_is_marked_as_amended() -> None:
+    """ADR-022 and `agentic-reviewers.md` both say Whetstone never walks `source_root`.
+
+    That was true when written and is not any more. The claim is load-bearing — it is the security
+    argument a reader checks before pointing a skill at a private monorepo — so it may not sit
+    unqualified while the code does the opposite.
+    """
+    for doc in ("docs/decisions.md", "docs/design/agentic-reviewers.md"):
+        text = _read(*doc.split("/"))
+        _, _, tail = text.partition("never traverses")
+        assert tail, f"{doc}: the claim moved — re-point this test"
+        assert "ADR-029" in tail[:1200], f"{doc}: the no-traversal claim is not marked as amended"
+
+
+def test_no_module_writes_to_a_source_tree() -> None:
+    """Sidecar *creation* is a PR against the source repo, never a filesystem write.
+
+    The traversal ADR-029 permits is read-only, and Whetstone is never given write access to the
+    code it reviews. A module that wrote there would cross both lines at once, so the grep is crude
+    on purpose: any write API applied to a resolved source root is worth a human look.
+    """
+    writes = re.compile(r"source_root[^\n]*\.(write_text|write_bytes|mkdir|unlink|rmdir)\s*\(")
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "src" / "whetstone").rglob("*.py")
+        if writes.search(path.read_text("utf-8"))
+    ]
+    assert offenders == []
+
+
+def test_the_collector_imports_nothing_from_whetstone() -> None:
+    """The claim that makes one collector serve both harnesses.
+
+    It is installed into skill folders and run under Claude Code with no Whetstone on the path, so
+    a single convenience import would break that caller — silently, and only for them.
+
+    Walked as a syntax tree rather than grepped: an import nested inside a function is the form this
+    would actually arrive in, and it is invisible to a check that only reads the top of the file.
+    """
+    import ast
+
+    tree = ast.parse(_read("src", "whetstone", "sidecars", "collect.py"))
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        (node.module or "").split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert "whetstone" not in imported, (
+        "collect.py must stay free of Whetstone imports — see docs/design/sidecars.md §3.5"
+    )
+    # And nothing outside the standard library either, for the same reason.
+    assert imported <= {"__future__", "argparse", "hashlib", "json", "sys", "pathlib", "typing"}

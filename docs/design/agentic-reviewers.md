@@ -317,7 +317,10 @@ silently wrong since Phase 1 shipped, and the symptom in each case was a digest 
   operator's choice, but the context bag makes "this reviewer has the whole repo and a network
   model" legible where it wasn't before. Worth a one-line note in the plan.
 - **Path handling is the subprocess's.** Whetstone passes `source_root` and never traverses it
-  itself, so no path-escape surface is added on whetstone's side.
+  itself, so no path-escape surface is added on whetstone's side. **Amended by
+  [`sidecars.md`](./sidecars.md) §11 / ADR-029**, which is the one exception: reading a skill's
+  `.agents/` sidecars is a guarded traversal Whetstone performs itself, because context the
+  subprocess collects is context Whetstone cannot hash.
 
 ---
 
