@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from whetstone.deadrules import dead_rules
+from whetstone.deadrules import (
+    consolidatable,
+    dead_rules,
+    removed_rules,
+    render_for_drafter,
+)
 from whetstone.domain.eval_model import CodeChange, EvalCase, Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
 from whetstone.domain.skill import GuidancePage, Skill
@@ -119,3 +124,87 @@ def test_unreferenced_wins_over_the_evidence_verdicts() -> None:
 
 def test_no_provenance_means_an_empty_report() -> None:
     assert dead_rules(_skill({}, [_case("c1", "a!1")])) == []
+
+
+# --- what a distill is told, and what it is caught doing --------------------------------
+
+
+def test_the_drafter_is_never_shown_a_rule_that_is_not_in_the_prose() -> None:
+    """`unreferenced` means the guidance no longer mentions it — a stale meta.yaml entry. Handing
+    it to a drafter would send it looking for text that is not there."""
+    skill = _skill({"R1": [_prov("a/b!1")], "R9": [_prov("a/b!9")]})
+    verdicts = {rule.rule_id: rule.verdict for rule in dead_rules(skill)}
+    assert verdicts["R9"] == "unreferenced"
+    assert [rule.rule_id for rule in consolidatable(skill)] == ["R1", "R2"]
+
+
+def test_the_block_says_nothing_is_testing_them_and_not_that_they_should_go() -> None:
+    """The report exists to prevent vandalism; handed over as a delete list it would cause some."""
+    text = render_for_drafter(consolidatable(_skill({"R1": [_prov("a/b!1")]})))
+    assert "**R1**" in text
+    assert "no case will fail" in text  # the fact that makes this the gate's blind spot
+    assert "Do not remove a rule because it appears in this list." in text
+
+
+def test_an_empty_report_renders_nothing_at_all() -> None:
+    """A heading over an empty list reads as "we checked and there is a problem"."""
+    assert render_for_drafter([]) == ""
+
+
+def test_a_removed_rule_with_cases_behind_it_is_the_gate_s_problem() -> None:
+    after = "# Review\n\n- **R2 — no swallowed errors.** Propagate or log.\n"
+    [removed] = removed_rules(
+        BODY, after, _skill({"R1": [_prov("a/b!1")]}, cases=[_case("c1", "a/b!1")])
+    )
+    assert removed.rule_id == "R1"
+    assert removed.linked_cases == ["c1"]
+    assert removed.unbacked is False
+
+
+def test_a_removed_rule_with_nothing_behind_it_is_nobody_s_problem_but_a_human_s() -> None:
+    """The whole reason this function exists: this edit passes every gate there is."""
+    after = "# Review\n\n- **R2 — no swallowed errors.** Propagate or log.\n"
+    [removed] = removed_rules(BODY, after, _skill({"R1": [_prov("a/b!1")]}))
+    assert removed.rule_id == "R1"
+    assert removed.unbacked is True
+
+
+def test_an_archived_case_does_not_count_as_backing() -> None:
+    """It runs at low weight, so it is not the tripwire a reviewer would be relying on."""
+    after = "# Review\n\n- **R2 — no swallowed errors.** Propagate or log.\n"
+    [removed] = removed_rules(
+        BODY,
+        after,
+        _skill({"R1": [_prov("a/b!1")]}, cases=[_case("c1", "a/b!1", tier="archive")]),
+    )
+    assert removed.unbacked is True
+
+
+def test_rewording_a_rule_is_not_removing_it() -> None:
+    reworded = BODY.replace("Replace `.unwrap()` with `?`.", "Use `?` instead of `.unwrap()`.")
+    assert removed_rules(BODY, reworded, _skill({})) == []
+
+
+def test_a_rule_that_moved_into_a_companion_page_is_not_removed() -> None:
+    """A skill is a folder, so both texts are the whole folder — a rule relocated from SKILL.md
+    into patterns/errors.md has not gone anywhere."""
+    body_only = "# Review\n\n- **R2 — no swallowed errors.** Propagate or log.\n"
+    page = "- **R1 — no unchecked panics.** Replace `.unwrap()` with `?`.\n"
+    assert removed_rules(BODY, f"{body_only}\n{page}", _skill({})) == []
+
+
+def test_a_hand_written_rule_with_no_provenance_is_still_untested() -> None:
+    """The commonest untested rule there is, and `dead_rules` cannot see it — it walks meta.yaml.
+    A block calling itself "rules nothing tests" that omitted these would omit most of them."""
+    skill = _skill({})
+    assert [rule.rule_id for rule in dead_rules(skill)] == []
+    assert [rule.rule_id for rule in consolidatable(skill)] == ["R1", "R2"]
+
+
+def test_the_dead_rule_count_itself_is_unchanged_by_any_of_this() -> None:
+    """`dead_rules` answers a narrower question — which provenance entries the corpus stopped
+    standing behind — and the console's badge still means exactly that."""
+    skill = _skill({"R1": [_prov("a/b!1")]}, cases=[_case("c1", "a/b!1")])
+    assert dead_rules(skill) == []
+    # R2 has no provenance, so it is untested but not a *dead rule*.
+    assert [rule.rule_id for rule in consolidatable(skill)] == ["R2"]

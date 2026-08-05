@@ -3324,6 +3324,11 @@ export interface components {
             /** Cases */
             cases?: string[];
             /**
+             * Distill
+             * @default false
+             */
+            distill: boolean;
+            /**
              * Instruction
              * @default
              */

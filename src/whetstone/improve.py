@@ -30,6 +30,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from whetstone.deadrules import (
+    DeadRule,
+    RemovedRule,
+    consolidatable,
+    removed_rules,
+    render_for_drafter,
+)
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.finding import Finding
 from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
@@ -124,6 +131,15 @@ class Digest(BaseModel):
     # A one-off steer from the operator (`--instruction`). Empty for a plain run. Kept on the
     # digest rather than bolted on at render time so a subprocess step receives it too.
     instruction: str = ""
+    # Rules in the guidance that no eval case is linked to (`deadrules.consolidatable`). **Filled
+    # only for a distill run**, and empty on every other, which is the whole of the opt-in.
+    #
+    # An ordinary improve is asked to fix named failures; handing it a list of rules nothing tests
+    # invites unrelated deletion in the same draft, and the diff a human has to read stops being
+    # about the thing that failed. The block also costs prompt attention on every run that does not
+    # want it, which this project has measured to be a real price rather than a theoretical one
+    # (`docs/design/sidecars.md` §9.2).
+    untested_rules: list[DeadRule] = Field(default_factory=list)
 
     def render_failures(self) -> str:
         withheld = (
@@ -212,6 +228,7 @@ class Digest(BaseModel):
             "fp_rate": "n/a" if self.fp_rate is None else f"{self.fp_rate:.3f}",
             "wiki": self.wiki or self._no_wiki(),
             "instruction": self.instruction,
+            "untested_rules": render_for_drafter(self.untested_rules),
         }
 
 
@@ -264,7 +281,16 @@ class ProposalResult(BaseModel):
     # Reported, never silent, for the same reason `unknown_cases` is: a narrowed improve that
     # quietly dropped half its selection would look like it acted on the whole of it.
     selected_missing: list[str] = Field(default_factory=list)
+    # Rules this draft takes out of the guidance. The ones with no case linked to them are the
+    # reason this field exists: their removal passes every gate, because a gate can only fail on a
+    # case, and having no case is what put them on the list. See `deadrules.removed_rules`.
+    removed_rules: list[RemovedRule] = Field(default_factory=list)
     llm_calls: int = 0
+
+    @property
+    def unbacked_removals(self) -> list[RemovedRule]:
+        """Removals no gate can judge — what a reviewer of this draft has to decide alone."""
+        return [rule for rule in self.removed_rules if rule.unbacked]
 
 
 def build_digest(
@@ -275,17 +301,25 @@ def build_digest(
     wiki_text: str = "",
     instruction: str = "",
     only: set[str] | None = None,
+    distill: bool = False,
 ) -> Digest:
     """Assemble the bounded view of `record` that an improve step will be shown.
 
     `only` narrows the failures the drafter sees to a chosen set of case ids — the workspace passes
     the cases an operator triaged and selected, so "improve based on these" means exactly that
     rather than "improve from whatever the last run happened to fail on". None keeps every failure.
+
+    `distill` adds the rules nothing tests. It is the consolidating pass the cadence clock asks for
+    monthly, and the one improve run with no failure to work from — entropy is the only rot signal
+    in this codebase with no red case behind it, because improve cycles add rules and nothing else
+    ever removes one. Off by default: see `Digest.untested_rules` for why this is not simply always
+    on.
     """
     cases = {c.id: c for c in skill.eval_cases}
     failures = [] if record is None else _failures(record, cases, inputs, only=only)
     clusters = _cluster(failures, inputs)
     return Digest(
+        untested_rules=consolidatable(skill) if distill else [],
         skill_id=skill.id,
         guidance=skill.body,
         pages={page.path: page.text for page in skill.pages},
@@ -309,6 +343,7 @@ def digest_for(
     *,
     instruction: str = "",
     only: set[str] | None = None,
+    distill: bool = False,
 ) -> Digest:
     """The digest *this step* will be handed — `build_digest` with the step's own inputs applied.
 
@@ -326,6 +361,7 @@ def digest_for(
         wiki_text=_wiki_for(skill, record, spec),
         instruction=instruction,
         only=only,
+        distill=distill,
     )
 
 
@@ -596,6 +632,7 @@ def propose(
     instruction: str = "",
     only: set[str] | None = None,
     agent: Any = None,
+    distill: bool = False,
 ) -> ProposalResult:
     """Run a skill's improve step and return the guidance change it proposes.
 
@@ -612,6 +649,11 @@ def propose(
     Cases in `only` the drafter never gets to (unscored, passing, or holdout) come back in
     `ProposalResult.selected_missing` rather than being dropped in silence.
 
+    `distill` is the consolidating pass: it adds the rules nothing tests to the digest. What comes
+    back is checked either way — `ProposalResult.removed_rules` names every rule the draft dropped
+    on every path, because an improve asked to fix one failure can drop a rule while rewording
+    around it, and that is the version nobody is looking for.
+
     Refuses outright for a multi-file skill on the single-call path — see `would_paste_the_folder`.
     The check is here as well as in every caller's preflight because this is the one door all of
     them go through, and a guard that lives only in the callers is a guard the next caller forgets.
@@ -619,7 +661,7 @@ def propose(
     refusal = would_paste_the_folder(spec, skill)
     if refusal:
         raise StepError(refusal)
-    digest = digest_for(spec, skill, record, instruction=instruction, only=only)
+    digest = digest_for(spec, skill, record, instruction=instruction, only=only, distill=distill)
     selected_missing: list[str] = []
     if only is not None and record is not None:
         # Against what reached the *prompt*, not what was merely eligible — clustering and the
@@ -675,9 +717,17 @@ def propose(
     held = {c.case_id for c in record.cases if c.partition == "holdout"} if record else set()
     holdout_named = [c for c in proposal.targeted_cases if c in held]
     proposal.targeted_cases = [c for c in proposal.targeted_cases if c not in held]
+    # Computed on every draft, not only on a distill: an ordinary improve is just as capable of
+    # dropping a rule while rewording around it, and that is exactly the edit nobody notices.
+    removed = removed_rules(
+        "\n".join([skill.body, *digest.pages.values()]),
+        "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
+        skill,
+    )
     return ProposalResult(
         proposal=proposal, digest=digest, unknown_cases=unknown,
-        holdout_cases=holdout_named, selected_missing=selected_missing, llm_calls=calls,
+        holdout_cases=holdout_named, selected_missing=selected_missing,
+        removed_rules=removed, llm_calls=calls,
     )
 
 
@@ -797,6 +847,15 @@ def appendices(spec: StepSpec, digest: Digest) -> list[tuple[str, str]]:
             "\n\n## Additional instruction for this run\n\n"
             "This takes precedence over the general direction above where they conflict:\n\n"
             f"{digest.instruction}\n",
+        ))
+    if digest.untested_rules and "untested_rules" not in named:
+        # Same rule as the two above: a template that places it decides where it goes, one that
+        # does not still gets it. Every improve template written before distills existed is in the
+        # second group, and those are the skills old enough to have rules nothing tests.
+        out.append((
+            "untested_rules",
+            "\n\n## Rules with nothing testing them\n\n"
+            f"{render_for_drafter(digest.untested_rules)}\n",
         ))
     return out
 
