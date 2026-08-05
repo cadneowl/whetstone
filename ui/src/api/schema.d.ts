@@ -2394,6 +2394,11 @@ export interface components {
              */
             comments: components["schemas"]["DiscussionComment"][];
             /**
+             * Mr Author
+             * @default
+             */
+            mr_author: string;
+            /**
              * Mr Title
              * @default
              */

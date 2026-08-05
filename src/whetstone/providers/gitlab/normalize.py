@@ -27,6 +27,9 @@ def mr_ref(repo: RepoRef, mr: dict[str, Any]) -> MergeRequestRef:
         labels=[str(label) for label in (mr.get("labels") or [])],
         description=str(mr.get("description") or ""),
         source_branch=str(mr.get("source_branch") or ""),
+        # Same shape as a note's author, and absent on the same old instances — an MR nobody can be
+        # attributed to is still an MR worth mining, so this never fails the pull.
+        author=str((mr.get("author") or {}).get("username", "")),
     )
 
 

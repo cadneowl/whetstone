@@ -10,6 +10,7 @@ import {
 } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
+import { mergeRequestOf } from '@/routes/triageFilters'
 
 /**
  * One skill's state of affairs on one surface — the integrating panel of the anti-rot plan.
@@ -89,7 +90,8 @@ function ScoreSection({ health }: { health: SkillHealth }) {
       {h ? (
         <div className="mt-2 flex flex-wrap items-baseline gap-x-5 gap-y-1 border-t border-line pt-2">
           <span className="tabular">
-            train {score(h.train_recall, 2)} <span className="text-xs text-muted">({h.train_cases})</span>
+            train {score(h.train_recall, 2)}{' '}
+            <span className="text-xs text-muted">({h.train_cases})</span>
           </span>
           <span className="tabular">
             holdout {score(h.holdout_recall, 2)}{' '}
@@ -110,9 +112,7 @@ function ScoreSection({ health }: { health: SkillHealth }) {
       {/* The reading, not a number: on this panel the useful thing is whether the alarm can fire
           at all. A gap the holdout is too small to resolve reads here as what it is, along with
           how many more graduated cases would make it readable. */}
-      {h && h.holdout_cases > 0 && (
-        <p className="mt-2 text-xs text-muted">{h.reading}.</p>
-      )}
+      {h && h.holdout_cases > 0 && <p className="mt-2 text-xs text-muted">{h.reading}.</p>}
     </Section>
   )
 }
@@ -308,11 +308,17 @@ function DriftSection({ skillId, health }: { skillId: string; health: SkillHealt
                 of {d.report.recent_mrs} recent MR{d.report.recent_mrs === 1 ? '' : 's'}
               </span>
             </span>
-            <span className="tabular text-muted" title="1 − cosine similarity of the two centroids — growth means the middle of the stream is moving away from the middle of the corpus">
+            <span
+              className="tabular text-muted"
+              title="1 − cosine similarity of the two centroids — growth means the middle of the stream is moving away from the middle of the corpus"
+            >
               centroid distance {score(d.report.centroid_distance, 3)}
             </span>
             {d.alarm && (
-              <Badge tone="warn" title="Past the drift threshold — the eval may be scoring last year's idioms">
+              <Badge
+                tone="warn"
+                title="Past the drift threshold — the eval may be scoring last year's idioms"
+              >
                 {Math.round((d.report.uncovered_fraction ?? 0) * 100)}% uncovered
               </Badge>
             )}
@@ -359,12 +365,24 @@ function DriftSection({ skillId, health }: { skillId: string; health: SkillHealt
   )
 }
 
+/**
+ * One uncovered merge request, linked into triage scoped to *all* of its candidates.
+ *
+ * The row used to open one candidate. But the promotion this list is arguing for is rarely one
+ * case — an MR nothing in the corpus resembles usually has several threads worth mining, and the
+ * queue is sorted by confidence, so its siblings are scattered through it. Scoping the queue to
+ * the merge request puts them together and still lands on the one the report picked.
+ */
 function UncoveredRow({ mr }: { mr: UncoveredMr }) {
+  const scoped =
+    `/triage?mr=${encodeURIComponent(mergeRequestOf(mr.ref))}` +
+    `&focus=${encodeURIComponent(mr.candidate_id)}`
   return (
     <li className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
       {mr.pending ? (
         <Link
-          to={`/triage?focus=${encodeURIComponent(mr.candidate_id)}`}
+          to={scoped}
+          title="Opens triage with the queue narrowed to this merge request"
           className="font-mono text-xs hover:text-accent"
         >
           {mr.ref}
@@ -401,7 +419,9 @@ function IndexSection({ skillId, health }: { skillId: string; health: SkillHealt
       {idx ? (
         <div className="space-y-2">
           <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1">
-            <span className="tabular">{idx.cases} case{idx.cases === 1 ? '' : 's'} indexed</span>
+            <span className="tabular">
+              {idx.cases} case{idx.cases === 1 ? '' : 's'} indexed
+            </span>
             <span className="font-mono text-xs text-muted">
               {idx.model}
               {idx.provider ? ` via ${idx.provider}` : ''}

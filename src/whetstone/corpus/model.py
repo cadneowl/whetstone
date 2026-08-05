@@ -27,6 +27,11 @@ class Discussion(BaseModel):
 
     mr_title: str = ""
     mr_url: str = ""
+    # Who opened the merge request, as distinct from who commented on it below. Both are people a
+    # queue gets filtered by, and they are not the same people: the author appears in a thread only
+    # when they replied to someone. Empty for a candidate mined before this was carried, and for
+    # every source that has no merge request behind it — unknown, which is not the same as nobody.
+    mr_author: str = ""
     comments: list[DiscussionComment] = []
     resolved: bool = False
     # The reviewer's proposed replacement and whether the author took it. This pair *is* the

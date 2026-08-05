@@ -35,6 +35,11 @@ class MergeRequestRef(BaseModel):
     # closed without either side's provider knowing the other exists.
     description: str = ""
     source_branch: str = ""
+    # Who opened it. Carried because triage is worked by person as often as by subject — "the MRs
+    # Alice wrote" and "the MRs Alice reviewed" are different questions, and only the second is
+    # answerable from the comment authors. Empty when the provider did not say, which reads as
+    # unknown rather than as nobody.
+    author: str = ""
     # Team-applied labels ("backend", "security"). A skill declares the ones it answers to in
     # `triggers.labels`, which is how a case reaches a skill whose subject isn't visible in a path.
     labels: list[str] = []

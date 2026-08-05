@@ -25,6 +25,18 @@ def test_missing_labels_are_not_an_error() -> None:
     assert mr_ref(REPO, {"iid": 1}).labels == []
 
 
+def test_the_author_is_the_username_not_the_display_name() -> None:
+    """Triage filters by the handle people use to refer to each other, and the display name is not
+    unique. The same field a note's author is read from, so the two are comparable."""
+    assert mr_ref(REPO, _json("mr_812.json")).author == "dana"
+
+
+def test_a_missing_author_is_unknown_rather_than_a_failed_pull() -> None:
+    # An MR nobody can be attributed to is still an MR worth mining.
+    assert mr_ref(REPO, {"iid": 1}).author == ""
+    assert mr_ref(REPO, {"iid": 1, "author": None}).author == ""
+
+
 def test_applied_suggestion_is_mapped() -> None:
     disc = _json("discussions_p1.json")[0]
     thread = review_thread(disc)
