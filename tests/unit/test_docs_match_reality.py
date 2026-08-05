@@ -849,3 +849,34 @@ def test_both_reviewers_are_told_that_agreement_is_not_a_finding() -> None:
         (("src", "whetstone", "reviewer", "agent_reviewer.py"), "never list something to say it"),
     ):
         assert symbol in _read(*module), f"{module[-1]} no longer says what a finding is not"
+
+
+def test_every_command_the_console_tells_you_to_run_exists() -> None:
+    """The Sidecar tab prints commands for someone to paste, and it printed `whetstone eval` —
+    which is a group, not a command. A console that hands out invocations that do not resolve is
+    worse than one that hands out none: the reader assumes the feature is broken, not the copy.
+    """
+    from typer.testing import CliRunner
+
+    from whetstone.cli import app
+
+    panel = (ROOT / "ui" / "src" / "components" / "LocalContext.tsx").read_text(encoding="utf-8")
+    # Only lines that *start* with the binary — that is how a pasteable command appears in a code
+    # block, and it is what keeps prose mentioning the tool out of this.
+    printed = {
+        line.strip().split(" --")[0].strip()
+        for line in panel.splitlines()
+        if line.strip().startswith("whetstone ")
+    }
+    assert printed, "no commands found — this guard would pass vacuously"
+
+    runner = CliRunner()
+    for command in sorted(printed):
+        words = command.split()[1:]
+        result = runner.invoke(app, [*words, "--help"])
+        assert result.exit_code == 0, f"the console prints `{command}`, which does not resolve"
+        # A group's help lists subcommands and running it bare does nothing, so telling someone to
+        # paste it is the same defect in a subtler form.
+        assert "COMMAND [ARGS]" not in result.output, (
+            f"the console prints `{command}`, which is a command group rather than a command"
+        )

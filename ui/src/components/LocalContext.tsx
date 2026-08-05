@@ -1,6 +1,25 @@
-import { useState } from 'react'
-import { useSkillClaims, type ClaimHistory, type SidecarStatus } from '@/api/client'
+import { useState, type ReactNode } from 'react'
+import {
+  useSkillClaims,
+  type ClaimHistory,
+  type SidecarStatus,
+  type SkillDetail,
+} from '@/api/client'
 import { Badge, when } from '@/components/primitives'
+
+/**
+ * The Sidecar tab: what this skill reads from beside the code, or how to make it read any.
+ *
+ * Both halves matter. A skill that declares a role needs the panel below — the silent failure it
+ * catches is a `source_root` that does not resolve, which reads on every other screen as a skill
+ * with nothing to say. A skill that declares none needs the other half, because the feature was
+ * otherwise discoverable only by already knowing it existed: nothing on any screen mentioned local
+ * context, so the person best placed to adopt it had no path to it.
+ */
+export function SidecarTab({ detail, skillId }: { detail: SkillDetail; skillId: string }) {
+  if (detail.sidecar) return <LocalContext sidecar={detail.sidecar} skillId={skillId} />
+  return <SidecarSetup detail={detail} skillId={skillId} />
+}
 
 /**
  * What a skill reads from beside the code it reviews.
@@ -163,6 +182,173 @@ export function LocalContext({
       )}
     </section>
   )
+}
+
+const CODE = 'mt-2 overflow-x-auto rounded border border-line bg-canvas p-2 font-mono text-xs'
+
+/**
+ * How to make this skill read local context, for a skill that does not.
+ *
+ * Written as the four things you actually do, in order, with this skill's own id in them — not as
+ * a description of the feature. Someone reading this has already decided they want it; what they
+ * need is the two keys, in the two files, and what to run afterwards.
+ *
+ * It also says when *not* to. There is deliberately no coverage metric anywhere in this design,
+ * because the moment one exists somebody fills every folder and the tier becomes noise — and a
+ * setup page that reads as an exhortation is the same mistake in prose.
+ */
+function SidecarSetup({ detail, skillId }: { detail: SkillDetail; skillId: string }) {
+  const evaluate = detail.steps.find((step) => step.kind === 'evaluate')
+  // An agent chooses its own reads and a program collects its own context, so Whetstone cannot
+  // hash what it did not resolve — declaring a role on one of these is refused at the plan rather
+  // than quietly ignored. Telling someone to add the block would be telling them to break a run.
+  const selfCollecting = evaluate?.mode === 'agent' || evaluate?.mode === 'program'
+  const isTask = evaluate?.mode === 'task'
+
+  return (
+    <section className="max-w-3xl space-y-4">
+      <div className="rounded-lg border border-line bg-surface px-4 py-3">
+        <h2 className="text-sm font-semibold">This skill reads no local context</h2>
+        <p className="mt-1 text-sm text-muted">
+          Its reviewer sees the guidance and the diff, and nothing about the particular folder the
+          change lands in. That is the right setup for rules that hold everywhere — and the wrong
+          one for a codebase whose reviews turn on things no rule can state: why this retry cap is
+          3, which class is a deliberate god object, which invariant a job depends on.
+        </p>
+      </div>
+
+      {isTask ? (
+        <p className="text-sm text-muted">
+          This is a task skill — it produces work rather than findings, and sidecars are read by the
+          review path. Nothing to enable here.
+        </p>
+      ) : selfCollecting ? (
+        <div className="rounded-lg border border-warn/40 bg-warn/5 px-4 py-3 text-sm">
+          <p>
+            This skill&apos;s <code className="font-mono text-xs">evaluate</code> step runs as{' '}
+            {evaluate?.mode === 'agent' ? 'an agent' : 'a program'}, which collects its own context.
+            Declaring a <code className="font-mono text-xs">sidecar:</code> role here is{' '}
+            <strong>refused at the plan</strong> rather than ignored: Whetstone cannot hash what it
+            did not resolve, and attaching the declaration anyway would claim sidecars shaped a
+            review they never touched.
+          </p>
+          <p className="mt-2 text-muted">
+            To read local context from a reviewer that collects its own, call{' '}
+            <code className="font-mono text-xs">tools/collect_sidecars.py</code> from inside it — the
+            same file Whetstone would have run. Install it with{' '}
+            <code className="font-mono text-xs">whetstone sidecars install</code>.
+          </p>
+        </div>
+      ) : (
+        <ol className="space-y-4">
+          <Step
+            n={1}
+            title="Name the role this skill reads"
+            why="In SKILL.md frontmatter, never the folder name — so forking this skill does not mean renaming files across a monorepo."
+          >
+            <pre className={CODE}>{`---
+id: ${skillId}
+sidecar:
+  role: ${suggestRole(skillId)}
+---`}</pre>
+          </Step>
+
+          <Step
+            n={2}
+            title="Say where the reviewed tree is checked out"
+            why="In evaluate/step.yaml. The env var's name is committed and its value never is — the path differs on every machine. `required: true` fails the plan when it is unset, instead of silently reviewing with no local context at all."
+          >
+            <pre className={CODE}>{`context:
+  source_root: { env: ${envName(skillId)}, required: true }`}</pre>
+          </Step>
+
+          <Step
+            n={3}
+            title="Install the collector"
+            why="Copies the retrieval script into this skill's tools/ so the skill still reads sidecars when it runs outside Whetstone — under Claude Code, say. It is the same file Whetstone scores with, byte for byte, which is what makes a gate here describe what happens there. Commit it."
+          >
+            <pre className={CODE}>{`whetstone sidecars install --skill skills/${skillId}`}</pre>
+          </Step>
+
+          <Step
+            n={4}
+            title="Write the first note, beside the code"
+            why="In the source repo, in the folder it describes. Every claim carries where it came from — a review comment, a ticket, an ADR — and is rejected without one, because verification needs something to check against beyond the claim's own plausibility."
+          >
+            <pre className={CODE}>{`# <source repo>/payments/.agents/context.md
+---
+status: confirmed
+---
+
+- PaymentService.record() is the only writer to payments_ledger. A write that
+  goes around it skips the idempotency check.
+  <!-- src: HUB-48163#r527 -->`}</pre>
+          </Step>
+        </ol>
+      )}
+
+      {!isTask && !selfCollecting && (
+        <>
+          <div className="rounded-lg border border-line bg-surface px-4 py-3 text-sm">
+            <h3 className="font-semibold">Then find out whether it is worth it</h3>
+            <p className="mt-1 text-muted">
+              The realistic failure is not a wrong note. It is fifteen files of mediocre context on
+              every run, attention diluted, findings quietly worse — invisible, because there is no
+              baseline without them. Score the corpus both ways and compare:
+            </p>
+            <pre className={CODE}>{`whetstone eval run --skill skills/${skillId}
+whetstone eval run --skill skills/${skillId} --no-sidecars`}</pre>
+            <p className="mt-2 text-muted">
+              The ablation records as a different measurement, so it can never reuse the other&apos;s
+              baseline or be read as a regression in a trend. If recall does not move, this tier is
+              costing tokens and attention for nothing.
+            </p>
+          </div>
+
+          <p className="text-sm text-muted">
+            Folders with no notes are normal and there is deliberately no coverage number anywhere
+            in this — fill folders where reviews keep going wrong, not to reach a percentage. The
+            full design is in{' '}
+            <code className="font-mono text-xs">docs/design/sidecars.md</code>, and{' '}
+            <code className="font-mono text-xs">examples/sidecar-review/</code> is a working fixture.
+          </p>
+        </>
+      )}
+    </section>
+  )
+}
+
+function Step({
+  n,
+  title,
+  why,
+  children,
+}: {
+  n: number
+  title: string
+  why: string
+  children: ReactNode
+}) {
+  return (
+    <li className="rounded-lg border border-line bg-surface px-4 py-3">
+      <p className="text-sm font-semibold">
+        <span className="mr-2 text-muted tabular">{n}</span>
+        {title}
+      </p>
+      <p className="mt-1 text-sm text-muted">{why}</p>
+      {children}
+    </li>
+  )
+}
+
+/** A plausible role id from the skill id — a starting point to edit, not a rule. */
+function suggestRole(skillId: string): string {
+  return skillId.replace(/^(code-review|review)-/, '').replace(/-review$/, '') || 'review'
+}
+
+/** The env var name the source_root would read, in this repo's SHOUTY_SNAKE convention. */
+function envName(skillId: string): string {
+  return `${skillId.replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase()}_SOURCE`
 }
 
 /**
