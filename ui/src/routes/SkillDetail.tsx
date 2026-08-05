@@ -16,7 +16,7 @@ import { GuidanceEditor } from '@/components/GuidanceEditor'
 import { HealthPanel } from '@/components/HealthPanel'
 import { ImproveWorkspace } from '@/components/ImproveWorkspace'
 import { LaunchButton } from '@/components/LaunchButton'
-import { LocalContext } from '@/components/LocalContext'
+import { SidecarTab } from '@/components/LocalContext'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 import { SkillReviews } from '@/components/reviews'
 import { SharpeningPanel } from '@/components/SharpeningPanel'
@@ -29,6 +29,7 @@ import { TasksPanel } from '@/components/TasksPanel'
 const TAB_KEYS = [
   'guidance',
   'edit',
+  'sidecar',
   'reviews',
   'improve',
   'cases',
@@ -41,6 +42,20 @@ const TAB_KEYS = [
 
 function activeTab(raw: string | null): string {
   return raw && (TAB_KEYS as readonly string[]).includes(raw) ? raw : 'guidance'
+}
+
+/**
+ * The query string with `tab` moved, and every other param kept.
+ *
+ * Shared by the tab strip and by any link that crosses tabs. Replacing the whole query instead
+ * quietly threw away the Improve workspace's state — the batch run it had just scored, the cases
+ * ticked — the moment you followed its own advice to go and hand-edit somewhere else.
+ */
+function withTab(params: URLSearchParams, next: string): URLSearchParams {
+  const keep = new URLSearchParams(params)
+  if (next === 'guidance') keep.delete('tab')
+  else keep.set('tab', next)
+  return keep
 }
 
 export function SkillDetail() {
@@ -106,16 +121,28 @@ export function SkillDetail() {
         // quietly threw away the Improve workspace's state — the batch run it had just scored and
         // the cases you had ticked — the moment you followed its own advice to go and hand-edit on
         // the Edit tab. "The loop, in one place" has to survive a round trip out of the tab.
-        onValueChange={(next) => {
-          const keep = new URLSearchParams(params)
-          if (next === 'guidance') keep.delete('tab')
-          else keep.set('tab', next)
-          setParams(keep, { replace: true })
-        }}
+        onValueChange={(next) => setParams(withTab(params, next), { replace: true })}
       >
         <Tabs.List className="mb-4 flex gap-1 border-b border-line">
           <Trigger value="guidance">Guidance</Trigger>
           <Trigger value="edit">Edit</Trigger>
+          {/* Beside the guidance, because the reviewer's prompt is the rules *plus* whatever local
+              context the changed paths pull in. Shown for every skill, including the ones that read
+              none: this feature was otherwise discoverable only by already knowing it existed. */}
+          <Trigger value="sidecar">
+            Sidecar{' '}
+            {data.sidecar ? (
+              data.sidecar.disputed > 0 ? (
+                <span className="text-bad">({data.sidecar.disputed} disputed)</span>
+              ) : data.sidecar.problems.length > 0 || !data.sidecar.source_ok ? (
+                <span className="text-warn">(check)</span>
+              ) : (
+                <span className="text-muted">({data.sidecar.files})</span>
+              )
+            ) : (
+              <span className="text-muted">(off)</span>
+            )}
+          </Trigger>
           {/* Between the guidance and the loop that changes it, because that is the order the work
               happens in: here are the rules, here is what they did on real code, now sharpen them.
               The count is the unruled findings — the work — not the number of reviews. */}
@@ -152,11 +179,33 @@ export function SkillDetail() {
             thing the improve loop ever changes. Each rule shows the merge requests that justified
             it.
           </TabIntro>
-          {/* Above the rules, because the prompt is the rules *plus* these: a screen showing only
-              the first is describing half of what the reviewer reads. Renders nothing at all for a
-              skill that declares no `sidecar:` role, which is most of them. */}
-          <LocalContext sidecar={data.sidecar} skillId={skillId} />
+          {/* The Guidance tab claims to show the exact prose the reviewer is given, and for a
+              skill reading local context that is not the whole truth. One line, with the detail a
+              tab away — rather than the panel twice on one page. */}
+          {data.sidecar && (
+            <p className="mb-4 text-sm text-muted">
+              Not everything the reviewer is given:{' '}
+              <button
+                type="button"
+                onClick={() => setParams(withTab(params, 'sidecar'), { replace: true })}
+                className="text-accent hover:underline"
+              >
+                {data.sidecar.files} sidecar file(s)
+              </button>{' '}
+              of local context are injected per changed path, from the folders each change touches.
+            </p>
+          )}
           <Guidance detail={data} />
+        </Tabs.Content>
+
+        <Tabs.Content value="sidecar">
+          <TabIntro>
+            The per-directory notes this skill reads from beside the code it reviews — facts about
+            one folder that no rule here could state, injected by the harness from the paths a
+            change touches. Everything injected is hashed, so a gate cannot pass against context no
+            gate ever scored.
+          </TabIntro>
+          <SidecarTab detail={data} skillId={skillId} />
         </Tabs.Content>
 
         <Tabs.Content value="edit">
