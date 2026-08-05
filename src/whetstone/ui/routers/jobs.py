@@ -31,7 +31,7 @@ from typing import Any, Literal, NamedTuple
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from whetstone import improve, staging
+from whetstone import deadrules, improve, staging
 from whetstone.authoring import SkillEdit, prepare_guidance
 from whetstone.candidates import CandidateStore
 from whetstone.config import Config
@@ -167,6 +167,9 @@ class ImproveRequest(BaseModel):
     # Draft only from these case ids — the workspace's "improve from the cases I selected". Empty
     # means every failure in the run, which is the plain `Draft a change` behaviour.
     cases: list[str] = Field(default_factory=list)
+    # The monthly consolidating pass. Adds the rules nothing tests to the digest, and nothing else:
+    # a distill is an ordinary improve run whose drafter has been shown where the corpus is thin.
+    distill: bool = False
     # Per-launch backend; see `EvalRequest.provider` and `_pick`.
     provider: str = ""
     model: str = ""
@@ -600,6 +603,15 @@ def plan_improve_job(
         if agent.context.redacted:
             shown = ", ".join(f"{k}={v}" for k, v in agent.context.redacted.items())
             plan.details.append(f"step context: {shown}")
+    if request.distill:
+        untested = deadrules.consolidatable(skill)
+        plan.details.append(
+            f"distill: the drafter is also shown {len(untested)} rule(s) no eval case is linked "
+            f"to. Removing one of those fails nothing, so the gate cannot check it and the draft "
+            f"will name what it took out"
+            if untested
+            else "distill: every rule in the guidance has a case linked to it — nothing to add"
+        )
     _warn_if_nothing_to_learn(plan, store, skill, request)
     return plan
 
@@ -778,6 +790,20 @@ def launch_improve(
                 instruction=request.instruction,
                 only=set(request.cases) or None,
                 agent=agent,
+                distill=request.distill,
+            )
+        for rule in result.unbacked_removals:
+            # Logged as it happens, not only in the result: this is the one edit in the whole loop
+            # that no later check can catch, so it should be visible while the job is still on
+            # screen rather than only to whoever opens the draft.
+            handle.log(
+                LogLine(
+                    text=(
+                        f"  removes {rule.rule_id} — no case is linked to it, so no gate can "
+                        f"judge this removal"
+                    ),
+                    tone="bad",
+                )
             )
         # The model has now read these cases. Recording it is what stops a promoted case that was
         # sharpened against from being handed back to the hash at graduation and counted as an
@@ -811,6 +837,10 @@ def launch_improve(
             # narrowed improve never looks like it acted on cases it did not.
             "selected_missing": result.selected_missing,
             "pinned_to_train": pinned,
+            # Rules this draft takes out, and which of those a gate could judge. The console shows
+            # the unbacked ones over the diff, because the diff is where they would otherwise be a
+            # deleted paragraph among reworded ones.
+            "removed_rules": [rule.model_dump() for rule in result.removed_rules],
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
             "holdout_withheld": result.digest.holdout_withheld,

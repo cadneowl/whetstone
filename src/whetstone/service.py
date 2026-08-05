@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -38,7 +37,7 @@ from whetstone.corpus.builder import (
 )
 from whetstone.corpus.model import CandidateCase
 from whetstone.curation import Contradiction, discrimination
-from whetstone.deadrules import dead_rules
+from whetstone.deadrules import RULE_RE, dead_rules
 from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import (
     EVIDENCE_CONFIRMED,
@@ -1252,7 +1251,10 @@ class CaseDetail(BaseModel):
 
 # Rules are id-tagged in bold in the guidance body ("- **R1 — no unchecked panics…**"), which is how
 # provenance and findings refer to them.
-_RULE_RE = re.compile(r"\*\*\s*([A-Z][A-Z0-9]*\d)\b")
+# One definition, in the module that also decides which rules a distill may be told about and which
+# a draft removed. Two copies of this pattern would mean a rule could be "declared" for one of those
+# answers and not the other.
+_RULE_RE = RULE_RE
 
 
 def rule_ids(skill: Skill) -> list[str]:

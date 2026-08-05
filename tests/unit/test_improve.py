@@ -560,3 +560,86 @@ class TestWhatTheReviewerSaid:
 
         assert "Reviewer said: nothing at this location." in text
         assert "defect in the case" not in text
+
+
+# --- the distill pass, and the edit no gate can judge ------------------------------
+
+
+RULES = "# Review\n\n- **R1 — no unwrap.** Use `?`.\n- **R2 — no swallowed errors.** Log them.\n"
+
+
+def _rule_skill(cases: list[EvalCase] | None = None) -> Skill:
+    return Skill(id="s", body=RULES, eval_cases=cases or [])
+
+
+def test_a_plain_improve_is_told_nothing_about_untested_rules() -> None:
+    """The opt-in. An ordinary improve is asked to fix named failures, and a list of rules nothing
+    tests invites unrelated deletion into the same diff — besides costing attention on every run
+    that did not want it."""
+    digest = build_digest(_rule_skill(), None, FailureInputs())
+    assert digest.untested_rules == []
+    assert digest.prompt_values()["untested_rules"] == ""
+
+
+def test_a_distill_is_shown_them(tmp_path: Path) -> None:
+    digest = build_digest(_rule_skill(), None, FailureInputs(), distill=True)
+    assert [rule.rule_id for rule in digest.untested_rules] == ["R1", "R2"]
+    block = digest.prompt_values()["untested_rules"]
+    assert "**R1**" in block and "**R2**" in block
+    assert "Do not remove a rule because it appears in this list." in block
+
+
+def test_the_block_reaches_a_prompt_that_never_mentions_it(tmp_path: Path) -> None:
+    """Every improve template written before distills existed is one of these."""
+    from whetstone.improve import render_step_prompt
+
+    digest = build_digest(_rule_skill(), None, FailureInputs(), distill=True)
+    prompt = render_step_prompt(_spec(tmp_path), digest)
+    assert "## Rules with nothing testing them" in prompt
+
+
+def test_a_draft_that_drops_an_unbacked_rule_says_so(tmp_path: Path) -> None:
+    """The whole safety argument: this edit passes every gate there is, because a gate can only
+    fail on a case and having no case is what put the rule on the list."""
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body="# Review\n\n- **R2 — no swallowed errors.** Log them.\n")
+
+    result = propose(_spec(tmp_path), _rule_skill(), None, client=FakeLLMClient(handler))
+    assert [rule.rule_id for rule in result.removed_rules] == ["R1"]
+    assert [rule.rule_id for rule in result.unbacked_removals] == ["R1"]
+
+
+def test_a_draft_that_keeps_every_rule_reports_no_removals(tmp_path: Path) -> None:
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body=RULES.replace("Use `?`.", "Prefer `?`."))
+
+    result = propose(_spec(tmp_path), _rule_skill(), None, client=FakeLLMClient(handler))
+    assert result.removed_rules == []
+
+
+def test_removals_are_reported_on_an_ordinary_improve_too(tmp_path: Path) -> None:
+    """An improve asked to fix one failure is just as capable of dropping a rule while rewording
+    around it, and that is exactly the edit nobody notices."""
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body="# Review\n\n- **R2 — no swallowed errors.** Log them.\n")
+
+    result = propose(_spec(tmp_path), _rule_skill(), None, client=FakeLLMClient(handler))
+    assert result.digest.untested_rules == []  # not a distill
+    assert [rule.rule_id for rule in result.removed_rules] == ["R1"]
+
+
+def test_propose_itself_accepts_the_distill_flag(tmp_path: Path) -> None:
+    """Threading it through `build_digest` and `digest_for` while leaving it off the one function
+    both callers actually use fails only at the call site — the CLI and the console job, not here.
+    """
+    seen: dict[str, str] = {}
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        seen["prompt"] = user
+        return GuidanceProposal(body=RULES)
+
+    result = propose(
+        _spec(tmp_path), _rule_skill(), None, client=FakeLLMClient(handler), distill=True
+    )
+    assert [rule.rule_id for rule in result.digest.untested_rules] == ["R1", "R2"]
+    assert "Rules with nothing testing them" in seen["prompt"]

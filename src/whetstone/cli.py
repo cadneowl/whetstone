@@ -1917,6 +1917,13 @@ def skills_improve(
             help="Steer this one run, e.g. 'focus on false positives'. Does not edit prompt.md.",
         ),
     ] = None,
+    distill: Annotated[
+        bool,
+        typer.Option(
+            "--distill",
+            help="The consolidating pass: also show the drafter the rules no case is linked to",
+        ),
+    ] = False,
     apply: Annotated[
         bool,
         typer.Option("--apply", help="Stage the proposal on the skill's branch, ready to gate"),
@@ -1957,7 +1964,7 @@ def skills_improve(
         # `digest_for`, not `build_digest`: this printed a prompt whose `{{wiki}}` said "(no repo
         # context indexed for this skill)" for skills whose wiki the real run sends, because the
         # preview rebuilt the digest by hand and forgot the one argument that is not on it already.
-        digest = digest_for(spec, sk, record, instruction=instruction or "")
+        digest = digest_for(spec, sk, record, instruction=instruction or "", distill=distill)
         typer.echo(
             render_step_prompt(spec, digest) if spec.prompt else digest.model_dump_json(indent=2)
         )
@@ -2017,7 +2024,7 @@ def skills_improve(
     try:
         result = propose(
             spec, sk, record, client=client, effort=effort,
-            instruction=instruction or "", agent=agent,
+            instruction=instruction or "", agent=agent, distill=distill,
         )
     except StepError as exc:
         typer.echo(str(exc), err=True)
@@ -2050,6 +2057,25 @@ def skills_improve(
         )
     if result.proposal.rationale:
         typer.echo(f"# rationale: {result.proposal.rationale}", err=True)
+
+    # Loudest thing this command prints, and deliberately. Every other footnote here is about
+    # something a later step would have caught anyway — a bad case id fails the gate, a withheld
+    # failure shows up next run. A rule removed with no case linked to it is the one edit that
+    # passes everything downstream, because passing everything downstream is what "no case linked
+    # to it" means.
+    for rule in result.removed_rules:
+        if rule.unbacked:
+            typer.echo(
+                f"# REMOVES {rule.rule_id} — no case is linked to it, so no gate can judge this. "
+                f"Read the diff before applying.",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"# removes {rule.rule_id} — linked to {', '.join(rule.linked_cases)}; "
+                f"the gate will judge it",
+                err=True,
+            )
 
     # Named on every path. A skill is a folder, so a proposal may rewrite `patterns/errors.md` and
     # leave `SKILL.md` alone — and then the body printed below is *unchanged*, which reads as "the

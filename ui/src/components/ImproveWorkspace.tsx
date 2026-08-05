@@ -69,7 +69,22 @@ export function sharpenWording(
   narrowed: readonly string[] | null,
   ticked: number,
   hasBatch: boolean,
+  distill = false,
 ): { label: string; scope: string } {
+  // A distill is a different job from the one every other label here describes. It consolidates
+  // guidance the corpus has stopped standing behind, and the failures it happens to also see are
+  // beside the point — so a button reading "Draft from the last run" would name the part that
+  // matters least, on the one run where a rule can leave the guidance unnoticed.
+  if (distill) {
+    return {
+      label: 'Distill the guidance',
+      // No trailing period: the panel adds one, the way every other scope string here relies on.
+      scope:
+        'Consolidates the rules no eval case is linked to, alongside ' +
+        (narrowed ? `the ${narrowed.length} selected case(s)` : 'whatever the last run got wrong') +
+        ' — the draft will name every rule it removes',
+    }
+  }
   if (narrowed) {
     return {
       label: hasBatch ? 'Improve from selected' : 'Draft from selected',
@@ -133,6 +148,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [notice, setNotice] = useState('')
   const [instruction, setInstruction] = useState('')
+  // The consolidating pass. Off by default and per-launch rather than a setting: an ordinary
+  // improve is asked to fix named failures, and a list of rules nothing tests invites unrelated
+  // deletion into the same diff.
+  const [distill, setDistill] = useState(false)
   // Off by default: reusing an identical baseline is sound by construction, and the point of the
   // cache is not having to think about it. Ticked, this run measures the baseline again.
   const [freshBaseline, setFreshBaseline] = useState(false)
@@ -203,12 +222,14 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     run_id: hasBatch ? batchRun : latestRunId,
     ...(narrowed ? { cases: narrowed } : {}),
     instruction,
+    ...(distill ? { distill: true } : {}),
   }
 
   const { label: sharpenLabel, scope: sharpenScope } = sharpenWording(
     narrowed,
     selected.size,
     hasBatch,
+    distill,
   )
 
   // The score buttons run `scope: 'promoted'`, which accepts promoted ids and refuses any other,
@@ -252,6 +273,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       pages,
       rationale: String(r.rationale ?? ''),
       selectedMissing: (r.selected_missing ?? []) as string[],
+      removedRules: (r.removed_rules ?? []) as RemovedRule[],
       // Snapshotted here, once, while it still describes what the draft was written against.
       baseline: { body: proposal?.body ?? '', pages: proposal?.pages ?? {} },
     })
@@ -545,6 +567,24 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                   .
                 </p>
                 <Steer value={instruction} onChange={setInstruction} />
+                {/* Inside the confirmation, with the cost: it changes what the drafter is shown,
+                    and the plan below restates how many rules that turns out to be. */}
+                <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={distill}
+                    onChange={(e) => setDistill(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <span className="font-medium">Distill</span> — also show the drafter the rules
+                    no eval case is linked to, so it can consolidate them.{' '}
+                    <span className="text-muted">
+                      The monthly pass the cadence clock asks for. Removing one of those fails
+                      nothing, so the draft will name what it took out and you decide.
+                    </span>
+                  </span>
+                </label>
               </LaunchButton>
               {/* Outside the LaunchButton, not inside its confirmation: the point of reading the
                   prompt is to decide whether to spend at all, and the confirmation is one click too
@@ -642,11 +682,15 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   )
 }
 
+/** A rule the draft takes out, and the cases that would notice — see `deadrules.removed_rules`. */
+export type RemovedRule = { rule_id: string; linked_cases: string[] }
+
 type Draft = {
   body: string
   pages: Record<string, string>
   rationale: string
   selectedMissing: string[]
+  removedRules: RemovedRule[]
   // The on-disk guidance as it stood when this draft arrived, captured rather than read live.
   //
   // Applying invalidates the skill, so the live `proposal` refetches to the *new* on-disk text —
@@ -729,6 +773,43 @@ export function draftedFiles(
   ]
 }
 
+/**
+ * What this draft removes from the guidance, split by whether anything would notice.
+ *
+ * The split is the point. A rule with cases linked to it can be removed carelessly and the gate
+ * will say so — that is the ordinary path and it needs no warning. A rule with nothing linked to
+ * it is the one edit in the loop with no downstream check at all, so the only thing between it and
+ * the guidance is whoever is reading this panel.
+ */
+function RemovedRules({ removed }: { removed: RemovedRule[] }) {
+  if (removed.length === 0) return null
+  const unbacked = removed.filter((r) => r.linked_cases.length === 0)
+  const backed = removed.filter((r) => r.linked_cases.length > 0)
+  return (
+    <div className="space-y-1">
+      {unbacked.length > 0 && (
+        <p className="rounded border border-bad/50 bg-bad/5 px-2.5 py-2 text-xs text-bad">
+          <strong>
+            Removes {unbacked.map((r) => r.rule_id).join(', ')} — no case is linked to
+            {unbacked.length === 1 ? ' it' : ' them'}.
+          </strong>{' '}
+          <span className="text-ink">
+            Nothing downstream can check this: scoring, the gate and the merge all pass, because
+            having no case linked to it is exactly what makes them pass. If the rule was doing work,
+            this is where that is decided.
+          </span>
+        </p>
+      )}
+      {backed.map((rule) => (
+        <p key={rule.rule_id} className="text-xs text-muted">
+          Removes {rule.rule_id} — linked to {rule.linked_cases.join(', ')}, so the gate will judge
+          it.
+        </p>
+      ))}
+    </div>
+  )
+}
+
 function DraftReview({
   draft,
   applying,
@@ -769,6 +850,11 @@ function DraftReview({
         )}
       </p>
       {draft.rationale && <p className="text-sm">{draft.rationale}</p>}
+      {/* Above the diff, not below it. A removed rule is one deleted paragraph among reworded
+          ones, and the ones with nothing linked to them are the single edit in this whole loop
+          that no later step can catch — scoring it, gating it and merging it all pass, because
+          passing is what "no case is linked to it" means. */}
+      <RemovedRules removed={draft.removedRules} />
       {files.length === 0 ? (
         <p className="text-xs text-warn">The drafter returned no change to any file.</p>
       ) : (
