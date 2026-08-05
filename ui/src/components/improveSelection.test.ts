@@ -111,4 +111,17 @@ describe('sharpenWording', () => {
       expect(scope.startsWith('Drafts from the')).toBe(narrowed !== null)
     }
   })
+
+  it('names a distill for what it is, whatever the selection says', () => {
+    // "Draft from the last run" would name the part that matters least on the one run where a
+    // rule can leave the guidance without anything failing.
+    const { label, scope } = sharpenWording(null, 3, false, true)
+    expect(label).toBe('Distill the guidance')
+    expect(scope).toContain('no eval case is linked to')
+    expect(scope).toContain('name every rule it removes')
+    // The panel supplies the full stop; a scope string ending in one renders '..'
+    expect(scope.endsWith('.')).toBe(false)
+    // And it still says what else it is drafting from, so the two are not confusable.
+    expect(sharpenWording(['a'], 1, false, true).scope).toContain('1 selected case(s)')
+  })
 })

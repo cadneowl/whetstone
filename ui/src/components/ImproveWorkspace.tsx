@@ -69,7 +69,22 @@ export function sharpenWording(
   narrowed: readonly string[] | null,
   ticked: number,
   hasBatch: boolean,
+  distill = false,
 ): { label: string; scope: string } {
+  // A distill is a different job from the one every other label here describes. It consolidates
+  // guidance the corpus has stopped standing behind, and the failures it happens to also see are
+  // beside the point — so a button reading "Draft from the last run" would name the part that
+  // matters least, on the one run where a rule can leave the guidance unnoticed.
+  if (distill) {
+    return {
+      label: 'Distill the guidance',
+      // No trailing period: the panel adds one, the way every other scope string here relies on.
+      scope:
+        'Consolidates the rules no eval case is linked to, alongside ' +
+        (narrowed ? `the ${narrowed.length} selected case(s)` : 'whatever the last run got wrong') +
+        ' — the draft will name every rule it removes',
+    }
+  }
   if (narrowed) {
     return {
       label: hasBatch ? 'Improve from selected' : 'Draft from selected',
@@ -214,6 +229,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     narrowed,
     selected.size,
     hasBatch,
+    distill,
   )
 
   // The score buttons run `scope: 'promoted'`, which accepts promoted ids and refuses any other,
