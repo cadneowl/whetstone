@@ -32,6 +32,11 @@ class Discussion(BaseModel):
     # when they replied to someone. Empty for a candidate mined before this was carried, and for
     # every source that has no merge request behind it — unknown, which is not the same as nobody.
     mr_author: str = ""
+    # The forge's own word for where the merge request stands: `opened`, `merged`. Empty for a
+    # candidate mined before the walk could reach an open branch, which is merged by construction —
+    # nothing else was mineable then. It is on the candidate because it changes what the evidence
+    # is worth: a comment on an open branch is a real objection, while its outcome is not decided.
+    mr_state: str = ""
     comments: list[DiscussionComment] = []
     resolved: bool = False
     # The reviewer's proposed replacement and whether the author took it. This pair *is* the

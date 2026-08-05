@@ -8,6 +8,7 @@ all, discarding every round-trip it had already paid for.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
@@ -49,8 +50,12 @@ class FakeForge:
         self.iids = iids
         self.unreachable = unreachable or set()
         self.fetched: list[int] = []
+        self.states: list[str] = []
 
-    def list_reviewed_changes(self, repo: RepoRef, since: datetime) -> list[MergeRequestRef]:
+    def list_reviewed_changes(
+        self, repo: RepoRef, since: datetime, *, states: Sequence[str] = ("merged",)
+    ) -> list[MergeRequestRef]:
+        self.states = list(states)
         return [MergeRequestRef(repo=repo, iid=i) for i in self.iids]
 
     def get_review(self, mr: MergeRequestRef) -> ReviewedChange:
@@ -136,6 +141,20 @@ def test_the_collected_form_still_returns_everything() -> None:
     streamed = list(iter_candidates(FakeForge([901, 902, 903]), REPO, SINCE))
     assert [c.id for c in collected] == [c.id for c in streamed]
     assert collected
+
+
+def test_the_walk_asks_only_for_merged_history_by_default() -> None:
+    """Mining review history means outcomes. A branch still being argued about has none, so it
+    takes an explicit ask — and a re-pull must not quietly change what an existing queue means."""
+    forge = FakeForge([1])
+    list(iter_candidates(forge, REPO, SINCE))
+    assert forge.states == ["merged"]
+
+
+def test_asking_for_open_merge_requests_asks_the_forge_for_both() -> None:
+    forge = FakeForge([1])
+    list(iter_candidates(forge, REPO, SINCE, include_open=True))
+    assert forge.states == ["opened", "merged"]
 
 
 def test_the_order_the_forge_gives_is_preserved() -> None:

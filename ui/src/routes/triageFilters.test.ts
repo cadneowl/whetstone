@@ -13,6 +13,7 @@ import {
   openedBy,
   peopleOf,
   selectedIndex,
+  stateOf,
   toParams,
   toggle,
   type TriageFilter,
@@ -26,6 +27,7 @@ type Opts = {
   kind?: 'should_catch' | 'should_not_flag'
   signal?: string
   title?: string
+  state?: string
 }
 
 function item(id: string, opts: Opts = {}): QueueItem {
@@ -42,6 +44,7 @@ function item(id: string, opts: Opts = {}): QueueItem {
         suggested_skill: opts.skill === undefined ? 'rust-errors' : opts.skill,
         discussion: {
           mr_author: opts.author ?? '',
+          mr_state: opts.state ?? '',
           mr_title: opts.title ?? '',
           comments: (opts.commenters ?? []).map((author) => ({ author, body: '…' })),
         },
@@ -290,6 +293,49 @@ describe('facets', () => {
     const mixed = [item('a', { signal: 'merged clean' }), item('b', { signal: 'merged clean' })]
     const rows = facets(mixed, filter({ hiddenSignals: ['merged clean'] })).signals
     expect(rows.find((s) => s.value === 'merged clean')?.count).toBe(2)
+  })
+})
+
+describe('merge request state', () => {
+  const queue = [
+    item('live', { ref: 'acme/p!900', state: 'opened', commenters: ['alice'] }),
+    item('landed', { ref: 'acme/p!812', state: 'merged', commenters: ['alice'] }),
+    item('legacy', { ref: 'acme/p!700', state: '', commenters: ['alice'] }),
+  ]
+
+  it('reads the state off the candidate', () => {
+    expect(stateOf(queue[0]!)).toBe('opened')
+    expect(stateOf(queue[1]!)).toBe('merged')
+  })
+
+  it('does not call an unrecorded state merged', () => {
+    // Every candidate mined before the walk could reach an open branch did come from a merged one,
+    // but saying so here would put a fact in the bar that nothing checked — on exactly the rows a
+    // re-pull is about to correct.
+    expect(stateOf(queue[2]!)).toBe(NONE)
+  })
+
+  it('narrows to what is still being reviewed', () => {
+    expect(ids(applyFilters(queue, filter({ states: ['opened'] })))).toEqual(['live'])
+  })
+
+  it('narrows to what has landed', () => {
+    expect(ids(applyFilters(queue, filter({ states: ['merged'] })))).toEqual(['landed'])
+  })
+
+  it('can single out the ones a re-pull has not reached', () => {
+    expect(ids(applyFilters(queue, filter({ states: [NONE] })))).toEqual(['legacy'])
+  })
+
+  it('offers open before merged, and unrecorded last', () => {
+    // The order the queue is worked in: a live branch is where saying something still changes the
+    // outcome.
+    expect(facets(queue, NO_FILTER).states.map((o) => o.value)).toEqual(['opened', 'merged', NONE])
+  })
+
+  it('survives the query string', () => {
+    const picked = filter({ states: ['opened', NONE] })
+    expect(fromParams(toParams(picked)).states).toEqual(['opened', NONE])
   })
 })
 

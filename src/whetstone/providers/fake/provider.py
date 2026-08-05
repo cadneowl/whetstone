@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -56,11 +57,17 @@ class FakeProvider:
             raise KeyError(f"no change seeded for {repo.slug} {base}..{head}") from None
 
     # --- ReviewConnector -----------------------------------------------------
-    def list_reviewed_changes(self, repo: RepoRef, since: datetime) -> list[MergeRequestRef]:
+    def list_reviewed_changes(
+        self, repo: RepoRef, since: datetime, *, states: Sequence[str] = ("merged",)
+    ) -> list[MergeRequestRef]:
+        # A seeded MR with no state stated is merged — the only kind this could produce before the
+        # states argument existed, so every caller that does not pass one sees what it always saw.
         return [
             m
             for m in self._mrs
-            if m.repo.slug == repo.slug and (m.merged_at is None or m.merged_at >= since)
+            if m.repo.slug == repo.slug
+            and (m.merged_at is None or m.merged_at >= since)
+            and (m.state or "merged") in states
         ]
 
     def get_review(self, mr: MergeRequestRef) -> ReviewedChange:

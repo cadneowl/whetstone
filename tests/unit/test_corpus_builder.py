@@ -58,7 +58,7 @@ def _charge_file() -> FileChange:
 def _mr(labels: list[str] | None = None) -> MergeRequestRef:
     return MergeRequestRef(
         repo=REPO, iid=812, base_sha="base123", head_sha="head456",
-        merged_at=datetime(2026, 6, 1), labels=labels or [], author="dana",
+        merged_at=datetime(2026, 6, 1), labels=labels or [], author="dana", state="merged",
     )
 
 
@@ -606,6 +606,59 @@ def test_a_comment_free_merge_still_names_who_opened_it() -> None:
     """The one candidate kind with nobody to attribute at all otherwise — and the kind that fills a
     queue mined from a repo that reviews by talking rather than by commenting."""
     assert build_candidates(_reviewed([]), [RUST_SKILL])[0].discussion.mr_author == "dana"
+
+
+def _open_mr() -> MergeRequestRef:
+    return _mr().model_copy(update={"state": "opened", "merged_at": None})
+
+
+def test_an_open_merge_request_yields_no_argument_from_silence() -> None:
+    """The whole reason mining an open branch needed a decision. A clean-merge candidate asserts
+    that a reviewer should stay silent about this code; on a branch still being reviewed that is
+    not silence, it is a review that has not happened yet."""
+    reviewed = _reviewed([])  # nobody commented
+    assert [c.provenance.human_signal for c in build_candidates(reviewed, [RUST_SKILL])] == [
+        "merged clean"
+    ]
+
+    still_open = ReviewedChange(mr=_open_mr(), change=reviewed.change, threads=[])
+    assert build_candidates(still_open, [RUST_SKILL]) == []
+
+
+def test_an_open_merge_request_still_yields_what_someone_actually_said() -> None:
+    """The comments are the point. An objection a reviewer typed is a fact whether or not the
+    branch has landed — only the inference from silence had to go."""
+    reviewed = ReviewedChange(
+        mr=_open_mr(),
+        change=_reviewed([]).change,
+        threads=[_applied_suggestion_thread()],
+    )
+    signals = [c.provenance.human_signal for c in build_candidates(reviewed, [RUST_SKILL])]
+
+    assert "suggestion applied" in signals
+    assert "merged clean" not in signals
+
+
+def test_the_state_travels_with_the_candidate() -> None:
+    """Triage filters on it, and promoting a case off an unfinished review is a choice someone
+    should be able to see they are making."""
+    reviewed = ReviewedChange(
+        mr=_open_mr(), change=_reviewed([]).change, threads=[_applied_suggestion_thread()]
+    )
+    assert build_candidates(reviewed, [RUST_SKILL])[0].discussion.mr_state == "opened"
+    assert build_candidates(_reviewed([]), [RUST_SKILL])[0].discussion.mr_state == "merged"
+
+
+def test_a_merge_request_whose_state_is_unknown_is_mined_as_merged() -> None:
+    """Every candidate written before the walk could reach an open branch came from a merged one,
+    because nothing else was mineable. Treating a blank as open would silently stop producing the
+    commonest candidate there is."""
+    silent = ReviewedChange(
+        mr=_mr().model_copy(update={"state": ""}), change=_reviewed([]).change, threads=[]
+    )
+    assert [c.provenance.human_signal for c in build_candidates(silent, [RUST_SKILL])] == [
+        "merged clean"
+    ]
 
 
 def test_a_candidate_mined_before_the_author_was_carried_reads_as_unknown() -> None:

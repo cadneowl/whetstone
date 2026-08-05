@@ -1910,6 +1910,32 @@ whetstone corpus pull \
 
 Then open **Triage**. The console reads `[candidates] dir` (default `candidates/`).
 
+#### Mining open merge requests
+
+By default a pull mines **merged** merge requests only. Mining review *history* means outcomes, and
+a branch still being argued about has none — you cannot tell yet whether the reviewer was right.
+
+`--include-open` mines the open ones too:
+
+```bash
+whetstone corpus pull --include-open ...
+```
+
+**Their comments only.** An objection somebody typed is a fact whether or not the branch has landed,
+so `suggestion applied`, `reviewer comment resolved` and `reviewer comment left open` all mine
+normally. What is suppressed is the **`merged clean`** signal — it samples the changed files of a
+merge request nobody commented on and asserts that a reviewer should stay silent about this code.
+On an open MR that is not silence, it is a review that has not happened yet, and promoting it would
+put "nobody objected" in the corpus about code nobody has finished reading.
+
+Two things follow. An open MR is a **moving target** — the thread may be resolved, the code may
+change, the branch may never land — so re-pull with `--refresh` to keep the queue honest; it rewrites
+undecided candidates in place. And the evidence pane badges an open MR **`MR still open`**, because a
+case promoted from one freezes an argument that is still in progress. Nothing stops you; you are
+told what you are looking at.
+
+Closed-unmerged merge requests are still never mined. Their diffs describe code that was thrown away.
+
 #### The three panes
 
 ```
@@ -1951,8 +1977,9 @@ thorough.
 
 **Filters** sit at the top of the queue pane, in two rows that mean opposite things and say so.
 
-*Show only* narrows to what you came to work on. **Merge request** is the one people reach for
-first — a candidate's provenance ref points at a discussion note (`acme/payments!812#note_44`) and
+*Show only* narrows to what you came to work on. **MR state** separates what has landed from what
+is still being argued about — see [mining open merge requests](#mining-open-merge-requests) below.
+**Merge request** is the one people reach for first — a candidate's provenance ref points at a discussion note (`acme/payments!812#note_44`) and
 the suffix is *where in the conversation*, not which MR, so every candidate mined from !812 lands
 in one bucket and finishing it is a single click. **Person** narrows by username, with a role:
 `commented` is who reviewed it, `opened` is who wrote it, `any` is either. Each name carries both

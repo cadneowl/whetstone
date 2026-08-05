@@ -32,6 +32,18 @@ export function DiscussionPane({ candidate }: { candidate: CandidateCase }) {
             {discussion?.resolved ? 'thread resolved' : 'thread open'}
           </Badge>
         )}
+        {/* The merge request itself, as distinct from the thread on it. Shown only when it has not
+            landed, because that is the state that changes what this evidence is worth: the comment
+            is real, but the review it belongs to has not finished, and a promoted case freezes it
+            as though it had. Nothing is blocked — the operator is told what they are looking at. */}
+        {discussion?.mr_state === 'opened' && (
+          <Badge
+            tone="warn"
+            title="This merge request is still open. What a reviewer said is real evidence, but the review has not concluded — the thread may yet be resolved, the code may change, and the branch may never land. A case promoted from it freezes an argument still in progress."
+          >
+            MR still open
+          </Badge>
+        )}
         <MergeRequestLink candidate={candidate} />
       </header>
 

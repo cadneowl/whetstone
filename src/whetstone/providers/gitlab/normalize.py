@@ -30,6 +30,7 @@ def mr_ref(repo: RepoRef, mr: dict[str, Any]) -> MergeRequestRef:
         # Same shape as a note's author, and absent on the same old instances — an MR nobody can be
         # attributed to is still an MR worth mining, so this never fails the pull.
         author=str((mr.get("author") or {}).get("username", "")),
+        state=str(mr.get("state") or ""),
     )
 
 

@@ -38,6 +38,8 @@ export type TriageFilter = {
   skills: string[]
   /** Kinds to show. Empty means both. */
   kinds: string[]
+  /** Merge request states to show — `opened`, `merged`, `NONE` for unrecorded. Empty means all. */
+  states: string[]
   /** Signals to **hide** — the one exclusive dimension, and the pre-existing one. */
   hiddenSignals: string[]
 }
@@ -48,6 +50,7 @@ export const NO_FILTER: TriageFilter = {
   role: 'any',
   skills: [],
   kinds: [],
+  states: [],
   hiddenSignals: [],
 }
 
@@ -57,6 +60,7 @@ export function isFiltered(filter: TriageFilter): boolean {
     filter.people.length > 0 ||
     filter.skills.length > 0 ||
     filter.kinds.length > 0 ||
+    filter.states.length > 0 ||
     filter.hiddenSignals.length > 0
   )
 }
@@ -122,6 +126,17 @@ export function skillOf(item: QueueItem): string {
   return item.entry.candidate.suggested_skill || NONE
 }
 
+/**
+ * Where the merge request stands — `opened`, `merged`, or unrecorded.
+ *
+ * Unrecorded is not the same as merged even though every candidate mined before the walk could
+ * reach an open branch came from one. Asserting it here would put a fact in the bar that nothing
+ * checked, on exactly the rows a re-pull is about to correct.
+ */
+export function stateOf(item: QueueItem): string {
+  return item.entry.candidate.discussion?.mr_state || NONE
+}
+
 export function signalOf(item: QueueItem): string {
   return item.entry.candidate.provenance?.human_signal ?? ''
 }
@@ -157,6 +172,11 @@ const DIMENSIONS = {
     off: { kinds: [] },
     holds: (item: QueueItem, f: TriageFilter) =>
       f.kinds.length === 0 || f.kinds.includes(item.entry.candidate.kind),
+  },
+  state: {
+    off: { states: [] },
+    holds: (item: QueueItem, f: TriageFilter) =>
+      f.states.length === 0 || f.states.includes(stateOf(item)),
   },
   signal: {
     off: { hiddenSignals: [] },
@@ -197,6 +217,7 @@ export type Facets = {
   people: PersonOption[]
   skills: FacetOption[]
   kinds: FacetOption[]
+  states: FacetOption[]
   signals: FacetOption[]
 }
 
@@ -238,6 +259,16 @@ export function facets(items: QueueItem[], filter: TriageFilter): Facets {
         count: byKind.filter((i) => i.entry.candidate.kind === kind).length,
       }))
       .filter((option) => option.count > 0 || filter.kinds.includes(option.value)),
+    // Open before merged, and unrecorded last: the ordering the queue is worked in, since a live
+    // branch is the one where saying something still changes the outcome.
+    states: byStateOrder(
+      keeping(
+        tally(without(items, filter, 'state'), (item) => [stateOf(item)], {
+          detail: (item) => STATE_DETAIL[stateOf(item)] ?? '',
+        }),
+        filter.states,
+      ),
+    ),
     signals: bySignalOrder(
       keeping(
         tally(without(items, filter, 'signal'), (item) => [signalOf(item)]),
@@ -245,6 +276,23 @@ export function facets(items: QueueItem[], filter: TriageFilter): Facets {
       ),
     ),
   }
+}
+
+const STATE_ORDER = ['opened', 'merged']
+
+const STATE_DETAIL: Record<string, string> = {
+  opened: 'still being reviewed',
+  merged: 'landed',
+}
+
+function byStateOrder(options: FacetOption[]): FacetOption[] {
+  return options.sort(
+    (a, b) =>
+      Number(a.value === NONE) - Number(b.value === NONE) ||
+      (STATE_ORDER.indexOf(a.value) + 1 || STATE_ORDER.length + 1) -
+        (STATE_ORDER.indexOf(b.value) + 1 || STATE_ORDER.length + 1) ||
+      a.value.localeCompare(b.value),
+  )
 }
 
 /**
@@ -368,6 +416,7 @@ const REPEATED: [keyof TriageFilter, string][] = [
   ['people', 'who'],
   ['skills', 'skill'],
   ['kinds', 'kind'],
+  ['states', 'state'],
   ['hiddenSignals', 'hide'],
 ]
 
@@ -388,6 +437,7 @@ export function fromParams(params: URLSearchParams): TriageFilter {
     role: (ROLES as string[]).includes(role) ? (role as PersonRole) : 'any',
     skills: params.getAll('skill'),
     kinds: params.getAll('kind'),
+    states: params.getAll('state'),
     hiddenSignals: params.getAll('hide'),
   }
 }
