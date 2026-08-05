@@ -795,15 +795,15 @@ function RemovedRules({ removed }: { removed: RemovedRule[] }) {
           </strong>{' '}
           <span className="text-ink">
             Nothing downstream can check this: scoring, the gate and the merge all pass, because
-            having no case linked to it is exactly what makes them pass. If the rule was doing
-            work, this is where that is decided.
+            having no case linked to it is exactly what makes them pass. If the rule was doing work,
+            this is where that is decided.
           </span>
         </p>
       )}
       {backed.map((rule) => (
         <p key={rule.rule_id} className="text-xs text-muted">
-          Removes {rule.rule_id} — linked to {rule.linked_cases.join(', ')}, so the gate will
-          judge it.
+          Removes {rule.rule_id} — linked to {rule.linked_cases.join(', ')}, so the gate will judge
+          it.
         </p>
       ))}
     </div>
