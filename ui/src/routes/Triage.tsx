@@ -23,7 +23,17 @@ import { DiffView, type Overlay, type Selection } from '@/components/diff/DiffVi
 import { LaunchButton } from '@/components/LaunchButton'
 import { DiscussionPane } from '@/components/DiscussionPane'
 import { Badge, Empty, ErrorNote, Intro, Loading, severityName } from '@/components/primitives'
-import { SIGNALS, SignalBadge, signalMeta } from '@/components/signals'
+import { SignalBadge } from '@/components/signals'
+import { TriageFilters } from '@/components/TriageFilters'
+import {
+  NO_FILTER,
+  applyFilters,
+  fromParams,
+  isFiltered,
+  selectedIndex,
+  toParams,
+  type TriageFilter,
+} from './triageFilters'
 
 /**
  * The triage queue.
@@ -57,7 +67,6 @@ export function Triage() {
   const readOnly = Boolean(config?.read_only)
   const { data: skills } = useSkills()
 
-  const [rawIndex, setIndex] = useState(0)
   const [edits, setEdits] = useState<CaseEdits | null>(null)
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
@@ -67,22 +76,40 @@ export function Triage() {
   // moment the operator sees it in this queue — the patch is also saved beside the promoted case,
   // and this says so.
   const [promotedSidecar, setPromotedSidecar] = useState<PreparedCase['sidecar'] | null>(null)
-  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => new Set())
+
+  // The filter lives in the query string, so a narrowed queue is a link — which is what lets the
+  // health panel point at a merge request's whole set, and "look at these four" be a message.
+  const [params, setParams] = useSearchParams()
+  const filter = useMemo(() => fromParams(params), [params])
+  const setFilter = useCallback(
+    (next: TriageFilter) => setParams((p) => toParams(next, p)),
+    [setParams],
+  )
 
   const all = useMemo(() => queue?.items ?? [], [queue])
-  const items = useMemo(() => all.filter((i) => !hidden.has(signalOf(i))), [all, hidden])
-  const index = Math.min(rawIndex, Math.max(0, items.length - 1))
+  const items = useMemo(() => applyFilters(all, filter), [all, filter])
+
+  // Keyed on the candidate, not on its position in the list. The queue is filtered while somebody
+  // is part-way through it, and a remembered index silently moves the selection onto a different
+  // candidate — the form re-seeds so nothing is written wrongly, but the row being read is gone and
+  // nothing says so.
+  const [selectedId, setSelectedId] = useState('')
+  const index = selectedIndex(items, selectedId)
   const current: QueueItem | undefined = items[index]
+
+  /** After a decision, the next candidate — the queue is about to lose this one. */
+  const advance = useCallback(() => {
+    const next = items[index + 1] ?? items[index - 1]
+    setSelectedId(next?.entry.candidate.id ?? '')
+  }, [items, index])
 
   // `?focus=<candidate-id>` opens the queue on a specific candidate — how the health panel's
   // uncovered-MRs list lands here. Consumed once the queue has loaded, so moving through the
   // queue afterwards is not pinned back to it, and a candidate already ruled on is simply absent.
-  const [params, setParams] = useSearchParams()
   const focus = params.get('focus')
   useEffect(() => {
     if (!focus || items.length === 0) return
-    const at = items.findIndex((i) => i.entry.candidate.id === focus)
-    if (at >= 0) setIndex(at)
+    if (items.some((i) => i.entry.candidate.id === focus)) setSelectedId(focus)
     setParams(
       (p) => {
         p.delete('focus')
@@ -115,8 +142,11 @@ export function Triage() {
   }, [editsKey])
 
   const move = useCallback(
-    (delta: number) => setIndex((i) => Math.max(0, Math.min(items.length - 1, i + delta))),
-    [items.length],
+    (delta: number) => {
+      const at = Math.max(0, Math.min(items.length - 1, index + delta))
+      setSelectedId(items[at]?.entry.candidate.id ?? '')
+    },
+    [items, index],
   )
 
   /**
@@ -148,12 +178,12 @@ export function Triage() {
                   : ''),
             })
             setPromotedSidecar(result.prepared.sidecar ?? null)
-            setIndex((i) => Math.min(i, Math.max(0, items.length - 2)))
+            advance()
           },
         },
       )
     },
-    [current, edits, items.length, promote],
+    [advance, current, edits, promote],
   )
   const doPromote = useCallback(() => promoteWith('active'), [promoteWith])
   const doArchive = useCallback(() => promoteWith('archive'), [promoteWith])
@@ -168,10 +198,11 @@ export function Triage() {
           setPromotedSidecar(null)
           setRejecting(false)
           setReason('')
+          advance()
         },
       },
     )
-  }, [current, reason, reject])
+  }, [advance, current, reason, reject])
 
   useKeyboard({
     enabled: !rejecting && Boolean(current) && !config?.read_only,
@@ -225,8 +256,6 @@ export function Triage() {
 
       {batch && batch.count > 0 && <PromotedBatch batch={batch} readOnly={readOnly} />}
 
-      <SignalFilter items={all} hidden={hidden} onToggle={setHidden} />
-
       {notice && (
         <p className="mb-3 rounded-lg border border-good/40 bg-good/5 px-3 py-2 text-sm">
           {notice.text}
@@ -256,17 +285,6 @@ export function Triage() {
 
       {all.length === 0 ? (
         <Empty>Queue is clear — every candidate has been decided.</Empty>
-      ) : items.length === 0 ? (
-        <Empty>
-          Every one of the {all.length} pending candidates is hidden by the filter above.{' '}
-          <button
-            type="button"
-            onClick={() => setHidden(new Set())}
-            className="underline hover:text-ink"
-          >
-            Show all
-          </button>
-        </Empty>
       ) : (
         // `minmax(0, …)` on the middle track, not `1fr`: a grid track sizes to its content's
         // intrinsic minimum by default, so one long unbroken path in a diff would widen the column
@@ -278,7 +296,14 @@ export function Triage() {
         // grows past its container, so without it the panes size to their content and `h-full`
         // measures a row that is already 2000px tall. Both tracks need the same `minmax(0, …)`.
         <div className="grid gap-4 xl:h-[calc(100vh-13rem)] xl:min-h-[28rem] xl:grid-cols-[15rem_minmax(0,1fr)_22rem] xl:grid-rows-[minmax(0,1fr)] 2xl:grid-cols-[17rem_minmax(0,1fr)_26rem]">
-          <QueuePane items={items} index={index} onPick={setIndex} />
+          <QueuePane
+            items={items}
+            all={all}
+            index={index}
+            onPick={setSelectedId}
+            filter={filter}
+            onFilter={setFilter}
+          />
 
           <div className="flex min-w-0 flex-col gap-4 xl:h-full xl:min-h-0">
             {/* Capped rather than fixed: a short thread gives its space to the diff, a long one
@@ -664,83 +689,6 @@ function PromotedEditor({
   )
 }
 
-function signalOf(item: QueueItem): string {
-  return item.entry.candidate.provenance.human_signal ?? ''
-}
-
-/**
- * Filter the queue by what each candidate is evidence *of*.
- *
- * A comment-free merge yields one `merged clean` candidate per changed file, so a repo that
- * reviews by talking rather than by commenting inline produces a queue that is mostly those —
- * and they are the weakest thing the builder makes. Sorted strongest-first they sit at the
- * bottom, but "scroll until it gets boring" is not a filter. This is.
- *
- * Doubles as the legend: every chip carries the signal's meaning on hover.
- */
-function SignalFilter({
-  items,
-  hidden,
-  onToggle,
-}: {
-  items: QueueItem[]
-  hidden: ReadonlySet<string>
-  onToggle: (next: ReadonlySet<string>) => void
-}) {
-  const counts = useMemo(() => {
-    const out = new Map<string, number>()
-    for (const item of items) out.set(signalOf(item), (out.get(signalOf(item)) ?? 0) + 1)
-    return out
-  }, [items])
-
-  // Builder order for the ones we know, then anything unrecognized (hand-written, or a signal
-  // added since this shipped) so a chip never silently disappears from the queue's account of itself.
-  const present = [
-    ...SIGNALS.map((s) => s.id).filter((id) => counts.has(id)),
-    ...[...counts.keys()].filter((id) => !SIGNALS.some((s) => s.id === id)),
-  ]
-  if (present.length < 2) return null
-
-  return (
-    <div className="mb-4 flex flex-wrap items-center gap-1.5">
-      {present.map((id) => {
-        const off = hidden.has(id)
-        const meta = signalMeta(id)
-        return (
-          <button
-            key={id}
-            type="button"
-            title={meta.meaning}
-            aria-pressed={!off}
-            onClick={() => {
-              const next = new Set(hidden)
-              if (off) next.delete(id)
-              else next.add(id)
-              onToggle(next)
-            }}
-            className={`rounded-full border px-2.5 py-0.5 text-xs transition-colors ${
-              off
-                ? 'border-line text-muted line-through opacity-50 hover:opacity-80'
-                : 'border-line hover:border-accent/50'
-            }`}
-          >
-            {meta.id} <span className="tabular text-muted">{counts.get(id)}</span>
-          </button>
-        )
-      })}
-      {hidden.size > 0 && (
-        <button
-          type="button"
-          onClick={() => onToggle(new Set())}
-          className="px-1.5 text-xs text-muted underline hover:text-ink"
-        >
-          show all
-        </button>
-      )}
-    </div>
-  )
-}
-
 type Severity = NonNullable<CaseEdits['severity_min']>
 const SEVERITIES: Severity[] = [10, 20, 30]
 
@@ -865,15 +813,42 @@ function DraftButton({
 
 function QueuePane({
   items,
+  all,
   index,
   onPick,
+  filter,
+  onFilter,
 }: {
+  /** What the filter left. */
   items: QueueItem[]
+  /** Everything pending, which the facets are built from — a value cannot disappear from the bar
+   *  while its candidates are in the queue. */
+  all: QueueItem[]
   index: number
-  onPick: (i: number) => void
+  onPick: (id: string) => void
+  filter: TriageFilter
+  onFilter: (next: TriageFilter) => void
 }) {
   return (
     <aside className="flex min-w-0 flex-col gap-3 xl:h-full xl:min-h-0">
+      <TriageFilters items={all} filter={filter} onChange={onFilter} />
+      {/* Rendered inside the pane rather than in place of the whole screen: filtering to nothing is
+          a reason to *adjust* the filter, and a layout that removes the controls to say so leaves
+          clearing them as the only way out. */}
+      {items.length === 0 && (
+        <p className="rounded-lg border border-line bg-surface px-3 py-2 text-xs text-muted">
+          None of the {all.length} pending candidates match.{' '}
+          {isFiltered(filter) && (
+            <button
+              type="button"
+              onClick={() => onFilter(NO_FILTER)}
+              className="underline hover:text-ink"
+            >
+              Clear the filter
+            </button>
+          )}
+        </p>
+      )}
       <ul className="min-h-0 flex-1 space-y-1 xl:overflow-y-auto">
         {items.map((item, i) => {
           const c = item.entry.candidate
@@ -882,7 +857,7 @@ function QueuePane({
             <li key={c.id}>
               <button
                 type="button"
-                onClick={() => onPick(i)}
+                onClick={() => onPick(c.id)}
                 className={`w-full min-w-0 rounded-lg border px-2.5 py-2 text-left text-sm transition-colors ${
                   i === index
                     ? 'border-accent bg-accent/10'

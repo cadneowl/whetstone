@@ -619,6 +619,29 @@ Design decisions that matter:
   to show an id, a confidence and a skill — which made a 0.30 guess-from-silence look exactly like a
   0.90 applied suggestion until you clicked it. The confidence number's *meaning* is the signal, so
   the signal leads. The filter chips double as a legend, each carrying what the signal claims.
+- **The queue is filtered by merge request and by person, not only by signal.** A month of mining
+  is worked by *whose* and by *which MR* at least as often as by subject — "finish !812",
+  "everything Dana commented on", "the ones I opened" — and none of that was reachable except by
+  scrolling until you recognised something. The controls sit in the queue pane rather than across
+  the top, because the three panes are one viewport tall by design and a full-width bar takes that
+  height out of the diff.
+
+  Two vocabularies, kept apart and labelled as such: the merge request / person / skill / kind
+  facets **include** (nothing picked means everything), while the signal chips **exclude**, because
+  what made them worth building was one signal flooding the queue and inverting that would cost
+  nine clicks to say.
+
+  The person facet needs to know who *opened* each merge request, which is not recoverable from the
+  thread — an author appears in it only when they replied. `MergeRequestRef.author` carries it from
+  the provider and `Discussion.mr_author` onto the candidate. Queues mined before that field
+  existed read as *unattributed* until `whetstone corpus pull --refresh` rewrites them; they are
+  never silently dropped from a filtered queue.
+
+  The filter lives in the query string, so a narrowed queue is a link — which is what lets the
+  health panel's uncovered-MR rows scope triage to a merge request's whole set (`?mr=…&focus=…`)
+  rather than opening one candidate from it. The selection follows the *candidate*, not its
+  position: filtering while part-way through a queue must not move the cursor onto a different row
+  with nothing saying so.
 - **The raw comment and the semantic field sit side by side, both visible, only the semantic
   editable.** This is the fix for G5: the human *rewrites* rather than retypes, and can see exactly
   what signal is being transformed into ground truth.

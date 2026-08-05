@@ -4,5 +4,6 @@
   "web_url": "https://gitlab.acme.com/acme/payments/-/merge_requests/812",
   "merged_at": "2026-06-01T10:00:00.000Z",
   "labels": ["backend", "payments"],
+  "author": {"id": 7, "username": "dana", "name": "Dana Ruiz"},
   "diff_refs": {"base_sha": "base123", "head_sha": "head456", "start_sha": "base123"}
 }

@@ -58,7 +58,7 @@ def _charge_file() -> FileChange:
 def _mr(labels: list[str] | None = None) -> MergeRequestRef:
     return MergeRequestRef(
         repo=REPO, iid=812, base_sha="base123", head_sha="head456",
-        merged_at=datetime(2026, 6, 1), labels=labels or [],
+        merged_at=datetime(2026, 6, 1), labels=labels or [], author="dana",
     )
 
 
@@ -589,6 +589,31 @@ def test_a_candidate_written_before_discussions_existed_still_loads() -> None:
     payload = build_candidates(_reviewed([_applied_suggestion_thread()]))[0].model_dump(mode="json")
     del payload["discussion"]
     assert CandidateCase.model_validate(payload).discussion.empty
+
+
+def test_the_author_of_the_merge_request_is_carried_beside_its_commenters() -> None:
+    """Who opened it and who commented on it are different people and different questions. The
+    author appears in a thread only when they replied, so reading it off the comments would answer
+    "did Dana argue about this" when the queue was asked "did Dana write this"."""
+    cands = build_candidates(_reviewed([_applied_suggestion_thread()]), [RUST_SKILL])
+    discussion = cands[0].discussion
+
+    assert discussion.mr_author == "dana"
+    assert [c.author for c in discussion.comments] == ["reviewer_a"]
+
+
+def test_a_comment_free_merge_still_names_who_opened_it() -> None:
+    """The one candidate kind with nobody to attribute at all otherwise — and the kind that fills a
+    queue mined from a repo that reviews by talking rather than by commenting."""
+    assert build_candidates(_reviewed([]), [RUST_SKILL])[0].discussion.mr_author == "dana"
+
+
+def test_a_candidate_mined_before_the_author_was_carried_reads_as_unknown() -> None:
+    """Every queue on disk right now. Blank is unknown, which the console must not render as a
+    person called nobody — and `corpus pull --refresh` is what backfills it."""
+    payload = build_candidates(_reviewed([_applied_suggestion_thread()]))[0].model_dump(mode="json")
+    del payload["discussion"]["mr_author"]
+    assert CandidateCase.model_validate(payload).discussion.mr_author == ""
 
 
 # --- one bad merge request must not end the walk -------------------------------

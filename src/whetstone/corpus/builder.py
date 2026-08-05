@@ -306,7 +306,11 @@ def _discussion(reviewed: ReviewedChange, thread: ReviewThread | None) -> Discus
     `thread is None` is the comment-free merge: the merge request is still named and linked, because
     "nobody said anything about this" is a claim a person should be able to go and check.
     """
-    base = Discussion(mr_title=reviewed.mr.title, mr_url=reviewed.mr.web_url)
+    base = Discussion(
+        mr_title=reviewed.mr.title,
+        mr_url=reviewed.mr.web_url,
+        mr_author=reviewed.mr.author,
+    )
     if thread is None:
         return base
     return base.model_copy(

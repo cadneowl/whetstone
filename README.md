@@ -1913,27 +1913,25 @@ Then open **Triage**. The console reads `[candidates] dir` (default `candidates/
 #### The three panes
 
 ```
- escaped defect 1  ·  suggestion applied 4  ·  merged clean 61   ← filter, and legend
-┌────────────┬───────────────────────────────────┬──────────────────────┐
-│ QUEUE      │ DISCUSSION                        │ EXPECTATION          │
-│            │  [applied][should catch][resolved]│                      │
-│ ▸[applied] │  PAY-812 harden charge settlement │ kind  ◉catch ○noflag │
-│   0.90 💬3 │                                   │ skill [rust-errors▾] │
-│  [the fix] │  priya.raghunathan                │ case id [812-t0    ] │
-│   0.85 💬3 │  This unwraps a DB lookup that    │ region [41]–[43]     │
-│ [no comm.] │  returns None whenever the row…   │ severity [none    ▾] │
-│   0.30     │                                   │                      │
-│            │  tom                              │ AS GENERATED         │
-│            │  Good catch — fixed.              │ "This unwraps a DB…" │
-│            │                                   │ ─────────────────────│
-│            │  PROPOSED  [author applied it]    │ SEMANTIC  [unedited] │
-│            │  let row = db.get(id)?;           │ [                  ] │
-│            ├───────────────────────────────────┤                      │
-│            │ DIFF  src/handlers/charge.rs      │                      │
-│            │  41 +  let row = db.get(id)       │                      │
-│            │  42 +      .unwrap();             │                      │
-│ j/k move…  │  drag line numbers to select      │ [Promote][Validate]  │
-└────────────┴───────────────────────────────────┴──────────────────────┘
+┌────────────────┬───────────────────────────────┬──────────────────────┐
+│ SHOW ONLY      │ DISCUSSION                    │ EXPECTATION          │
+│ [MR 1▾][Person▾│  [applied][should catch]      │                      │
+│ [Skill▾][Kind▾]│  PAY-812 harden charge settle │ kind  ◉catch ○noflag │
+│  acme/pay!812 ×│                               │ skill [rust-errors▾] │
+│ HIDE           │  priya.raghunathan            │ case id [812-t0    ] │
+│ applied 4      │  This unwraps a DB lookup     │ region [41]–[43]     │
+│ n̶o̶ ̶c̶o̶m̶m̶e̶n̶t̶s̶ ̶6̶1̶  │  that returns None whenever…  │ severity [none    ▾] │
+│ 7 of 66 · clear│                               │                      │
+├────────────────┤  tom                          │ AS GENERATED         │
+│ QUEUE          │  Good catch — fixed.          │ "This unwraps a DB…" │
+│ ▸[applied]     │                               │ ─────────────────────│
+│   0.90 💬3     │  PROPOSED [author applied it] │ SEMANTIC  [unedited] │
+│  [the fix]     │  let row = db.get(id)?;       │ [                  ] │
+│   0.85 💬3     ├───────────────────────────────┤                      │
+│                │ DIFF  src/handlers/charge.rs  │                      │
+│                │  41 +  let row = db.get(id)   │                      │
+│ j/k move…      │  42 +      .unwrap();         │ [Promote][Validate]  │
+└────────────────┴───────────────────────────────┴──────────────────────┘
 ```
 
 **Queue** rows lead with the **signal** — what the candidate is evidence *of* — because the id is a
@@ -1951,10 +1949,31 @@ For a `merged clean` candidate there is no conversation, and the pane says so in
 nobody commented, so the case rests on silence and is only as true as the original review was
 thorough.
 
-**Filter chips** above the panes hide signals you are not working. A repo that reviews by talking
+**Filters** sit at the top of the queue pane, in two rows that mean opposite things and say so.
+
+*Show only* narrows to what you came to work on. **Merge request** is the one people reach for
+first — a candidate's provenance ref points at a discussion note (`acme/payments!812#note_44`) and
+the suffix is *where in the conversation*, not which MR, so every candidate mined from !812 lands
+in one bucket and finishing it is a single click. **Person** narrows by username, with a role:
+`commented` is who reviewed it, `opened` is who wrote it, `any` is either. Each name carries both
+counts, because those are different questions about the same person. **Skill** and **Kind** are
+there too. Nothing picked means everything; picking more than one value widens within a facet and
+narrows across them. Every count is what picking that value *would leave*, measured with the other
+filters still applied — so a chip never promises rows another filter has already excluded.
+
+*Hide* is the signal row, and it excludes rather than includes. A repo that reviews by talking
 rather than by commenting inline produces a queue that is mostly `merged clean` — one candidate per
-changed file — and this is how you get it out of the way. (`corpus pull --max-clean-files 0`
-suppresses them at the source.) The chips double as the legend.
+changed file — and getting that out of the way is one click here where an include-only bar would
+cost nine. (`corpus pull --max-clean-files 0` suppresses them at the source.) The chips double as
+the legend.
+
+Who *opened* a merge request is not recoverable from its thread — an author appears there only if
+they replied — so it is carried on the candidate as `discussion.mr_author`. Queues mined before
+that field existed show those candidates as **unattributed** rather than dropping them; a
+`whetstone corpus pull --refresh` rewrites the undecided ones with authors.
+
+The filter is in the URL, so a narrowed queue is a link you can send — and it is how the health
+panel's uncovered-MR rows open triage on a merge request's whole set instead of one candidate.
 
 **Diff** highlights the current region. Drag across the **line numbers** to change it.
 
