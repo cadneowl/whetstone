@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -41,7 +42,9 @@ class ReviewConnector(Protocol):
     """Read historical reviewed changes (MRs/PRs) and their normalized review threads."""
 
     def capabilities(self) -> set[Capability]: ...
-    def list_reviewed_changes(self, repo: RepoRef, since: datetime) -> list[MergeRequestRef]: ...
+    def list_reviewed_changes(
+        self, repo: RepoRef, since: datetime, *, states: Sequence[str] = ("merged",)
+    ) -> list[MergeRequestRef]: ...
     def get_review(self, mr: MergeRequestRef) -> ReviewedChange: ...
 
 

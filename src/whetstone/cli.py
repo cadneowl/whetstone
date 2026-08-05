@@ -1248,6 +1248,13 @@ def corpus_pull(
         bool,
         typer.Option("--refresh", help="Rewrite undecided candidates that already exist"),
     ] = False,
+    include_open: Annotated[
+        bool,
+        typer.Option(
+            "--include-open",
+            help="Also mine merge requests that are still open — their comments only",
+        ),
+    ] = False,
     jira_url: Annotated[
         str | None, typer.Option(help="Jira base URL — enables the escaped-defect signal")
     ] = None,
@@ -1358,6 +1365,7 @@ def corpus_pull(
             stream_corpus(
                 connector, project, since, skills,
                 max_clean_files=max_clean_files, on_skip=note_skip, on_progress=show("mr"),
+                include_open=include_open,
             )
         )
 

@@ -631,6 +631,13 @@ Design decisions that matter:
   what made them worth building was one signal flooding the queue and inverting that would cost
   nine clicks to say.
 
+  The **MR state** facet exists because a pull can now reach merge requests that are still open
+  (`corpus pull --include-open`). Those contribute their comments and nothing else: the
+  `merged clean` signal is suppressed for them, since sampling a comment-free *open* branch and
+  asserting a reviewer should stay silent about it reads a review that has not happened yet as
+  evidence. The evidence pane badges an open MR, because promoting a case from one freezes an
+  argument still in progress.
+
   The person facet needs to know who *opened* each merge request, which is not recoverable from the
   thread — an author appears in it only when they replied. `MergeRequestRef.author` carries it from
   the provider and `Discussion.mr_author` onto the candidate. Queues mined before that field

@@ -949,12 +949,14 @@ def stream_corpus(
     max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
     on_skip: SkipHandler | None = None,
     on_progress: ProgressHandler | None = None,
+    include_open: bool = False,
 ) -> Iterator[CandidateCase]:
     """`pull_corpus`, yielded as it goes, so a caller can write each candidate immediately."""
     repo = RepoRef.parse(f"gitlab:{project}")
     return iter_candidates(
         connector, repo, since, skills,
         max_clean_files=max_clean_files, on_skip=on_skip, on_progress=on_progress,
+        include_open=include_open,
     )
 
 

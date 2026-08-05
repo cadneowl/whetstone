@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -77,19 +78,35 @@ class GitLabConnector:
         return CodeChange(repo=repo, base_ref=base, head_ref=head, files=files)
 
     # --- ReviewConnector -----------------------------------------------------
-    def list_reviewed_changes(self, repo: RepoRef, since: datetime) -> list[MergeRequestRef]:
+    def list_reviewed_changes(
+        self, repo: RepoRef, since: datetime, *, states: Sequence[str] = ("merged",)
+    ) -> list[MergeRequestRef]:
+        """Merge requests to mine, newest first within each state.
+
+        `states` defaults to merged alone, which is what mining review *history* means: a branch
+        still being argued about has no outcome to learn from. Passing `opened` as well is for the
+        other job this queue does — reaching the review happening right now, where the comments are
+        real even though nothing has landed.
+
+        One request per state rather than GitLab's `state=all`, so asking for open and merged never
+        drags every closed merge request in the project over the wire as well. Open first: a walk
+        can be stopped at any point, and the same argument that puts newest first — keep the review
+        activity most likely to still describe how the team works — puts a live branch ahead of a
+        merged one.
+        """
         endpoint = f"/api/v4/projects/{self._pid(repo)}/merge_requests"
-        # `sort` is stated rather than left to GitLab's default. A corpus walk writes as it goes and
-        # may be stopped at any point — by an operator, a timeout, a token expiring — so the order
-        # decides which history survives a partial run. Newest first means what you keep is the
-        # review activity most likely to still describe how the team works.
-        params = {
-            "state": "merged",
-            "updated_after": since.isoformat(),
-            "order_by": "updated_at",
-            "sort": "desc",
-        }
-        return [mr_ref(repo, m) for m in self._http.paginate(endpoint, params)]
+        ordered = [state for state in ("opened", "merged", "closed") if state in states]
+        out: list[MergeRequestRef] = []
+        for state in ordered:
+            # `sort` is stated rather than left to GitLab's default, for the reason above.
+            params = {
+                "state": state,
+                "updated_after": since.isoformat(),
+                "order_by": "updated_at",
+                "sort": "desc",
+            }
+            out.extend(mr_ref(repo, m) for m in self._http.paginate(endpoint, params))
+        return out
 
     def get_merge_request(self, repo: RepoRef, iid: int) -> MergeRequestRef:
         """One merge request by iid — **open or merged**.

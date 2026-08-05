@@ -2399,6 +2399,11 @@ export interface components {
              */
             mr_author: string;
             /**
+             * Mr State
+             * @default
+             */
+            mr_state: string;
+            /**
              * Mr Title
              * @default
              */

@@ -58,6 +58,29 @@ def _wire(router: respx.MockRouter) -> None:
     )
 
 
+@respx.mock
+def test_open_and_merged_are_two_requests_with_open_first() -> None:
+    """GitLab's `state` parameter takes one value. `state=all` would work, and would drag every
+    closed merge request in the project over the wire for a walk that asked for neither — so this
+    asks once per state instead. Open first because a walk can be stopped at any point, and the
+    same argument that puts newest first puts a live branch ahead of a merged one.
+    """
+    route = respx.get(url__regex=r".*/merge_requests(\?.*)?$").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    connector = GitLabConnector(GitLabHttp(BASE, "token", sleep=lambda _: None))
+    since = datetime(2026, 1, 1)
+
+    connector.list_reviewed_changes(REPO, since)
+    connector.list_reviewed_changes(REPO, since, states=("opened", "merged"))
+
+    assert [call.request.url.params.get("state") for call in route.calls] == [
+        "merged",  # the default, unchanged: mining history means outcomes
+        "opened",
+        "merged",
+    ]
+
+
 class TestGitLabConformance(SourceContract, ReviewContract):
     @pytest.fixture
     def connector(self) -> Iterator[GitLabConnector]:

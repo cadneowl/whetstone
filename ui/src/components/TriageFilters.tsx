@@ -49,6 +49,7 @@ export function TriageFilters({
     people: offersChoice(options.people, filter.people),
     skills: offersChoice(options.skills, filter.skills),
     kinds: offersChoice(options.kinds, filter.kinds),
+    states: offersChoice(options.states, filter.states),
     signals: offersChoice(options.signals, filter.hiddenSignals),
   }
   // Nothing to filter by is not the same as a filter bar with nothing in it: one merge request and
@@ -58,7 +59,8 @@ export function TriageFilters({
   if (!isFiltered(filter) && !Object.values(showing).some(Boolean)) return null
   // Each heading earns its place separately. A queue from one merge request by one person still
   // has signals worth hiding, and a bare "Show only" over nothing is a control that went missing.
-  const narrowing = showing.mrs || showing.people || showing.skills || showing.kinds
+  const narrowing =
+    showing.mrs || showing.people || showing.states || showing.skills || showing.kinds
 
   return (
     <div className="shrink-0 space-y-2 border-b border-line pb-3">
@@ -82,6 +84,16 @@ export function TriageFilters({
               role={filter.role}
               onRole={(role) => set({ role })}
               onToggle={(value) => set({ people: toggle(filter.people, value) })}
+            />
+          )}
+          {showing.states && (
+            <Menu
+              label="MR state"
+              noneLabel="unrecorded"
+              noneHint="Mined before the walk could reach an open merge request, so its state was never written down — every one of those came from a merged MR. `whetstone corpus pull --refresh` fills it in."
+              options={options.states}
+              selected={filter.states}
+              onToggle={(value) => set({ states: toggle(filter.states, value) })}
             />
           )}
           {showing.skills && (

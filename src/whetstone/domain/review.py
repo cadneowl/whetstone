@@ -20,6 +20,13 @@ class FileBlob(BaseModel):
         return len(self.content)
 
 
+# The forge's own words for where a merge request stands, in GitLab's spelling. Named here rather
+# than spelled out at each use because three layers now branch on them — the provider asks for
+# them, the builder decides what a candidate may assert from them, and the console filters on them.
+STATE_OPEN = "opened"
+STATE_MERGED = "merged"
+
+
 class MergeRequestRef(BaseModel):
     """Provider-neutral pointer to a merge/pull request plus what's needed to fetch its diff."""
 
@@ -40,6 +47,11 @@ class MergeRequestRef(BaseModel):
     # answerable from the comment authors. Empty when the provider did not say, which reads as
     # unknown rather than as nobody.
     author: str = ""
+    # The forge's own word: `opened`, `merged`, `closed`. Mining used to be merged-only, so this was
+    # a constant and worth nothing; once a walk can reach a branch still being argued about it
+    # decides what the evidence means. Empty for a provider that does not say — read as merged,
+    # which is what every candidate written before this field existed came from.
+    state: str = ""
     # Team-applied labels ("backend", "security"). A skill declares the ones it answers to in
     # `triggers.labels`, which is how a case reaches a skill whose subject isn't visible in a path.
     labels: list[str] = []

@@ -37,6 +37,14 @@ def test_a_missing_author_is_unknown_rather_than_a_failed_pull() -> None:
     assert mr_ref(REPO, {"iid": 1, "author": None}).author == ""
 
 
+def test_the_state_is_carried_so_the_builder_knows_what_it_is_reading() -> None:
+    """Merged and open merge requests reach the same builder now, and only one of them has an
+    outcome to read silence from."""
+    assert mr_ref(REPO, _json("mr_812.json")).state == "merged"
+    assert mr_ref(REPO, {"iid": 1, "state": "opened"}).state == "opened"
+    assert mr_ref(REPO, {"iid": 1}).state == ""
+
+
 def test_applied_suggestion_is_mapped() -> None:
     disc = _json("discussions_p1.json")[0]
     thread = review_thread(disc)

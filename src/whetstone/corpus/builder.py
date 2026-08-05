@@ -31,7 +31,13 @@ from whetstone.domain.eval_model import (
 from whetstone.domain.finding import Finding
 from whetstone.domain.issue import Issue
 from whetstone.domain.refs import Region, RepoRef
-from whetstone.domain.review import MergeRequestRef, ReviewedChange, ReviewThread
+from whetstone.domain.review import (
+    STATE_MERGED,
+    STATE_OPEN,
+    MergeRequestRef,
+    ReviewedChange,
+    ReviewThread,
+)
 from whetstone.domain.skill import Skill
 from whetstone.providers.base import ConnectorError, IssueConnector, ReviewConnector
 
@@ -91,6 +97,7 @@ def iter_candidates(
     max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
     on_skip: SkipHandler | None = None,
     on_progress: ProgressHandler | None = None,
+    include_open: bool = False,
 ) -> Iterator[CandidateCase]:
     """Walk a repo's reviewed changes since `since`, yielding candidates as each one is built.
 
@@ -107,7 +114,8 @@ def iter_candidates(
     merge requests and no diffs, and having the total is what makes progress a fraction rather than
     a rising number with no end in sight.
     """
-    merge_requests = connector.list_reviewed_changes(repo, since)
+    states = (STATE_OPEN, STATE_MERGED) if include_open else (STATE_MERGED,)
+    merge_requests = connector.list_reviewed_changes(repo, since, states=states)
     total = len(merge_requests)
     for done, mr in enumerate(merge_requests, start=1):
         reviewed = _review_or_skip(connector, mr, on_skip)
@@ -130,6 +138,7 @@ def pull_candidates(
     *,
     max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
     on_skip: SkipHandler | None = None,
+    include_open: bool = False,
 ) -> list[CandidateCase]:
     """Walk a repo's reviewed changes since `since`, emitting candidate eval cases to review.
 
@@ -138,7 +147,13 @@ def pull_candidates(
     """
     return list(
         iter_candidates(
-            connector, repo, since, skills, max_clean_files=max_clean_files, on_skip=on_skip
+            connector,
+            repo,
+            since,
+            skills,
+            max_clean_files=max_clean_files,
+            on_skip=on_skip,
+            include_open=include_open,
         )
     )
 
@@ -295,7 +310,14 @@ def build_candidates(
         if counterpart is not None:
             candidates.append(counterpart)
 
-    if not saw_diff_feedback:
+    # Never off an open branch. A clean-merge candidate samples the changed files of a merge request
+    # nobody commented on and asserts that a reviewer should stay silent about this code — evidence
+    # from silence, which the health panel already warns about when it starts to dominate. On a
+    # merge request still open that is not silence, it is a review that has not happened yet, and
+    # promoting it would put "nobody objected" in the corpus about code nobody has finished reading.
+    # The comment-derived signals above are unaffected: an objection someone actually typed is a
+    # fact whether or not the branch has landed.
+    if not saw_diff_feedback and reviewed.mr.state != STATE_OPEN:
         candidates.extend(_clean_merge_candidates(reviewed, ref, skills, limit=max_clean_files))
     return candidates
 
@@ -310,6 +332,7 @@ def _discussion(reviewed: ReviewedChange, thread: ReviewThread | None) -> Discus
         mr_title=reviewed.mr.title,
         mr_url=reviewed.mr.web_url,
         mr_author=reviewed.mr.author,
+        mr_state=reviewed.mr.state,
     )
     if thread is None:
         return base
