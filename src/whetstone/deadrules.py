@@ -53,6 +53,22 @@ RULE_RE = re.compile(r"\*\*\s*([A-Z][A-Z0-9]*\d)\b")
 CONSOLIDATABLE: tuple[DeadRuleVerdict, ...] = ("no-evidence", "evidence-archived")
 
 
+def _mentioned(rule_id: str, text: str) -> bool:
+    """Whether the rule's id appears at all — declared, or merely referred to in passing.
+
+    The same test `dead_rules` uses for "does the guidance still mention this", so the two cannot
+    disagree about whether a rule is still in the file.
+    """
+    return bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(rule_id)}(?![A-Za-z0-9_])", text))
+
+
+def _rule_key(rule_id: str) -> tuple[str, int, str]:
+    """Sort R2 before R10. Plain string order puts a skill's tenth rule second, which reads as a
+    list that has been shuffled — and these lists are read as evidence."""
+    match = re.match(r"^([A-Z]*?)(\d+)$", rule_id)
+    return (match.group(1), int(match.group(2)), rule_id) if match else (rule_id, 0, rule_id)
+
+
 class DeadRule(BaseModel):
     """One rule the evidence no longer stands behind, and the case for saying so."""
 
@@ -142,7 +158,7 @@ def consolidatable(skill: Skill) -> list[DeadRule]:
                 "nothing would go red if this rule were removed",
             )
         )
-    return sorted(out, key=lambda rule: rule.rule_id)
+    return sorted(out, key=lambda rule: _rule_key(rule.rule_id))
 
 
 def render_for_drafter(report: list[DeadRule]) -> str:
@@ -198,10 +214,20 @@ def removed_rules(before: str, after: str, skill: Skill) -> list[RemovedRule]:
 
     Both texts are the whole guidance folder — body plus companion pages — because a skill is a
     folder and half these rules live in `patterns/*.md`.
+
+    **A rule whose id survives anywhere in the new text is not reported.** Declaration is the bold
+    `**R1 — …**` form, and nothing tells a drafter to keep it: a model that rewrites
+    `**R1 — no unwrap**` as `## R1 — no unwrap` has changed the formatting and removed nothing, and
+    reporting that as three rules deleted is how a warning that must be read every time becomes one
+    that is skipped every time. The edit this exists to catch takes the rule *and its id* out, and
+    that still fires.
     """
-    gone = set(RULE_RE.findall(before)) - set(RULE_RE.findall(after))
+    declared_before = set(RULE_RE.findall(before))
+    gone = declared_before - set(RULE_RE.findall(after))
     out: list[RemovedRule] = []
-    for rule_id in sorted(gone):
+    for rule_id in sorted(gone, key=_rule_key):
+        if _mentioned(rule_id, after):
+            continue
         refs = [p.ref for p in skill.provenance.get(rule_id, []) if p.ref]
         out.append(
             RemovedRule(

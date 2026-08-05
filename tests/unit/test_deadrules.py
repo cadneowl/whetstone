@@ -208,3 +208,53 @@ def test_the_dead_rule_count_itself_is_unchanged_by_any_of_this() -> None:
     assert dead_rules(skill) == []
     # R2 has no provenance, so it is untested but not a *dead rule*.
     assert [rule.rule_id for rule in consolidatable(skill)] == ["R2"]
+
+
+# --- found in review, each one a wrong answer the code gave confidently ---------------
+
+
+REFORMATTED = (
+    "# Review\n\n## R1 — no unchecked panics\nUse `?`.\n\n"
+    "## R2 — no swallowed errors\nPropagate or log.\n"
+)
+
+
+def test_reformatting_a_rule_heading_is_not_removing_three_rules() -> None:
+    """Nothing tells a drafter to keep the bold `**R1 — …**` form, and a model that rewrites it as
+    a heading has removed nothing. Reporting that as every rule deleted is how a warning that must
+    be read every time becomes one that is skipped every time."""
+    assert removed_rules(BODY, REFORMATTED, _skill({})) == []
+
+
+def test_a_rule_demoted_to_a_passing_mention_is_not_reported() -> None:
+    """Its id is still on the page, so a reviewer of the diff can see where it went."""
+    demoted = "# Review\n\n- **R2 — no swallowed errors.** Propagate or log (this absorbs R1).\n"
+    assert removed_rules(BODY, demoted, _skill({})) == []
+
+
+def test_a_rule_whose_id_vanishes_entirely_is_still_reported() -> None:
+    """The edit the whole check exists for, unaffected by either narrowing above."""
+    gone = "# Review\n\n- **R2 — no swallowed errors.** Propagate or log.\n"
+    assert [rule.rule_id for rule in removed_rules(BODY, gone, _skill({}))] == ["R1"]
+
+
+def test_an_empty_draft_body_reports_every_rule() -> None:
+    """Every id really is gone, so this is the true answer and the loudest one."""
+    assert [r.rule_id for r in removed_rules(BODY, "", _skill({}))] == ["R1", "R2"]
+
+
+NUMBERED = (
+    "# Review\n\n- **R1 — a.** x\n- **R2 — b.** x\n- **R10 — c.** x\n- **SEC2 — d.** x\n"
+)
+
+
+def test_rule_ids_sort_like_numbers_not_like_strings() -> None:
+    """A skill's tenth rule listed second reads as a shuffled list, and these are evidence."""
+    assert [r.rule_id for r in consolidatable(_skill({}, body=NUMBERED))] == [
+        "R1", "R2", "R10", "SEC2",
+    ]
+
+
+def test_removals_are_listed_in_the_same_order() -> None:
+    dropped = "# Review\n\n- **SEC2 — d.** x\n"
+    assert [r.rule_id for r in removed_rules(NUMBERED, dropped, _skill({}))] == ["R1", "R2", "R10"]
