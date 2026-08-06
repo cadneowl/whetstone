@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from whetstone.verify.base import VerifyOutcome
+from whetstone.verify.base import VerifyOutcome, expand
 
 if TYPE_CHECKING:  # pragma: no cover - `tasks` imports `verify.base`, so this way round only
     from whetstone.tasks import TaskCase, TaskOutput
@@ -45,7 +45,12 @@ class ProgramVerifier:
 
     @property
     def identity(self) -> str:
-        """What this grades with, for the cost plan."""
+        """What this grades with, for the cost plan.
+
+        Unexpanded, deliberately: `{python}` is what the skill committed, and printing the resolved
+        interpreter would make the plan read differently on every machine while describing the same
+        grader.
+        """
         return f"the grader `{' '.join(self.run)}` this skill ships"
 
     def verify(self, case: TaskCase, workspace: Path, output: TaskOutput) -> VerifyOutcome:
@@ -58,7 +63,7 @@ class ProgramVerifier:
         )
         try:
             done = subprocess.run(  # noqa: S603 - argv from the skill's own committed config
-                self.run,
+                [expand(part, workspace) for part in self.run],
                 input=payload,
                 cwd=self.cwd,
                 capture_output=True,

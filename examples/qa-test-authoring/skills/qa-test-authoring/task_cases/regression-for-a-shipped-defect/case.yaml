@@ -1,0 +1,45 @@
+id: regression-for-a-shipped-defect
+
+# The case for references/regression-and-smoke.md. The fix is already in the source, which is the
+# realistic and the hard shape: the skill cannot watch its test go red, so it has to reason about
+# what the defect *was* from the ticket and write the assertion that would have caught it.
+#
+# The first mutant is the original defect, restored verbatim. That is the whole grading argument —
+# "would this test have caught PAY-4471?" stops being a matter of opinion, because the grader
+# reintroduces PAY-4471 and looks.
+instruction: >
+  PAY-4471 shipped last month and was fixed in invoice.py. The defect: split_evenly used plain
+  integer division for every part, so any total that did not divide evenly lost the remainder —
+  splitting 100 cents three ways returned [33, 33, 33] and one cent vanished from every such
+  invoice. Finance found it in a reconciliation report, not in a test.
+
+  The fix is already in the code. Write the regression test that would have caught this, plus
+  tests for the rest of the function's behaviour. Only pytest is available — the environment has
+  no hypothesis, no external test packages, and no network. Put the tests in test_invoice.py and
+  do not modify invoice.py.
+
+verify:
+  mutants:
+    - id: pay-4471-the-original-defect
+      file: invoice.py
+      find: "[base + (1 if i < remainder else 0) for i in range(ways)]"
+      replace: "[total_cents // ways] * ways"
+      describes: >
+        the shipped defect itself — the remainder is dropped again. A test that only splits 100
+        four ways divides evenly and stays green, which is exactly how this reached production
+
+    - id: remainder-over-distributed
+      file: invoice.py
+      find: "if i < remainder"
+      replace: "if i <= remainder"
+      describes: >
+        one cent too many is handed out, so the parts no longer sum to the total — killed by
+        asserting the sum invariant rather than only the individual values
+
+    - id: zero-ways-divides-by-zero
+      file: invoice.py
+      find: "if ways < 1:"
+      replace: "if ways < 0:"
+      describes: >
+        splitting zero ways raises ZeroDivisionError instead of the documented ValueError — the
+        "empty, null, one, many" row of the boundary table

@@ -16,6 +16,7 @@ verifier wants to keep.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -23,6 +24,23 @@ from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle: tasks defines the case this grades
     from whetstone.tasks import TaskCase, TaskOutput
+
+
+def expand(part: str, workspace: Path) -> str:
+    """Expand the two placeholders a committed grader command line cannot hard-code.
+
+    `{python}` is the interpreter Whetstone itself is running under. A skill that writes Python and
+    grades it with `["python", …]` is at the mercy of whatever `python` happens to mean on the
+    machine — on Windows that is usually the Store stub, which has no pytest, so a perfectly good
+    skill scores zero for an environment reason. `{workspace}` is the case's directory, for
+    commands that need it as an argument rather than as a working directory.
+
+    Shared by both verifiers rather than living in `command.py`, because the problem is a property
+    of *grading*, not of one grader. A skill shipping `graders/x.py` under `run:` has exactly the
+    same interpreter problem as one running pytest under `command:` — and had no way to say so,
+    which made a committed Python grader unrunnable on any machine where `python` is not the venv.
+    """
+    return part.replace("{python}", sys.executable).replace("{workspace}", str(workspace))
 
 
 class VerifyOutcome(BaseModel):

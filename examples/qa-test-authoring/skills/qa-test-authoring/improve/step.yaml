@@ -1,0 +1,22 @@
+# Rewrite the guidance from what the tests it wrote failed to catch.
+#
+# `agent: enabled: true` is not optional on this step, and trying it without is the fastest way to
+# understand why the setting exists. This skill is twelve markdown files; a single-call improve step
+# has no tool to read one with, so its only way to show the drafter the guidance is to paste all of
+# it into one prompt. Whetstone refuses that outright rather than truncating it — a byte cap would
+# shrink the prompt by *dropping rules*, leaving the model rewriting guidance it saw a third of.
+# Delete the block below and the error names the setting that fixes it.
+#
+# There is no `source:` here. A source root is for a skill whose rules depend on code outside the
+# diff; this skill's rules are about how to write a test, and the evidence for changing one is the
+# failure digest plus the pages themselves — both already in reach.
+
+description: Rewrite the guidance from the mutants its tests let through.
+
+prompt: prompt.md
+
+agent:
+  enabled: true
+  # Fewer than the writing budget: this is bounded work — read the failures, open the one or two
+  # reference pages they implicate, rewrite. Priced at 11 calls (10 + one forced answer).
+  max_steps: 10

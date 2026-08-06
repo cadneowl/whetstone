@@ -20,12 +20,11 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from whetstone.verify.base import VerifyOutcome
+from whetstone.verify.base import VerifyOutcome, expand
 
 if TYPE_CHECKING:  # pragma: no cover - `tasks` imports `verify.base`, so this way round only
     from whetstone.tasks import TaskCase, TaskOutput
@@ -66,7 +65,7 @@ class CommandVerifier:
         timeout = int(config.get("timeout_s", DEFAULT_TIMEOUT_S))
         try:
             done = subprocess.run(  # noqa: S603 - argv from the skill's own committed config
-                [_substitute(str(part), workspace) for part in command],
+                [expand(str(part), workspace) for part in command],
                 cwd=workspace,
                 capture_output=True,
                 text=True,
@@ -96,18 +95,6 @@ class CommandVerifier:
         return VerifyOutcome(
             passed=passed, score=max(0.0, min(1.0, score)), metrics=metrics, detail=detail
         )
-
-
-def _substitute(part: str, workspace: Path) -> str:
-    """Expand the two placeholders a committed command line cannot hard-code.
-
-    `{python}` is the interpreter Whetstone itself is running under. A skill that writes Python and
-    grades it with `["python", "-m", "pytest"]` is at the mercy of whatever `python` happens to mean
-    on the machine — on Windows that is usually the Store stub, which has no pytest, so a perfectly
-    good skill scores zero for an environment reason. `{workspace}` is the case's directory, for
-    commands that need it as an argument rather than as a working directory.
-    """
-    return part.replace("{python}", sys.executable).replace("{workspace}", str(workspace))
 
 
 def _number(value: Any, default: float) -> float:

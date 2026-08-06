@@ -124,6 +124,33 @@ def test_a_program_verifier_returns_its_own_outcome(tmp_path: Path) -> None:
     assert outcome.passed and outcome.score == 0.5 and outcome.detail == "c1"
 
 
+def test_a_program_verifier_expands_the_placeholders_too(tmp_path: Path) -> None:
+    """`{python}` was a `command:`-only feature, and the gap made a shipped grader unrunnable.
+
+    A skill grading with `command: ["{python}", "-m", "pytest"]` got the interpreter Whetstone runs
+    under; one shipping `run: ["python", "graders/x.py"]` got whatever `python` meant on the
+    machine — on Windows usually the Store stub. The problem is a property of grading, not of one
+    grader, so the expansion lives on both. `{workspace}` comes with it, for a grader that wants
+    the directory as an argument as well as on stdin.
+    """
+    (tmp_path / "g.py").write_text(
+        "import json,sys; print(json.dumps("
+        '{"passed": True, "score": 1.0, "detail": sys.argv[1]}))',
+        encoding="utf-8",
+    )
+    outcome = ProgramVerifier(run=["{python}", "g.py", "{workspace}"], cwd=tmp_path).verify(
+        _case(), tmp_path, TaskOutput()
+    )
+    assert outcome.passed and outcome.detail == str(tmp_path)
+
+
+def test_a_program_verifiers_identity_shows_what_was_committed(tmp_path: Path) -> None:
+    """Unexpanded: the plan describes the grader, and a resolved interpreter path would make the
+    same committed line read differently on every machine."""
+    verifier = ProgramVerifier(run=["{python}", "graders/x.py"], cwd=tmp_path)
+    assert verifier.identity == "the grader `{python} graders/x.py` this skill ships"
+
+
 def test_a_broken_grader_stops_the_run_rather_than_blaming_the_skill(tmp_path: Path) -> None:
     grader = tmp_path / "g.py"
     grader.write_text("raise SystemExit(3)", encoding="utf-8")
