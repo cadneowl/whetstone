@@ -25,6 +25,7 @@ import { DiscussionPane } from '@/components/DiscussionPane'
 import { Badge, Empty, ErrorNote, Intro, Loading, severityName } from '@/components/primitives'
 import { SignalBadge } from '@/components/signals'
 import { TriageFilters } from '@/components/TriageFilters'
+import { WatchNow } from '@/components/WatchNow'
 import {
   NO_FILTER,
   applyFilters,
@@ -225,13 +226,19 @@ export function Triage() {
         </header>
         <Empty>
           Nothing mined yet — no candidate directory at{' '}
-          <code className="font-mono">{queue?.root}</code>. Turn on{' '}
+          <code className="font-mono">{queue?.root}</code>. Pull the watched projects now, turn on{' '}
           <code className="font-mono">[watch]</code> in whetstone.toml, or run{' '}
           <code className="font-mono">
             whetstone corpus pull --out {queue?.root ?? 'candidates'}
           </code>
           .
         </Empty>
+        {/* The button belongs on this screen most of all: it is the one somebody reaches with an
+            empty queue, and until it was here the only way to fill one was to leave the console
+            and run the CLI. */}
+        <div className="mt-3 rounded-lg border border-line bg-surface px-3 py-2">
+          <WatchNow />
+        </div>
       </div>
     )
   }
@@ -253,6 +260,13 @@ export function Triage() {
         </div>
         <Intro>{TRIAGE_INTRO}</Intro>
       </header>
+
+      {/* On this screen rather than only on the home one, because this is where somebody is when
+          they need it: the interval is a promise about the average case, and "the merge request
+          landed two minutes ago and I am triaging now" is not the average case. */}
+      <div className="mb-4 rounded-lg border border-line bg-surface px-3 py-2">
+        <WatchNow />
+      </div>
 
       {batch && batch.count > 0 && <PromotedBatch batch={batch} readOnly={readOnly} />}
 

@@ -1425,7 +1425,12 @@ tracker_project = "PAY"
 ```
 
 Off by default: a tool that reaches out to a forge on a timer should do so because someone asked it
-to. *Check now* sweeps immediately without waiting for the interval.
+to. ***Pull now*** — on the triage screen, the inbox and the status page — sweeps immediately
+without waiting for the interval, and works whether or not anything is watching on a schedule. It is
+how a queue gets seeded on a console that has never pulled, and how an open merge request that
+landed two minutes ago reaches triage without waiting half an hour for it. The click returns as soon
+as the sweep starts; the screen reports what it found when it lands, and refreshes the queue
+underneath itself.
 
 **Each project carries a watermark**, advanced only after a sweep's candidates are safely on disk.
 A failed sweep re-covers its window rather than skipping it, and a restart resumes where the last
@@ -1630,7 +1635,7 @@ Every URL is deep-linkable. Paste a run link into a merge request and it opens w
 The deployment's state of affairs on top, rather than one skill at a time behind Skills → Health.
 It sums signals the rest of the product already computes: the **fleet** rot totals (how many skills
 are drifting, saturated, overdue a pass, or carrying a dead rule) and how many need a person; the
-**judge**'s accuracy against its bar; the **watch** state with a *Check now*; the model and git
+**judge**'s accuracy against its bar; the **watch** state with a *Pull now*; the model and git
 strip; and every skill **worst-first**, each row linking into its own Health tab. No number here is
 new — it is the scattered signals summed into one screen. Built entirely from existing endpoints.
 

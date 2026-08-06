@@ -315,10 +315,14 @@ export interface paths {
         put?: never;
         /**
          * Check Now
-         * @description Sweep the watched projects immediately, rather than waiting for the interval.
+         * @description Pull the watched projects now, rather than waiting for the interval.
          *
          *     A write because it reaches out to a forge and adds to the triage queue — read-only consoles do
          *     not go poking at other people's systems.
+         *
+         *     Returns the watcher's state, not the sweep: the sweep starts here and finishes later, and a
+         *     request held open for the minutes a first pull takes would time out in the browser long before
+         *     it had anything to report. Poll `/api/watch` for the outcome.
          */
         post: operations["check_now_api_inbox_check_post"];
         delete?: never;
@@ -1467,6 +1471,30 @@ export interface paths {
          *     worth showing to the person who has to fix it.
          */
         get: operations["get_tasks_api_skills__skill_id__tasks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/watch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Watch
+         * @description When the watcher last looked, what it found, and whether it is looking right now.
+         *
+         *     The same object `/api/inbox` carries, without the page around it. Separate because a sweep is
+         *     polled while it runs, and polling the inbox for it would rebuild every skill's row — runs,
+         *     gates, drift, git — once a second to read one boolean.
+         */
+        get: operations["get_watch_api_watch_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -6334,6 +6362,11 @@ export interface components {
             /** History */
             history?: components["schemas"]["Sweep"][];
             /**
+             * Include Open
+             * @default false
+             */
+            include_open: boolean;
+            /**
              * Interval Minutes
              * @default 30
              */
@@ -6893,7 +6926,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Sweep"];
+                    "application/json": components["schemas"]["WatchState"];
                 };
             };
         };
@@ -8761,6 +8794,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_watch_api_watch_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WatchState"];
                 };
             };
         };

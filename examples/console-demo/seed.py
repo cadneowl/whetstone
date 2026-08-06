@@ -540,7 +540,7 @@ port = 8790
 
 [watch]
 # Off, and with nothing to watch: the demo has no forge to poll. Add a GitLab URL and a project
-# here and "Check now" on the inbox becomes real.
+# here and "Pull now" — on triage, the inbox and the status page — becomes real.
 enabled = false
 projects = []
 lookback_days = 14

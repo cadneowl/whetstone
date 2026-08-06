@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { components } from './schema'
 
@@ -219,6 +220,7 @@ export const keys = {
   reviews: (skillId?: string) => ['reviews', skillId ?? 'all'] as const,
   review: (id: string) => ['review', id] as const,
   inbox: ['inbox'] as const,
+  watch: ['watch'] as const,
   jobs: ['jobs'] as const,
   job: (id: string) => ['job', id] as const,
   // Keyed on the launch it describes, not on the skill: change the run, the selection or the steer
@@ -960,14 +962,64 @@ export function useInbox() {
   })
 }
 
-/** Sweep the watched projects now rather than waiting for the interval. */
+/**
+ * When the watcher last looked, and whether it is looking right now.
+ *
+ * Polled while a sweep runs, and — this is the part that has to live here rather than in a screen —
+ * a sweep that *lands* invalidates the triage queue and the inbox. A sweep is the one thing that
+ * rewrites the queue without anyone on this side asking it to, so every screen offering the button
+ * would otherwise need to remember to refresh, and the one that forgot would show a stale queue
+ * with a green "12 new" beside it.
+ *
+ * Its own endpoint rather than the inbox payload: polling `/api/inbox` for this would rebuild every
+ * skill's row — runs, gates, drift, git — every couple of seconds to read one boolean.
+ */
+export function useWatch() {
+  const client = useQueryClient()
+  const query = useQuery({
+    queryKey: keys.watch,
+    queryFn: () => get<WatchState>('/api/watch'),
+    refetchInterval: (q) => (q.state.data?.polling ? WATCH_POLL_MS : false),
+  })
+
+  // Which sweep is on the counter, once nothing is in flight: its timestamp, or `''` for a watcher
+  // that has never swept. `null` means there is nothing to compare yet — still loading, or still
+  // sweeping — and must not be recorded as a baseline.
+  //
+  // `''` has to be a baseline like any other. Treating "no sweep yet" as nothing-to-see is how the
+  // first version of this missed the one case the button exists for: open the triage screen of a
+  // console that has never pulled, click, and the sweep lands against a baseline that was never
+  // taken — so the queue it just filled is never re-read, and the screen goes on saying nothing has
+  // been mined underneath a line reporting two new candidates.
+  const landed = !query.data || query.data.polling ? null : (query.data.last_sweep?.at ?? '')
+  const seen = useRef<string | null>(null)
+  useEffect(() => {
+    if (landed === null) return
+    // The first reading is the baseline, not news: whatever the watcher did before this screen
+    // opened is already in the queue underneath it.
+    if (seen.current !== null && seen.current !== landed) {
+      void client.invalidateQueries({ queryKey: keys.candidates })
+      void client.invalidateQueries({ queryKey: keys.inbox })
+    }
+    seen.current = landed
+  }, [landed, client])
+
+  return query
+}
+
+/** Slower than a job's poll: this is a background walk of a forge, not a step someone is watching. */
+const WATCH_POLL_MS = 2_000
+
+/**
+ * Pull the watched projects now rather than waiting for the interval.
+ *
+ * Answers as soon as the sweep has *started* — see `check_now` in `watch.py` — so the result comes
+ * back through `useWatch`, not from here. Callers need both.
+ */
 export function useCheckNow() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => send<Sweep>('POST', '/api/inbox/check'),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: keys.inbox })
-      void client.invalidateQueries({ queryKey: keys.candidates })
-    },
+    mutationFn: () => send<WatchState>('POST', '/api/inbox/check'),
+    onSuccess: (state) => client.setQueryData(keys.watch, state),
   })
 }

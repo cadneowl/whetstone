@@ -67,6 +67,11 @@ class WatchState(BaseModel):
 
     enabled: bool = False
     interval_minutes: int = 30
+    # Carried so the console can answer the question an empty queue always raises: *should* this
+    # have found anything? A sweep that mines merged history only and one that also reads open
+    # merge requests produce very different queues from the same projects, and the difference is
+    # invisible in the result — both are just a number of candidates.
+    include_open: bool = False
     polling: bool = False
     # Per project, the timestamp the next sweep will ask for changes since.
     since: dict[str, datetime] = Field(default_factory=dict)
@@ -83,8 +88,9 @@ class WatchState(BaseModel):
 class Watcher:
     """The sweeping thread and its persisted state.
 
-    One per console. `sweep()` is public and synchronous so the *Check now* button and the tests
-    exercise exactly the code the timer runs, rather than a parallel path that could drift.
+    One per console. `sweep()` is public and synchronous so the *Pull now* button and the tests
+    exercise exactly the code the timer runs, rather than a parallel path that could drift —
+    `check_now()` only decides which thread it happens on.
     """
 
     def __init__(self, config: Config, *, state_path: Path | None = None) -> None:
@@ -117,9 +123,38 @@ class Watcher:
         with self._lock:
             return self._state.model_copy(deep=True)
 
-    def check_now(self) -> Sweep:
-        """Sweep immediately, off the schedule. What the console's *Check now* button calls."""
-        return self.sweep()
+    def check_now(self) -> WatchState:
+        """Start a sweep now, off the schedule, and return without waiting for it.
+
+        What the console's *Pull now* button calls. Backgrounded rather than run inline, because the
+        sweep this button exists for is the expensive one: the first pull of a project walks the
+        whole lookback window, which is minutes of forge round-trips, while the console's fetch
+        gives up after thirty seconds. Held open, the one click that matters most looks exactly like
+        a server that has died — and the sweep it started goes on to succeed, unwatched.
+
+        So the answer is the state rather than the result: `polling` if the sweep is still going,
+        and `last_sweep` once it lands — the shape the console was already built to read, since it
+        has always had to poll for the timer's sweeps. A sweep that fails before it reaches the
+        forge at all is quick enough to have finished by the time this returns, and reporting that
+        honestly is better than a `polling` nobody would ever see go false.
+        """
+        with self._lock:
+            if self._state.polling:
+                # A second click joins the sweep in flight rather than starting a rival walk of the
+                # same window — two of them would double the forge traffic to no end.
+                return self._state.model_copy(deep=True)
+            self._state.polling = True
+        threading.Thread(target=self._sweep_once, name="whetstone-check", daemon=True).start()
+        return self.state()
+
+    def _sweep_once(self) -> None:
+        try:
+            self.sweep()
+        finally:
+            # `_record` clears it on every path a sweep can ordinarily take. This is for the one it
+            # cannot: `polling` stuck true would disable the button for the life of the process.
+            with self._lock:
+                self._state.polling = False
 
     # --- the sweep ---------------------------------------------------------------
 
@@ -225,6 +260,7 @@ class Watcher:
             )
             self._state.enabled = self._config.watch.enabled
             self._state.interval_minutes = self._config.watch.interval_minutes
+            self._state.include_open = self._config.watch.include_open
             self._save()
 
     # --- the timer ---------------------------------------------------------------
@@ -234,7 +270,11 @@ class Watcher:
         # Sweep on start rather than after the first interval: a console opened after a weekend
         # should show the weekend's signal, not a screen that says to come back in half an hour.
         while not self._stop.is_set():
-            self.sweep()
+            # Never alongside a sweep somebody asked for by hand. Both would walk the same window
+            # and write the same candidates, at twice the forge traffic — and this interval's turn
+            # is being served by the one already running.
+            if not self.state().polling:
+                self.sweep()
             self._wake.wait(timeout=interval)
             self._wake.clear()
 
@@ -266,7 +306,11 @@ class Watcher:
 
     def _load(self) -> WatchState:
         watch = self._config.watch
-        state = WatchState(enabled=watch.enabled, interval_minutes=watch.interval_minutes)
+        state = WatchState(
+            enabled=watch.enabled,
+            interval_minutes=watch.interval_minutes,
+            include_open=watch.include_open,
+        )
         if self._path.is_file():
             try:
                 stored = WatchState.model_validate_json(self._path.read_text(encoding="utf-8"))

@@ -149,7 +149,7 @@ real backend — see `examples/sharpening-demo/` for that, which needs one.
 
 ## What the demo cannot show
 
-- **Watching.** `[watch]` is off with no projects, because there is no forge to poll. *Check now*
+- **Watching.** `[watch]` is off with no projects, because there is no forge to poll. *Pull now*
   says so rather than inventing merge requests. Point `[watch] projects` and `gitlab_url` at a real
-  GitLab and the inbox fills itself on a timer.
+  GitLab and the inbox fills itself on a timer — and the button fills it between timers.
 - **Whether your skills improve.** That needs your skills, your review history, and a real model.
