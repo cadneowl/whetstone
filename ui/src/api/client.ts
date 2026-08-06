@@ -982,33 +982,43 @@ export function useWatch() {
     refetchInterval: (q) => (q.state.data?.polling ? WATCH_POLL_MS : false),
   })
 
-  // Which sweep is on the counter, once nothing is in flight: its timestamp, or `''` for a watcher
-  // that has never swept. `null` means there is nothing to compare yet — still loading, or still
-  // sweeping — and must not be recorded as a baseline.
-  //
-  // `''` has to be a baseline like any other. Treating "no sweep yet" as nothing-to-see is how the
-  // first version of this missed the one case the button exists for: open the triage screen of a
-  // console that has never pulled, click, and the sweep lands against a baseline that was never
-  // taken — so the queue it just filled is never re-read, and the screen goes on saying nothing has
-  // been mined underneath a line reporting two new candidates.
-  const landed = !query.data || query.data.polling ? null : (query.data.last_sweep?.at ?? '')
+  // What the watcher is showing, as one comparable value: `SWEEPING` while one is in flight, the
+  // timestamp of the sweep on the counter otherwise, and `''` for a watcher that has never swept.
+  // `null` only before the state has loaded at all, and that is the one value never recorded.
+  const shown = !query.data
+    ? null
+    : query.data.polling
+      ? SWEEPING
+      : (query.data.last_sweep?.at ?? '')
   const seen = useRef<string | null>(null)
   useEffect(() => {
-    if (landed === null) return
-    // The first reading is the baseline, not news: whatever the watcher did before this screen
-    // opened is already in the queue underneath it.
-    if (seen.current !== null && seen.current !== landed) {
+    if (shown === null) return
+    // A sweep *landed* — not merely started — since the last time this looked. Both of the odd
+    // baselines are deliberate, and both were bugs first:
+    //
+    //   `''`        a console that has never pulled is exactly the case the button exists for.
+    //               Reading "no sweep yet" as nothing-to-compare meant the first pull landed
+    //               against a baseline that was never taken, so the queue it had just filled was
+    //               never re-read: the screen went on saying nothing had been mined, underneath a
+    //               line reporting two new candidates.
+    //   `SWEEPING`  a screen opened while the timer is mid-sweep is looking at a queue that
+    //               predates it. Leaving the baseline unset until the sweep finished made that
+    //               sweep's result the baseline, so the candidates it brought in never appeared.
+    if (seen.current !== null && seen.current !== shown && shown !== SWEEPING) {
       void client.invalidateQueries({ queryKey: keys.candidates })
       void client.invalidateQueries({ queryKey: keys.inbox })
     }
-    seen.current = landed
-  }, [landed, client])
+    seen.current = shown
+  }, [shown, client])
 
   return query
 }
 
 /** Slower than a job's poll: this is a background walk of a forge, not a step someone is watching. */
 const WATCH_POLL_MS = 2_000
+
+/** Stands in for a sweep in flight, which has no timestamp of its own yet. No `at` can collide. */
+const SWEEPING = 'sweeping'
 
 /**
  * Pull the watched projects now rather than waiting for the interval.
