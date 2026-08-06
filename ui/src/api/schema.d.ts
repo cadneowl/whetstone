@@ -4164,6 +4164,14 @@ export interface components {
              */
             source: string;
         };
+        /**
+         * PullRequest
+         * @description What one pull was asked for. An absent body means the ordinary sweep.
+         */
+        PullRequest: {
+            /** Since */
+            since?: string | null;
+        };
         /** Queue */
         Queue: {
             /** Available */
@@ -4896,6 +4904,38 @@ export interface components {
             paths: string[];
             prepared: components["schemas"]["PreparedSkill"];
             proposal: components["schemas"]["Proposal"];
+        };
+        /**
+         * Scope
+         * @description What a sweep was looking at when it earned a watermark.
+         *
+         *     Recorded per project, beside the mark, and compared before the mark is trusted. Without it a
+         *     watermark is a claim with a silent precondition: *everything up to here has been covered* — of
+         *     the merge requests we were asking about, which nothing wrote down.
+         *
+         *     The failure it exists to prevent is invisible and permanent. Turn on `include_open` on a console
+         *     that has been watching for a week and the next sweep asks for changes `updated_after` a mark
+         *     earned while only merged history was being mined. Every open merge request that went quiet
+         *     before that moment is skipped, and skipped again on every sweep after it, because merge requests
+         *     that nobody touches never enter an `updated_after` window again. The queue looks healthy; the
+         *     signal simply never arrives.
+         */
+        Scope: {
+            /**
+             * Defects
+             * @default false
+             */
+            defects: boolean;
+            /**
+             * Lookback Days
+             * @default 0
+             */
+            lookback_days: number;
+            /**
+             * Open
+             * @default false
+             */
+            open: boolean;
         };
         /**
          * ScoreNow
@@ -5694,6 +5734,8 @@ export interface components {
              * Format: date-time
              */
             at: string;
+            /** Backfill From */
+            backfill_from?: string | null;
             /**
              * Duration S
              * @default 0
@@ -5711,6 +5753,8 @@ export interface components {
             found: number;
             /** Projects */
             projects?: string[];
+            /** Rewound */
+            rewound?: string[];
             /** Skipped */
             skipped?: string[];
         };
@@ -6379,6 +6423,10 @@ export interface components {
              * @default false
              */
             polling: boolean;
+            /** Scope */
+            scope?: {
+                [key: string]: components["schemas"]["Scope"];
+            };
             /** Since */
             since?: {
                 [key: string]: string;
@@ -6918,7 +6966,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PullRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -6927,6 +6979,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WatchState"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

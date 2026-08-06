@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -205,6 +206,45 @@ def test_pulling_now_answers_at_once_and_reports_the_outcome_afterwards(
     # No projects configured in the fixture, so the sweep fails — but it is recorded, not raised.
     swept = _settled(client)["last_sweep"]
     assert "[watch] projects" in swept["error"]
+
+
+def test_a_pull_can_name_the_date_to_reach_back_to(client: TestClient) -> None:
+    """Signal that went quiet before anyone was watching for it is only reachable by asking."""
+    response = client.post("/api/inbox/check", json={"since": "2026-08-01"})
+    assert response.status_code == 200, response.text
+
+    swept = _settled(client)["last_sweep"]
+    assert swept["backfill_from"].startswith("2026-08-01T00:00:00")
+
+
+def test_a_pull_from_the_future_is_refused_rather_than_run(client: TestClient) -> None:
+    """It would ask the forge for nothing, succeed, and report "nothing new" — the same screen as a
+    project where nothing is happening."""
+    response = client.post("/api/inbox/check", json={"since": "2099-01-01"})
+
+    assert response.status_code == 422, response.text
+    assert "in the future" in response.json()["message"]
+
+
+def test_midnight_today_in_a_zone_ahead_of_utc_is_not_the_future(client: TestClient) -> None:
+    """What the console actually sends: midnight on the operator's own calendar, as an instant.
+
+    At UTC+14 that is fourteen hours *behind* UTC's idea of the same date, which is the point — a
+    bare day read as UTC midnight would refuse the date picker's own default for everyone ahead of
+    UTC, on the one control they reached for because nothing else could find their merge request.
+    """
+    ahead = datetime.now(UTC).astimezone(timezone(timedelta(hours=14)))
+    midnight_there = ahead.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    response = client.post("/api/inbox/check", json={"since": midnight_there.isoformat()})
+
+    assert response.status_code == 200, response.text
+    assert _settled(client)["last_sweep"]["backfill_from"] is not None
+
+
+def test_an_ordinary_pull_still_takes_no_body(client: TestClient) -> None:
+    assert client.post("/api/inbox/check").status_code == 200
+    assert _settled(client)["last_sweep"]["backfill_from"] is None
 
 
 def test_watch_state_says_whether_open_merge_requests_are_mined(client: TestClient) -> None:

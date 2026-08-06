@@ -1025,11 +1025,15 @@ const SWEEPING = 'sweeping'
  *
  * Answers as soon as the sweep has *started* — see `check_now` in `watch.py` — so the result comes
  * back through `useWatch`, not from here. Callers need both.
+ *
+ * `since` is a bare date (`2026-08-01`) and makes it a backfill: it reaches back past every
+ * watermark and moves none of them.
  */
 export function useCheckNow() {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => send<WatchState>('POST', '/api/inbox/check'),
+    mutationFn: (since?: string) =>
+      send<WatchState>('POST', '/api/inbox/check', since ? { since } : undefined),
     onSuccess: (state) => client.setQueryData(keys.watch, state),
   })
 }

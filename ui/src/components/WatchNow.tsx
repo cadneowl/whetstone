@@ -1,6 +1,7 @@
+import { useState } from 'react'
 import { useCheckNow, useConsoleConfig, useWatch } from '@/api/client'
 import { ErrorNote, when } from '@/components/primitives'
-import { pullScope, sweepSummary } from '@/components/sweepSummary'
+import { localDay, pullScope, startOfDay, sweepSummary } from '@/components/sweepSummary'
 
 /**
  * Pull the watched projects now, and say what came back.
@@ -20,6 +21,7 @@ export function WatchNow({ className = '' }: { className?: string }) {
   const { data: watch } = useWatch()
   const { data: config } = useConsoleConfig()
   const check = useCheckNow()
+  const [from, setFrom] = useState<string | null>(null)
 
   const readOnly = Boolean(config?.read_only)
   // Its own sweep or the timer's — either way something is walking the forge and the answer is not
@@ -35,7 +37,7 @@ export function WatchNow({ className = '' }: { className?: string }) {
         <button
           type="button"
           disabled={busy || readOnly}
-          onClick={() => check.mutate()}
+          onClick={() => check.mutate(undefined)}
           title={
             readOnly
               ? 'The console is running read-only, so it will not reach out to a forge. Restart ' +
@@ -47,6 +49,17 @@ export function WatchNow({ className = '' }: { className?: string }) {
         >
           {busy ? 'Pulling…' : 'Pull now'}
         </button>
+        {from === null && (
+          <button
+            type="button"
+            disabled={readOnly}
+            onClick={() => setFrom(localDay())}
+            title="Reach back past the watermark — for signal that went quiet before anyone was watching for it."
+            className="underline decoration-dotted underline-offset-2 transition-colors hover:text-accent disabled:cursor-not-allowed disabled:no-underline"
+          >
+            from a date…
+          </button>
+        )}
         <p>
           {watch?.enabled ? (
             <>Watching every {watch.interval_minutes} min</>
@@ -59,6 +72,41 @@ export function WatchNow({ className = '' }: { className?: string }) {
           {scope && <> · {scope}</>}
         </p>
       </div>
+
+      {/* A sweep only ever asks the forge for what changed *since* the watermark, so anything that
+          stopped moving before it is unreachable by any number of ordinary pulls — an open merge
+          request whose review went quiet last week, or the whole history before watching was
+          turned on. Naming the date is the only way back to it. */}
+      {from !== null && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-accent/30 bg-accent/5 px-2 py-1.5">
+          <label className="flex items-center gap-2">
+            Pull everything changed since
+            <input
+              type="date"
+              value={from}
+              max={localDay()}
+              onChange={(e) => setFrom(e.target.value)}
+              className="rounded border border-line bg-canvas px-1.5 py-0.5 font-mono text-ink"
+            />
+          </label>
+          <button
+            type="button"
+            disabled={busy || readOnly || !from}
+            onClick={() => check.mutate(startOfDay(from))}
+            className="rounded border border-accent/50 px-2 py-0.5 text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy ? 'Pulling…' : 'Pull from this date'}
+          </button>
+          <button type="button" onClick={() => setFrom(null)} className="hover:text-ink">
+            cancel
+          </button>
+          <p className="w-full text-[11px]">
+            Reaches back past the watermark, and moves it for nothing — this is a backfill, not a
+            change to what the schedule keeps up with. Anything already queued or already ruled on
+            is left exactly as it is.
+          </p>
+        </div>
+      )}
 
       {/* Shown whether or not anything is watching on a schedule: `Pull now` runs a real sweep
           either way, and this used to sit inside the `enabled` branch — so on the far commoner
