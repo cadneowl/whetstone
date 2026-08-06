@@ -1,17 +1,15 @@
 import { Link } from 'react-router-dom'
 import {
-  useCheckNow,
   useInbox,
   useSetTier,
   type Attention,
   type ActionKind,
   type Retirement,
   type Signal,
-  type Sweep,
-  type WatchState,
 } from '@/api/client'
 import { LaunchButton } from '@/components/LaunchButton'
-import { Badge, Empty, ErrorNote, Intro, Loading, score, when } from '@/components/primitives'
+import { Badge, Empty, ErrorNote, Intro, Loading, score } from '@/components/primitives'
+import { WatchNow } from '@/components/WatchNow'
 
 /**
  * The console's home: what happened since you last looked, and the one thing to do about it.
@@ -32,7 +30,7 @@ export function InboxRoute() {
   if (error) return <ErrorNote error={error} />
   if (!data) return null
 
-  const { inbox, watch } = data
+  const { inbox } = data
   // Pydantic marks defaulted lists optional in the generated schema; they are always present.
   const rows = inbox.attention ?? []
   const busy = rows.filter((a) => a.action.kind !== 'nothing')
@@ -81,7 +79,7 @@ export function InboxRoute() {
             )}
           </Intro>
         </div>
-        <WatchStatus watch={watch} />
+        <WatchNow className="max-w-sm" />
       </header>
 
       {rows.length === 0 && (
@@ -401,78 +399,4 @@ function ActionBadge({ kind }: { kind: ActionKind }) {
     nothing: 'neutral',
   } as const
   return <Badge tone={tone[kind]}>{kind}</Badge>
-}
-
-/** When Whetstone last looked, what it found, and whether it is looking at all. */
-function WatchStatus({ watch }: { watch: WatchState }) {
-  const check = useCheckNow()
-  // The mutation's own result first: it is what this click just produced. Waiting for the refetched
-  // inbox to carry it around would leave the button looking like it had done nothing.
-  const sweep = check.data ?? watch.last_sweep
-  const busy = check.isPending || watch.polling
-
-  return (
-    <div className="max-w-sm text-right text-xs text-muted">
-      <p>
-        {watch.enabled ? (
-          <>Watching every {watch.interval_minutes} min.</>
-        ) : (
-          <>
-            Not watching. <span className="font-mono">[watch] enabled = true</span> in
-            whetstone.toml turns it on.
-          </>
-        )}
-      </p>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => check.mutate()}
-        className="mt-1 rounded border border-line px-2 py-0.5 transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
-      >
-        {busy ? 'Checking…' : 'Check now'}
-      </button>
-
-      {/* Shown whether or not anything is watching on a schedule. `Check now` runs a real sweep
-          either way, and this used to sit inside the `enabled` branch — so on the far commoner
-          setup, where watching is off, clicking it reached out to a forge and reported absolutely
-          nothing back. A button indistinguishable from a broken one. */}
-      {check.error ? (
-        <div className="mt-2 text-left">
-          <ErrorNote error={check.error} />
-        </div>
-      ) : (
-        sweep && !busy && <SweepResult sweep={sweep} />
-      )}
-    </div>
-  )
-}
-
-/** What one sweep did, in the terms an operator would ask it in: what arrived, and when. */
-function SweepResult({ sweep }: { sweep: Sweep }) {
-  if (sweep.error) {
-    return (
-      <p className="mt-2 rounded border border-bad/40 bg-bad/5 px-2 py-1 text-left text-bad">
-        {/* The reason, not a tooltip on the words "last check failed". An expired token and a
-            project nobody configured need different things doing about them. */}
-        Check failed at {when(sweep.at)}: {sweep.error}
-      </p>
-    )
-  }
-
-  const found = sweep.found ?? 0
-  const queued = sweep.already_queued ?? 0
-  const decided = sweep.already_decided ?? 0
-  const skipped = sweep.skipped ?? []
-  const detail = [
-    found > 0 ? `${found} new` : 'nothing new',
-    queued > 0 ? `${queued} already queued` : '',
-    decided > 0 ? `${decided} already ruled on` : '',
-    skipped.length > 0 ? `${skipped.length} unreachable` : '',
-  ].filter(Boolean)
-
-  return (
-    <p className={`mt-2 ${found > 0 ? 'text-accent' : ''}`}>
-      Checked {when(sweep.at)} · {detail.join(' · ')}
-    </p>
-  )
 }

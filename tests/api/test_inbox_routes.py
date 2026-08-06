@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -184,12 +185,49 @@ def test_the_inbox_reports_whether_anything_is_watching(client: TestClient) -> N
     assert watch["last_sweep"] is None
 
 
-def test_check_now_is_a_write(client: TestClient) -> None:
-    """It reaches out to a forge and adds to the queue, so read-only consoles must not."""
+def test_pulling_now_answers_at_once_and_reports_the_outcome_afterwards(
+    client: TestClient,
+) -> None:
+    """The click that seeds an empty queue must not be held open until the sweep finishes.
+
+    A first pull walks the whole lookback window — minutes of forge round-trips — and the console
+    gives up on a request after thirty seconds, so an inline sweep would look like a dead server on
+    the one click that matters most. It reports that a sweep is running; `/api/watch` carries how it
+    went.
+    """
     response = client.post("/api/inbox/check")
-    # No projects configured in the fixture, so the sweep fails — but it is recorded, not raised.
     assert response.status_code == 200, response.text
-    assert "[watch] projects" in response.json()["error"]
+    # The watcher's state, not a sweep — the sweep has only been started. (Whether it is still
+    # running by the time this returns is a race the fixture wins instantly, which is why the
+    # deterministic proof that this does not block lives in `tests/unit/test_watch.py`.)
+    assert "polling" in response.json()
+
+    # No projects configured in the fixture, so the sweep fails — but it is recorded, not raised.
+    swept = _settled(client)["last_sweep"]
+    assert "[watch] projects" in swept["error"]
+
+
+def test_watch_state_says_whether_open_merge_requests_are_mined(client: TestClient) -> None:
+    """The question an empty queue always raises: should this have found anything?
+
+    Merged-history-only and include-open sweeps produce very different queues from the same
+    projects, and the difference is invisible in the result — both are just a number of candidates.
+    """
+    state = client.get("/api/watch")
+    assert state.status_code == 200, state.text
+    assert state.json()["include_open"] is False  # off unless whetstone.toml turns it on
+
+
+def _settled(client: TestClient, timeout_s: float = 20.0) -> dict:
+    """The watch state once the sweep in flight has landed."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = client.get("/api/watch")
+        assert state.status_code == 200, state.text
+        if not state.json()["polling"]:
+            return state.json()
+        time.sleep(0.02)
+    raise AssertionError("the sweep never finished")
 
 
 def test_the_inbox_survives_a_run_the_index_knows_about_but_cannot_load(

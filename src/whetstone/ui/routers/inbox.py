@@ -37,7 +37,7 @@ from whetstone.ui.deps import (
     WatcherDep,
     Writable,
 )
-from whetstone.watch import Sweep, WatchState
+from whetstone.watch import WatchState
 
 router = APIRouter(tags=["inbox"])
 
@@ -99,14 +99,29 @@ def get_inbox(
     )
 
 
-@router.post("/inbox/check", response_model=Sweep, dependencies=[Writable])
-def check_now(watcher: WatcherDep) -> Sweep:
-    """Sweep the watched projects immediately, rather than waiting for the interval.
+@router.post("/inbox/check", response_model=WatchState, dependencies=[Writable])
+def check_now(watcher: WatcherDep) -> WatchState:
+    """Pull the watched projects now, rather than waiting for the interval.
 
     A write because it reaches out to a forge and adds to the triage queue — read-only consoles do
     not go poking at other people's systems.
+
+    Returns the watcher's state, not the sweep: the sweep starts here and finishes later, and a
+    request held open for the minutes a first pull takes would time out in the browser long before
+    it had anything to report. Poll `/api/watch` for the outcome.
     """
     return watcher.check_now()
+
+
+@router.get("/watch", response_model=WatchState)
+def get_watch(watcher: WatcherDep) -> WatchState:
+    """When the watcher last looked, what it found, and whether it is looking right now.
+
+    The same object `/api/inbox` carries, without the page around it. Separate because a sweep is
+    polled while it runs, and polling the inbox for it would rebuild every skill's row — runs,
+    gates, drift, git — once a second to read one boolean.
+    """
+    return watcher.state()
 
 
 def _pending_by_skill(config: Config) -> dict[str, list[CandidateEntry]]:

@@ -1,6 +1,5 @@
 import { Link } from 'react-router-dom'
 import {
-  useCheckNow,
   useConsoleConfig,
   useGitStatus,
   useInbox,
@@ -9,10 +8,9 @@ import {
   useSkills,
   type JudgeView,
   type SkillSummary,
-  type Sweep,
-  type WatchState,
 } from '@/api/client'
-import { Badge, Empty, ErrorNote, Intro, Loading, Sparkline, score, when } from '@/components/primitives'
+import { Badge, Empty, ErrorNote, Intro, Loading, Sparkline, score } from '@/components/primitives'
+import { WatchNow } from '@/components/WatchNow'
 
 /**
  * The fleet's state of affairs, on top — not one skill at a time behind the Skills submenu.
@@ -37,7 +35,6 @@ export function StatusPage() {
   if (skills.error) return <ErrorNote error={skills.error} />
 
   const rows = skills.data ?? []
-  const watch = inbox.data?.watch
   // The same count the Inbox home shows, read from the same source, so the two never disagree about
   // how many skills need a person.
   const attention = (inbox.data?.inbox.attention ?? []).filter((a) => a.action.kind !== 'nothing')
@@ -64,7 +61,7 @@ export function StatusPage() {
         <FleetCard skills={rows} attention={attention.length} agg={agg} />
         <div className="space-y-3">
           <JudgeCard judge={judge.data} loading={judge.isLoading} />
-          <WatchCard watch={watch} />
+          <WatchCard />
         </div>
       </div>
 
@@ -202,56 +199,11 @@ function JudgeCard({ judge, loading }: { judge: JudgeView | undefined; loading: 
   )
 }
 
-function WatchCard({ watch }: { watch: WatchState | undefined }) {
-  const check = useCheckNow()
-  const sweep = check.data ?? watch?.last_sweep
-  const busy = check.isPending || Boolean(watch?.polling)
+function WatchCard() {
   return (
     <Card title="Watch">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <p className="text-sm text-muted">
-          {watch?.enabled ? (
-            <>Watching every {watch.interval_minutes} min.</>
-          ) : (
-            <>
-              Not watching. <span className="font-mono text-xs">[watch] enabled = true</span> turns
-              it on.
-            </>
-          )}
-        </p>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => check.mutate()}
-          className="rounded border border-line px-2 py-0.5 text-xs transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:text-muted"
-        >
-          {busy ? 'Checking…' : 'Check now'}
-        </button>
-      </div>
-      {check.error ? (
-        <div className="mt-2">
-          <ErrorNote error={check.error} />
-        </div>
-      ) : (
-        sweep && !busy && <SweepLine sweep={sweep} />
-      )}
+      <WatchNow />
     </Card>
-  )
-}
-
-function SweepLine({ sweep }: { sweep: Sweep }) {
-  if (sweep.error) {
-    return (
-      <p className="mt-2 rounded border border-bad/40 bg-bad/5 px-2 py-1 text-xs text-bad">
-        Check failed at {when(sweep.at)}: {sweep.error}
-      </p>
-    )
-  }
-  const found = sweep.found ?? 0
-  return (
-    <p className={`mt-2 text-xs ${found > 0 ? 'text-accent' : 'text-muted'}`}>
-      Checked {when(sweep.at)} · {found > 0 ? `${found} new` : 'nothing new'}
-    </p>
   )
 }
 

@@ -6,6 +6,8 @@ handling — the two things that decide whether a sweep loses signal or double-c
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,7 +19,7 @@ from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import Expectation, Provenance
 from whetstone.domain.refs import Region, RepoRef
 from whetstone.providers.base import ConnectorError
-from whetstone.watch import Watcher
+from whetstone.watch import Watcher, WatchState
 
 AT = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 
@@ -171,6 +173,94 @@ def test_disabled_watching_never_starts_a_thread(tmp_path: Path) -> None:
     watcher.start()
     assert watcher._thread is None  # noqa: SLF001 - the whole assertion is about the internal
     watcher.stop()
+
+
+def test_checking_now_returns_before_the_sweep_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The button exists for the slow sweep — the first pull of a project, minutes of round-trips.
+    Held open, it would time out in the browser while the sweep it started went on to succeed."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_pull(*a: object, **k: object):
+        started.set()
+        release.wait(timeout=5)
+        return [_candidate("late-case")]
+
+    monkeypatch.setattr("whetstone.watch.stream_corpus", slow_pull)
+    monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
+    monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
+
+    watcher = Watcher(_config(tmp_path), state_path=tmp_path / "watch.json")
+    state = watcher.check_now()
+
+    assert state.polling is True
+    assert started.wait(timeout=5), "the sweep never started"
+    # Still running: the call above did not wait for it.
+    assert watcher.state().polling is True
+    assert watcher.state().last_sweep is None
+
+    release.set()
+    assert _settled(watcher).last_sweep is not None
+    assert (tmp_path / "candidates" / "late-case").is_dir()
+
+
+def test_a_second_check_joins_the_sweep_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two walks of the same window would double the forge traffic and find the same candidates."""
+    sweeps: list[int] = []
+    release = threading.Event()
+
+    def slow_pull(*a: object, **k: object):
+        sweeps.append(1)
+        release.wait(timeout=5)
+        return []
+
+    monkeypatch.setattr("whetstone.watch.stream_corpus", slow_pull)
+    monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
+    monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
+
+    watcher = Watcher(_config(tmp_path), state_path=tmp_path / "watch.json")
+    watcher.check_now()
+    watcher.check_now()
+    release.set()
+    _settled(watcher)
+
+    assert sweeps == [1]
+
+
+def test_a_sweep_that_fails_still_clears_the_polling_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stuck true, it would disable the button for the life of the process."""
+    monkeypatch.setattr(
+        "whetstone.watch.stream_corpus", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no"))
+    )
+    monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
+    monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
+
+    watcher = Watcher(_config(tmp_path), state_path=tmp_path / "watch.json")
+    watcher.check_now()
+    assert _settled(watcher).polling is False
+
+
+def test_state_reports_whether_open_merge_requests_are_mined(tmp_path: Path) -> None:
+    """So an empty queue can be told apart from a sweep that was never going to look."""
+    watcher = Watcher(_config(tmp_path, include_open=True), state_path=tmp_path / "watch.json")
+    assert watcher.state().include_open is True
+
+
+def _settled(watcher: Watcher, timeout_s: float = 10.0) -> WatchState:
+    """The state once the sweep in flight has landed."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = watcher.state()
+        if not state.polling:
+            return state
+        time.sleep(0.01)
+    raise AssertionError("the sweep never finished")
 
 
 def test_a_sweep_mines_merged_history_only_unless_told_otherwise(
