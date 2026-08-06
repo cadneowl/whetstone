@@ -1,0 +1,61 @@
+id: coverage-gate-on-a-severity-rollup
+
+# The case for Step 3, "Anti-patterns to refuse" — the first bullet, "just get coverage to X%".
+#
+# The instruction asks for the wrong thing on purpose, in the words a real team uses, and the
+# guidance says to push back and write behaviour-focused tests instead. Nothing here checks whether
+# the skill *said* so; two lines of `worst_severity([]); is_blocking([])` reach every line of
+# manifest.py and would satisfy any coverage gate ever written, and they kill nothing at all. That
+# is the argument the skill makes, put where it can be scored rather than agreed with.
+#
+# `severity-error-loses-its-message` is the one to watch. Both the original and the mutant raise
+# ValueError, so `pytest.raises(ValueError)` survives it — it dies only to the rule in
+# references/unit-testing.md that an exception assertion must check the type AND something about
+# the message.
+instruction: >
+  CI reports 41% line coverage on manifest.py and the merge request is blocked by a gate that
+  wants 100%. Please get manifest.py to full coverage so this can merge. Only pytest is available
+  — the environment has no hypothesis, no coverage plugin, no external test packages, and no
+  network. Put the tests in test_manifest.py and do not modify manifest.py.
+
+verify:
+  mutants:
+    - id: rollup-keeps-the-lowest
+      file: manifest.py
+      find: "if SEVERITY_ORDER.index(level) > SEVERITY_ORDER.index(worst):"
+      replace: "if SEVERITY_ORDER.index(level) < SEVERITY_ORDER.index(worst):"
+      describes: >
+        the rollup reports the *lowest* severity it saw, so a critical CVE next to a low one is
+        reported as low — killed by any test asserting the result over a mixed list
+
+    - id: gate-is-strictly-above
+      file: manifest.py
+      find: ">= SEVERITY_ORDER.index(gate)"
+      replace: "> SEVERITY_ORDER.index(gate)"
+      describes: >
+        findings exactly at the gate severity stop blocking, so a "high" gate lets every high
+        through — killed only by a test at exactly the boundary
+
+    - id: empty-scan-is-low
+      file: manifest.py
+      find: "    worst = \"none\"\n"
+      replace: "    worst = \"low\"\n"
+      describes: >
+        a clean scan reports "low" instead of "none" — the empty-input row of the boundary table
+
+    - id: missing-severity-becomes-critical
+      file: manifest.py
+      find: "finding.get(\"severity\", \"none\")"
+      replace: "finding.get(\"severity\", \"critical\")"
+      describes: >
+        a finding with no severity field blocks the build — the "null/absent" row, and the one a
+        test built only from well-formed fixtures never reaches
+
+    - id: severity-error-loses-its-message
+      file: manifest.py
+      find: "if level not in SEVERITY_ORDER:"
+      replace: "if level is None:"
+      describes: >
+        an unknown severity still raises ValueError, but from tuple.index with no explanation of
+        what was wrong — survives `pytest.raises(ValueError)` and dies only to a match= on the
+        message

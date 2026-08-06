@@ -1,0 +1,13 @@
+# Machine metadata. Not guidance, and deliberately not reachable by the agent — `read_skill_file`
+# serves the skill's *markdown* pages, and this is YAML. Worth knowing before writing a prompt that
+# tells the drafter to cite a recorded ticket, because that instruction reads as satisfiable and is
+# not: handing the file over needs a `tools:` entry with `{ file: ./meta.yaml }` in `context:`.
+
+owner: "@qa-guild"
+
+# `provenance` maps a rule id to the signals that justified it, and is written by triage when a
+# promotion cites one. It is empty here, and honestly so: this skill arrived whole, from outside,
+# with no mined review history behind any of its rules — which is the starting state of every
+# adopted skill and the thing the loop exists to change. `whetstone skills rules` will therefore
+# report every rule as untested until this skill has cases of its own linked to them.
+provenance: {}

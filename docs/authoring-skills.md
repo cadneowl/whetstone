@@ -356,6 +356,7 @@ get. The skill page shows the same per step, before you click anything.
 | [`examples/agent-skill`](../examples/agent-skill) | `agent:` on all three steps, `source:`, `tools:`, `context:`, the triage blindfold |
 | [`examples/agentic-reviewer`](../examples/agentic-reviewer) | `run:` — your own reviewer program |
 | [`examples/task-skill`](../examples/task-skill) | `task:` — scored on work produced, not findings reported |
+| [`examples/qa-test-authoring`](../examples/qa-test-authoring) | an adopted 12-file skill: `task:` with a grader it ships, and why its improve step *must* be an agent |
 | [`examples/console-demo`](../examples/console-demo) | the whole loop in the browser, one agentic skill and three plain ones |
 
 Deeper reference: [docs/skill-pipeline.md](skill-pipeline.md). The decisions behind it:

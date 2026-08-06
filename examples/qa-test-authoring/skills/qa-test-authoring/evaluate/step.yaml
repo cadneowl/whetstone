@@ -1,0 +1,35 @@
+# Score this skill on the tests it writes, by trying to break the code they claim to protect.
+#
+# `task:` rather than the review path, because this skill's output is *work*. A review skill is
+# graded by asking a judge whether a finding and an expectation describe the same issue; there is no
+# finding here. There is a file of tests, and the only honest question about it is whether it would
+# have gone red.
+#
+# `task:` and `agent:` are mutually exclusive and this is not a downgrade: a task skill already runs
+# as an agent. `SKILL.md` is the instruction set, the eleven pages under references/ are fetched with
+# `read_skill_file` only when the guidance points at one, and the terminal tool is `submit_work`
+# instead of `submit_findings`. That matters more here than on most skills — the whole folder is
+# 750 lines, and a skill that reads the one page its task needs is the shape this was written for.
+
+description: Score this skill by planting bugs in the code and checking its tests go red.
+
+task:
+  enabled: true
+  # Producing work takes more turns than reporting on it: pick the test type, open that reference
+  # page, read the source, write, read back, extend. The plan prices the ceiling at 21 calls per
+  # case (20 + one forced answer); a run normally lands well short.
+  max_steps: 20
+
+  verify:
+    # A grader this skill ships, not a bare `pytest -q`. Running the tests only establishes that
+    # they agree with the code as written — which an assertion-free test does too, and which is
+    # exactly the outcome Step 3 of the guidance exists to refuse. The grader reintroduces a
+    # hand-authored bug per mutant and scores on how many of them the tests notice.
+    #
+    # `{python}` is Whetstone's own interpreter. Committing `["python", ...]` instead would make
+    # this depend on whatever `python` means on the machine — on Windows usually the Store stub,
+    # which has no pytest, so a perfectly good skill would score zero for an environment reason.
+    run: ["{python}", "graders/mutation_grader.py"]
+    # Four cases, each running pytest once per mutant plus once for the baseline. Generous: the
+    # tests themselves take milliseconds and the cost is interpreter startup.
+    timeout_s: 300

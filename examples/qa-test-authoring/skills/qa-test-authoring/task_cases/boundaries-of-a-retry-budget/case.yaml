@@ -1,0 +1,45 @@
+id: boundaries-of-a-retry-budget
+
+# The case for quality-bar item 6, "covers the ugly paths", and for the boundary table in
+# references/unit-testing.md. Every mutant below lives at an edge: the first legal attempt, the last
+# one, the one past the end, and the point where the ceiling starts to bind. A happy-path test at
+# attempt 2 executes every line of this function and notices none of them, which is the whole
+# argument the skill makes about coverage.
+instruction: >
+  Write pytest unit tests for retry.py in this workspace. Only pytest is available — the
+  environment has no hypothesis, no external test packages, and no network. Put the tests in
+  test_retry.py and do not modify retry.py.
+
+verify:
+  mutants:
+    - id: accepts-attempt-zero
+      file: retry.py
+      find: "if attempt < 1:"
+      replace: "if attempt < 0:"
+      describes: >
+        attempt 0 is accepted and returns a 50ms delay instead of raising — killed by asserting the
+        lower boundary rejects, not just that some negative number does
+
+    - id: budget-off-by-one
+      file: retry.py
+      find: "if attempt > MAX_ATTEMPTS:"
+      replace: "if attempt > MAX_ATTEMPTS + 1:"
+      describes: >
+        the budget silently allows one attempt too many — killed only by a test at exactly
+        MAX_ATTEMPTS + 1, which is the boundary table's whole point
+
+    - id: ceiling-never-binds
+      file: retry.py
+      find: "return min(base_ms * 2 ** (attempt - 1), cap_ms)"
+      replace: "return base_ms * 2 ** (attempt - 1)"
+      describes: >
+        the cap is dropped, so attempt 5 waits 1600ms instead of the 500ms ceiling — invisible to
+        any test that stops at attempt 3, before the doubling would exceed cap_ms
+
+    - id: first-attempt-doubles
+      file: retry.py
+      find: "2 ** (attempt - 1)"
+      replace: "2 ** attempt"
+      describes: >
+        every delay is doubled because attempts are treated as 0-based — killed by asserting the
+        actual value of the first delay rather than that it is "a positive number"

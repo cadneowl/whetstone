@@ -151,7 +151,8 @@ workspace path and output; stdout returns `{passed, score, metrics, detail}`).
 
 `{python}` expands to the interpreter Whetstone is running under, and `{workspace}` to the case
 directory — a committed command line otherwise depends on whatever `python` happens to mean on the
-machine.
+machine. Both are expanded in `run:` as well as in `command:`, so a skill shipping its own Python
+grader is not at the mercy of the PATH either.
 
 **Partial credit matters.** A command may print a trailing JSON object (`{"score": 0.8, "metrics":
 {…}}`) to report *degree*. The exit code still owns the verdict, so a grader cannot pass itself by
@@ -186,6 +187,12 @@ listing. The gate record is what C6 reads before a task skill's change may be pu
 by the same verdict function the review gates use. `whetstone skills trend --skill <id>` reads both.
 
 `task:` and `agent:` are mutually exclusive — a skill is scored one way.
+
+Two worked examples: [`examples/task-skill`](../examples/task-skill) is the minimal shape (one
+case, graded by `pytest -q`), and [`examples/qa-test-authoring`](../examples/qa-test-authoring) is
+a real adopted skill graded by a **mutation grader it ships** — the case for `run:` over `command:`,
+since running the tests only establishes that they agree with the code, which an assertion-free
+test does too.
 
 ### Run the skill as an agent
 
