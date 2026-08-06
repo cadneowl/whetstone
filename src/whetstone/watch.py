@@ -160,6 +160,7 @@ class Watcher:
                         skills,
                         max_clean_files=watch.max_clean_files,
                         on_skip=note_skip,
+                        include_open=watch.include_open,
                     )
                 ]
                 if issues is not None and watch.tracker_project:

@@ -2029,6 +2029,7 @@ export interface components {
             path: string;
             /**
              * @default {
+             *       "mr_state": "",
              *       "semantic_drafted_by": "",
              *       "source": "manual"
              *     }
@@ -2704,6 +2705,7 @@ export interface components {
             partition?: ("train" | "holdout") | null;
             /**
              * @default {
+             *       "mr_state": "",
              *       "semantic_drafted_by": "",
              *       "source": "manual"
              *     }
@@ -3782,6 +3784,7 @@ export interface components {
             path: string;
             /**
              * @default {
+             *       "mr_state": "",
              *       "semantic_drafted_by": "",
              *       "source": "manual"
              *     }
@@ -4013,6 +4016,7 @@ export interface components {
             path: string;
             /**
              * @default {
+             *       "mr_state": "",
              *       "semantic_drafted_by": "",
              *       "source": "manual"
              *     }
@@ -4114,6 +4118,11 @@ export interface components {
         Provenance: {
             /** Human Signal */
             human_signal?: string | null;
+            /**
+             * Mr State
+             * @default
+             */
+            mr_state: string;
             /** Ref */
             ref?: string | null;
             /**

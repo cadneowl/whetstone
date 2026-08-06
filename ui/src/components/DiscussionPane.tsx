@@ -32,16 +32,20 @@ export function DiscussionPane({ candidate }: { candidate: CandidateCase }) {
             {discussion?.resolved ? 'thread resolved' : 'thread open'}
           </Badge>
         )}
-        {/* The merge request itself, as distinct from the thread on it. Shown only when it has not
-            landed, because that is the state that changes what this evidence is worth: the comment
-            is real, but the review it belongs to has not finished, and a promoted case freezes it
-            as though it had. Nothing is blocked — the operator is told what they are looking at. */}
+        {/* The merge request itself, as distinct from the thread on it. Shown only when it had not
+            landed, because that is what changes the worth of this evidence: the comment is real,
+            but the review it belongs to has not finished, and a promoted case freezes it as though
+            it had. Nothing is blocked — the operator is told what they are looking at.
+
+            Past tense, deliberately. Everything in this pane is a snapshot taken at mining time and
+            never refetched (see `Discussion`), so a merge request that has landed since would go on
+            claiming to be open. "Was open when mined" is true whether or not that has happened. */}
         {discussion?.mr_state === 'opened' && (
           <Badge
             tone="warn"
-            title="This merge request is still open. What a reviewer said is real evidence, but the review has not concluded — the thread may yet be resolved, the code may change, and the branch may never land. A case promoted from it freezes an argument still in progress."
+            title="This merge request had not landed when it was mined. What a reviewer said is real evidence, but the review had not concluded — the thread may since have been resolved, the code may have changed, and the branch may never land. A case promoted from it freezes an argument that was still in progress. Re-pull with `--refresh` to see where it stands now."
           >
-            MR still open
+            MR open when mined
           </Badge>
         )}
         <MergeRequestLink candidate={candidate} />

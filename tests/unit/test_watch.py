@@ -171,3 +171,25 @@ def test_disabled_watching_never_starts_a_thread(tmp_path: Path) -> None:
     watcher.start()
     assert watcher._thread is None  # noqa: SLF001 - the whole assertion is about the internal
     watcher.stop()
+
+
+def test_a_sweep_mines_merged_history_only_unless_told_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A background sweep and a hand-run `corpus pull` must not quietly write different queues.
+    Before this was configurable the watcher could never reach an open merge request, and nothing
+    on the operator's side said which path had produced what they were looking at."""
+    asked: list[bool] = []
+
+    def fake_pull(connector: object, project: str, since: datetime, *a: object, **k: object):
+        asked.append(bool(k.get("include_open")))
+        return []
+
+    monkeypatch.setattr("whetstone.watch.stream_corpus", fake_pull)
+    monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
+    monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
+
+    Watcher(_config(tmp_path)).sweep(now=AT)
+    Watcher(_config(tmp_path, include_open=True)).sweep(now=AT)
+
+    assert asked == [False, True]

@@ -27,7 +27,9 @@ from whetstone.domain.eval_model import EvalCase, Expectation, Provenance
 # Fields set to a non-default value by CASE_YAML below and asserted after the round trip.
 COVERED_CASE_FIELDS = {"id", "kind", "change", "expect", "provenance", "tier", "partition"}
 COVERED_EXPECTATION_FIELDS = {"id", "must", "where", "semantic", "severity_min", "pattern"}
-COVERED_PROVENANCE_FIELDS = {"source", "ref", "human_signal", "semantic_drafted_by"}
+COVERED_PROVENANCE_FIELDS = {
+    "source", "ref", "human_signal", "semantic_drafted_by", "mr_state",
+}
 
 CASE_YAML = """id: round-trip
 kind: should_catch
@@ -38,6 +40,7 @@ provenance:
   ref: acme/payments!812
   human_signal: suggestion applied
   semantic_drafted_by: a-model-wrote-this
+  mr_state: opened
 expect:
   - id: e1
     must: appear
@@ -108,6 +111,9 @@ def test_a_case_round_trips_every_field_it_carries(tmp_path: Path) -> None:
     # all until this test existed: the corpus recorded which expectations a model wrote and the
     # running system could not see it.
     assert prov.semantic_drafted_by == "a-model-wrote-this"
+    # The review had not concluded when this case was mined. Nothing else in the corpus says
+    # so, which is the whole reason it is written down.
+    assert prov.mr_state == "opened"
 
     [expectation] = case.expect
     assert expectation.id == "e1"
@@ -131,6 +137,7 @@ def test_absent_optional_fields_still_mean_what_they_used_to(tmp_path: Path) -> 
     assert case.partition is None
     assert case.provenance.source == "manual"
     assert case.provenance.semantic_drafted_by == ""
+    assert case.provenance.mr_state == ""  # absent means merged
     assert case.expect[0].severity_min is None
     assert case.expect[0].pattern is None
 

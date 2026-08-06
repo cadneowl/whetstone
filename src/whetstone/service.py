@@ -932,11 +932,13 @@ def pull_corpus(
     *,
     max_clean_files: int = DEFAULT_MAX_CLEAN_FILES,
     on_skip: SkipHandler | None = None,
+    include_open: bool = False,
 ) -> list[CandidateCase]:
     """Walk a GitLab project's reviewed changes into candidate eval cases for human promotion."""
     repo = RepoRef.parse(f"gitlab:{project}")
     return pull_candidates(
-        connector, repo, since, skills, max_clean_files=max_clean_files, on_skip=on_skip
+        connector, repo, since, skills,
+        max_clean_files=max_clean_files, on_skip=on_skip, include_open=include_open,
     )
 
 

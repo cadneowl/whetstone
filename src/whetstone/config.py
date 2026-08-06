@@ -229,6 +229,11 @@ class WatchConfig(BaseModel):
     # How far back the very first sweep of a project looks. Later sweeps start from the watermark.
     lookback_days: int = Field(default=14, ge=1)
     max_clean_files: int = 40
+    # Whether a sweep also mines merge requests that are still open — `corpus pull --include-open`
+    # for the automated path. Configurable rather than assumed either way: without it a background
+    # sweep and a hand-run pull quietly write different queues, and the operator cannot tell which
+    # one produced what they are looking at.
+    include_open: bool = False
     # Optional defect pairing — the strongest recall signal, since it is what review demonstrably
     # missed. Needs both a tracker URL and a project to do anything.
     tracker_url: str = ""

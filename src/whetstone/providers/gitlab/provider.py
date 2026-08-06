@@ -95,7 +95,16 @@ class GitLabConnector:
         merged one.
         """
         endpoint = f"/api/v4/projects/{self._pid(repo)}/merge_requests"
-        ordered = [state for state in ("opened", "merged", "closed") if state in states]
+        known = ("opened", "merged", "closed")
+        # Refused rather than skipped. GitLab's word is `opened`, so `open` is the obvious typo, and
+        # dropping it silently would return a short walk that looks like a project with no history.
+        unknown = [state for state in states if state not in known]
+        if unknown:
+            raise ConnectorError(
+                f"unknown merge request state(s) {', '.join(sorted(unknown))} — "
+                f"GitLab's are {', '.join(known)}"
+            )
+        ordered = [state for state in known if state in states]
         out: list[MergeRequestRef] = []
         for state in ordered:
             # `sort` is stated rather than left to GitLab's default, for the reason above.

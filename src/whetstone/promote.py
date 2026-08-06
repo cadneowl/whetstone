@@ -33,6 +33,7 @@ from whetstone.domain.eval_model import (
     EvalKind,
     Provenance,
 )
+from whetstone.domain.review import STATE_MERGED
 from whetstone.naming import describe_unsafe, is_safe_segment
 from whetstone.sidecars.claims import with_claim
 from whetstone.sidecars.collect import AGENTS_DIR, CONTEXT_FILE
@@ -219,6 +220,12 @@ def render_case_yaml(entry: CandidateEntry, edits: CaseEdits) -> str:
         provenance["human_signal"] = candidate.provenance.human_signal
     if edits.semantic_drafted_by:
         provenance["semantic_drafted_by"] = edits.semantic_drafted_by
+    # Only when it is not the ordinary case. A case mined from a merge request still open rests on
+    # a review that had not finished, and after promotion nothing else would say so — the triage
+    # screen knew and the corpus did not. Written only when it says something, so every case file
+    # mined from merged history is byte-identical to what it was.
+    if candidate.discussion.mr_state and candidate.discussion.mr_state != STATE_MERGED:
+        provenance["mr_state"] = candidate.discussion.mr_state
 
     payload: dict[str, Any] = {
         "id": edits.case_id,
