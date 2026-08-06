@@ -8,6 +8,8 @@ screens, which is the whole reason it exists.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -37,7 +39,8 @@ from whetstone.ui.deps import (
     WatcherDep,
     Writable,
 )
-from whetstone.watch import WatchState
+from whetstone.ui.errors import Conflict, Unprocessable
+from whetstone.watch import SweepInFlight, WatchState, as_utc
 
 router = APIRouter(tags=["inbox"])
 
@@ -99,8 +102,17 @@ def get_inbox(
     )
 
 
+class PullRequest(BaseModel):
+    """What one pull was asked for. An absent body means the ordinary sweep."""
+
+    # An explicit floor for this pull, overriding every watermark. An instant, not a day: the
+    # console sends midnight on the operator's own calendar, because a bare date is only a moment
+    # once you say whose. It moves no watermark — see `watch.sweep`.
+    since: datetime | None = None
+
+
 @router.post("/inbox/check", response_model=WatchState, dependencies=[Writable])
-def check_now(watcher: WatcherDep) -> WatchState:
+def check_now(watcher: WatcherDep, body: PullRequest | None = None) -> WatchState:
     """Pull the watched projects now, rather than waiting for the interval.
 
     A write because it reaches out to a forge and adds to the triage queue — read-only consoles do
@@ -110,7 +122,24 @@ def check_now(watcher: WatcherDep) -> WatchState:
     request held open for the minutes a first pull takes would time out in the browser long before
     it had anything to report. Poll `/api/watch` for the outcome.
     """
-    return watcher.check_now()
+    since = body.since if body is not None else None
+    if since is not None and as_utc(since) > datetime.now(UTC):
+        # Refused rather than run. A sweep from the future asks the forge for nothing, succeeds, and
+        # reports "nothing new" — which is the same screen as a project where nothing is happening.
+        #
+        # Compared as instants, which is why the console sends midnight on the operator's own
+        # calendar rather than a bare day: read as UTC, "today" in the zones ahead of it is still in
+        # the future, and this would refuse the date picker's own default.
+        raise Unprocessable(
+            f"cannot pull from {as_utc(since):%Y-%m-%d}, which is in the future — "
+            "pick the date you want signal from, not the date you want it by"
+        )
+    try:
+        return watcher.check_now(since)
+    except SweepInFlight as exc:
+        # 409, not 500: nothing is wrong, something else got there first, and the answer is to
+        # ask again in a moment.
+        raise Conflict(str(exc)) from None
 
 
 @router.get("/watch", response_model=WatchState)

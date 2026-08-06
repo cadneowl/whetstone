@@ -1437,6 +1437,23 @@ A failed sweep re-covers its window rather than skipping it, and a restart resum
 success left off instead of re-walking months of history. Overlap is harmless — a candidate anyone
 has already ruled on is never rewritten.
 
+**Widening what is mined gives that watermark up.** The mark claims everything up to it has been
+covered, which is only true of what the sweep was asking for at the time — so the scope is recorded
+beside it. Turn on `include_open`, pair a tracker, or raise `lookback_days`, and the next sweep
+re-walks the whole lookback window once and says so. Without that, a merge request that had gone
+quiet before the setting changed would never be seen again: sweeps ask the forge for what changed
+*since* the mark, and nothing nobody is touching ever enters that window again. Narrowing the scope
+keeps the watermark, because everything the narrower sweep wants was already covered.
+
+***Pull now → from a date…*** reaches back to a day you name, past every watermark and past
+`lookback_days` — the escape hatch for signal that went quiet before anyone was watching for it, and
+the only thing that reaches a review thread nobody has touched in two months. A dated pull is purely
+additive: it **moves no watermark**, because the window it covered is a date you chose rather than a
+claim about what the schedule has kept up with. Candidates already queued or already ruled on are
+left exactly as they are. The day is read on *your* calendar, not UTC's, and a dated pull is refused
+rather than quietly folded into a sweep that is already running — it named a window that sweep is
+not covering.
+
 **A sweep mines; it does not act.** It writes candidates and stops. Nothing is promoted, no model is
 called, and nothing is spent — what to do about a signal is yours to decide, which is what the
 inbox is for.
