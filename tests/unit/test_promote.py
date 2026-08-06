@@ -5,7 +5,7 @@ import yaml
 
 from whetstone.candidates import CandidateEntry
 from whetstone.core.loader import SkillLoadError
-from whetstone.corpus.model import CandidateCase
+from whetstone.corpus.model import CandidateCase, Discussion
 from whetstone.domain.change import AddedLine, CodeChange, FileChange
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import Expectation, Provenance
@@ -32,6 +32,7 @@ def _entry(
     line_range: tuple[int, int] | None = (41, 41),
     source: str = "gitlab_mr",
     human_signal: str = "suggestion applied",
+    mr_state: str = "merged",
 ) -> CandidateEntry:
     change = CodeChange(
         repo=REPO,
@@ -59,6 +60,7 @@ def _entry(
         provenance=Provenance(source=source, ref="acme/payments!812", human_signal=human_signal),
         confidence=0.9,
         suggested_skill=suggested,
+        discussion=Discussion(mr_state=mr_state),
     )
     return CandidateEntry(candidate=candidate, diff=DIFF)
 
@@ -460,3 +462,30 @@ def test_a_mined_comment_may_be_promoted_verbatim(tmp_path: Path) -> None:
     entry = _entry(semantic="nit: use ? here")
     edits = edits_from(entry)
     assert prepare(entry, edits, skills_root=tmp_path).case.expect[0].semantic == "nit: use ? here"
+
+
+# --- what a case remembers about the review it came from ---------------------------------
+
+
+def test_a_case_from_an_unfinished_review_says_so_in_its_provenance() -> None:
+    """The corpus has to be able to tell the two populations apart, for the same reason
+    `semantic_drafted_by` exists: a case resting on a review that had not concluded may behave
+    differently, and after promotion nothing else would say so. The triage screen knew; the corpus
+    did not."""
+    prepared = prepare(
+        _entry(mr_state="opened"), edits_from(_entry()), skills_root=Path("skills")
+    )
+    case = yaml.safe_load(prepared.files["skills/rust-errors/promoted_cases/812-t0/case.yaml"])
+    assert case["provenance"]["mr_state"] == "opened"
+
+
+def test_a_case_from_merged_history_carries_no_state_at_all() -> None:
+    """Written only when it says something. Every case mined from merged history stays byte for
+    byte what it was, which is also what a case mined before the field existed looks like."""
+    prepared = prepare(_entry(), edits_from(_entry()), skills_root=Path("skills"))
+    case = yaml.safe_load(prepared.files["skills/rust-errors/promoted_cases/812-t0/case.yaml"])
+    assert "mr_state" not in case["provenance"]
+
+    unmined = prepare(_entry(mr_state=""), edits_from(_entry()), skills_root=Path("skills"))
+    blank = yaml.safe_load(unmined.files["skills/rust-errors/promoted_cases/812-t0/case.yaml"])
+    assert "mr_state" not in blank["provenance"]

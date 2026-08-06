@@ -1416,6 +1416,7 @@ interval_minutes = 30
 projects = ["acme/payments"]
 gitlab_url = "https://gitlab.example.com"
 lookback_days = 14          # how far the first sweep of a project looks back
+include_open = false        # also mine merge requests still open — `corpus pull --include-open`
 
 # Optional, and the strongest recall signal there is: resolved defects paired with the merge
 # requests that fixed them — cases review demonstrably missed.
@@ -1935,6 +1936,16 @@ case promoted from one freezes an argument that is still in progress. Nothing st
 told what you are looking at.
 
 Closed-unmerged merge requests are still never mined. Their diffs describe code that was thrown away.
+
+**The watcher has the same switch** — `[watch] include_open` — because a background sweep and a
+hand-run pull writing different queues, with nothing saying which produced what, is worse than
+either choice.
+
+**A promoted case remembers.** Its provenance carries `mr_state: opened`, so a case resting on a
+review that had not concluded stays tellable apart from one mined off merged history — the same
+reason `semantic_drafted_by` is recorded. It is deliberately outside `skill_hash`: how far to trust
+the evidence is not what the case measures, and both sides of a gate score it identically either
+way.
 
 #### The three panes
 

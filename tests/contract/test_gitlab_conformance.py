@@ -17,6 +17,7 @@ from conformance import (
 
 from whetstone.domain.refs import RepoRef
 from whetstone.domain.review import MergeRequestRef
+from whetstone.providers.base import ConnectorError
 from whetstone.providers.gitlab.client import GitLabHttp
 from whetstone.providers.gitlab.provider import GitLabConnector
 
@@ -79,6 +80,19 @@ def test_open_and_merged_are_two_requests_with_open_first() -> None:
         "opened",
         "merged",
     ]
+
+
+@respx.mock
+def test_a_state_the_forge_does_not_have_is_refused_not_skipped() -> None:
+    """GitLab's word is `opened`, so `open` is the obvious typo — and a walk that quietly dropped
+    it would return short and look like a project with no history."""
+    respx.get(url__regex=r".*/merge_requests(\?.*)?$").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    connector = GitLabConnector(GitLabHttp(BASE, "token", sleep=lambda _: None))
+
+    with pytest.raises(ConnectorError, match="unknown merge request state"):
+        connector.list_reviewed_changes(REPO, datetime(2026, 1, 1), states=("open",))
 
 
 class TestGitLabConformance(SourceContract, ReviewContract):

@@ -409,7 +409,17 @@ def skill_hash(skill: Skill) -> str:
         # governs who may *learn* from it, not what gets measured. Including it would also mean
         # that landing the field re-hashed every case in every corpus and revoked the right to
         # propose everywhere until each skill was gated again — for a change no gate could see.
-        h.update(case.model_dump_json(exclude={"partition"}).encode("utf-8"))
+        #
+        # `provenance.mr_state` is excluded on exactly that precedent. Whether the merge request a
+        # case was mined from had landed says something about how far to trust the evidence, and
+        # nothing about what the case measures: both sides of a gate score it identically either
+        # way. Left in, merely defining the field would have moved every skill's hash — the pinned
+        # test below is what caught that — retracting every passing gate in every deployment.
+        h.update(
+            case.model_dump_json(
+                exclude={"partition": True, "provenance": {"mr_state"}}
+            ).encode("utf-8")
+        )
     _feed_wiki(h, skill)
     _feed_index(h, skill)
     return h.hexdigest()

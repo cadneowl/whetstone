@@ -104,6 +104,16 @@ class Provenance(BaseModel):
     # two populations are indistinguishable and the question can only be argued about. The human
     # signal above is untouched either way — what a reviewer *did* is not drafted by anyone.
     semantic_drafted_by: str = ""
+    # Where the merge request stood when this case was mined, and only when that was not `merged`.
+    #
+    # Recorded for the same reason as the field above: it is measurable and otherwise invisible. A
+    # case promoted from a branch still being argued about rests on a review that had not concluded
+    # — the thread could still be resolved, the code could change, the branch could be abandoned —
+    # and once it is in the corpus nothing else distinguishes it from one mined off a merged MR.
+    # With this, "do cases from unfinished reviews behave differently?" is a query over the corpus.
+    # Absent means merged, which is what every case mined before open merge requests were reachable
+    # came from.
+    mr_state: str = ""
 
     @property
     def synthetic(self) -> bool:
