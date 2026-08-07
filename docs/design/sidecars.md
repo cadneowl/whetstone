@@ -651,6 +651,9 @@ should say how many sidecars will be sent and from which repo.
 - `src/whetstone/sidecars.py` — *not* a second implementation. Runs the collector, validates its
   output paths against `source_root`, and folds the script + declaration into the context digest.
 - `tests/unit/test_sidecars.py`, and tests for the collector runnable without Whetstone imported.
+- `src/whetstone/sidecars/graph.py` — §16, added later and not in the original plan. Reads the
+  same parse everything else does and produces nodes, edges and a query over them. Off the scoring
+  path: it imports nothing from retrieval's write side and no digest depends on it.
 
 **Changed**
 - `src/whetstone/core/loader.py` — parse the `sidecar:` frontmatter block into the `Skill` model.
@@ -760,7 +763,134 @@ sidecar names the right folder.
 
 ---
 
-## 16. Open questions
+## 16. The graph — what the notes point at
+
+**Built** (`sidecars/graph.py`, `whetstone sidecars graph`, and the Sidecar tab). It is an
+instrument for *reading* the tier, and it is deliberately not a wider door into it.
+
+**The claims already carry the edges.** §2.1's format requires a citation on every claim, §7 gives
+exceptions the countable `Excepts R*n*` form, and §2 puts file-specific claims under `## file`
+headings. Those are three edge kinds — claim→reference, claim→rule, claim→file — sitting in a
+parser four callers already share, invisible to every screen. A fourth is new and small: a claim may
+contain `[[payments/gateway]]`, and a frontmatter `see:` list may name the same targets.
+
+**The write boundary carries over unchanged**, which is the reason for the split. A `[[…]]` inside a
+claim is below the delimiter, where §7 already forbids an agent from writing — so the *semantic*
+edges stay human-authored by the rule that exists. `see:` is frontmatter, which agents may write, so
+a compiler inferring "these two folders are related" has somewhere to put it that is not an
+assertion. Neither needed a new permission.
+
+**Why this is not injected.** Retrieval, its caps and `context_hash` are untouched. §9.1's
+realistic failure is *fifteen files of mediocre context on every run, attention diluted, findings
+quietly worse* — and a graph traversal can pull far more than an ancestor walk does. Widening the
+resolved set therefore needs the thing §9.1 asks for and one arm more: `--no-sidecars`,
+tree-only, and graph, with **graph beating tree** rather than beating nothing. A picture is not
+that measurement. Until it exists, this changes nothing a reviewer is given.
+
+The same reasoning answers the retrieval question the other way round. `scope: subtree+imports` is
+still declared-and-unimplemented (`domain/skill.py:64`), and the graph is the mechanism that would
+make it mean something — arch review needs the other side of a boundary and the other side is never
+in the diff (§3.3). That remains the obvious next step and it is gated on the third arm.
+
+**Where the index lives, and why not at the root of the source tree.** The natural place for a
+compiled graph is one file at the top of the repository, and it is the wrong place twice: §11 and
+ADR-029 permit Whetstone a *read-only* traversal of somebody's code and nothing else, and a file
+every branch rewrites is a merge conflict on every PR that touches a note. So the cache lives under
+Whetstone's own store, keyed on `(source_root, role)` — and `whetstone sidecars graph --out` writes
+the JSON wherever an operator asks, which is a command they ran rather than a file that appeared.
+
+**Freshness is the Merkle argument §2.1 already makes, pointed at the working tree.** Each folder
+carries `(size, mtime_ns)` per sidecar plus a content hash, and a build reuses any folder whose
+stamps still match; the folder hashes fold into one root digest, which is the graph's identity. The
+one deliberate departure from `confirmed_at_tree` is that this stamps the working tree rather than a
+git object: a cache that went stale the moment someone edited a note without committing it would be
+wrong exactly when a person is looking at the screen. `--refresh` is the answer to a filesystem
+whose timestamps lie.
+
+**Nothing is dropped from the picture.** An `unconfirmed` folder is withheld from retrieval and
+still drawn, because the screen that could explain a folder's silence during a review must not
+repeat it. A `[[link]]` that resolves to nothing is a hollow node rather than a discarded edge —
+and the same resolver decides it, so `dangling_link` at the CI floor and a hollow node on the
+screen cannot disagree about what dangles.
+
+**Determinism, for the same reason as everywhere else here.** Node order, ranking and traversal are
+sorted; the layout is seeded from the node index rather than a PRNG. Two builds of the same notes
+draw the same picture on every machine, which is what makes a screenshot of one worth pasting into
+a review.
+
+### 16.1 Meaning search, and why §1's ban does not reach it
+
+§1 lists *"semantic retrieval of any kind"* as a non-goal, and the query box does it. The two are
+compatible, and the distinction is worth stating precisely rather than leaving to be inferred.
+
+The ban is about **retrieval** — §5's whole argument is that what reaches a reviewer must be a pure
+function of the diff, or the two sides of a gate see different context and a score difference stops
+being attributable to the guidance change. `caseindex.py` already carves out the conditions under
+which embeddings satisfy even that: a pinned model over a versioned index retrieves the same
+precedents for the same diff every time, so the principle survives and only the key changes.
+
+This is a weaker case still. Nothing the query box returns reaches a prompt, no digest depends on
+it, and no gate can be passed or failed differently because of it. Determinism here is a courtesy
+to a reader, not a property a measurement rests on.
+
+Three constraints keep it that way, and they are the design:
+
+- **Additive, never authoritative.** Semantic hits are a separate list, seeded after the lexical
+  matches and only from what is left of the node budget. They cannot reorder, hide or displace an
+  exact match. The deterministic half of the answer is byte-identical to what it was before an
+  embedder existed.
+- **Labelled and scored in the UI**, because a lexical hit contains what you typed and this is a
+  model's opinion about a sentence. One ranked list would spend the first's credibility on the
+  second.
+- **Every failure is a status string.** No embedding model configured, an unreachable Ollama, a
+  tree with no claims — all of them return the lexical results plus a sentence saying why there
+  are no others. An embedding endpoint being down may cost the extra rows and may never cost the
+  search.
+
+The similarity threshold is two cuts, not one: an absolute floor so that a query the corpus cannot
+answer comes back **empty** — that emptiness is the answer that sends someone to write the note —
+and a relative band under the best hit, because absolute scores compress and the same 0.52 is a
+strong hit for one phrasing and the fourth-best noise for another. Both are properties of the
+embedding model rather than of sidecars, which is why they are arguments and are documented as
+measured against one model on one fixture.
+
+**The ranking is `llm/semantic.rank`, not a function of this module**, because a second screen
+wanted the same thing: the Guidance tab searches a skill's own `SKILL.md`, companion pages and wiki
+(`guidance.py`), and differs only in what it calls a searchable unit. Two rankers would drift on
+exactly what nobody tests — whether the floor applies before or after the band, whether ties break
+by score or by id, whether a dead endpoint raises or degrades — and would drift silently, because
+both would go on returning plausible rows. Same argument as one collector, one parser, one
+resolver; this is the fourth instance of it and the reason the module exists at all.
+
+### 16.2 The one route that reads a source tree for display
+
+Opening a claim opens its `.agents/` file, because the claim alone reads as the folder's only note:
+what a reader wants next is the rung, the `confirmed_at_tree` stamp, the orientation prose the
+format does not parse as a claim, and the other bullets.
+
+That makes it the first route to read a source tree for something other than a prompt, so it is
+narrow by construction (`sidecars.read_sidecar`): the path must be `.agents/(context|<role>.md)`
+for *this skill's* role, **and** resolve under `source_root` after symlinks. Two independent
+conditions, because the shape check alone is satisfied by `../../../../home/me/.agents/context.md`
+and the resolution check alone is satisfied by any file in the repository. A route parameterised by
+a query string that served any path under a repository root would be a file-read primitive, and the
+console has no authentication of its own to put in front of one.
+
+**Not built, and named rather than implied:** import edges (per-language extractors, which is where
+this gets expensive and each language should earn itself) and co-change edges from `git log` — free
+and language-agnostic, and the one that would surface implicit coupling, which is exactly the
+knowledge §6 says is not recoverable from the code.
+
+**One risk this opens, stated plainly.** Today a planted claim reaches only reviews touching its
+folder. Authored edges are a way for a claim to reach further, and if the graph ever feeds
+retrieval the rule has to be that **authored links may re-order, never expand** — only structural
+and derived edges may add folders to a resolved set — or one `[[…]]` puts a sentence in front of
+every review in the repository. Nothing enforces that yet because nothing injects yet; it is a
+precondition on the injection work, not on this.
+
+---
+
+## 17. Open questions
 
 1. ~~`SKILL.md` frontmatter or `evaluate/step.yaml` `context:`?~~ **Settled: frontmatter**, by §3.5.
    The collector must read the declaration when it runs under Claude Code, where `step.yaml` is a

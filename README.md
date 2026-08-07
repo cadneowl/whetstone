@@ -403,6 +403,37 @@ ever scored, and `--no-sidecars` scores the corpus with it withheld so you can f
 is earning its tokens. Nothing changes for a skill that declares no role. Design:
 [docs/design/sidecars.md](docs/design/sidecars.md).
 
+**And what those notes point at.** The claims already carry more structure than the folder tree can
+show: `Excepts R1` names a central rule, `<!-- src: HUB-45814 -->` names the review it came from, a
+`## stripe.py` heading names a file, and a `[[payments/gateway]]` in a claim names another folder
+whose invariants also hold here. The skill's **Sidecar** tab draws all four as a graph and lets you
+query it — `rule:R1` and one hop out is every folder that excepts that rule, which is the signal
+that the rule wants rewriting rather than a fourth exception; `ref:ADR-22` is everything that came
+out of one decision, across folders that contain neither each other. Same answers on the command
+line with `whetstone sidecars graph --skill <dir> -q '…'`. It is **read-only and off the scoring
+path**: retrieval is still the ancestor walk, no hash moves, and a `[[link]]` that names nothing is
+drawn hollow and failed by `whetstone sidecars check`.
+
+Two things make it usable rather than merely present. **Meaning search**: with `[drift] embed_model`
+set, *"who is allowed to write money rows"* finds the claim that says `PaymentService.record()` is
+the only writer to `payments_ledger`, which contains none of those words. Those hits arrive *below*
+the exact matches, scored and labelled, and can never reorder or hide one — so the deterministic
+half of the answer is the same as it was before an embedder existed, and is still there when the
+embedder is down. **And the note itself**: selecting a claim opens its whole `.agents/` file with
+that line marked, so the rung, the `confirmed_at_tree` stamp, the folder's other claims and the
+prose between them are one click away rather than a checkout away.
+
+**Finding what a skill already says.** A skill is a folder, and once the rules live across
+`SKILL.md`, `patterns/rust.md` and a wiki page, *"is there already a rule about swallowed errors?"*
+stops being answerable by scrolling — which is how the improve loop gets a rule added because
+nobody could find the one three files away that already said it. The **Guidance** tab has a search
+box over every file the reviewer is given: exact matches in document order (`rule:R1`,
+`file:patterns`, `section:retries`, `kind:wiki`, or any substring), and — with `[drift] embed_model`
+set — blocks that *mean* something close underneath, scored and labelled. *"errors we quietly
+ignore"* finds **R2 — no swallowed errors**, which contains none of those words. The meaning half
+is additive: it can never reorder or hide an exact match, and an embedding endpoint that is down
+costs those rows and nothing else.
+
 **Writing one: [docs/authoring-skills.md](docs/authoring-skills.md)** — the working reference for
 these files, organised around the mistakes that are silent (`required:` on a source root, `pin:`
 un-redacting, `grep` being a substring, `meta.yaml` not being readable). Full behavioural reference:

@@ -3,6 +3,7 @@ role: arch-review
 status: confirmed
 confirmed_at_tree: 3d90fe1
 confirmed_by: run/2026-07-14/812
+see: [payments]
 ---
 
 - Excepts R1 (no direct database access outside the repository layer): this package is a batch

@@ -19,7 +19,9 @@ from typing import Any
 
 from whetstone.domain.skill import SidecarSpec
 from whetstone.sidecars.collect import (
+    AGENTS_DIR,
     CONFIG_FILE,
+    CONTEXT_FILE,
     SidecarError,
     resolve,
     to_prompt,
@@ -37,6 +39,7 @@ __all__ = [
     "declaration_of",
     "install",
     "installed_state",
+    "read_sidecar",
     "to_prompt",
 ]
 
@@ -142,6 +145,53 @@ class SidecarLoader:
             )
             self._memo[key] = hit
         return hit
+
+
+def read_sidecar(source_root: str | Path, rel: str, role: str) -> str:
+    """One `.agents/` file's text, for showing a human. Guarded, and read-only.
+
+    This is the *only* place Whetstone reads a byte of a source tree for display rather than for a
+    prompt, so the guard is the one §11 already specifies for the collector, applied again here
+    rather than assumed: the path must be `.agents/(context|<role>).md`, it must resolve under
+    `source_root`, and a symlink out of the tree is refused rather than followed. Two independent
+    conditions, because the shape check alone is satisfied by
+    `../../../../home/me/.agents/context.md`.
+
+    Confined to the two names this role would read on purpose. A route that served any file under
+    a repository root — parameterised by a query string, reachable from a browser — is a file-read
+    primitive, and the console has no authentication of its own to put in front of one.
+    """
+    root = Path(source_root)
+    if not root.is_dir():
+        raise SidecarError(f"source root {str(source_root)!r} is not a directory")
+    # The same shape `resolve()` demands of a role, checked here too rather than assumed. Nothing
+    # today can reach this with a bad one — the caller passes `skill.sidecar.role` and a path
+    # segment cannot contain a separator anyway — but the allow-list below is *built* from `role`,
+    # and a guard whose safety depends on an argument someone else validated is one refactor away
+    # from being no guard.
+    if "/" in role or "\\" in role or role.startswith("."):
+        raise SidecarError(f"role {role!r} must be a plain file-name stem, e.g. 'arch-review'")
+    parts = tuple(p for p in rel.replace("\\", "/").split("/") if p not in ("", "."))
+    allowed = {CONTEXT_FILE} | ({f"{role}.md"} if role else set())
+    if len(parts) < 2 or ".." in parts or parts[-2] != AGENTS_DIR or parts[-1] not in allowed:
+        raise SidecarError(
+            f"{rel!r} is not a sidecar this role reads — expected "
+            f"<folder>/{AGENTS_DIR}/({CONTEXT_FILE}|{role}.md)"
+        )
+    anchor = root.resolve()
+    target = (anchor / "/".join(parts)).resolve()
+    try:
+        target.relative_to(anchor)
+    except ValueError:
+        raise SidecarError(f"{rel!r} resolves outside the source tree") from None
+    if not target.is_file():
+        raise SidecarError(f"{rel!r} is not in this source tree")
+    try:
+        return target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise SidecarError(f"{rel}: sidecars must be UTF-8 ({exc.reason})") from exc
+    except OSError as exc:
+        raise SidecarError(f"{rel}: cannot read sidecar: {exc}") from exc
 
 
 def install(skill_dir: str | Path, spec: SidecarSpec) -> tuple[Path, Path]:

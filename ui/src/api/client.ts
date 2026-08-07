@@ -14,6 +14,18 @@ export type PendingCase = Schemas['PendingCase']
 export type SidecarStatus = Schemas['SidecarStatus']
 /** Everything the claim ledger knows about one `.agents/` claim, across runs and sweeps. */
 export type ClaimHistory = Schemas['ClaimHistory']
+/** One query over a source tree's `.agents/` notes, and what the whole graph holds. */
+export type SidecarGraphView = Schemas['SidecarGraphView']
+/** A folder, a claim, a rule, a citation, a file — or a link that resolves to none of them. */
+export type GraphNode = Schemas['Node']
+export type GraphEdge = Schemas['Edge']
+export type GraphNodeKind = GraphNode['kind']
+export type GraphEdgeKind = GraphEdge['kind']
+/** One `.agents/` file verbatim, for the panel behind a claim in the graph. */
+export type SidecarFile = Schemas['SidecarFile']
+/** A search over a skill's own guidance — SKILL.md, its companion pages and its wiki. */
+export type GuidanceSearchResult = Schemas['GuidanceSearchResult']
+export type GuidanceChunk = Schemas['GuidanceChunk']
 export type Contradiction = Schemas['Contradiction']
 export type RunRecord = Schemas['RunRecord']
 export type RunListItem = Schemas['RunListItem']
@@ -208,6 +220,11 @@ export const keys = {
   case: (skillId: string, caseId: string) => ['case', skillId, caseId] as const,
   sharpening: (id: string) => ['sharpening', id] as const,
   claims: (id: string) => ['claims', id] as const,
+  // The query is in the key: it is a server-side traversal, so two queries are two answers and a
+  // cache keyed on the skill alone would show the previous question's picture while typing.
+  sidecarGraph: (id: string, q: string, hops: number) => ['sidecar-graph', id, q, hops] as const,
+  sidecarFile: (id: string, path: string) => ['sidecar-file', id, path] as const,
+  guidanceSearch: (id: string, q: string) => ['guidance-search', id, q] as const,
   tasks: (id: string) => ['tasks', id] as const,
   runs: (skillId?: string) => ['runs', skillId ?? 'all'] as const,
   run: (id: string) => ['run', id] as const,
@@ -310,6 +327,67 @@ export function useSkillClaims(skillId: string, enabled: boolean) {
     queryKey: keys.claims(skillId),
     queryFn: () => get<ClaimHistory[]>(`/api/skills/${encodeURIComponent(skillId)}/claims`),
     enabled,
+  })
+}
+
+/**
+ * The source tree's `.agents/` notes as a graph, filtered by `q`.
+ *
+ * `enabled` for the same reason the ledger has it: the walk is cheap on a cached tree and is still
+ * a filesystem crawl of somebody's monorepo, and it should happen when a person opens the graph
+ * rather than on every visit to the skill page.
+ *
+ * `placeholderData` keeps the previous answer on screen while a new query resolves. Without it
+ * every keystroke blanks the picture, and a graph that flashes empty between letters reads as a
+ * tree that lost its notes.
+ */
+export function useSidecarGraph(skillId: string, q: string, hops: number, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.sidecarGraph(skillId, q, hops),
+    queryFn: () =>
+      get<SidecarGraphView>(
+        `/api/skills/${encodeURIComponent(skillId)}/sidecars/graph` +
+          `?q=${encodeURIComponent(q)}&hops=${hops}`,
+      ),
+    enabled,
+    placeholderData: (previous) => previous,
+  })
+}
+
+/**
+ * One `.agents/` file, for the panel behind a claim.
+ *
+ * `staleTime: Infinity` for the life of the page: the graph's digest already changes when a note
+ * changes, and re-reading a file every time someone reopens the same claim would put a filesystem
+ * read behind a disclosure triangle.
+ */
+export function useSidecarFile(skillId: string, path: string | null) {
+  return useQuery({
+    queryKey: keys.sidecarFile(skillId, path ?? ''),
+    queryFn: () =>
+      get<SidecarFile>(
+        `/api/skills/${encodeURIComponent(skillId)}/sidecars/file?path=${encodeURIComponent(path ?? '')}`,
+      ),
+    enabled: !!path,
+    staleTime: Infinity,
+  })
+}
+
+/**
+ * Search this skill's own guidance — the body, its companion pages and its wiki.
+ *
+ * Disabled on an empty query rather than fetching everything: with no query the Guidance tab below
+ * already shows the whole folder, which is the same answer rendered better.
+ */
+export function useGuidanceSearch(skillId: string, q: string) {
+  return useQuery({
+    queryKey: keys.guidanceSearch(skillId, q),
+    queryFn: () =>
+      get<GuidanceSearchResult>(
+        `/api/skills/${encodeURIComponent(skillId)}/guidance/search?q=${encodeURIComponent(q)}`,
+      ),
+    enabled: q.trim().length > 0,
+    placeholderData: (previous) => previous,
   })
 }
 

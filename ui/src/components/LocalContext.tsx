@@ -6,6 +6,7 @@ import {
   type SkillDetail,
 } from '@/api/client'
 import { Badge, when } from '@/components/primitives'
+import { SidecarGraph } from '@/components/SidecarGraph'
 
 /**
  * The Sidecar tab: what this skill reads from beside the code, or how to make it read any.
@@ -17,8 +18,25 @@ import { Badge, when } from '@/components/primitives'
  * context, so the person best placed to adopt it had no path to it.
  */
 export function SidecarTab({ detail, skillId }: { detail: SkillDetail; skillId: string }) {
-  if (detail.sidecar) return <LocalContext sidecar={detail.sidecar} skillId={skillId} />
-  return <SidecarSetup detail={detail} skillId={skillId} />
+  if (!detail.sidecar) return <SidecarSetup detail={detail} skillId={skillId} />
+  return (
+    <>
+      <LocalContext sidecar={detail.sidecar} skillId={skillId} />
+      {/* The panel above counts the notes; this says what they are about. Kept on the same tab
+          rather than behind another one, because the two answer halves of one question and the
+          count is the half that cannot tell you where to write the next note. */}
+      <section>
+        <h2 className="text-sm font-semibold">What these notes point at</h2>
+        <p className="mt-1 mb-3 max-w-3xl text-sm text-muted">
+          The rule a folder excepts, the review a claim came out of, the file a section describes,
+          the folder a claim says its invariant also holds in — all of it is already in the files
+          and none of it was visible anywhere. Read-only: nothing here changes what a reviewer is
+          given, or any hash.
+        </p>
+        <SidecarGraph skillId={skillId} />
+      </section>
+    </>
+  )
 }
 
 /**
@@ -234,8 +252,8 @@ function SidecarSetup({ detail, skillId }: { detail: SkillDetail; skillId: strin
           </p>
           <p className="mt-2 text-muted">
             To read local context from a reviewer that collects its own, call{' '}
-            <code className="font-mono text-xs">tools/collect_sidecars.py</code> from inside it — the
-            same file Whetstone would have run. Install it with{' '}
+            <code className="font-mono text-xs">tools/collect_sidecars.py</code> from inside it —
+            the same file Whetstone would have run. Install it with{' '}
             <code className="font-mono text-xs">whetstone sidecars install</code>.
           </p>
         </div>
@@ -299,18 +317,18 @@ status: confirmed
             <pre className={CODE}>{`whetstone eval run --skill skills/${skillId}
 whetstone eval run --skill skills/${skillId} --no-sidecars`}</pre>
             <p className="mt-2 text-muted">
-              The ablation records as a different measurement, so it can never reuse the other&apos;s
-              baseline or be read as a regression in a trend. If recall does not move, this tier is
-              costing tokens and attention for nothing.
+              The ablation records as a different measurement, so it can never reuse the
+              other&apos;s baseline or be read as a regression in a trend. If recall does not move,
+              this tier is costing tokens and attention for nothing.
             </p>
           </div>
 
           <p className="text-sm text-muted">
             Folders with no notes are normal and there is deliberately no coverage number anywhere
             in this — fill folders where reviews keep going wrong, not to reach a percentage. The
-            full design is in{' '}
-            <code className="font-mono text-xs">docs/design/sidecars.md</code>, and{' '}
-            <code className="font-mono text-xs">examples/sidecar-review/</code> is a working fixture.
+            full design is in <code className="font-mono text-xs">docs/design/sidecars.md</code>,
+            and <code className="font-mono text-xs">examples/sidecar-review/</code> is a working
+            fixture.
           </p>
         </>
       )}
