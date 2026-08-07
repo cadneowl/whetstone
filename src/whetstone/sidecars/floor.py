@@ -26,6 +26,10 @@ The checks, and why each one earns its place:
 - **role_mismatch** — `qa.md` whose frontmatter says `role: arch-review`, or a `context.md` that
   claims a role at all. The filename is what retrieval keys on, so a disagreeing frontmatter means
   the file is read by a role that did not write it.
+- **dangling_link** — a `[[payments/gateway]]` naming no folder, file, rule or reference in this
+  tree. Same failure as `orphan_section` one level out: the target was renamed and the link was
+  not, so a claim asserts a relationship to something that is not there. Decidable, and cheap
+  enough to check here rather than leaving it to a reader of the graph to notice.
 
 **The bot-write boundary is separate** (`claims_touched`), because it needs a diff rather than a
 tree. Agents may write metadata; agents may never write claims. That is what keeps closed the
@@ -50,6 +54,7 @@ CODES = (
     "orphan_section",
     "orphan_dir",
     "role_mismatch",
+    "dangling_link",
 )
 
 
@@ -99,7 +104,8 @@ def check_tree(
         for file in sorted(directory.glob("*.md")):
             problems.extend(
                 _check_file(file, rel=file.relative_to(root).as_posix(),
-                            siblings=siblings, max_file_bytes=max_file_bytes)
+                            siblings=siblings, max_file_bytes=max_file_bytes,
+                            root=root, folder=parent.relative_to(root).as_posix() or ".")
             )
     return problems
 
@@ -128,7 +134,7 @@ def _deserted(directory: Path) -> bool:
 
 
 def _check_file(
-    file: Path, *, rel: str, siblings: set[str], max_file_bytes: int
+    file: Path, *, rel: str, siblings: set[str], max_file_bytes: int, root: Path, folder: str
 ) -> list[Problem]:
     problems: list[Problem] = []
     try:
@@ -154,6 +160,40 @@ def _check_file(
     problems.extend(_check_frontmatter(sidecar, rel=rel, stem=file.stem))
     problems.extend(_check_claims(sidecar, rel=rel))
     problems.extend(_check_sections(sidecar, rel=rel, siblings=siblings))
+    problems.extend(_check_links(sidecar, rel=rel, root=root, folder=folder))
+    return problems
+
+
+def _check_links(sidecar: Sidecar, *, rel: str, root: Path, folder: str) -> list[Problem]:
+    """`[[…]]` targets that name nothing in this tree.
+
+    Resolved by the same function the graph uses, so a link the graph draws hollow is exactly a
+    link this fails — one resolver, and no way for the picture and the CI step to disagree about
+    what counts as dangling.
+
+    Frontmatter `see:` links are checked too. They are metadata and an agent may write them (§7),
+    which is precisely why they are worth a mechanical check: nothing human is guaranteed to have
+    read one before it landed.
+    """
+    from whetstone.sidecars.graph import resolve_target
+
+    problems: list[Problem] = []
+    targets: list[tuple[str, int]] = [(t, 1) for t in sidecar.see]
+    targets.extend((target, claim.line) for claim in sidecar.claims for target in claim.links)
+    for target, line in targets:
+        if resolve_target(root, folder, target).kind != "unresolved":
+            continue
+        problems.append(
+            Problem(
+                path=rel,
+                code="dangling_link",
+                message=(
+                    f"[[{target}]] names no folder, file, rule or reference in this tree — it was "
+                    f"renamed or misspelt, and the claim now points at nothing"
+                ),
+                line=line,
+            )
+        )
     return problems
 
 

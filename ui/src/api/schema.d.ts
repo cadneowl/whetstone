@@ -1368,6 +1368,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/guidance/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Guidance
+         * @description Find something in this skill's own guidance — `SKILL.md`, its pages, and its wiki.
+         *
+         *     The Guidance tab renders the whole folder top to bottom, which answers *"what are the rules"*
+         *     and not *"is there already a rule about swallowed errors"*. The second question is the one
+         *     asked before writing a new rule, and asked badly it produces the improve loop's characteristic
+         *     defect: a rule added because nobody could find the one three files away that already said it.
+         *
+         *     Exact matches first, in document order. With `[drift] embed_model` set, blocks that *mean*
+         *     something close arrive in a separate list below — additive, scored, and never able to reorder
+         *     or hide an exact match (`docs/design/sidecars.md` §16.1 makes the argument; it applies here
+         *     unchanged and more weakly still, since this is the skill's own text).
+         *
+         *     Read-only and off the scoring path: `skill_hash` covers the same bytes it did before, and
+         *     nothing here is consulted at review time.
+         */
+        get: operations["search_guidance_api_skills__skill_id__guidance_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills/{skill_id}/health": {
         parameters: {
             query?: never;
@@ -1446,6 +1479,73 @@ export interface paths {
          *     `whetstone.sharpening` for why the obvious trend line is a trap and what is reported instead.
          */
         get: operations["get_sharpening_api_skills__skill_id__sharpening_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/sidecars/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sidecar File
+         * @description One of this role's `.agents/` files, verbatim, for the graph's detail panel.
+         *
+         *     **The only route that reads a source tree for display**, so it is narrow on purpose: the path
+         *     must be `.agents/context.md` or `.agents/<role>.md` for *this skill's* role, and it must
+         *     resolve under `source_root` after symlinks (`sidecars.read_sidecar`). Anything else is refused
+         *     rather than clamped. A route that served any path under a repository root would be a file-read
+         *     primitive on a console that has no authentication of its own.
+         *
+         *     Read-only, like everything else about sidecars on Whetstone's side: correction is a human
+         *     editing the file in the repository that owns it (`docs/design/sidecars.md` §8).
+         */
+        get: operations["get_sidecar_file_api_skills__skill_id__sidecars_file_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/sidecars/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sidecar Graph
+         * @description This role's `.agents/` notes as a graph, filtered by `q`.
+         *
+         *     What the notes *point at* — the rule a folder excepts, the merge request a claim came from, the
+         *     file a section describes, the folder a claim says its invariant also holds in — is in the files
+         *     already and was visible nowhere. The count on the panel above says how many notes exist; this
+         *     says what they are about, which is the question anyone deciding where to write the next one is
+         *     actually asking.
+         *
+         *     **Read-only, and off the scoring path.** It resolves nothing a reviewer will be given and
+         *     changes no hash: retrieval is still the ancestor walk, and the graph is an instrument for
+         *     reading the tier rather than a wider door into it (`sidecars/graph.py`).
+         *
+         *     Cached under Whetstone's own store and keyed on `(source_root, role)`, so an unchanged tree
+         *     costs a `stat()` per folder and no reads at all. `refresh=true` is the answer to a timestamp
+         *     that lied — a checkout that restored mtimes, a filesystem with a coarse clock.
+         *
+         *     `semantic=true` also returns claims that mean something close to `q` without containing any of
+         *     it, using `[drift] embed_model` — additive only, below the exact matches, and reported as
+         *     unavailable rather than raised when there is no model or the endpoint is down.
+         */
+        get: operations["get_sidecar_graph_api_skills__skill_id__sidecars_graph_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2681,6 +2781,23 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        /** Edge */
+        Edge: {
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "parent" | "contains" | "excepts" | "cites" | "describes" | "links" | "see";
+            /** Source */
+            source: string;
+            /** Target */
+            target: string;
+        };
         /**
          * EditPromotedRequest
          * @description New edits for a case already on the batch.
@@ -3191,6 +3308,48 @@ export interface components {
             skill_id: string;
         };
         /**
+         * GuidanceChunk
+         * @description One searchable piece of a skill's guidance.
+         *
+         *     A *block* — what a blank line separates, which is also what the Guidance tab renders as one
+         *     element. Matching the renderer's unit is deliberate: a result that cannot be pointed at on the
+         *     page it came from sends the reader back to scrolling, which is what they were doing.
+         *
+         *     Bullets are split out of their block individually, because a rule is the unit people look for
+         *     and a list of nine rules is nine answers, not one.
+         */
+        GuidanceChunk: {
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "body" | "page" | "wiki";
+            /**
+             * Line
+             * @default 0
+             */
+            line: number;
+            /**
+             * Rule
+             * @default
+             */
+            rule: string;
+            /**
+             * Section
+             * @default
+             */
+            section: string;
+            /** Source */
+            source: string;
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+        };
+        /**
          * GuidancePage
          * @description A markdown file beside `SKILL.md` that is part of the guidance.
          *
@@ -3219,6 +3378,51 @@ export interface components {
         /** GuidanceRequest */
         GuidanceRequest: {
             edit: components["schemas"]["SkillEdit"];
+        };
+        /** GuidanceSearchResult */
+        GuidanceSearchResult: {
+            /**
+             * Chunks
+             * @default 0
+             */
+            chunks: number;
+            /**
+             * Matched
+             * @default []
+             */
+            matched: components["schemas"]["GuidanceChunk"][];
+            /**
+             * Query
+             * @default
+             */
+            query: string;
+            /**
+             * Scores
+             * @default {}
+             */
+            scores: {
+                [key: string]: number;
+            };
+            /**
+             * Semantic
+             * @default []
+             */
+            semantic: components["schemas"]["GuidanceChunk"][];
+            /**
+             * Semantic Status
+             * @default
+             */
+            semantic_status: string;
+            /**
+             * Total Matched
+             * @default 0
+             */
+            total_matched: number;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -3781,6 +3985,76 @@ export interface components {
             why: string;
         };
         /**
+         * Node
+         * @description One thing the notes talk about, or one thing they talk *in*.
+         */
+        Node: {
+            /**
+             * Cited
+             * @default true
+             */
+            cited: boolean;
+            /**
+             * Claims
+             * @default 0
+             */
+            claims: number;
+            /**
+             * Degree
+             * @default 0
+             */
+            degree: number;
+            /**
+             * Excepts
+             * @default
+             */
+            excepts: string;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "folder" | "claim" | "rule" | "ref" | "file" | "unresolved";
+            /** Label */
+            label: string;
+            /**
+             * Line
+             * @default 0
+             */
+            line: number;
+            /**
+             * Missing
+             * @default false
+             */
+            missing: boolean;
+            /**
+             * Path
+             * @default
+             */
+            path: string;
+            /**
+             * Section
+             * @default
+             */
+            section: string;
+            /**
+             * Sidecar
+             * @default
+             */
+            sidecar: string;
+            /**
+             * Status
+             * @default
+             */
+            status: string;
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+        };
+        /**
          * PendingCase
          * @description An eval case promoted from triage and waiting under `promoted_cases/` to be graduated.
          *
@@ -4171,6 +4445,64 @@ export interface components {
         PullRequest: {
             /** Since */
             since?: string | null;
+        };
+        /**
+         * QueryResult
+         * @description A query's matches, and the neighbourhood they pull in.
+         */
+        QueryResult: {
+            /**
+             * Edges
+             * @default []
+             */
+            edges: components["schemas"]["Edge"][];
+            /**
+             * Hops
+             * @default 1
+             */
+            hops: number;
+            /**
+             * Matched
+             * @default []
+             */
+            matched: string[];
+            /**
+             * Nodes
+             * @default []
+             */
+            nodes: components["schemas"]["Node"][];
+            /**
+             * Query
+             * @default
+             */
+            query: string;
+            /**
+             * Scores
+             * @default {}
+             */
+            scores: {
+                [key: string]: number;
+            };
+            /**
+             * Semantic
+             * @default []
+             */
+            semantic: string[];
+            /**
+             * Semantic Status
+             * @default
+             */
+            semantic_status: string;
+            /**
+             * Total Matched
+             * @default 0
+             */
+            total_matched: number;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
         };
         /** Queue */
         Queue: {
@@ -5077,6 +5409,139 @@ export interface components {
             role: string;
             /** Title */
             title: string;
+        };
+        /**
+         * SidecarFile
+         * @description One `.agents/` file as a human reads it — the whole thing, not the claim alone.
+         *
+         *     The graph already carries each claim's text, so this exists for what surrounds it: the rung the
+         *     file sits on, the tree it was last confirmed against, the orientation prose between bullets,
+         *     and the other claims a reader is about to be told nothing about. A claim shown alone reads as
+         *     the folder's only note.
+         */
+        SidecarFile: {
+            /**
+             * Bytes
+             * @default 0
+             */
+            bytes: number;
+            /**
+             * Claim Lines
+             * @default []
+             */
+            claim_lines: number[];
+            /**
+             * Confirmed At Tree
+             * @default
+             */
+            confirmed_at_tree: string;
+            /**
+             * Confirmed By
+             * @default
+             */
+            confirmed_by: string;
+            /**
+             * Path
+             * @default
+             */
+            path: string;
+            /**
+             * Problem
+             * @default
+             */
+            problem: string;
+            /**
+             * Role
+             * @default
+             */
+            role: string;
+            /**
+             * Status
+             * @default
+             */
+            status: string;
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+        };
+        /**
+         * SidecarGraphView
+         * @description One query's answer, plus what the whole graph holds — the console's Sidecar tab.
+         *
+         *     The totals are alongside the result rather than derived from it on purpose: a query that
+         *     matched four claims out of six hundred must say so, and a screen that could only count what it
+         *     was handed would show `4` and read as a tree with four claims in it.
+         */
+        SidecarGraphView: {
+            /**
+             * Counts
+             * @default {}
+             */
+            counts: {
+                [key: string]: number;
+            };
+            /**
+             * Digest
+             * @default
+             */
+            digest: string;
+            /**
+             * Folders Scanned
+             * @default 0
+             */
+            folders_scanned: number;
+            /**
+             * Parsed
+             * @default 0
+             */
+            parsed: number;
+            /**
+             * Problem
+             * @default
+             */
+            problem: string;
+            /**
+             * @default {
+             *       "edges": [],
+             *       "hops": 1,
+             *       "matched": [],
+             *       "nodes": [],
+             *       "query": "",
+             *       "scores": {},
+             *       "semantic": [],
+             *       "semantic_status": "",
+             *       "total_matched": 0,
+             *       "truncated": false
+             *     }
+             */
+            result: components["schemas"]["QueryResult"];
+            /**
+             * Reused
+             * @default 0
+             */
+            reused: number;
+            /**
+             * Role
+             * @default
+             */
+            role: string;
+            /**
+             * Source Root
+             * @default
+             */
+            source_root: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /**
+             * Unresolved
+             * @default []
+             */
+            unresolved: string[];
         };
         /**
          * SidecarSpec
@@ -8698,6 +9163,41 @@ export interface operations {
             };
         };
     };
+    search_guidance_api_skills__skill_id__guidance_search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                semantic?: boolean;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GuidanceSearchResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_health_api_skills__skill_id__health_get: {
         parameters: {
             query?: never;
@@ -8815,6 +9315,76 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SharpeningReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sidecar_file_api_skills__skill_id__sidecars_file_get: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SidecarFile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sidecar_graph_api_skills__skill_id__sidecars_graph_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                hops?: number;
+                limit?: number;
+                refresh?: boolean;
+                semantic?: boolean;
+            };
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SidecarGraphView"];
                 };
             };
             /** @description Validation Error */

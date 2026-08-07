@@ -41,6 +41,18 @@ SRC = re.compile(r"<!--\s*src:\s*(?P<source>.+?)\s*-->", re.DOTALL)
 # an exception; §7's whole argument for this form is that exceptions are countable.
 EXCEPTS = re.compile(r"^\s*excepts\s+(?P<rule>[A-Z][A-Z0-9]*[0-9])\b", re.IGNORECASE)
 
+# `[[payments/gateway]]`, `[[R7]]`, `[[ADR-22]]`, `[[stripe.py|the client]]` — an authored edge.
+#
+# Wiki syntax rather than a frontmatter list, because the link belongs to the *sentence*: "this
+# holds here too, see [[payments]]" is a different fact from "this folder is somehow related to
+# payments", and only the first survives someone editing the claim around it. It also puts the edge
+# below the frontmatter delimiter, which is where §7's write boundary already forbids agents from
+# writing — so the semantic half of the graph stays human-authored by the rule that already exists.
+#
+# The `|alias` half is accepted and discarded: it is display text for a human reading the markdown,
+# and two claims linking one folder must produce one edge regardless of what they called it.
+LINK = re.compile(r"\[\[\s*(?P<target>[^\[\]|]+?)\s*(?:\|[^\[\]]*)?\]\]")
+
 # The trust ladder (`docs/design/sidecars.md` §9). Order matters: it is a ladder.
 LADDER = ("unconfirmed", "confirmed", "load-bearing")
 INJECTABLE = frozenset({"confirmed", "load-bearing"})
@@ -55,6 +67,10 @@ class Claim(BaseModel):
     section: str = ""
     # The rule id from an `Excepts R7` opening, or "" for a plain fact.
     excepts: str = ""
+    # `[[…]]` targets, in order, deduped. What the claim says it depends on — the authored half of
+    # the graph (`sidecars/graph.py`). Left in `text` as well, because the link is part of the
+    # sentence and a claim shown without it reads as though it stood alone.
+    links: list[str] = []
     # 1-based line of the bullet's first line, so a floor failure can be pointed at.
     line: int = 0
 
@@ -96,6 +112,23 @@ class Sidecar(BaseModel):
     def role(self) -> str:
         value = self.frontmatter.get("role")
         return str(value) if isinstance(value, str) else ""
+
+    @property
+    def see(self) -> list[str]:
+        """Folder-level `see:` links from the frontmatter — the *derived* half of the graph.
+
+        Above the delimiter on purpose, which is the whole point of putting them there: §7 lets an
+        agent write metadata and never a claim, so a compiler that infers "these two folders are
+        related" can record it here, while the claim body — where a link is an assertion someone is
+        making — stays human-only. The two halves of the graph inherit the write boundary the
+        format already had, instead of needing one of their own.
+        """
+        value = self.frontmatter.get("see")
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
 
     def excepted_rules(self) -> list[str]:
         """Every rule this file narrows, in order. What makes exceptions countable."""
@@ -159,6 +192,7 @@ def _claims(body: str, offset: int) -> list[Claim]:
                 source=source,
                 section=section,
                 excepts=excepts.group("rule").upper() if excepts else "",
+                links=_links(text),
                 line=start,
             )
         )
@@ -193,6 +227,20 @@ def _claims(body: str, offset: int) -> list[Claim]:
         flush()
     flush()
     return claims
+
+
+def _links(text: str) -> list[str]:
+    """`[[…]]` targets in order of appearance, deduped, whitespace collapsed.
+
+    Order-preserving rather than sorted, because the first link in a claim is usually the one the
+    sentence is about and a reader scanning the graph's edge list benefits from that surviving.
+    """
+    out: list[str] = []
+    for match in LINK.finditer(text):
+        target = " ".join(match.group("target").split())
+        if target and target not in out:
+            out.append(target)
+    return out
 
 
 def render_claim(text: str, source: str, *, excepts: str = "") -> str:

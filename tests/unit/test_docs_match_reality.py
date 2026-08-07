@@ -815,6 +815,156 @@ def test_the_collector_runs_on_a_python_far_older_than_whetstones() -> None:
     assert runtime_generics == []
 
 
+def test_the_graph_stays_off_the_scoring_path() -> None:
+    """`sidecars.md` §16 and the README both say the graph changes nothing a reviewer is given.
+
+    That claim is what makes it safe to have shipped ahead of the measurement §9.1 asks for — the
+    tier could not be diluted by a screen that does not feed a prompt. It is also the kind of claim
+    that decays by accident: one import from the reviewer or the collector, added because the graph
+    already knows which folders relate, and the resolved set widens without a with-graph arm ever
+    having been scored.
+
+    So the module may be imported by the console, the CLI and the CI floor, and by nothing that
+    resolves, renders or hashes a reviewer's context.
+    """
+    import ast
+
+    scoring = [
+        ("src", "whetstone", "sidecars", "collect.py"),
+        ("src", "whetstone", "sidecars", "__init__.py"),
+        ("src", "whetstone", "reviewer", "llm_reviewer.py"),
+        ("src", "whetstone", "reviewer", "factory.py"),
+        ("src", "whetstone", "domain", "run.py"),
+    ]
+    offenders = []
+    for parts in scoring:
+        tree = ast.parse(_read(*parts))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and "sidecars.graph" in (node.module or ""):
+                offenders.append("/".join(parts))
+            if isinstance(node, ast.Import) and any(
+                "sidecars.graph" in alias.name for alias in node.names
+            ):
+                offenders.append("/".join(parts))
+    assert offenders == [], (
+        f"{offenders} reach the sidecar graph from the scoring path — see sidecars.md §16"
+    )
+
+
+def test_only_one_route_reads_a_source_tree_for_display() -> None:
+    """`sidecars.md` §16.2: the file panel is the single such route, and it is narrow on purpose.
+
+    The console has no authentication of its own, so a second route reading `source_root` — added
+    because some other panel also wanted to show a file — is how a file-read primitive arrives
+    without anyone deciding to build one. `read_sidecar` is the guarded door; this asserts nothing
+    else opened another.
+    """
+    import ast
+
+    offenders = []
+    for path in (ROOT / "src" / "whetstone" / "ui").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr not in {
+                "read_text",
+                "read_bytes",
+                "open",
+            }:
+                continue
+            if "source_root" in ast.unparse(node):
+                offenders.append(f"{path.relative_to(ROOT).as_posix()}: {ast.unparse(node)}")
+    assert offenders == [], f"{offenders} read a source tree directly — go through read_sidecar"
+
+
+def test_the_meaning_search_cannot_reach_the_scoring_path() -> None:
+    """§16.1 permits embeddings on the query box because nothing they touch feeds a reviewer.
+
+    Deliberately *not* "the reviewer never embeds": it does, for `caseindex.py` precedents, and
+    that is the admissible case §16.1 reasons from — a pinned model over a versioned index whose
+    digest folds into `skill_hash`, so retrieval stays a pure function of the diff.
+
+    What must stay true is narrower and is the whole of the §16.1 argument: the *graph's* search is
+    reachable only from the console and the CLI. Wire `semantic_hits` into a reviewer and it
+    becomes retrieval by an unpinned model over an unversioned set, at which point §1's ban applies
+    in full and nothing about it has been measured.
+    """
+    for parts in (
+        ("src", "whetstone", "sidecars", "collect.py"),
+        ("src", "whetstone", "sidecars", "__init__.py"),
+        ("src", "whetstone", "reviewer", "llm_reviewer.py"),
+        ("src", "whetstone", "reviewer", "factory.py"),
+        ("src", "whetstone", "domain", "run.py"),
+    ):
+        assert "semantic_hits" not in _read(*parts), f"{'/'.join(parts)} reaches meaning search"
+
+
+def test_there_is_one_semantic_ranking_policy() -> None:
+    """Two search boxes rank by meaning; `sidecars.md` §16.1 says they share an implementation.
+
+    Deliberately about the *policy*, not the arithmetic. Cosine is three lines and this repository
+    already has three copies of it on purpose — `caseindex.py` keeps its own because it is the
+    committed index that folds into `skill_hash` and must share no edge with anything off that
+    path, and `drift.py` predates both. Consolidating those is not what this protects.
+
+    What a second copy would break is the part nobody would notice: whether the floor applies
+    before or after the band, whether ties break by score or by id, whether a dead endpoint raises
+    or degrades. Both copies would go on returning plausible rows while disagreeing about all
+    three. So the thresholds are defined once, and every search box goes through `rank`.
+    """
+    owner = "src/whetstone/llm/semantic.py"
+    defines = []
+    for path in (ROOT / "src" / "whetstone").rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if rel != owner and re.search(r"^DEFAULT_(MIN_SCORE|BAND)\s*=", text, re.MULTILINE):
+            defines.append(rel)
+    assert defines == [], f"{defines} define their own similarity cut — import them from {owner}"
+
+    for module in ("sidecars/graph.py", "guidance.py"):
+        source = _read("src", "whetstone", *module.split("/"))
+        assert "rank(" in source, f"{module} no longer ranks through llm/semantic.rank"
+
+
+def test_the_guidance_search_covers_every_file_the_reviewer_is_given() -> None:
+    """The README says it searches `SKILL.md`, its companion pages and its wiki.
+
+    Miss one and the feature is worse than absent: a search that quietly excludes `patterns/rust.md`
+    answers *"there is no rule about that"* about the file most likely to hold it, which is the
+    exact mistake it exists to prevent.
+    """
+    from whetstone.domain.skill import GuidancePage, Skill
+    from whetstone.guidance import chunks_of
+    from whetstone.wiki import SkillWiki, WikiPage
+
+    skill = Skill(
+        id="x",
+        body="- body rule\n",
+        pages=[GuidancePage(path="patterns/rust.md", text="- page rule\n")],
+        wiki=SkillWiki(pages={"w": WikiPage(id="w", title="W", text="- wiki fact\n")}),
+    )
+    assert {chunk.kind for chunk in chunks_of(skill)} == {"body", "page", "wiki"}
+
+
+def test_the_graph_and_the_floor_agree_on_what_dangles() -> None:
+    """One resolver behind the picture and the CI step.
+
+    A hollow node the floor passes, or a failure the graph draws as resolved, would make the two
+    screens disagree about the same file — and the whole argument for drawing dangling links is
+    that seeing one is easier than reading for it.
+    """
+    assert "resolve_target" in _read("src", "whetstone", "sidecars", "floor.py")
+
+
+def test_the_readme_says_the_graph_is_queryable() -> None:
+    """Someone deciding whether to write another note acts on this, and it is the only place that
+    says the answers exist at all."""
+    # Whitespace-flattened and unemphasised, because a claim this long wraps and gets bolded, and
+    # a test that broke on a reflow would be reworded rather than read.
+    readme = " ".join(_read("README.md").replace("*", "").split()).lower()
+    assert "whetstone sidecars graph" in readme
+    assert "read-only and off the scoring path" in readme
+
+
 def test_the_deterministic_judge_never_reaches_a_scoring_path() -> None:
     """It cannot tell a complaint from agreement, and on a negative case that decides the score.
 

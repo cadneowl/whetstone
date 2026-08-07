@@ -13,6 +13,7 @@ import {
 } from '@/api/client'
 import { Guidance } from '@/components/Guidance'
 import { GuidanceEditor } from '@/components/GuidanceEditor'
+import { GuidanceSearch } from '@/components/GuidanceSearch'
 import { HealthPanel } from '@/components/HealthPanel'
 import { ImproveWorkspace } from '@/components/ImproveWorkspace'
 import { LaunchButton } from '@/components/LaunchButton'
@@ -195,6 +196,10 @@ export function SkillDetail() {
               of local context are injected per changed path, from the folders each change touches.
             </p>
           )}
+          {/* Above the prose rather than beside it: a skill is a folder, and once it is more than
+              one file "read it all" stops being how anyone finds the rule they are about to
+              duplicate. */}
+          <GuidanceSearch skillId={skillId} />
           <Guidance detail={data} />
         </Tabs.Content>
 

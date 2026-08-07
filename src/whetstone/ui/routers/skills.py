@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 
 import yaml
 from fastapi import APIRouter
@@ -24,6 +25,8 @@ from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import CaseTier, EvalKind
 from whetstone.domain.run import RunRecord, skill_hash
 from whetstone.domain.skill import Skill
+from whetstone.guidance import DEFAULT_LIMIT, GuidanceSearchResult, search, wants_meaning
+from whetstone.llm.semantic import SemanticResult
 from whetstone.naming import describe_unsafe, is_safe_segment
 from whetstone.sampling import partition_for, pinned_partitions
 from whetstone.service import (
@@ -39,6 +42,7 @@ from whetstone.service import (
 )
 from whetstone.sharpening import DEFAULT_WINDOW, SharpeningReport, sharpening_report
 from whetstone.sidecars.confirm import ClaimHistory
+from whetstone.sidecars.graph import DEFAULT_QUERY_LIMIT, SidecarGraph, SidecarGraphView
 from whetstone.steps import StepError
 from whetstone.taskruns import TaskRunRecord
 from whetstone.ui.deps import (
@@ -285,6 +289,233 @@ def get_claims(skill_id: str, root: SkillsRootDep, store: StoreDep) -> list[Clai
         return [h for h in Ledger(store.root).summary() if h.path.endswith(suffixes)]
     except (OSError, ValueError):
         return []
+
+
+@router.get("/{skill_id}/sidecars/graph", response_model=SidecarGraphView)
+def get_sidecar_graph(
+    skill_id: str,
+    root: SkillsRootDep,
+    config: ConfigDep,
+    store: StoreDep,
+    q: str = "",
+    hops: int = 1,
+    limit: int = DEFAULT_QUERY_LIMIT,
+    refresh: bool = False,
+    semantic: bool = True,
+) -> SidecarGraphView:
+    """This role's `.agents/` notes as a graph, filtered by `q`.
+
+    What the notes *point at* — the rule a folder excepts, the merge request a claim came from, the
+    file a section describes, the folder a claim says its invariant also holds in — is in the files
+    already and was visible nowhere. The count on the panel above says how many notes exist; this
+    says what they are about, which is the question anyone deciding where to write the next one is
+    actually asking.
+
+    **Read-only, and off the scoring path.** It resolves nothing a reviewer will be given and
+    changes no hash: retrieval is still the ancestor walk, and the graph is an instrument for
+    reading the tier rather than a wider door into it (`sidecars/graph.py`).
+
+    Cached under Whetstone's own store and keyed on `(source_root, role)`, so an unchanged tree
+    costs a `stat()` per folder and no reads at all. `refresh=true` is the answer to a timestamp
+    that lied — a checkout that restored mtimes, a filesystem with a coarse clock.
+
+    `semantic=true` also returns claims that mean something close to `q` without containing any of
+    it, using `[drift] embed_model` — additive only, below the exact matches, and reported as
+    unavailable rather than raised when there is no model or the endpoint is down. A query that is
+    all field syntax (`rule:R1`) gets none: it is an exact question, and a net cast around it is
+    six near-identical noise hits, each expanded by `hops` into the rest of the graph.
+    """
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.sidecars import SidecarError
+    from whetstone.sidecars.graph import build_cached, view
+
+    skill = _load_one(root, skill_id)
+    if skill.sidecar.is_empty():
+        return SidecarGraphView(problem="this skill declares no `sidecar:` role")
+    try:
+        choice = reviewer_for(config.skills_root, skill)
+    except (SkillLoadError, StepError, ContextError, OSError) as exc:
+        return SidecarGraphView(role=skill.sidecar.role, problem=str(exc))
+    if choice.sidecar is None:
+        return SidecarGraphView(
+            role=skill.sidecar.role,
+            problem="; ".join(choice.problems) or "no source tree resolved for this skill",
+        )
+    try:
+        graph = build_cached(
+            store.root,
+            choice.sidecar.source_root,
+            skill.sidecar.role,
+            refresh=refresh,
+        )
+    except (SidecarError, OSError) as exc:
+        # Reported, never raised. An unresolvable source tree is the silent failure this whole
+        # panel exists to catch, and a 500 here would take the rest of the tab down with it.
+        return SidecarGraphView(
+            role=skill.sidecar.role,
+            source_root=str(choice.sidecar.source_root),
+            problem=str(exc),
+        )
+    return view(
+        graph,
+        q,
+        hops=max(0, min(hops, 4)),
+        limit=max(1, min(limit, 2_000)),
+        semantic=_semantic_for(config, store, graph, q) if semantic and q.strip() else None,
+    )
+
+
+def _embedder(config: Config, store: StoreDep) -> tuple[Any | None, str]:
+    """An embedder for the meaning-search boxes, or None and an operator-facing reason.
+
+    One builder for both boxes — the sidecar graph's and the guidance tab's — because "which local
+    model does this deployment embed with" has one answer, and two places to configure it is how
+    one of them ends up pointing at a chat model.
+
+    Reuses `[drift] embed_provider` / `embed_model` for the same reason: that setting already
+    exists and already means exactly this. Vectors are cached by content under the store, so the
+    first search over a corpus costs one embedding per unit and every search after it costs one,
+    for the query.
+    """
+    if not config.drift.embed_model:
+        return None, (
+            "no embedding model configured — set `[drift] embed_model` in whetstone.toml "
+            "(e.g. `ollama pull nomic-embed-text`) to also search by meaning"
+        )
+    try:
+        from whetstone.llm.embedding import build_embedder
+        from whetstone.sidecars.graph import CACHE_DIR
+
+        return build_embedder(
+            config.drift.embed_provider,
+            model=config.drift.embed_model,
+            cache_dir=Path(store.root) / CACHE_DIR / "vectors",
+            timeout=20.0,
+        ), ""
+    except (ValueError, OSError) as exc:
+        return None, f"semantic search unavailable: {exc}"
+
+
+def _semantic_for(
+    config: Config, store: StoreDep, graph: SidecarGraph, q: str
+) -> SemanticResult:
+    """Claims near `q` in meaning, or a `status` saying why not. Never raises."""
+    from whetstone.sidecars.graph import semantic_hits
+
+    embedder, problem = _embedder(config, store)
+    if embedder is None:
+        return SemanticResult(status=problem)
+    return semantic_hits(graph, q, embedder)
+
+
+@router.get("/{skill_id}/guidance/search", response_model=GuidanceSearchResult)
+def search_guidance(
+    skill_id: str,
+    root: SkillsRootDep,
+    config: ConfigDep,
+    store: StoreDep,
+    q: str = "",
+    semantic: bool = True,
+    limit: int = DEFAULT_LIMIT,
+) -> GuidanceSearchResult:
+    """Find something in this skill's own guidance — `SKILL.md`, its pages, and its wiki.
+
+    The Guidance tab renders the whole folder top to bottom, which answers *"what are the rules"*
+    and not *"is there already a rule about swallowed errors"*. The second question is the one
+    asked before writing a new rule, and asked badly it produces the improve loop's characteristic
+    defect: a rule added because nobody could find the one three files away that already said it.
+
+    Exact matches first, in document order. With `[drift] embed_model` set, blocks that *mean*
+    something close arrive in a separate list below — additive, scored, and never able to reorder
+    or hide an exact match (`docs/design/sidecars.md` §16.1 makes the argument; it applies here
+    unchanged and more weakly still, since this is the skill's own text).
+
+    Read-only and off the scoring path: `skill_hash` covers the same bytes it did before, and
+    nothing here is consulted at review time.
+    """
+    skill = _load_one(root, skill_id)
+    wanted = semantic and wants_meaning(q)
+    embedder, problem = _embedder(config, store) if wanted else (None, "")
+    result = search(skill, q, embedder=embedder, limit=max(1, min(limit, 200)))
+    if embedder is None and problem:
+        # Reported rather than swallowed: "this skill says nothing like that" and "nothing here can
+        # answer that kind of question" are different facts, and only one is about the guidance.
+        result.semantic_status = problem
+    return result
+
+
+class SidecarFile(BaseModel):
+    """One `.agents/` file as a human reads it — the whole thing, not the claim alone.
+
+    The graph already carries each claim's text, so this exists for what surrounds it: the rung the
+    file sits on, the tree it was last confirmed against, the orientation prose between bullets,
+    and the other claims a reader is about to be told nothing about. A claim shown alone reads as
+    the folder's only note.
+    """
+
+    path: str = ""
+    text: str = ""
+    bytes: int = 0
+    # Frontmatter worth putting in front of a reader rather than making them parse out of the text.
+    status: str = ""
+    role: str = ""
+    confirmed_at_tree: str = ""
+    confirmed_by: str = ""
+    # 1-based lines each claim starts on, so the viewer can mark them without a second parser.
+    claim_lines: list[int] = []
+    problem: str = ""
+
+
+@router.get("/{skill_id}/sidecars/file", response_model=SidecarFile)
+def get_sidecar_file(
+    skill_id: str, path: str, root: SkillsRootDep, config: ConfigDep
+) -> SidecarFile:
+    """One of this role's `.agents/` files, verbatim, for the graph's detail panel.
+
+    **The only route that reads a source tree for display**, so it is narrow on purpose: the path
+    must be `.agents/context.md` or `.agents/<role>.md` for *this skill's* role, and it must
+    resolve under `source_root` after symlinks (`sidecars.read_sidecar`). Anything else is refused
+    rather than clamped. A route that served any path under a repository root would be a file-read
+    primitive on a console that has no authentication of its own.
+
+    Read-only, like everything else about sidecars on Whetstone's side: correction is a human
+    editing the file in the repository that owns it (`docs/design/sidecars.md` §8).
+    """
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.sidecars import SidecarError, read_sidecar
+    from whetstone.sidecars.claims import parse
+
+    skill = _load_one(root, skill_id)
+    if skill.sidecar.is_empty():
+        return SidecarFile(path=path, problem="this skill declares no `sidecar:` role")
+    try:
+        choice = reviewer_for(config.skills_root, skill)
+    except (SkillLoadError, StepError, ContextError, OSError) as exc:
+        return SidecarFile(path=path, problem=str(exc))
+    if choice.sidecar is None:
+        return SidecarFile(
+            path=path,
+            problem="; ".join(choice.problems) or "no source tree resolved for this skill",
+        )
+    try:
+        text = read_sidecar(choice.sidecar.source_root, path, skill.sidecar.role)
+    except (SidecarError, OSError) as exc:
+        # Described rather than raised, the way the graph route describes an unresolvable tree: a
+        # panel that 500s takes the rest of the tab with it.
+        return SidecarFile(path=path, problem=str(exc))
+
+    sidecar = parse(text, path=path)
+    front = sidecar.frontmatter
+    return SidecarFile(
+        path=path,
+        text=text,
+        bytes=len(text.encode("utf-8")),
+        status=sidecar.status,
+        role=sidecar.role,
+        confirmed_at_tree=str(front.get("confirmed_at_tree") or ""),
+        confirmed_by=str(front.get("confirmed_by") or ""),
+        claim_lines=[claim.line for claim in sidecar.claims],
+    )
 
 
 @router.get("/{skill_id}/sharpening", response_model=SharpeningReport)

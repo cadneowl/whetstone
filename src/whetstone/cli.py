@@ -3228,5 +3228,102 @@ def sidecars_show(
     typer.echo(f"{len(to_prompt(resolved)):,} prompt chars")
 
 
+@sidecars_app.command("graph")
+def sidecars_graph(
+    skill: SkillDirOpt,
+    query: Annotated[
+        str,
+        typer.Option("--query", "-q", help="Terms to match; `kind:`, `folder:`, `rule:`, `ref:`"),
+    ] = "",
+    hops: Annotated[
+        int, typer.Option(help="How far out from each match to follow edges")
+    ] = 1,
+    limit: Annotated[int, typer.Option(help="Most nodes to return")] = 400,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write the whole graph as JSON to this path")
+    ] = None,
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Ignore the cache and re-read every sidecar")
+    ] = False,
+    runs_dir: RunsDirOpt = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """What this role's `.agents/` notes point at, as a graph you can query.
+
+    The notes already carry the edges: `Excepts R7` names a rule, a `<!-- src: HUB-45814 -->` names
+    a review, a `## stripe.py` heading names a file, and a `[[payments/gateway]]` in a claim names
+    another folder. This walks the tree once, resolves all four, and answers questions over the
+    result — *which folders except R7*, *what came out of HUB-48163*, *what points at a folder that
+    is no longer there*.
+
+    `--hops` is the graph half. `-q rule:R7` finds one node; `-q rule:R7 --hops 1` finds every
+    claim that excepts it, and `--hops 2` the folders those claims live in.
+
+    Read-only and off the scoring path: it changes nothing a reviewer is given and no hash. The
+    cache lives under the run store, never in the source tree — `--out` is how you get the JSON
+    somewhere else, and it is a file you asked for rather than one that appeared.
+    """
+    import json as _json
+
+    from whetstone.sidecars import SidecarError
+    from whetstone.sidecars.graph import as_json, build_cached
+    from whetstone.sidecars.graph import query as run_query
+
+    sk = load_skill(skill)
+    if sk.sidecar.is_empty():
+        raise typer.BadParameter(f"{sk.id} declares no `sidecar:` block in SKILL.md")
+    choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
+    if choice.sidecar is None:
+        raise typer.BadParameter(
+            f"{sk.id} resolves no source tree"
+            + (f": {'; '.join(choice.problems)}" if choice.problems else "")
+        )
+    try:
+        graph = build_cached(
+            _store(runs_dir).root, choice.sidecar.source_root, sk.sidecar.role, refresh=refresh
+        )
+    except SidecarError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(_json.dumps(as_json(graph), indent=2), encoding="utf-8")
+
+    result = run_query(graph, query, hops=hops, limit=limit)
+    if json_out:
+        typer.echo(_json.dumps(result.model_dump(mode="json"), indent=2))
+        return
+
+    counts = graph.counts
+    typer.echo(
+        f"{graph.root}  role={graph.role or '(none)'}  "
+        f"{counts.get('folder', 0)} folder(s), {counts.get('claim', 0)} claim(s), "
+        f"{counts.get('edges', 0)} edge(s)"
+    )
+    typer.echo(
+        f"  digest {graph.digest[:12]}  ({graph.parsed} folder(s) read, {graph.reused} cached)"
+    )
+    if graph.truncated:
+        typer.echo("  note: the walk hit its folder limit — this graph is partial")
+    if graph.unresolved:
+        typer.echo(f"  dangling: {', '.join(graph.unresolved)}")
+    if out is not None:
+        typer.echo(f"  wrote {out}")
+
+    typer.echo(
+        f"\n{result.total_matched} match(es) for {query or '(everything)'}"
+        f", {len(result.nodes)} node(s) within {hops} hop(s)"
+    )
+    shown = {node.id: node for node in result.nodes}
+    for node_id in result.matched:
+        node = shown.get(node_id)
+        if node is None:  # pragma: no cover - matched ids are always kept
+            continue
+        where = f"{node.sidecar}:{node.line}" if node.sidecar else node.path
+        typer.echo(f"  [{node.kind}] {node.label}" + (f"  {where}" if where else ""))
+    if result.truncated:
+        typer.echo("  … more matched than the limit allowed; narrow the query or raise --limit")
+
+
 if __name__ == "__main__":
     app()
