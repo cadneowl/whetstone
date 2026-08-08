@@ -356,6 +356,7 @@ def get_sidecar_graph(
             source_root=str(choice.sidecar.source_root),
             problem=str(exc),
         )
+    _annotate(store, skill.sidecar.role, graph)
     return view(
         graph,
         q,
@@ -363,6 +364,25 @@ def get_sidecar_graph(
         limit=max(1, min(limit, 2_000)),
         semantic=_semantic_for(config, store, graph, q) if semantic and q.strip() else None,
     )
+
+
+def _annotate(store: StoreDep, role: str, graph: SidecarGraph) -> None:
+    """Join the claim ledger onto the graph. Best-effort, and never fatal.
+
+    Filtered to the files this role reads rather than to entries this skill recorded, for the same
+    reason `get_claims` is: `context.md` is shared between roles on purpose, and so is the news
+    that one of its claims is wrong.
+    """
+    from whetstone.sidecars.collect import CONTEXT_FILE
+    from whetstone.sidecars.confirm import Ledger
+    from whetstone.sidecars.graph import annotate_verdicts
+
+    suffixes = (f"/{CONTEXT_FILE}", f"/{role}.md")
+    try:
+        histories = [h for h in Ledger(store.root).summary() if h.path.endswith(suffixes)]
+    except (OSError, ValueError):
+        return
+    annotate_verdicts(graph, histories)
 
 
 def _embedder(config: Config, store: StoreDep) -> tuple[Any | None, str]:
