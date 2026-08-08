@@ -5607,6 +5607,11 @@ export interface components {
              * @default diff-paths
              */
             scope: string;
+            /**
+             * Self Collected
+             * @default false
+             */
+            self_collected: boolean;
         };
         /**
          * SidecarStatus
@@ -5675,6 +5680,11 @@ export interface components {
              * @default diff-paths
              */
             scope: string;
+            /**
+             * Self Collected
+             * @default false
+             */
+            self_collected: boolean;
             /**
              * Source Declared
              * @default
@@ -5817,7 +5827,8 @@ export interface components {
              *       "max_file_bytes": 32000,
              *       "max_files": 24,
              *       "role": "",
-             *       "scope": "diff-paths"
+             *       "scope": "diff-paths",
+             *       "self_collected": false
              *     }
              */
             sidecar: components["schemas"]["SidecarSpec"];

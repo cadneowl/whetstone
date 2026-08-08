@@ -34,9 +34,11 @@ from whetstone.reviewer.base import Reviewer, ReviewerProvenance
 from whetstone.reviewer.subprocess_reviewer import SubprocessReviewer
 from whetstone.sidecars import (
     COLLECTOR_KEY,
+    COLLECTOR_NAME,
     DECLARATION_KEY,
     SidecarLoader,
     collector_digest,
+    collector_installed,
     declaration_of,
 )
 from whetstone.steps import StepError, StepSpec, load_step
@@ -70,6 +72,11 @@ class ReviewerChoice:
     # Set when the skill declares a `sidecar:` role and a source tree to read it from. None for
     # every skill that declares neither, which is the unchanged default path.
     sidecar: SidecarPlan | None = None
+    # Set instead of `sidecar` when the skill's own reviewer does the collecting. A different field
+    # rather than a flag on the plan, because every consumer of `sidecar` — injection, provenance,
+    # the ablation, the cost plan — would be wrong about this one, and a type that carries no loader
+    # and no provenance cannot be handed to any of them by accident.
+    sidecar_view: SidecarView | None = None
 
     @property
     def custom(self) -> bool:
@@ -163,6 +170,27 @@ class SidecarPlan:
             context=dict(self.context.redacted) if self.context else {},
             context_digest=self.context.digest if self.context else "",
         )
+
+
+@dataclass
+class SidecarView:
+    """Where a self-collecting reviewer's `.agents/` files live — for reading, never for running.
+
+    A skill reviewed by its own agent or program collects its own context, so Whetstone must not
+    inject any (`_with_sidecars`). But the files are still real, still this skill's, and still the
+    thing someone maintaining them needs to look at — and looking changes no prompt and no hash.
+
+    Deliberately not a `SidecarPlan`. The plan has `loader()` and `provenance`, and every caller of
+    those means "the harness resolves this per case and the digest says so" — none of which is true
+    here. Reusing it would put a false sentence in the cost plan, make `--no-sidecars` report an
+    ablation that never happened, and hand the run recorder an empty provenance to attach. This type
+    is what is left when you remove everything that could lie: a root and a declaration to read it
+    with. If a future caller needs more than that, that is the moment to think, not to add a field.
+    """
+
+    spec: SidecarSpec
+    source_root: str
+    skill_dir: Path = Path()
 
 
 @dataclass
@@ -338,16 +366,7 @@ def _with_sidecars(
             )
         return choice
     if choice.agent is not None or choice.task is not None or choice.reviewer is not None:
-        # Refused rather than ignored. Host-resolved injection reaches the built-in reviewer only —
-        # an agent chooses its own reads and a program collects its own context — so attaching the
-        # declaration to the digest here would say sidecars shaped a review they never touched,
-        # which is a worse lie than the one this whole design exists to stop telling.
-        choice.problems.append(
-            f"this skill declares `sidecar: {skill.sidecar.role}` but is reviewed by its own "
-            f"agent or program, which collects its own context. Whetstone cannot hash what it "
-            f"does not resolve — call `tools/collect_sidecars.py` from the reviewer itself, and "
-            f"remove the `sidecar:` block from SKILL.md"
-        )
+        _self_collected(choice, skill.sidecar, skill_dir, root, enabled=enabled)
         return choice
     resolved = choice.context or ResolvedContext()
     if choice.context is None:
@@ -385,6 +404,92 @@ def _with_sidecars(
         context=resolved,
     )
     return choice
+
+
+def _self_collected(
+    choice: ReviewerChoice,
+    spec: SidecarSpec,
+    skill_dir: Path,
+    root: str | None,
+    *,
+    enabled: bool,
+) -> None:
+    """A `sidecar:` role on a skill reviewed by its own agent or program.
+
+    Host-resolved injection reaches the built-in reviewer only, so the declaration must never enter
+    this reviewer's digest: doing so would say sidecars shaped a review they never touched, which is
+    a worse lie than the one this whole design exists to stop telling.
+
+    What `self_collected: true` changes is only who is told. The reviewer already calls the
+    collector itself, so the refusal is no longer news — but the `.agents/` files are this skill's,
+    and until now the one screen that could show them refused to, on the grounds that Whetstone
+    could not hash them. Reading is not hashing. So the declaration binds to a `SidecarView`, which
+    carries a root and nothing that could be mistaken for an instrument.
+
+    Everything refused below is refused because saying nothing would be worse. A flag that means "I
+    call the collector myself" is a claim, and the two ways it is false — no tree to read from, no
+    collector to read with — are both silent otherwise: the page says the skill reads no local
+    context, and nothing anywhere says why.
+    """
+    if choice.task is not None:
+        # Ahead of the flag check, because for a task skill the flag is not the fix. A task skill is
+        # scored on work it produces and no review path can run it, so there is no review for a
+        # collector to be called at the start of — advising `self_collected: true` here would send
+        # someone to a second refusal, and accepting it would render a panel describing reviews this
+        # skill never performs.
+        choice.problems.append(
+            f"this skill declares `sidecar: {spec.role}` but it is a task skill — it is scored on "
+            f"work it produces, and sidecars are read on the review path. Remove the `sidecar:` "
+            f"block from SKILL.md"
+        )
+        return
+    if not spec.self_collected:
+        choice.problems.append(
+            f"this skill declares `sidecar: {spec.role}` but is reviewed by its own agent or "
+            f"program, which collects its own context. Whetstone cannot hash what it does not "
+            f"resolve — call `tools/{COLLECTOR_NAME}` from the reviewer itself and add "
+            f"`self_collected: true` to the `sidecar:` block, or remove the block from SKILL.md"
+        )
+        return
+    if not enabled:
+        # `--no-sidecars` withholds what *Whetstone* injects, and here that is nothing: the reviewer
+        # would collect the same files either way. Left to run it produces a measurement identical
+        # to the normal one, labelled an ablation and — since the declaration is not in the digest —
+        # not even distinguishable from it afterwards. That is the exact confusion the ablation was
+        # built to prevent, so it is refused instead of performed.
+        choice.problems.append(
+            f"--no-sidecars cannot ablate `sidecar: {spec.role}` on this skill: its own reviewer "
+            f"collects the context, so withholding Whetstone's injection withholds nothing and the "
+            f"run would be indistinguishable from one with sidecars on. Ablate inside the reviewer"
+        )
+        return
+    if not root:
+        # Silent when the variable is merely unset: `context.missing` already names it, and the
+        # built-in path stays quiet for the same reason.
+        missing = choice.context.missing if choice.context else []
+        if not any(name == "source_root" for name, _ in missing):
+            choice.problems.append(
+                f"this skill declares `sidecar: {spec.role}` with `self_collected: true`, but its "
+                f"evaluate step declares no `context: source_root:` — the reviewer has no tree to "
+                f"collect from. Add one, or remove the `sidecar:` block from SKILL.md"
+            )
+        return
+    if not Path(root).is_dir():
+        choice.problems.append(
+            f"the source root {root!r} is not a directory — the reviewer's own collector would "
+            f"resolve no local context and the run would look clean while reading nothing"
+        )
+        return
+    if not collector_installed(skill_dir):
+        # For the built-in reviewer a missing installed copy is a warning: Whetstone scores with the
+        # canonical collector regardless. Here it is the whole mechanism, and its absence means the
+        # declaration describes a call that cannot be made.
+        choice.problems.append(
+            f"`self_collected: true` says this skill's reviewer calls `tools/{COLLECTOR_NAME}`, "
+            f"but no collector is installed — run `whetstone sidecars install` and commit it"
+        )
+        return
+    choice.sidecar_view = SidecarView(spec=spec, source_root=root, skill_dir=skill_dir)
 
 
 @dataclass

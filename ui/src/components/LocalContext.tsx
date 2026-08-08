@@ -72,6 +72,7 @@ export function LocalContext({
     source_root: sourceRoot,
     source_declared: declared,
     scan_truncated: truncated,
+    self_collected: selfCollected,
   } = sidecar
 
   return (
@@ -95,6 +96,13 @@ export function LocalContext({
             >
               {files} file{files === 1 ? '' : 's'} · {claims} claim{claims === 1 ? '' : 's'}
               {truncated ? '+' : ''}
+            </Badge>
+          ) : problems.length > 0 ? (
+            // The plan knows *why* and says so below. Asserting "tree not found" here would name a
+            // cause we did not check — a declaration refused for some other reason (a task skill, a
+            // missing collector) leaves the tree unbound with nothing wrong with the tree at all.
+            <Badge tone="bad" title={problems.join(' · ')}>
+              not resolved
             </Badge>
           ) : (
             <Badge
@@ -123,11 +131,17 @@ export function LocalContext({
           {installProblems.length === 0 ? (
             <Badge
               tone="neutral"
-              title="The collector copy in this skill's tools/ is byte-for-byte the one Whetstone scores with, so a gate taken here describes what a Claude Code session does."
+              title={
+                selfCollected
+                  ? "The collector copy in this skill's tools/ is byte-for-byte the one Whetstone scores with — which is what makes this panel show the same files the reviewer reads."
+                  : "The collector copy in this skill's tools/ is byte-for-byte the one Whetstone scores with, so a gate taken here describes what a Claude Code session does."
+              }
             >
               collector current
             </Badge>
           ) : (
+            // Drift only. A collector that is missing outright is refused at the plan for a
+            // self-collecting skill, so it arrives in `problems` below rather than as a badge.
             <Badge tone="warn" title={installProblems.join(' · ')}>
               collector stale
             </Badge>
@@ -135,37 +149,87 @@ export function LocalContext({
         </div>
       </div>
 
+      {/* Who does the walking is the difference between two panels, not one sentence: every cap
+          below is enforced by whoever collects, and `confirmations` is a question only the built-in
+          reviewer's prompt asks. Saying "the harness injects this" over a skill that collects its
+          own would be the same class of untruth this whole tier is built to stop. */}
       <p className="mt-2 text-sm text-muted">
-        Read from{' '}
-        <code className="font-mono text-xs">{declared || sourceRoot || '(nowhere declared)'}</code>{' '}
-        per changed path — the harness walks each path's folder up to the root and injects what it
-        finds. The model never decides whether to look, so a folder's notes cannot be skipped on
-        file 30 of 40.
+        {selfCollected ? (
+          <>
+            Collected by this skill&apos;s own reviewer, which calls its installed{' '}
+            <code className="font-mono text-xs">tools/collect_sidecars.py</code> against{' '}
+            <code className="font-mono text-xs">
+              {declared || sourceRoot || '(nowhere declared)'}
+            </code>
+            . Whetstone resolves none of it and sends none of it, so nothing here is in any hash —
+            this panel reads the same files the reviewer will, and that is all it does.
+          </>
+        ) : (
+          <>
+            Read from{' '}
+            <code className="font-mono text-xs">
+              {declared || sourceRoot || '(nowhere declared)'}
+            </code>{' '}
+            per changed path — the harness walks each path&apos;s folder up to the root and injects
+            what it finds. The model never decides whether to look, so a folder&apos;s notes cannot
+            be skipped on file 30 of 40.
+          </>
+        )}
       </p>
 
       <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs text-muted">
-        <li title="Which folders a role pulls in. Only diff-paths is implemented; the field is hashed so a skill that later asks for more is not silently scored as if it had not.">
+        <li
+          title={
+            selfCollected
+              ? 'Which folders a role pulls in. Only diff-paths is implemented. Not hashed here: the reviewer collects its own context, so the declaration identifies nothing Whetstone measured.'
+              : 'Which folders a role pulls in. Only diff-paths is implemented; the field is hashed so a skill that later asks for more is not silently scored as if it had not.'
+          }
+        >
           scope {sidecar.scope}
         </li>
-        <li title="What the model is asked to hold. Over it, the most general folders are dropped first and the drop is named in the prompt and hashed.">
+        <li
+          title={
+            selfCollected
+              ? 'What the collector is allowed to hand back. Enforced by the installed script from tools/sidecar.json — Whetstone neither applies nor hashes it here.'
+              : 'What the model is asked to hold. Over it, the most general folders are dropped first and the drop is named in the prompt and hashed.'
+          }
+        >
           budget {sidecar.budget.toLocaleString()}
         </li>
-        <li title="Bounds the IO one case can cause, before any file is read.">
+        <li
+          title={
+            selfCollected
+              ? 'Bounds the IO one review can cause. Enforced by the installed collector, not by this harness.'
+              : 'Bounds the IO one case can cause, before any file is read.'
+          }
+        >
           max_files {sidecar.max_files}
         </li>
         <li title="A sidecar over this has become the central system map this design exists to break up. It is dropped rather than read, and the CI floor fails it where splitting is cheap.">
           max_file_bytes {sidecar.max_file_bytes.toLocaleString()}
         </li>
-        <li
-          className={sidecar.confirmations ? 'text-accent' : undefined}
-          title={
-            sidecar.confirmations
-              ? 'Each review is also asked whether the code still agrees with the claims it was handed. Measured to cost recall on at least one model — it is part of the hashed declaration, so turning it off retracts baselines rather than quietly changing what was measured.'
-              : 'Reviews are not asked to confirm the claims they read. Off by default: the extra question is free in tokens and measured expensive in attention.'
-          }
-        >
-          confirmations {sidecar.confirmations ? 'on' : 'off'}
-        </li>
+        {/* Only the built-in reviewer's prompt carries the confirmation question
+            (`llm_reviewer.py`), so for a self-collecting reviewer the setting decides nothing and
+            showing it "on" would promise a maintenance signal that never arrives. */}
+        {selfCollected ? (
+          <li
+            className="text-muted/70"
+            title="Consumer confirmations are asked by the built-in reviewer's prompt. This skill's reviewer writes its own, so Whetstone cannot ask on its behalf — the ledger fills from `whetstone sidecars sweep` instead."
+          >
+            confirmations n/a
+          </li>
+        ) : (
+          <li
+            className={sidecar.confirmations ? 'text-accent' : undefined}
+            title={
+              sidecar.confirmations
+                ? 'Each review is also asked whether the code still agrees with the claims it was handed. Measured to cost recall on at least one model — it is part of the hashed declaration, so turning it off retracts baselines rather than quietly changing what was measured.'
+                : 'Reviews are not asked to confirm the claims they read. Off by default: the extra question is free in tokens and measured expensive in attention.'
+            }
+          >
+            confirmations {sidecar.confirmations ? 'on' : 'off'}
+          </li>
+        )}
       </ul>
 
       {/* The maintenance loop's whole output. It existed only behind `whetstone sidecars claims`,
@@ -241,22 +305,59 @@ function SidecarSetup({ detail, skillId }: { detail: SkillDetail; skillId: strin
           review path. Nothing to enable here.
         </p>
       ) : selfCollecting ? (
-        <div className="rounded-lg border border-warn/40 bg-warn/5 px-4 py-3 text-sm">
-          <p>
-            This skill&apos;s <code className="font-mono text-xs">evaluate</code> step runs as{' '}
-            {evaluate?.mode === 'agent' ? 'an agent' : 'a program'}, which collects its own context.
-            Declaring a <code className="font-mono text-xs">sidecar:</code> role here is{' '}
-            <strong>refused at the plan</strong> rather than ignored: Whetstone cannot hash what it
-            did not resolve, and attaching the declaration anyway would claim sidecars shaped a
-            review they never touched.
-          </p>
-          <p className="mt-2 text-muted">
-            To read local context from a reviewer that collects its own, call{' '}
-            <code className="font-mono text-xs">tools/collect_sidecars.py</code> from inside it —
-            the same file Whetstone would have run. Install it with{' '}
-            <code className="font-mono text-xs">whetstone sidecars install</code>.
-          </p>
-        </div>
+        // Not a refusal any more, so it no longer reads as one. What stays refused is *injection*:
+        // Whetstone will not hash context it did not resolve. Everything else — the files, the
+        // counts, the graph — is reading, and reading was never the thing in question.
+        <ol className="space-y-4">
+          <Step
+            n={1}
+            title="Call the collector from your reviewer"
+            why={`This skill's evaluate step runs as ${
+              evaluate?.mode === 'agent' ? 'an agent' : 'a program'
+            }, which chooses its own reads — so Whetstone must not inject a second, host-resolved set behind its back. Install the collector and call it yourself at the start of each review: it is the same file Whetstone would have run, byte for byte.`}
+          >
+            <pre className={CODE}>{`whetstone sidecars install --skill skills/${skillId}
+# then, from the reviewer, per changed path:
+python tools/collect_sidecars.py --root "$SOURCE_ROOT" <changed paths>`}</pre>
+          </Step>
+
+          <Step
+            n={2}
+            title="Name the role, and say you collect it yourself"
+            why="In SKILL.md frontmatter. Without `self_collected: true` the declaration is refused at the plan, because a role on a self-collecting reviewer usually means someone believes injection is happening. With it, Whetstone reads the files for this page and injects nothing — the eval digest is untouched either way."
+          >
+            <pre className={CODE}>{`---
+id: ${skillId}
+sidecar:
+  role: ${suggestRole(skillId)}
+  self_collected: true
+---`}</pre>
+          </Step>
+
+          <Step
+            n={3}
+            title="Say where the reviewed tree is checked out"
+            why="In evaluate/step.yaml — the same env var your reviewer resolves. Whetstone needs it only to find the .agents/ files for this page; it is refused if it is unset or is not a directory, because the alternative is a page that says this skill reads no local context and never says why."
+          >
+            <pre className={CODE}>{`context:
+  source_root: { env: ${envName(skillId)}, required: true }`}</pre>
+          </Step>
+
+          <Step
+            n={4}
+            title="Write the first note, beside the code"
+            why="In the source repo, in the folder it describes. Every claim carries where it came from — a review comment, a ticket, an ADR — and is rejected without one, because verification needs something to check against beyond the claim's own plausibility."
+          >
+            <pre className={CODE}>{`# <source repo>/payments/.agents/context.md
+---
+status: confirmed
+---
+
+- PaymentService.record() is the only writer to payments_ledger. A write that
+  goes around it skips the idempotency check.
+  <!-- src: HUB-48163#r527 -->`}</pre>
+          </Step>
+        </ol>
       ) : (
         <ol className="space-y-4">
           <Step
@@ -303,6 +404,18 @@ status: confirmed
   <!-- src: HUB-48163#r527 -->`}</pre>
           </Step>
         </ol>
+      )}
+
+      {selfCollecting && (
+        // No ablation box here on purpose: `--no-sidecars` withholds what *Whetstone* injects, and
+        // that is nothing when the reviewer collects its own. Running it would measure the same
+        // thing twice and label one an ablation, so the flag is refused rather than offered.
+        <p className="text-sm text-muted">
+          Measuring whether the notes help is yours to arrange — withhold them inside the reviewer
+          and score both ways. <code className="font-mono text-xs">--no-sidecars</code> is refused
+          for this skill: it would withhold nothing and record a run indistinguishable from a normal
+          one.
+        </p>
       )}
 
       {!isTask && !selfCollecting && (

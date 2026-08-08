@@ -1165,6 +1165,10 @@ class SidecarStatus(BaseModel):
     max_files: int = 0
     max_file_bytes: int = 0
     confirmations: bool = False
+    # The skill's own reviewer calls the collector; Whetstone injects nothing. The page reads very
+    # differently either way — half the fields above are caps *this* harness enforces, and none of
+    # them are when this is true — so it is carried rather than inferred from the step mode.
+    self_collected: bool = False
     # As declared — an env var name, never its value, the way `ResolvedContext` shows it.
     source_declared: str = ""
     # Resolved, and whether it is a directory. A `source_root` that does not resolve is the failure

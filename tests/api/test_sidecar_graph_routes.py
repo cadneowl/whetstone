@@ -268,3 +268,81 @@ def test_the_file_route_serves_only_this_roles_notes(
 def test_the_file_route_describes_a_skill_with_no_role(client: TestClient) -> None:
     body = file_of(client, "rust-errors", "payments/.agents/context.md")
     assert body["problem"] == "this skill declares no `sidecar:` role"
+
+
+# --- a reviewer that collects its own -----------------------------------------------------------
+
+SELF_COLLECTED_SKILL = SIDECAR_SKILL.replace(
+    "  role: arch-review\n", "  role: arch-review\n  self_collected: true\n"
+)
+
+AGENT_STEP = """kind: evaluate
+agent:
+  enabled: true
+  max_steps: 4
+  source: {{ env: {var} }}
+"""
+
+
+@pytest.fixture
+def self_collecting_skill(
+    skills_root: Path, source: Path, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """The arrangement `self_collected: true` exists for: the skill reviews itself, as an agent."""
+    from whetstone.domain.skill import SidecarSpec
+    from whetstone.sidecars import install
+
+    skill = skills_root / "agentic"
+    (skill / "evaluate").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        SELF_COLLECTED_SKILL.replace("id: arch", "id: agentic"), encoding="utf-8"
+    )
+    (skill / "evaluate" / "step.yaml").write_text(
+        AGENT_STEP.format(var="ARCH_SOURCE"), encoding="utf-8"
+    )
+    install(skill, SidecarSpec(role="arch-review"))
+    monkeypatch.setenv("ARCH_SOURCE", str(source))
+    return "agentic"
+
+
+def test_the_graph_draws_for_a_reviewer_that_collects_its_own(
+    client: TestClient, self_collecting_skill: str
+) -> None:
+    """The point of the whole change. Before it, this skill's notes were real, on disk, named in its
+    frontmatter — and every screen refused to show them because Whetstone could not hash them."""
+    body = get(client, self_collecting_skill)
+    assert body["problem"] == ""
+    assert body["counts"]["claim"] == 2
+
+
+def test_the_file_route_opens_a_note_for_a_self_collecting_skill(
+    client: TestClient, self_collecting_skill: str
+) -> None:
+    body = file_of(client, self_collecting_skill, "payments/.agents/context.md")
+    assert body["problem"] == ""
+    assert "payments_ledger" in body["text"]
+
+
+def test_the_panel_says_who_collects(client: TestClient, self_collecting_skill: str) -> None:
+    """`self_collected` reaches the page, because half the panel's fields are caps this harness
+    enforces and none of them are when it is true."""
+    detail = client.get(f"/api/skills/{self_collecting_skill}").json()
+    assert detail["sidecar"]["self_collected"] is True
+    assert detail["sidecar"]["source_ok"] is True
+    assert detail["sidecar"]["claims"] == 2
+    assert detail["sidecar"]["problems"] == []
+
+
+def test_without_the_flag_the_same_skill_is_still_refused(
+    client: TestClient, self_collecting_skill: str, skills_root: Path
+) -> None:
+    """The refusal is what stops someone believing injection happens. Only the flag lifts it, and
+    only for reading."""
+    skill = skills_root / self_collecting_skill / "SKILL.md"
+    skill.write_text(
+        skill.read_text(encoding="utf-8").replace("  self_collected: true\n", ""),
+        encoding="utf-8",
+    )
+    body = get(client, self_collecting_skill)
+    assert "collects its own context" in body["problem"]
+    assert body["result"]["nodes"] == []

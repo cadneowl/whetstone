@@ -35,6 +35,7 @@ __all__ = [
     "SidecarError",
     "SidecarLoader",
     "collector_digest",
+    "collector_installed",
     "collector_source",
     "declaration_of",
     "install",
@@ -214,6 +215,16 @@ def install(skill_dir: str | Path, spec: SidecarSpec) -> tuple[Path, Path]:
         json.dumps(declaration_of(spec), indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return script, config
+
+
+def collector_installed(skill_dir: str | Path) -> bool:
+    """Whether this skill carries a copy of the collector at all.
+
+    Separate from `installed_state`, which grades *drift* and answers in prose. For a skill whose
+    reviewer collects its own context this is not drift but presence: the installed script is the
+    entire mechanism, so its absence is a refusal at the plan rather than a note beside one.
+    """
+    return (Path(skill_dir) / TOOLS_DIR / COLLECTOR_NAME).is_file()
 
 
 def installed_state(skill_dir: str | Path, spec: SidecarSpec) -> list[str]:

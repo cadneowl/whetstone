@@ -666,7 +666,10 @@ def _sidecar_target(config: Config, edits: CaseEdits) -> SidecarTarget | None:
     if skill.sidecar.is_empty():
         return None
     try:
-        plan = reviewer_for(config.skills_root, skill).sidecar
+        # Either binding: filing a claim writes a file in the source tree, which is the same act
+        # whether the harness or the skill's own reviewer reads it back at review time.
+        choice = reviewer_for(config.skills_root, skill)
+        plan = choice.sidecar or choice.sidecar_view
     except Exception:  # noqa: BLE001 - a broken step must not 500 the triage screen
         plan = None
     existing: str | None = None

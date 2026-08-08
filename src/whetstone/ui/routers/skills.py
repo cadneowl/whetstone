@@ -148,6 +148,7 @@ def _sidecar_status(
         max_files=spec.max_files,
         max_file_bytes=spec.max_file_bytes,
         confirmations=spec.confirmations,
+        self_collected=spec.self_collected,
     )
     try:
         choice = reviewer_for(config.skills_root, skill)
@@ -157,9 +158,13 @@ def _sidecar_status(
     status.problems = list(choice.problems)
     declared = (choice.context.redacted if choice.context else {}).get("source_root")
     status.source_declared = str(declared or "")
-    if choice.sidecar is not None:
-        status.source_root = str(choice.sidecar.source_root)
-        status.source_ok = Path(choice.sidecar.source_root).is_dir()
+    # One of the two, never both. The view is the self-collecting reviewer's read-only twin of the
+    # plan; everything this panel does with a root — scan it, count claims, draw the graph — is the
+    # same either way, because none of it touches a prompt or a hash.
+    bound = choice.sidecar or choice.sidecar_view
+    if bound is not None:
+        status.source_root = str(bound.source_root)
+        status.source_ok = Path(bound.source_root).is_dir()
     try:
         status.install_problems = installed_state(skill_dir, spec)
     except OSError:
@@ -336,7 +341,10 @@ def get_sidecar_graph(
         choice = reviewer_for(config.skills_root, skill)
     except (SkillLoadError, StepError, ContextError, OSError) as exc:
         return SidecarGraphView(role=skill.sidecar.role, problem=str(exc))
-    if choice.sidecar is None:
+    # Either binding will do: drawing the notes reads the tree and changes no prompt and no hash,
+    # so which side collects them at review time is a question this route is not asking.
+    bound = choice.sidecar or choice.sidecar_view
+    if bound is None:
         return SidecarGraphView(
             role=skill.sidecar.role,
             problem="; ".join(choice.problems) or "no source tree resolved for this skill",
@@ -344,7 +352,7 @@ def get_sidecar_graph(
     try:
         graph = build_cached(
             store.root,
-            choice.sidecar.source_root,
+            bound.source_root,
             skill.sidecar.role,
             refresh=refresh,
         )
@@ -353,7 +361,7 @@ def get_sidecar_graph(
         # panel exists to catch, and a 500 here would take the rest of the tab down with it.
         return SidecarGraphView(
             role=skill.sidecar.role,
-            source_root=str(choice.sidecar.source_root),
+            source_root=str(bound.source_root),
             problem=str(exc),
         )
     _annotate(store, skill.sidecar.role, graph)
@@ -512,13 +520,14 @@ def get_sidecar_file(
         choice = reviewer_for(config.skills_root, skill)
     except (SkillLoadError, StepError, ContextError, OSError) as exc:
         return SidecarFile(path=path, problem=str(exc))
-    if choice.sidecar is None:
+    bound = choice.sidecar or choice.sidecar_view
+    if bound is None:
         return SidecarFile(
             path=path,
             problem="; ".join(choice.problems) or "no source tree resolved for this skill",
         )
     try:
-        text = read_sidecar(choice.sidecar.source_root, path, skill.sidecar.role)
+        text = read_sidecar(bound.source_root, path, skill.sidecar.role)
     except (SidecarError, OSError) as exc:
         # Described rather than raised, the way the graph route describes an unresolvable tree: a
         # panel that 500s takes the rest of the tab with it.

@@ -79,6 +79,19 @@ class SidecarSpec(BaseModel):
     # It is in the hashed declaration, so switching it retracts baselines — correct, since it
     # changes every prompt the skill sends.
     confirmations: bool = False
+    # The reviewer runs `tools/collect_sidecars.py` itself, so Whetstone injects nothing.
+    #
+    # Only meaningful for a skill reviewed by its own agent or program. Whetstone cannot hash what
+    # it did not resolve, so declaring a role on one of those is refused — this flag is the author
+    # saying "I know, I call the collector myself", which turns the refusal into a *view*: the
+    # `.agents/` files are real and worth reading on the skill's page, and showing them changes no
+    # prompt and no hash. It is deliberately **not** in `declaration_of`, because it identifies who
+    # does the reading rather than what gets read, and folding it in would retract baselines for a
+    # change that alters no byte of any review.
+    #
+    # Named for who collects rather than for who manages: "managed" reads as "Whetstone handles
+    # this", which is the opposite of what it means.
+    self_collected: bool = False
 
     def is_empty(self) -> bool:
         return not self.role
