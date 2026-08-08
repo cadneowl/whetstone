@@ -46,6 +46,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -118,6 +119,13 @@ class Node(BaseModel):
     cited: bool = True
     # `folder` only: how many claims this folder keeps, across the files this role reads.
     claims: int = 0
+    # What runs and sweeps have said about this claim, joined from the ledger at view time and
+    # never cached (`annotate_verdicts`). On a folder, the roll-up of the claims it contains — so
+    # a tree's trouble spots are visible before anything is clicked.
+    confirmed: int = 0
+    contradicted: int = 0
+    # The most recent evidence *against*, which is the only text that helps someone decide.
+    evidence: str = ""
     # A `## PaymentService.java` heading in a folder with no such file, or a `[[link]]` to a folder
     # that is not in the tree. The floor calls these `orphan_section`; here they are hollow nodes,
     # which is the form in which someone actually notices them.
@@ -1054,6 +1062,50 @@ def build_cached(
     cache = None if refresh else load_cache(path)
     graph, updated = build(source_root, role, cache=cache, folder_limit=folder_limit)
     save_cache(path, updated)
+    return graph
+
+
+def annotate_verdicts(graph: SidecarGraph, histories: Sequence[Any]) -> SidecarGraph:
+    """Mark each claim with what runs and sweeps have said about it, and roll it up to its folder.
+
+    The two halves of this tab knew nothing about each other: the ledger panel listed claims four
+    runs had contradicted, and the picture beside it drew those claims exactly like healthy ones.
+    That is the maintenance loop's entire output, invisible on the one screen that is a map.
+
+    **Applied at view time, never cached.** The graph cache is keyed on the notes; verdicts arrive
+    from runs that change nothing about the notes, so baking them in would serve a stale ledger for
+    as long as the sidecars happen not to move — which is exactly the folders nobody is touching,
+    and exactly the ones the crawl exists to reach.
+
+    `histories` is anything carrying `path`, `claim`, `confirmed`, `contradicted` and
+    `last_evidence` — structural on purpose, the way `confirm.verdicts_from` is, so this module
+    does not import the ledger it is handed.
+
+    Mutates and returns `graph`. Safe because `_assemble` deep-copies every node it merges, so the
+    annotated nodes are this build's own and not the cache's.
+    """
+    by_claim = {
+        (str(getattr(h, "path", "")), str(getattr(h, "claim", ""))): h for h in histories
+    }
+    if not by_claim:
+        return graph
+    folders: dict[str, Node] = {n.id: n for n in graph.nodes if n.kind == "folder"}
+    for node in graph.nodes:
+        if node.kind != "claim":
+            continue
+        hit = by_claim.get((node.sidecar, node.text))
+        if hit is None:
+            continue
+        node.confirmed = int(getattr(hit, "confirmed", 0) or 0)
+        node.contradicted = int(getattr(hit, "contradicted", 0) or 0)
+        node.evidence = str(getattr(hit, "last_evidence", "") or "")
+        parent = folders.get(_folder_id(node.path))
+        if parent is not None:
+            parent.confirmed += node.confirmed
+            parent.contradicted += node.contradicted
+    graph.counts["disputed"] = sum(
+        1 for n in graph.nodes if n.kind == "claim" and n.contradicted > 0
+    )
     return graph
 
 

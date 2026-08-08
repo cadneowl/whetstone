@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   useSidecarFile,
   useSidecarGraph,
@@ -9,6 +10,14 @@ import {
   type SidecarFile,
 } from '@/api/client'
 import { layout, radiusFor } from '@/components/graphLayout'
+import {
+  clampHops,
+  crumbsFor,
+  focusQuery,
+  parentOf,
+  parentQuery,
+  type GraphParams,
+} from '@/components/graphNav'
 import { Badge, ErrorNote } from '@/components/primitives'
 
 /**
@@ -25,18 +34,43 @@ import { Badge, ErrorNote } from '@/components/primitives'
  * separate decision that needs a scored with-graph arm first, and a picture is not that arm.
  */
 export function SidecarGraph({ skillId }: { skillId: string }) {
-  const [draft, setDraft] = useState('')
-  const [query, setQuery] = useState('')
-  const [hops, setHops] = useState(1)
-  const [selected, setSelected] = useState<string | null>(null)
+  // Navigation lives in the URL, not in component state. Three things fall out of that and none of
+  // them are available otherwise: browser back/forward becomes undo for an exploration (three hops
+  // deep, one keystroke home), a view can be pasted to someone, and it survives a reload. The tab
+  // was already a search param, so a graph position that was not read as an inconsistency.
+  const [params, setParams] = useSearchParams()
+  const query = params.get('q') ?? ''
+  const hops = clampHops(params.get('hops'))
+  const selected = params.get('node')
+
+  const [draft, setDraft] = useState(query)
 
   // Debounced, because every keystroke is a filesystem walk on somebody's monorepo — cached, but
   // still a walk. 250ms is under the threshold where a person notices waiting and well over the
   // gap between two keys in a word.
+  //
+  // `replace` while typing: a history entry per keystroke would make back useless for the thing it
+  // is actually wanted for, which is undoing a *navigation* step.
   useEffect(() => {
-    const timer = setTimeout(() => setQuery(draft.trim()), 250)
+    const timer = setTimeout(() => {
+      if (draft.trim() !== query) navigate({ q: draft.trim(), node: null }, { replace: true })
+    }, 250)
     return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft])
+
+  // A query typed elsewhere — a breadcrumb, a Focus button, the browser's back button — has to
+  // reach the box, or the input and the picture disagree about what is being asked.
+  useEffect(() => setDraft(query), [query])
+
+  function navigate(next: Partial<GraphParams>, options?: { replace?: boolean }) {
+    const merged = new URLSearchParams(params)
+    for (const [key, value] of Object.entries(next)) {
+      if (value === null || value === '') merged.delete(key)
+      else merged.set(key, String(value))
+    }
+    setParams(merged, options)
+  }
 
   const { data, isLoading, error } = useSidecarGraph(skillId, query, hops, true)
 
@@ -68,20 +102,36 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
   return (
     <section className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <input
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder="ledger · rule:R1 · folder:payments · kind:claim uncited:true"
-          aria-label="Query the sidecar graph"
-          className="min-w-64 flex-1 rounded border border-line bg-canvas px-2.5 py-1.5 font-mono text-sm"
-        />
+        <div className="relative flex min-w-64 flex-1 items-center">
+          <input
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setDraft('')
+            }}
+            placeholder="ledger · rule:R1 · folder:payments · kind:claim uncited:true"
+            aria-label="Query the sidecar graph"
+            className="w-full rounded border border-line bg-canvas py-1.5 pr-8 pl-2.5 font-mono text-sm"
+          />
+          {draft && (
+            <button
+              type="button"
+              onClick={() => setDraft('')}
+              aria-label="Clear the query"
+              title="Clear (Esc)"
+              className="absolute right-2 text-muted hover:text-ink"
+            >
+              ×
+            </button>
+          )}
+        </div>
         <label className="flex items-center gap-1.5 text-sm text-muted">
-          <span title="How far out from each match to follow edges. A rule is one node; one hop out is every claim that excepts it, and two is the folders those claims live in.">
+          <span title="How far out from each match to follow edges. A rule is one node; one hop out is every claim that excepts it, and two is the folders those claims live in. It is a radius, not a step — it reaches parents, children and siblings alike.">
             hops
           </span>
           <select
             value={hops}
-            onChange={(event) => setHops(Number(event.target.value))}
+            onChange={(event) => navigate({ hops: Number(event.target.value) })}
             aria-label="Hops from each match"
             className="rounded border border-line bg-canvas px-1.5 py-1 text-sm"
           >
@@ -129,6 +179,14 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             {counts.uncited} uncited
           </Badge>
         )}
+        {(counts.disputed ?? 0) > 0 && (
+          <Badge
+            tone="bad"
+            title="Something with the code in front of it said these claims no longer hold. They are still injected into every review that touches their folder — correction is a human's call, never automatic."
+          >
+            {counts.disputed} disputed
+          </Badge>
+        )}
         <span
           className="ml-auto font-mono text-muted"
           title="Identity of the built graph — the builder version and every folder's content hash. Two builds with the same digest read the same notes."
@@ -145,6 +203,8 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
         </p>
       )}
 
+      <Breadcrumb query={query} focused={focused} onGo={(q) => navigate({ q, node: null })} />
+
       {empty ? (
         <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-muted">
           No <code className="font-mono text-xs">.agents/</code> folders under this tree yet.
@@ -159,7 +219,8 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             positions={positions}
             matched={matched}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={(id) => navigate({ node: id }, { replace: true })}
+            onFocus={(node) => navigate({ q: focusQuery(node), node: node.id })}
           />
           <Legend />
           <EdgeLegend />
@@ -171,7 +232,7 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             query={query}
             rescued={data.result.semantic.length > 0}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={(id) => navigate({ node: id }, { replace: true })}
           />
           <Semantic
             nodes={nodes}
@@ -180,7 +241,7 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             status={data.result.semantic_status}
             asked={query.length > 0}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={(id) => navigate({ node: id }, { replace: true })}
           />
         </>
       )}
@@ -189,13 +250,80 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
         <Detail
           node={focused}
           skillId={skillId}
-          onQuery={(text) => {
-            setDraft(text)
-            setSelected(null)
-          }}
+          onQuery={(text) => navigate({ q: text, node: null })}
+          onFocus={() => navigate({ q: focusQuery(focused), node: focused.id })}
         />
       )}
     </section>
+  )
+}
+
+/**
+ * Where you are in the tree, and the one control that goes both ways.
+ *
+ * Going *in* had a button (`everything under payments`) and going *out* had nothing — you edited
+ * the path in the query box by hand, which is not navigation, it is typing. `hops` is no answer
+ * either: it is a radius, so it reaches the parent, the children and the siblings at once.
+ *
+ * The path is read back out of the query rather than tracked separately, so it also answers the
+ * question nothing on this screen answered before — *where am I* — including after a reload or
+ * when someone pastes you a link.
+ */
+function Breadcrumb({
+  query,
+  focused,
+  onGo,
+}: {
+  query: string
+  focused: GraphNode | null
+  onGo: (query: string) => void
+}) {
+  const segments = crumbsFor(query, focused?.path || null)
+  if (segments === null) return null
+
+  return (
+    <nav aria-label="Folder path" className="flex flex-wrap items-center gap-1 text-sm">
+      <Crumb onGo={onGo} to="" active={segments.length === 0}>
+        whole tree
+      </Crumb>
+      {segments.map((segment: string, index: number) => (
+        <span key={index} className="flex items-center gap-1">
+          <span className="text-muted">/</span>
+          <Crumb
+            onGo={onGo}
+            to={segments.slice(0, index + 1).join('/')}
+            active={index === segments.length - 1}
+          >
+            {segment}
+          </Crumb>
+        </span>
+      ))}
+    </nav>
+  )
+}
+
+function Crumb({
+  onGo,
+  to,
+  active,
+  children,
+}: {
+  onGo: (query: string) => void
+  to: string
+  active: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onGo(to ? `folder:${to}` : '')}
+      title={to ? `Everything under ${to}` : 'The whole tree'}
+      className={`rounded px-1.5 py-0.5 font-mono text-xs ${
+        active ? 'bg-accent/10 text-accent' : 'text-muted hover:text-ink'
+      }`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -242,6 +370,7 @@ function Canvas({
   matched,
   selected,
   onSelect,
+  onFocus,
 }: {
   nodes: GraphNode[]
   edges: GraphEdge[]
@@ -249,6 +378,7 @@ function Canvas({
   matched: Set<string>
   selected: string | null
   onSelect: (id: string | null) => void
+  onFocus: (node: GraphNode) => void
 }) {
   // Labels for every node turn a 200-node graph into a wall of text, so most nodes earn one by
   // being selected. Folders always keep theirs — they are the map anyone orients by — and a small
@@ -276,17 +406,24 @@ function Canvas({
         const style = EDGE_STYLE[edge.kind]
         const touched = selected !== null && (edge.source === selected || edge.target === selected)
         return (
-          <line
-            key={`${edge.source}|${edge.target}|${edge.kind}`}
-            x1={a.x}
-            y1={a.y}
-            x2={b.x}
-            y2={b.y}
-            stroke={touched ? 'var(--color-accent)' : 'var(--color-muted)'}
-            strokeWidth={touched ? 1.6 : 1}
-            strokeDasharray={style.dash}
-            opacity={selected !== null && !touched ? 0.15 : style.opacity}
-          />
+          <g key={`${edge.source}|${edge.target}|${edge.kind}`}>
+            <line
+              x1={a.x}
+              y1={a.y}
+              x2={b.x}
+              y2={b.y}
+              stroke={touched ? 'var(--color-accent)' : 'var(--color-muted)'}
+              strokeWidth={touched ? 1.6 : 1}
+              strokeDasharray={style.dash}
+              opacity={selected !== null && !touched ? 0.15 : style.opacity}
+            />
+            {/* An invisible fat line over the thin one, so a 1px edge has a hoverable target. The
+                legend explains the dash patterns as a class; this says what *this* line is, which
+                is the question anyone actually has while looking at a specific pair of nodes. */}
+            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={8}>
+              <title>{edgeTitle(edge)}</title>
+            </line>
+          </g>
         )
       })}
       {nodes.map((node) => {
@@ -305,8 +442,12 @@ function Canvas({
               event.stopPropagation()
               onSelect(node.id === selected ? null : node.id)
             }}
+            onDoubleClick={(event) => {
+              event.stopPropagation()
+              onFocus(node)
+            }}
           >
-            <title>{`${node.kind}: ${node.label}`}</title>
+            <title>{nodeTitle(node)}</title>
             <circle
               r={radius}
               fill={node.missing ? 'none' : KIND_COLOR[node.kind]}
@@ -314,10 +455,33 @@ function Canvas({
               strokeWidth={node.missing ? 1.5 : 1}
               strokeDasharray={node.missing ? '3 2' : undefined}
             />
+            {/* Health, on the picture rather than a click away. The two facts worth seeing without
+                asking are the two that change what a review is given: a claim the code has
+                contradicted is still injected into every review touching its folder, and an
+                `unconfirmed` folder is injected into none of them. Both drew identically to a
+                healthy node, which made the map silent about the only thing it could warn of. */}
+            {node.contradicted > 0 && (
+              <circle
+                r={radius + 3.5}
+                fill="none"
+                stroke={KIND_COLOR.unresolved}
+                strokeWidth={1.6}
+              />
+            )}
+            {node.status === 'unconfirmed' && (
+              <circle
+                r={radius + 3.5}
+                fill="none"
+                stroke="var(--color-warn)"
+                strokeWidth={1.4}
+                strokeDasharray="2 2"
+              />
+            )}
             {/* A match ring rather than a different fill: the kind is what the colour means, and a
-                query must not be able to make a folder look like a rule. */}
+                query must not be able to make a folder look like a rule. Outermost, so it never
+                hides a health ring — a query is transient and a contradiction is not. */}
             {isMatch && (
-              <circle r={radius + 3.5} fill="none" stroke="var(--color-accent)" strokeWidth={1.4} />
+              <circle r={radius + 6} fill="none" stroke="var(--color-accent)" strokeWidth={1.4} />
             )}
             {labelled(node) && (
               <text
@@ -337,6 +501,49 @@ function Canvas({
       })}
     </svg>
   )
+}
+
+/**
+ * Everything about a node that a hover can answer, so the picture is readable without clicking.
+ *
+ * The old title was `kind: label`, which repeated what the colour and the text already said. What
+ * a reader wants from a dot is the four things that are otherwise invisible: how connected it is,
+ * where it lives, whether retrieval will inject it, and whether anything has argued with it.
+ */
+function nodeTitle(node: GraphNode): string {
+  const lines = [`${node.kind}: ${node.label}`]
+  if (node.path && node.path !== node.label) lines.push(node.path)
+  if (node.sidecar) lines.push(`${node.sidecar}:${node.line}`)
+  if (node.kind === 'folder' && node.claims) lines.push(`${node.claims} claim(s) in this folder`)
+  if (node.status === 'unconfirmed') {
+    lines.push('unconfirmed — withheld from every review until something independent agrees')
+  }
+  if (node.kind === 'claim' && !node.cited) lines.push('uncited — nothing can verify this')
+  if (node.contradicted > 0) {
+    lines.push(
+      `${node.contradicted} run(s) found code disagreeing with ` +
+        (node.kind === 'folder' ? 'claims here' : 'this'),
+    )
+  }
+  if (node.confirmed > 0) lines.push(`${node.confirmed} cited it as still holding`)
+  if (node.missing) lines.push('not in the source tree — renamed, or misspelt')
+  lines.push(`${node.degree} edge(s) · double-click to centre the graph here`)
+  return lines.join('\n')
+}
+
+const EDGE_TITLE: Record<GraphEdgeKind, string> = {
+  parent: 'is inside — the ancestor walk retrieval performs',
+  contains: 'keeps this claim',
+  describes: 'this claim is about that file',
+  excepts: 'this claim narrows that central rule',
+  cites: 'this claim came out of that review, ticket or ADR',
+  links: 'a [[link]] written inside the claim',
+  see: 'a `see:` link in the folder’s frontmatter',
+}
+
+function edgeTitle(edge: GraphEdge): string {
+  const detail = edge.detail ? `\n${edge.detail}` : ''
+  return `${edge.kind} — ${EDGE_TITLE[edge.kind]}${detail}`
 }
 
 /** Roughly half a long label at 10px — past this from an edge, centring clips it. */
@@ -481,6 +688,19 @@ function Results({
                 {node.kind === 'claim' && !node.cited && (
                   <span className="text-xs text-warn">uncited</span>
                 )}
+                {node.status === 'unconfirmed' && (
+                  <span className="text-xs text-warn" title="Withheld from every review.">
+                    unconfirmed
+                  </span>
+                )}
+                {node.contradicted > 0 && (
+                  <span
+                    className="text-xs text-bad"
+                    title="Runs that found code disagreeing with this claim."
+                  >
+                    {node.contradicted} contradicted
+                  </span>
+                )}
               </span>
             </button>
           </li>
@@ -581,10 +801,12 @@ function Detail({
   node,
   skillId,
   onQuery,
+  onFocus,
 }: {
   node: GraphNode
   skillId: string
   onQuery: (query: string) => void
+  onFocus: () => void
 }) {
   return (
     <div className="rounded-lg border border-accent/40 bg-accent/5 px-4 py-3 text-sm">
@@ -593,6 +815,14 @@ function Detail({
           {node.kind}
         </span>
         <span className="font-semibold">{node.label}</span>
+        <button
+          type="button"
+          onClick={onFocus}
+          title="Redraw the graph around this node. Double-clicking it in the picture does the same."
+          className="rounded border border-line bg-canvas px-2 py-0.5 text-xs hover:border-accent"
+        >
+          Centre here
+        </button>
         {node.status && (
           <span
             className={node.status === 'unconfirmed' ? 'text-warn text-xs' : 'text-muted text-xs'}
@@ -620,6 +850,26 @@ function Detail({
           <code className="font-mono text-xs">whetstone sidecars check</code> fails it.
         </p>
       )}
+      {/* The ledger, on the map. This is the maintenance loop's whole output, and it lived in a
+          collapsed list further up the same tab while the picture beside it drew a contradicted
+          claim exactly like a healthy one. */}
+      {(node.contradicted > 0 || node.confirmed > 0) && (
+        <p className="mt-2 flex flex-wrap items-baseline gap-x-3 text-xs">
+          {node.contradicted > 0 && (
+            <span className="text-bad">
+              {node.contradicted} run{node.contradicted === 1 ? '' : 's'} found code disagreeing
+              {node.kind === 'folder' ? ' with claims here' : ''}
+            </span>
+          )}
+          {node.confirmed > 0 && (
+            <span className="text-good">{node.confirmed} cited it as still holding</span>
+          )}
+          <span className="text-muted">
+            Still injected either way — correction is a human editing the note in its own repo.
+          </span>
+        </p>
+      )}
+      {node.evidence && <p className="mt-1 text-sm text-bad italic">— {node.evidence}</p>}
       <div className="mt-2 flex flex-wrap gap-2">
         {node.kind === 'rule' && (
           <Ask onQuery={onQuery} query={`excepts:${node.label}`}>
@@ -639,6 +889,13 @@ function Detail({
         {node.kind === 'claim' && node.path && (
           <Ask onQuery={onQuery} query={`folder:${node.path}`}>
             the rest of {node.path}
+          </Ask>
+        )}
+        {/* Out, not just in. Every other button on this card goes deeper; without this one the
+            only way back up the tree was editing the path in the query box by hand. */}
+        {parentOf(node.path) !== null && (
+          <Ask onQuery={onQuery} query={parentQuery(node.path)}>
+            ↑ up to {parentOf(node.path) || 'the whole tree'}
           </Ask>
         )}
       </div>

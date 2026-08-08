@@ -18,12 +18,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from whetstone.sidecars import read_sidecar
 from whetstone.sidecars.claims import parse
 from whetstone.sidecars.collect import SidecarError
 from whetstone.sidecars.floor import check_tree
 from whetstone.sidecars.graph import (
+    annotate_verdicts,
     build,
     build_cached,
     cache_path,
@@ -423,6 +425,81 @@ def test_an_alias_link_is_one_target(tmp_path: Path) -> None:
         "  <!-- src: HUB-1 -->\n"
     ).claims
     assert claims[0].links == ["payments"]
+
+
+# --- the claim ledger, joined onto the graph ------------------------------------------------------
+
+
+class History(BaseModel):
+    path: str
+    claim: str
+    confirmed: int = 0
+    contradicted: int = 0
+    last_evidence: str = ""
+
+
+def test_verdicts_land_on_the_claim_and_roll_up_to_its_folder(tree: Path) -> None:
+    """The two halves of the tab knew nothing about each other: a claim four runs contradicted drew
+    exactly like a healthy one, on the only screen that is a map."""
+    graph, _ = build(tree, "arch-review")
+    claim = next(n for n in graph.nodes if n.sidecar.endswith("context.md"))
+    annotate_verdicts(
+        graph,
+        [
+            History(
+                path=claim.sidecar,
+                claim=claim.text,
+                contradicted=3,
+                confirmed=1,
+                last_evidence="ReconciliationJob.java:88 writes to it directly",
+            )
+        ],
+    )
+    marked = next(n for n in graph.nodes if n.id == claim.id)
+    assert (marked.contradicted, marked.confirmed) == (3, 1)
+    assert "ReconciliationJob" in marked.evidence
+    # And the folder, so a tree's trouble spots are visible before anything is clicked.
+    folder = next(n for n in graph.nodes if n.id == f"folder:{claim.path}")
+    assert (folder.contradicted, folder.confirmed) == (3, 1)
+    assert graph.counts["disputed"] == 1
+
+
+def test_a_verdict_for_a_claim_that_no_longer_exists_is_dropped(tree: Path) -> None:
+    """The ledger is append-only and claims get edited, so it names text no sidecar contains any
+    more. Matching loosely would mark the wrong bullet."""
+    graph, _ = build(tree, "arch-review")
+    annotate_verdicts(
+        graph,
+        [
+            History(
+                path="payments/.agents/context.md",
+                claim="a claim nobody wrote",
+                contradicted=9,
+            )
+        ],
+    )
+    assert all(n.contradicted == 0 for n in graph.nodes)
+    assert graph.counts.get("disputed", 0) == 0
+
+
+def test_an_empty_ledger_changes_nothing(tree: Path) -> None:
+    graph, _ = build(tree, "arch-review")
+    before = graph.model_dump()
+    assert annotate_verdicts(graph, []).model_dump() == before
+
+
+def test_verdicts_are_not_cached_with_the_graph(tmp_path: Path, tree: Path) -> None:
+    """Verdicts arrive from runs that change nothing about the notes. Baking them into the cache
+    would serve a stale ledger for exactly as long as the sidecars do not move — which is the cold
+    folders the crawl exists to reach."""
+    graph = build_cached(tmp_path, tree, "arch-review")
+    claim = next(n for n in graph.nodes if n.kind == "claim")
+    annotate_verdicts(graph, [History(path=claim.sidecar, claim=claim.text, contradicted=5)])
+    assert next(n for n in graph.nodes if n.id == claim.id).contradicted == 5
+
+    again = build_cached(tmp_path, tree, "arch-review")
+    assert again.reused > 0, "still a cache hit"
+    assert all(n.contradicted == 0 for n in again.nodes), "and it kept none of the verdicts"
 
 
 # --- semantic search ----------------------------------------------------------------------------

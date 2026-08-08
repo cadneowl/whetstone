@@ -1543,7 +1543,9 @@ export interface paths {
          *
          *     `semantic=true` also returns claims that mean something close to `q` without containing any of
          *     it, using `[drift] embed_model` — additive only, below the exact matches, and reported as
-         *     unavailable rather than raised when there is no model or the endpoint is down.
+         *     unavailable rather than raised when there is no model or the endpoint is down. A query that is
+         *     all field syntax (`rule:R1`) gets none: it is an exact question, and a net cast around it is
+         *     six near-identical noise hits, each expanded by `hops` into the rest of the graph.
          */
         get: operations["get_sidecar_graph_api_skills__skill_id__sidecars_graph_get"];
         put?: never;
@@ -4000,10 +4002,25 @@ export interface components {
              */
             claims: number;
             /**
+             * Confirmed
+             * @default 0
+             */
+            confirmed: number;
+            /**
+             * Contradicted
+             * @default 0
+             */
+            contradicted: number;
+            /**
              * Degree
              * @default 0
              */
             degree: number;
+            /**
+             * Evidence
+             * @default
+             */
+            evidence: string;
             /**
              * Excepts
              * @default
