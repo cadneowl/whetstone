@@ -3000,12 +3000,14 @@ def sidecars_verify(
     if sk.sidecar.is_empty():
         raise typer.BadParameter(f"{sk.id} declares no `sidecar:` block in SKILL.md")
     choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
-    if choice.sidecar is None:
+    # A self-collecting reviewer's tree is still this skill's tree, and the sweep only reads it.
+    bound = choice.sidecar or choice.sidecar_view
+    if bound is None:
         raise typer.BadParameter(
             f"{sk.id} resolves no source tree"
             + (f": {'; '.join(choice.problems)}" if choice.problems else "")
         )
-    root = choice.sidecar.source_root
+    root = bound.source_root
     ledger = Ledger(_store(runs_dir).root)
     last_seen = {h.path: h.last_seen for h in ledger.summary()}
 
@@ -3196,17 +3198,24 @@ def sidecars_show(
     """
     import json as _json
 
-    from whetstone.sidecars import SidecarError, to_prompt
+    from whetstone.sidecars import SidecarError, SidecarLoader, to_prompt
 
     sk = load_skill(skill)
     choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
-    if choice.sidecar is None:
+    # For a self-collecting reviewer the loader is built here rather than taken off the binding:
+    # `SidecarView` deliberately has none, because everything that owns one injects what it returns.
+    # This command injects nothing — it answers "what would the collector hand back for these
+    # paths", the same question and, the installed copy being byte-identical, the same answer.
+    loader = choice.sidecar.loader() if choice.sidecar else None
+    if loader is None and choice.sidecar_view is not None:
+        loader = SidecarLoader(choice.sidecar_view.source_root, choice.sidecar_view.spec)
+    if loader is None:
         raise typer.BadParameter(
             f"{sk.id} resolves no sidecars"
             + (f": {'; '.join(choice.problems)}" if choice.problems else "")
         )
     try:
-        resolved = choice.sidecar.loader().for_paths(list(paths or []))
+        resolved = loader.for_paths(list(paths or []))
     except SidecarError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if json_out:
@@ -3273,14 +3282,15 @@ def sidecars_graph(
     if sk.sidecar.is_empty():
         raise typer.BadParameter(f"{sk.id} declares no `sidecar:` block in SKILL.md")
     choice = _reviewer_choice(_step(skill, "evaluate"), skill, sk)
-    if choice.sidecar is None:
+    bound = choice.sidecar or choice.sidecar_view
+    if bound is None:
         raise typer.BadParameter(
             f"{sk.id} resolves no source tree"
             + (f": {'; '.join(choice.problems)}" if choice.problems else "")
         )
     try:
         graph = build_cached(
-            _store(runs_dir).root, choice.sidecar.source_root, sk.sidecar.role, refresh=refresh
+            _store(runs_dir).root, bound.source_root, sk.sidecar.role, refresh=refresh
         )
     except SidecarError as exc:
         raise typer.BadParameter(str(exc)) from exc

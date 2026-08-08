@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from whetstone.domain.skill import Skill
 from whetstone.llm.factory import LOCAL_PRESETS, Backend
-from whetstone.sidecars import installed_state
+from whetstone.sidecars import COLLECTOR_NAME, installed_state
 from whetstone.wiki import WikiLimits, paths_of, retrieve
 
 if TYPE_CHECKING:
@@ -321,6 +321,7 @@ def _describe_sidecars(plan: Plan, choice: ReviewerChoice, skill: Skill | None) 
     going to this backend at all, and the root answers that.
     """
     if choice.sidecar is None:
+        _describe_self_collected(plan, choice)
         return
     spec = choice.sidecar.spec
     if not choice.sidecar.enabled:
@@ -340,6 +341,30 @@ def _describe_sidecars(plan: Plan, choice: ReviewerChoice, skill: Skill | None) 
     # way — it resolves with the canonical collector — so this is a warning, not a refusal: what a
     # stale copy costs is that the gate stops describing what a user's Claude Code session does.
     for problem in installed_state(choice.sidecar.skill_dir, spec):
+        plan.details.append(f"sidecar collector: {problem}")
+
+
+def _describe_self_collected(plan: Plan, choice: ReviewerChoice) -> None:
+    """The same disclosure for a reviewer that collects its own local context.
+
+    Separate wording because every clause of the line above would be wrong here. Whetstone resolves
+    nothing, sends nothing and enforces no cap — the reviewer runs the collector itself, against the
+    declaration in its own `tools/sidecar.json`. The egress still happens and still deserves saying;
+    what changes is who causes it, and an operator deciding whether this repo's contents should go
+    to this backend is owed the difference.
+    """
+    view = choice.sidecar_view
+    if view is None:
+        return
+    plan.details.append(
+        f"local context: this skill's own reviewer reads `.agents/context.md` and "
+        f"`.agents/{view.spec.role}.md` from {view.source_root} by calling its installed "
+        f"`tools/{COLLECTOR_NAME}`. Whetstone resolves none of it, so it is in no hash and the "
+        f"caps are the collector's — this is still source, and it still leaves the machine"
+    )
+    # Drift only. Absence is refused at the plan (`factory._self_collected`), so a view that exists
+    # already carries a collector; what a stale one costs is that the gate stops describing the run.
+    for problem in installed_state(view.skill_dir, view.spec):
         plan.details.append(f"sidecar collector: {problem}")
 
 

@@ -1010,6 +1010,9 @@ set produces a valid-looking hash over context that was never read, and forks ga
 checkout location. For the same reason a skill that declares a role but no `context: source_root:`
 is refused, as is one whose reviewer is its own agent or program — those collect their own context,
 so attaching the declaration to the digest would claim sidecars shaped a review they never touched.
+`self_collected: true` acknowledges that arrangement instead of ending it: injection stays refused
+and the digest stays empty, and the declaration binds a read-only `SidecarView` so the skill's page
+can show files it will never send. Refusing to *read* what we cannot hash was never the rule.
 
 **The tier is subject to an ablation, and the ablation was built first.** Every other safeguard here
 addresses one claim: is it true, is it still true, did anyone verify it. None of them can see the

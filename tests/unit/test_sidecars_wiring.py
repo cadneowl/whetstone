@@ -254,9 +254,241 @@ def test_an_agent_skill_that_declares_sidecars_is_refused(
     )
     choice = reviewer_for(root, load_skill(root / "arch"))
     assert choice.sidecar is None
+    assert choice.sidecar_view is None
     assert any("collects its own context" in p for p in choice.problems)
+    # The way out is named in the refusal, or nobody finds it.
+    assert any("self_collected: true" in p for p in choice.problems)
     assert choice.context is not None
     assert DECLARATION_KEY not in choice.context.hashable
+
+
+# --- self_collected: reading what we cannot hash -------------------------------------------------
+
+
+def _self_collecting(
+    tmp_path: Path,
+    *,
+    step: str = "agent:\n  enabled: true\n  source: { env: HUB_ROOT }\n",
+    flag: str = "  self_collected: true\n",
+    collector: bool = True,
+) -> Path:
+    """A skill whose own reviewer collects, set up the way the panel asks for."""
+    root = tmp_path / "skills"
+    directory = _skill_folder(
+        root, "arch", frontmatter=f"sidecar:\n  role: {ROLE}\n{flag}", step=step
+    )
+    if collector:
+        install(directory, SidecarSpec(role=ROLE))
+    return root
+
+
+def test_self_collected_binds_a_view_and_never_a_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point: the files become readable without becoming an instrument.
+
+    A `SidecarPlan` is what `run_eval` injects and what a run record's provenance comes from. This
+    binding is neither — it is a root and a declaration, for a page that only ever reads.
+    """
+    source = _source(tmp_path)
+    monkeypatch.setenv("HUB_ROOT", str(source))
+    root = _self_collecting(tmp_path)
+    choice = reviewer_for(root, load_skill(root / "arch"))
+    assert choice.problems == []
+    assert choice.sidecar is None
+    assert choice.sidecar_view is not None
+    assert choice.sidecar_view.source_root == str(source)
+
+
+def test_a_view_carries_nothing_that_could_inject_or_identify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Structural, because a comment saying "do not pass this to `run_eval`" is not a guarantee.
+
+    `loader()` is what injects and `provenance` is what a record attributes a score to. A view that
+    has neither cannot be handed to the scoring path by a future caller who did not read this file.
+    """
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = _self_collecting(tmp_path)
+    view = reviewer_for(root, load_skill(root / "arch")).sidecar_view
+    assert view is not None
+    assert not hasattr(view, "loader")
+    assert not hasattr(view, "provenance")
+    assert not hasattr(view, "enabled")
+
+
+def test_self_collected_leaves_the_reviewer_digest_exactly_where_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whetstone resolves nothing here, so nothing about this skill's identity may move — otherwise
+    adding a read-only panel would retract every baseline the skill already has."""
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    step = "agent:\n  enabled: true\n  source: { env: HUB_ROOT }\n"
+    declaring = _self_collecting(tmp_path)
+    bare = tmp_path / "bare"
+    _skill_folder(bare, "arch", step=step)
+    assert context_digest_for(declaring, load_skill(declaring / "arch")) == context_digest_for(
+        bare, load_skill(bare / "arch")
+    )
+    choice = reviewer_for(declaring, load_skill(declaring / "arch"))
+    assert choice.context is not None
+    assert DECLARATION_KEY not in choice.context.hashable
+    assert COLLECTOR_KEY not in choice.context.hashable
+
+
+def test_the_flag_stays_out_of_the_installed_declaration(tmp_path: Path) -> None:
+    """`declaration_of` names what gets read, not who reads it. Folding the flag in would rewrite
+    every skill's `sidecar.json` and report a stale collector for a change that moved no byte of
+    what any collector returns."""
+    from whetstone.sidecars import declaration_of
+
+    plain = declaration_of(SidecarSpec(role=ROLE))
+    flagged = declaration_of(SidecarSpec(role=ROLE, self_collected=True))
+    assert plain == flagged
+    assert "self_collected" not in plain
+
+
+def test_self_collected_on_a_task_skill_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task skill is scored on work it produces and no review path can run it — so there is no
+    review for a collector to be called at the start of, and a panel saying so invents one."""
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = _self_collecting(
+        tmp_path, step="task:\n  enabled: true\n  source: { env: HUB_ROOT }\n"
+    )
+    choice = reviewer_for(root, load_skill(root / "arch"))
+    assert choice.sidecar_view is None
+    assert any("task skill" in p for p in choice.problems)
+
+
+def test_a_task_skill_is_not_told_to_set_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the flag a task skill would otherwise get the generic advice to add it — which leads
+    straight to a second refusal. The first message a person reads has to be the one that ends."""
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = _self_collecting(
+        tmp_path, step="task:\n  enabled: true\n  source: { env: HUB_ROOT }\n", flag=""
+    )
+    problems = reviewer_for(root, load_skill(root / "arch")).problems
+    assert any("task skill" in p for p in problems)
+    assert not any("self_collected: true" in p for p in problems)
+
+
+def test_the_ablation_is_refused_rather_than_faked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--no-sidecars` withholds what *Whetstone* injects, which here is nothing.
+
+    Left to run it would score the same instrument on the same inputs, call one an ablation, and —
+    the declaration being outside the digest — leave the two indistinguishable afterwards. That is
+    precisely the confusion the ablation exists to prevent.
+    """
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = _self_collecting(tmp_path)
+    choice = reviewer_for(root, load_skill(root / "arch"), sidecars=False)
+    assert choice.sidecar_view is None
+    assert any("--no-sidecars cannot ablate" in p for p in choice.problems)
+
+
+def test_self_collected_with_no_source_root_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """The failure this replaces was silence: the page said the skill read no local context, and
+    nothing anywhere said why."""
+    root = _self_collecting(tmp_path, step="agent:\n  enabled: true\n")
+    choice = reviewer_for(root, load_skill(root / "arch"))
+    assert choice.sidecar_view is None
+    assert any("no `context: source_root:`" in p for p in choice.problems)
+
+
+def test_self_collected_with_a_root_that_is_not_a_directory_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the program path, which has no root check of its own — the agent path would catch
+    this first, so testing only that would prove nothing about this branch."""
+    bad = tmp_path / "a-file"
+    bad.write_text("not a tree", encoding="utf-8")
+    monkeypatch.setenv("HUB_ROOT", str(bad))
+    root = _self_collecting(
+        tmp_path,
+        step='run: ["./review.sh"]\ncontext:\n  source_root: { env: HUB_ROOT }\n',
+    )
+    choice = reviewer_for(root, load_skill(root / "arch"))
+    assert choice.sidecar_view is None
+    assert any("is not a directory" in p for p in choice.problems)
+
+
+def test_self_collected_without_an_installed_collector_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For the built-in reviewer a missing copy is a warning — Whetstone scores with the canonical
+    collector regardless. Here it is the entire mechanism, so the flag describes a call that cannot
+    be made."""
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = _self_collecting(tmp_path, collector=False)
+    choice = reviewer_for(root, load_skill(root / "arch"))
+    assert choice.sidecar_view is None
+    assert any("no collector is installed" in p for p in choice.problems)
+
+
+def _plan_details(root: Path, skill_id: str = "arch") -> list[str]:
+    from whetstone.preflight import Plan, annotate_reviewer
+
+    skill = load_skill(root / skill_id)
+    plan = Plan(action="eval", backend="ollama", model="m", billing="local")
+    annotate_reviewer(plan, reviewer_for(root, skill), invocations=1, skill=skill)
+    return plan.details
+
+
+def test_the_cost_plan_names_who_does_the_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`agentic-reviewers.md` §7 asks the plan to name the egress a run will cause, and the built-in
+    wording names the wrong actor here: Whetstone resolves nothing, sends nothing, caps nothing.
+    The egress is still real — an operator deciding whether this repo should reach this backend is
+    owed which side causes it."""
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    details = " ".join(_plan_details(_self_collecting(tmp_path)))
+    assert "own reviewer reads" in details
+    assert "Whetstone resolves none of it" in details
+    assert "still leaves the machine" in details
+    # The built-in line describes a walk this run does not do.
+    assert "the paths in each diff and sent with it" not in details
+
+
+def test_the_built_in_plan_line_is_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = tmp_path / "skills"
+    _skill_folder(
+        root,
+        "arch",
+        frontmatter=f"sidecar:\n  role: {ROLE}\n",
+        step="context:\n  source_root: { env: HUB_ROOT }\n",
+    )
+    details = " ".join(_plan_details(root))
+    assert "resolved per case from the paths in each diff and sent with it" in details
+
+
+def test_the_flag_does_nothing_to_a_built_in_reviewer_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It answers "who collects?" for a skill where the answer is already "the harness". Setting it
+    must not divert that skill off the injecting path, which is the one the tier is measured on."""
+    monkeypatch.setenv("HUB_ROOT", str(_source(tmp_path)))
+    root = tmp_path / "skills"
+    _skill_folder(
+        root,
+        "arch",
+        frontmatter=f"sidecar:\n  role: {ROLE}\n  self_collected: true\n",
+        step="context:\n  source_root: { env: HUB_ROOT }\n",
+    )
+    choice = reviewer_for(root, load_skill(root / "arch"))
+    assert choice.sidecar is not None
+    assert choice.sidecar_view is None
+    assert choice.context is not None
+    assert DECLARATION_KEY in choice.context.hashable
 
 
 def test_context_on_a_plain_evaluate_step_with_no_role_is_still_refused(tmp_path: Path) -> None:

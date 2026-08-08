@@ -193,7 +193,13 @@ export function SkillDetail() {
               >
                 {data.sidecar.files} sidecar file(s)
               </button>{' '}
-              of local context are injected per changed path, from the folders each change touches.
+              {/* "injected" is the harness doing it. When the skill's own reviewer collects,
+                  Whetstone sends none of it, and saying otherwise here would be the same untruth
+                  the Sidecar tab was just corrected for — on the page that claims to show the exact
+                  prose the reviewer is given. */}
+              {data.sidecar.self_collected
+                ? 'of local context are read by its own reviewer, from the folders each change touches.'
+                : 'of local context are injected per changed path, from the folders each change touches.'}
             </p>
           )}
           {/* Above the prose rather than beside it: a skill is a folder, and once it is more than
@@ -204,11 +210,26 @@ export function SkillDetail() {
         </Tabs.Content>
 
         <Tabs.Content value="sidecar">
+          {/* Two intros, because the second sentence is the tier's central promise and it is only
+              true of host-resolved injection. A skill whose own reviewer collects gets neither the
+              injection nor the hash, and the panel below is careful about that — an intro above it
+              claiming otherwise would undo the care in the first line anyone reads. */}
           <TabIntro>
-            The per-directory notes this skill reads from beside the code it reviews — facts about
-            one folder that no rule here could state, injected by the harness from the paths a
-            change touches. Everything injected is hashed, so a gate cannot pass against context no
-            gate ever scored.
+            {data.sidecar?.self_collected ? (
+              <>
+                The per-directory notes this skill reads from beside the code it reviews — facts
+                about one folder that no rule here could state. This skill&apos;s own reviewer
+                collects them, so Whetstone neither resolves nor hashes them; what is below is the
+                same tree, read for you to inspect and maintain.
+              </>
+            ) : (
+              <>
+                The per-directory notes this skill reads from beside the code it reviews — facts
+                about one folder that no rule here could state, injected by the harness from the
+                paths a change touches. Everything injected is hashed, so a gate cannot pass against
+                context no gate ever scored.
+              </>
+            )}
           </TabIntro>
           <SidecarTab detail={data} skillId={skillId} />
         </Tabs.Content>
@@ -229,8 +250,8 @@ export function SkillDetail() {
             What this skill said about real changes nobody has labelled — its own output, not a
             score. Rule each finding correct or false and the ruling becomes an eval case: a
             confirmed one the skill must keep catching, a rejected one the gate refuses to let back
-            in. A place it stayed silent and should not have is a case too. This is the ground
-            truth the eval numbers are a proxy for; when the two disagree, believe this one.
+            in. A place it stayed silent and should not have is a case too. This is the ground truth
+            the eval numbers are a proxy for; when the two disagree, believe this one.
           </TabIntro>
           <SkillReviews skillId={skill.id} />
         </Tabs.Content>
@@ -359,8 +380,8 @@ export function SkillDetail() {
         <Tabs.Content value="health">
           <TabIntro>
             The state of affairs in one look: the latest score with its train/holdout split, what
-            the corpus is made of, cases ready to retire, the judge behind every number, and how
-            the skill is doing on live reviews — the ground truth the scores are a proxy for.
+            the corpus is made of, cases ready to retire, the judge behind every number, and how the
+            skill is doing on live reviews — the ground truth the scores are a proxy for.
           </TabIntro>
           <HealthPanel skillId={skill.id} />
         </Tabs.Content>
@@ -584,7 +605,10 @@ function ContradictionList({ skillId, pairs }: { skillId: string; pairs: Contrad
                   measured
                 </Badge>
               ) : (
-                <Badge tone="neutral" title="Flagged on wording alone — no run has scored them together yet">
+                <Badge
+                  tone="neutral"
+                  title="Flagged on wording alone — no run has scored them together yet"
+                >
                   wording only
                 </Badge>
               )}{' '}

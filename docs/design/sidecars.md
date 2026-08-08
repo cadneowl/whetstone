@@ -665,6 +665,16 @@ should say how many sidecars will be sent and from which repo.
   attaching the declaration to the digest there would say sidecars shaped a review they never
   touched — a worse lie than the one this design exists to stop telling. Such a reviewer calls
   `tools/collect_sidecars.py` itself.
+
+  **`self_collected: true` narrows that refusal without weakening it** (`factory._self_collected`).
+  The injection stays refused and the digest stays untouched; what the flag buys is the *view* — the
+  skill's page can scan, count and draw the `.agents/` files, because reading them changes no prompt
+  and no hash. It binds a `SidecarView`, deliberately not a `SidecarPlan`: no `loader()`, no
+  `provenance`, so it cannot reach `run_eval` or a run record by accident. Four things are refused
+  rather than shown, each of them otherwise silent — a task skill (no review path for a collector to
+  run at the start of), `--no-sidecars` (it would withhold nothing and record an ablation
+  indistinguishable from a normal run), a `source_root` that is absent or not a directory, and a
+  skill with no installed collector, for which the flag describes a call that cannot be made.
 - `src/whetstone/domain/run.py` — `_feed_context` for the `sidecar:` declaration; `CaseRun.sidecars`.
 - `src/whetstone/promote.py` — `CaseEdits.destination` + `excepts_rule_id`; the branch at :312;
   `PreparedCase.sidecar` as a **separate field** — *not* in `files`, which `commit_promotion`
