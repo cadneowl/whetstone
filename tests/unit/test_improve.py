@@ -1461,6 +1461,123 @@ def test_the_destinations_are_named_even_when_no_folder_keeps_notes_yet() -> Non
     assert "`payments`" in digest.render_sidecars()
 
 
+def test_an_improve_that_proposes_nothing_against_failures_says_so(tmp_path: Path) -> None:
+    """The reported defect, in one sentence: the scorer said every case failed and the improve
+    beside it said "no change" — in the success colour, with no cause.
+
+    Two screens describing one skill, one saying broken and one saying fine. An empty draft is only
+    good news when there was nothing to fix; given failures it is a dead end and has to read as one.
+    """
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body=RULES_WITH_ID)  # handed straight back, unchanged
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([_miss_with_notes("c1", [], path="payments/service.py")]),
+        client=FakeLLMClient(handler),
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
+    )
+
+    assert "proposed nothing" in result.stalled
+    assert "1 failing case" in result.stalled
+
+
+def test_a_stall_names_the_reviewer_when_it_opened_none_of_the_notes(tmp_path: Path) -> None:
+    """The one cause the harness can establish, and the one no guidance edit can fix.
+
+    `resolved_by: reviewer` with nothing opened is recorded on every case and was read by nothing
+    outside a single console line. Without it the reader is told to re-run an improve that will
+    keep proposing nothing, because the miss was never a guidance gap.
+    """
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body=RULES_WITH_ID)
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([_miss_with_notes("c1", [], observed=True, path="payments/service.py")]),
+        client=FakeLLMClient(handler),
+        sidecars=_reader({}, exists={"payments/.agents/context.md": NOTES}),
+    )
+
+    assert "the reviewer never opened payments/.agents/context.md" in result.stalled
+    assert "fix the reviewer's collection" in result.stalled
+
+
+def test_a_stall_does_not_blame_the_reviewer_when_it_opened_some_of_them(tmp_path: Path) -> None:
+    """A reviewer that read one folder's notes and not another's did not fail to collect. Blaming
+    it there sends the reader to fix a reviewer that is working, and buries the real answer, which
+    is that this run has no diagnosis beyond "it proposed nothing"."""
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body=RULES_WITH_ID)
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([
+            _miss_with_notes(
+                "c1", ["payments/.agents/context.md"], observed=True, path="payments/service.py"
+            )
+        ]),
+        client=FakeLLMClient(handler),
+        sidecars=_reader(
+            {"payments/.agents/context.md": NOTES}, exists={"payments/.agents/arch.md": NOTES}
+        ),
+    )
+
+    assert [n.seen_by_reviewer for n in result.digest.sidecars] == [True, False]
+    assert "never opened" not in result.stalled
+    assert "1 failing case" in result.stalled
+
+
+def test_a_run_that_routed_every_lesson_is_not_a_stall(tmp_path: Path) -> None:
+    """The best outcome this loop has arrives with an empty body. Calling it a dead end would put a
+    red line on the exact behaviour the last five changes were trying to produce."""
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body="", sidecar_claims=[_claim()])
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([_miss_with_notes("c1", [], path="payments/service.py")]),
+        client=FakeLLMClient(handler),
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
+    )
+
+    assert result.sidecar_patches and result.stalled == ""
+
+
+def test_a_run_with_no_failures_to_show_is_not_a_stall(tmp_path: Path) -> None:
+    """Nothing shown, nothing proposed, nothing wrong — and a warning here would teach the reader
+    to skip the line on the runs that matter."""
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body=RULES_WITH_ID)
+
+    result = propose(
+        _spec(tmp_path), _routed_skill(), None, client=FakeLLMClient(handler)
+    )
+
+    assert result.digest.clusters == [] and result.stalled == ""
+
+
+def test_a_refused_claim_is_not_a_stall(tmp_path: Path) -> None:
+    """It tried, the refusal is loud, and the reader has something concrete to act on. Silence is
+    the failure mode here, not a rejected attempt."""
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body=RULES_WITH_ID, sidecar_claims=[_claim(folder="nowhere")])
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([_miss_with_notes("c1", [], path="payments/service.py")]),
+        client=FakeLLMClient(handler),
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
+    )
+
+    assert result.rejected_claims and result.stalled == ""
+
+
 def _routed_run(tmp_path: Path, body: str, claims: list[ProposedClaim], path: str):
     """A whole `propose` over one deep failure, so the cross-checks that only run there are real.
 

@@ -146,7 +146,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const selected = selectionFrom(params.get('cases'), ids)
   const batchRun = params.get('run')
   const [draft, setDraft] = useState<Draft | null>(null)
-  const [notice, setNotice] = useState('')
+  // `bad` because one of the three things that lands here is a dead end, and the box was styled
+  // `border-good` for all of them — so "the drafter proposed no change" was rendered in the
+  // success colour, on the same screen as a scorer reporting every case failing.
+  const [notice, setNotice] = useState<{ text: string; bad?: boolean } | null>(null)
   const [instruction, setInstruction] = useState('')
   // The consolidating pass. Off by default and per-launch rather than a setting: an ordinary
   // improve is asked to fix named failures, and a list of rules nothing tests invites unrelated
@@ -245,10 +248,11 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
   const scored = (job: Job) => {
     const r = job.result as Record<string, unknown>
     patch({ run: String(r.run_id ?? '') || null })
-    setNotice(
-      `Scored: recall ${fmt(r.recall)} · fp ${fmt(r.fp_rate)}` +
+    setNotice({
+      text:
+        `Scored: recall ${fmt(r.recall)} · fp ${fmt(r.fp_rate)}` +
         (r.run_id ? ` — open the run to see each case.` : ''),
-    )
+    })
   }
 
   const applyDraft = () =>
@@ -277,7 +281,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       !disputes.length &&
       !rejected.length
     ) {
-      setNotice('The drafter proposed no change.')
+      // `stalled` says *why*, and says it in the words of whichever cause the harness could
+      // establish. The old text — "the drafter proposed no change" — was the defect: it reads as a
+      // clean bill of health, and it appeared beside a scorer reporting every case failing.
+      setNotice(emptyDraftNotice(r))
       return
     }
     setDraft({
@@ -390,9 +397,9 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
                     onClick={() =>
                       graduate.mutate(c.id, {
                         onSuccess: () =>
-                          setNotice(
-                            `Graduated ${c.id} into the eval corpus — re-gate before you commit.`,
-                          ),
+                          setNotice({
+                            text: `Graduated ${c.id} into the eval corpus — re-gate before you commit.`,
+                          }),
                       })
                     }
                     title="Move this case from promoted_cases/ into the eval corpus. Changes skill_hash, so a fresh gate is needed."
@@ -692,12 +699,47 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
         </div>
       </section>
 
-      {notice && (
-        <p className="rounded-lg border border-good/40 bg-good/5 px-3 py-2 text-sm break-words">
-          {notice}
-        </p>
-      )}
+      <Notice notice={notice} />
     </div>
+  )
+}
+
+export type NoticeText = { text: string; bad?: boolean } | null
+
+/**
+ * What to say when a draft came back with nothing in it.
+ *
+ * The server's `stalled` sentence when it has one — it names the cause, and for the one cause the
+ * harness can establish it also names the fix. The old text is the fallback and nothing more: on
+ * its own it read as a clean bill of health, which is how an operator came to have a scorer
+ * reporting every case failing and an improve beside it apparently content.
+ *
+ * Always `bad`. An empty draft is only good news when there was nothing to fix, and in that case
+ * this function is never called — `propose` returns no stall for a run it was shown no failures on.
+ */
+export function emptyDraftNotice(result: Record<string, unknown>): NoticeText {
+  return { text: String(result.stalled ?? '') || 'The drafter proposed no change.', bad: true }
+}
+
+/**
+ * The one-line outcome of the last action, in the colour that outcome deserves.
+ *
+ * Its own component, and exported, because the colour was the defect. Every notice rendered
+ * `border-good` — including "the drafter proposed no change", which is a dead end, shown in the
+ * success colour on the same screen as a scorer reporting every case failing. A reader scanning
+ * for red found none and concluded the improve was fine.
+ */
+export function Notice({ notice }: { notice: NoticeText }) {
+  if (!notice) return null
+  return (
+    <p
+      role={notice.bad ? 'alert' : undefined}
+      className={`rounded-lg border px-3 py-2 text-sm break-words ${
+        notice.bad ? 'border-bad/50 bg-bad/5 text-bad' : 'border-good/40 bg-good/5'
+      }`}
+    >
+      {notice.text}
+    </p>
   )
 }
 
