@@ -47,6 +47,7 @@ from whetstone.improve import (
     digest_for,
     propose,
     render_step_prompt,
+    sidecar_reader,
     would_paste_the_folder,
 )
 from whetstone.judge.spec import load_judge
@@ -1940,6 +1941,13 @@ def skills_improve(
         Path | None,
         typer.Option("--out", help="Write the proposed guidance BODY here (no frontmatter)"),
     ] = None,
+    sidecar_patches: Annotated[
+        Path | None,
+        typer.Option(
+            "--sidecar-patches",
+            help="Write claims routed to the code as .patch files here, for a source-repo PR",
+        ),
+    ] = None,
     stale_ok: Annotated[
         bool,
         typer.Option("--stale-ok", help="Improve from a run that scored different content anyway"),
@@ -1972,7 +1980,10 @@ def skills_improve(
         # `digest_for`, not `build_digest`: this printed a prompt whose `{{wiki}}` said "(no repo
         # context indexed for this skill)" for skills whose wiki the real run sends, because the
         # preview rebuilt the digest by hand and forgot the one argument that is not on it already.
-        digest = digest_for(spec, sk, record, instruction=instruction or "", distill=distill)
+        digest = digest_for(
+            spec, sk, record, instruction=instruction or "", distill=distill,
+            sidecars=sidecar_reader(skill.parent, sk, _store(runs_dir).root),
+        )
         typer.echo(
             render_step_prompt(spec, digest) if spec.prompt else digest.model_dump_json(indent=2)
         )
@@ -2033,6 +2044,7 @@ def skills_improve(
         result = propose(
             spec, sk, record, client=client, effort=effort,
             instruction=instruction or "", agent=agent, distill=distill,
+            sidecars=sidecar_reader(skill.parent, sk, _store(runs_dir).root),
         )
     except StepError as exc:
         typer.echo(str(exc), err=True)
@@ -2065,6 +2077,10 @@ def skills_improve(
         )
     if result.proposal.rationale:
         typer.echo(f"# rationale: {result.proposal.rationale}", err=True)
+    _file_disputes(result, sk, _store(runs_dir))
+    _report_routed(result)
+    if sidecar_patches is not None:
+        _write_patches(result, sidecar_patches)
 
     # Loudest thing this command prints, and deliberately. Every other footnote here is about
     # something a later step would have caught anyway — a bad case id fails the gate, a withheld
@@ -2192,6 +2208,102 @@ def _apply_proposal(
         f"--skill-path {staging.skill_path(config, skill_id)} "
         f"--base-ref {config.git.default_base} --candidate-ref {branch}{targeted}"
     )
+
+
+def _file_disputes(result: Any, skill: Skill, store: Any) -> None:
+    """Append the drafter's claim disputes to the ledger, and say what happened.
+
+    The ledger, never the source tree. §7: a skill that writes the notes it later reads is a closed
+    loop, so a dispute joins what the consuming runs and the maintainer sweep file, and a human
+    promotes the correction. `whetstone sidecars claims --disputed` is where it surfaces.
+
+    Reported even when nothing could be matched — a drafter that named three claims and quoted all
+    three inexactly is indistinguishable from one that found nothing wrong, and those call for
+    different next steps.
+    """
+    if not result.disputed and not result.unmatched_disputes:
+        return
+    if result.disputed:
+        from whetstone.sidecars.confirm import Ledger
+
+        try:
+            written = Ledger(store.root).record(result.disputed, skill_id=skill.id)
+        except OSError as exc:
+            typer.echo(f"# could not file {len(result.disputed)} claim dispute(s): {exc}", err=True)
+            return
+        for verdict in result.disputed:
+            typer.echo(f"# DISPUTES {verdict.path}: {verdict.claim[:80]}", err=True)
+        typer.echo(
+            f"# filed {written} claim dispute(s) — see `whetstone sidecars claims --disputed`. "
+            f"Nothing in the source tree was written.",
+            err=True,
+        )
+    for claim in result.unmatched_disputes:
+        typer.echo(
+            f"# dropped a dispute naming no claim in {claim.path or '(no path)'}: "
+            f"{claim.claim[:80]} — quoted inexactly, or a file this run never loaded",
+            err=True,
+        )
+
+
+def _write_patches(result: Any, directory: Path) -> None:
+    """Write each routed claim's diff to `<dir>/<folder>.patch`, for a PR on the *source* repo.
+
+    Into a directory the operator names, never into the source tree. Whetstone holds no write
+    credentials on a reviewed repository and this is the seam where that stays true: what comes out
+    is a file you can read, `git apply` yourself, and send to the folder's CODEOWNERS.
+
+    One file per claim rather than one combined diff — §6 delivers one sidecar per PR, because a
+    folder's owners should not have to accept another folder's claim to get their own.
+    """
+    if not result.sidecar_patches:
+        typer.echo("# no claims were routed to the code — no patches to write", err=True)
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    for index, patch in enumerate(result.sidecar_patches, start=1):
+        name = patch.folder.replace("/", "-") or "root"
+        path = directory / f"{index:02d}-{name}.patch"
+        path.write_text(patch.patch, encoding="utf-8")
+        typer.echo(f"# wrote {path}", err=True)
+
+
+def _report_routed(result: Any) -> None:
+    """Say which lessons went to a folder's notes instead of the guidance, and which were refused.
+
+    Loud, and on stderr with the rest of the accounting, because this is the one part of a draft
+    that is *not* in the diff below it: the guidance the command prints does not contain these
+    lessons, by design, and an operator who did not notice would conclude the drafter dropped them.
+
+    Printed, never applied. Delivery is a pull request the folder's owners accept (§6), so the
+    patch is here to be read and taken somewhere else.
+    """
+    for patch in result.sidecar_patches:
+        what = f"excepts {patch.excepts}" if patch.excepts else "local context"
+        typer.echo(f"# TO THE CODE, not the guidance — {patch.path} ({what})", err=True)
+        typer.echo(f"#   {patch.claim[:110]}", err=True)
+        if patch.because:
+            typer.echo(f"#   because: {patch.because[:110]}", err=True)
+    if result.sidecar_patches:
+        typer.echo(
+            f"# {len(result.sidecar_patches)} claim(s) belong beside the code and are NOT in the "
+            f"guidance below. Nothing was written — `--sidecar-patches <dir>` writes the diffs out "
+            f"for a pull request against the source repo.",
+            err=True,
+        )
+    for claim in result.rejected_claims:
+        typer.echo(
+            f"# dropped a claim for {claim.folder or '(no folder)'}: {claim.reason}", err=True
+        )
+    # Loud, and last, because it is the one finding here that is about the guidance the operator is
+    # to accept rather than about something filed elsewhere. §6's named rot: a rule softened to fit
+    # one folder is weaker in every folder, including the ones it was working in.
+    for folder in result.misrouted:
+        typer.echo(
+            f"# MISROUTED — the new guidance names {folder!r}, which the old one did not. A "
+            f"central rule that has to name a folder to be correct is a fact about that folder: "
+            f"it belongs in {folder}/.agents/, not in a rule that applies everywhere.",
+            err=True,
+        )
 
 
 def _worth_improving(record: RunRecord, instruction: str | None) -> bool:

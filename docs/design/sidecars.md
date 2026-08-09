@@ -384,6 +384,29 @@ paths, deterministically. That is exactly the part that can and should be hashed
 Triage today has one destination; the judgment being made has three. This is the change that makes
 the tier fillable.
 
+**The improve step makes the same three-way choice**, from a failure rather than from a human's
+signal, and for the same reason. Until it could, every lesson became a central rule — including
+the ones true in exactly one folder — and the rot below happened by the shortest path: the drafter
+softened the rule. Measured on a real run before the routing existed: *"R1 was too rigid and did
+not account for batch jobs operating on their own tables"*, with nothing filed anywhere. The
+guidance got weaker in every folder to fix one.
+
+So a drafter returns `sidecar_claims` alongside its guidance, one home per lesson, and the split is
+stated in the prompt as a test it can apply: **would this sentence be false, or meaningless, in
+another folder?** If yes it is a claim; if no it is guidance. Biased toward the guidance on the
+tie, because a rule is gated by the corpus and a claim is not.
+
+Four checks refuse a claim, each closing a way knowledge lands somewhere it does not belong: a
+folder none of the shown failures touched (the analogue of `_check_region`, and the door §7's
+*"generating sidecars from source"* would otherwise come back through), an empty claim, an
+`Excepts` naming a rule nothing declares, and prose that argues with a rule without excepting it.
+
+And one warning that is not a refusal: `misrouted` reports a folder the new guidance names that the
+old one did not. A central rule that has to name a folder to be correct is a fact about that folder
+written in the one place that applies everywhere — decidable, unlike "is this rule too specific",
+and a warning rather than a refusal because naming a path is occasionally right and a drafter that
+cannot be overruled by a person is worse than one that is sometimes wrong out loud.
+
 | destination | writes | gated by |
 |---|---|---|
 | **rule** | central skill + `meta.yaml` provenance | eval: catches without regressing |
@@ -484,6 +507,25 @@ single detail most easily lost, and losing it turns the loop into theatre.
 **Contradictions become triage candidates.** The maintainer stamps `status` and files; a human
 promotes the edit. Confirmation is automatic, correction is gated.
 
+**A fourth voice: the improve step.** A skill with sidecars keeps rules in two places, and until
+the drafter could see both it could only act on one. Shown a failure caused by a stale claim beside
+the code, it did the only thing available to it — hardened a rule to compensate — and the claim
+survived every rewrite made around it, so the guidance grew a ring of scar tissue around rot
+nobody was fixing.
+
+So the digest carries the notes the failing reviewers had, and the drafter may return
+`disputed_claims`. That is **filed, never written**: §7 forbids a skill maintaining the sidecars it
+later reads, so a dispute joins what the consuming runs and the sweep file and a human promotes the
+correction. The claim must be quoted as it appears in the file, matched by the same
+`confirm.verdicts_from` the reviewer's own confirmations go through — a ledger keyed on a
+paraphrase cannot be matched back to anything. What fails to match is reported, not dropped
+silently: a drafter that named four claims and quoted all four inexactly must not read as one that
+found nothing wrong.
+
+Both `whetstone sidecars verify` and the console's **Verify claims** button run the sweep. The
+console route matters more than it looks: the crawl is the only loop that reaches cold code, and
+while it existed as a CLI command alone, a console-driven deployment ran it never.
+
 **Stamp on change, not on check.** A claim edit commits; a routine "checked, unchanged" goes to
 Whetstone's ledger. `git blame` then answers when the knowledge last *moved*, and the console
 answers when it was last *verified*.
@@ -492,6 +534,13 @@ answers when it was last *verified*.
 exists, malformed frontmatter, a claim with no `src:`, a sidecar over `max_file_bytes` (§3.2 — it
 has become the central file this design exists to break up), a bot commit touching claims. 100%
 decidable, should block CI.
+
+It is also **drawn on the graph** (§16), joined at view time exactly as the ledger verdicts are and
+for the same reason: half these codes are facts about the *tree* rather than the bytes of the
+notes, so caching one would serve a stale answer for as long as the sidecar happened not to move —
+precisely the folders nobody is touching. A flagged node carries a marker and its reason; the count
+is a button that queries `issue:true`, because above sixty nodes "which of these is broken" is not
+a question anyone can answer by looking, and a number with no way to act on it is worse than none.
 
 ---
 
@@ -588,13 +637,37 @@ by that: *a byproduct with no marginal cost* is the intent, not the measurement.
 
 ## 10. Records
 
-`CaseRun` gains `sidecars: {paths: [...], dropped: [...], context_hash: str}` — which files were
-loaded, which the budget dropped, and the identity of the set. Without this, "the reviewer never
-loaded it" and "the reviewer read it and disagreed" are indistinguishable, and the whole maintenance
-loop loses its input.
+`CaseRun` gains `sidecars: {resolved_by, paths: [...], dropped: [...], context_hash: str}` — who
+produced the account, which files were loaded, which the budget dropped, and the identity of the
+set. Without this, "the reviewer never loaded it" and "the reviewer read it and disagreed" are
+indistinguishable, and the whole maintenance loop loses its input.
 
 The drill-down shows the loaded set per case, so a surprising miss can be checked against what the
 reviewer actually had.
+
+### 10.1 Two accounts, and why they are not interchangeable
+
+`resolved_by` says which of two things this record is.
+
+**`harness`** — the built-in reviewer. The host resolved the set before the call, so `paths` is
+exhaustive, `dropped` names what the caps withheld, and `context_hash` identifies the whole of it.
+
+**`reviewer`** — an agent or a `run:` program, which collects its own (§3.5). Then this is an
+*observation*: the `.agents/` files the reviewer was seen to open, recorded by watching its
+`read_file` calls. It is weaker in three ways no consumer may forget — `context_hash` is empty
+(nothing was assembled here to hash), `dropped` is empty (the caps were the collector's), and
+`paths` is a **lower bound**, since a reviewer that shells out reads nothing we can see.
+
+Recording the weaker account rather than leaving the field absent, because absence was the worse
+answer: an agent-reviewed deployment had no record anywhere of whether local context reached the
+model, which is the one question a missed finding turns on. Both are surfaced with their
+provenance attached — the improve digest captions an observed set *"it may have read more"* rather
+than presenting it as complete, because a drafter told a set is exhaustive will conclude that a
+claim it cannot find does not exist.
+
+Only `read_file` counts. `list_dir` hands over no claim text, and `grep` prunes dot-directories so
+it cannot reach an `.agents/` folder at all — recording either would make one path list mean two
+different things.
 
 ---
 

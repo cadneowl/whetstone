@@ -141,11 +141,17 @@ def _sidecars_of(reviewer: Reviewer) -> CaseSidecars | None:
     resolved set, they are *not* the same across `k` trials — a model asked the same question three
     times can answer differently — so this records the last one rather than claiming to summarise
     them. The ledger is where a claim's history accumulates; a run record is a snapshot.
+
+    Two reviewers fill this, and `resolved_by` is how a reader tells their accounts apart — the
+    built-in one reports the set it was handed, an agent reports the files it was seen to open.
+    Defaulted here rather than required, because the shape predates the distinction and a
+    reviewer that does not state one is the built-in kind by construction.
     """
     resolved = getattr(reviewer, "last_sidecars", None)
     if not isinstance(resolved, dict):
         return None
     return CaseSidecars(
+        resolved_by="reviewer" if resolved.get("resolved_by") == "reviewer" else "harness",
         paths=[str(f["path"]) for f in resolved.get("files") or []],
         dropped=[
             DroppedSidecar(path=str(d["path"]), reason=str(d["reason"]))

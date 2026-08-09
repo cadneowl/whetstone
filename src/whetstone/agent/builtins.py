@@ -19,7 +19,7 @@ sorted, because an agent whose inputs vary with filesystem ordering makes a gate
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
@@ -137,6 +137,16 @@ class BuiltinTools:
 
     skill: Skill
     root: Path | None = None
+    # Source files this instance handed over, in call order and deduplicated — what the agent was
+    # actually given, as opposed to what it asked for. Appended by `_read` on the success path
+    # only, because that is the one function that can tell a delivered file from `No such file`,
+    # which comes back as an ordinary non-error result. A caller inferring that from the content
+    # would be reimplementing this method's error strings.
+    #
+    # `read_file` alone. `list_dir` delivers no file content, and `grep` prunes dot-directories
+    # (see `_grep`) so it cannot reach an `.agents/` folder at all — recording either would make
+    # "was given this file" mean two things. One instance serves one review, so this is per case.
+    reads: list[str] = field(default_factory=list)
 
     def specs(self) -> list[ToolSpec]:
         return [*skill_tools(self.skill), *(source_tools() if self.root else [])]
@@ -220,6 +230,8 @@ class BuiltinTools:
         body = "\n".join(f"{first + i} | {line}" for i, line in enumerate(chosen))
         if len(body) > MAX_FILE_BYTES:
             body = body[:MAX_FILE_BYTES] + f"\n… truncated at {MAX_FILE_BYTES} bytes"
+        if rel not in self.reads:
+            self.reads.append(rel)
         return body or "(empty)"
 
     def _list(self, rel: str) -> str:

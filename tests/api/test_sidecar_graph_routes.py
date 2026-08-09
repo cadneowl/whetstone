@@ -346,3 +346,131 @@ def test_without_the_flag_the_same_skill_is_still_refused(
     body = get(client, self_collecting_skill)
     assert "collects its own context" in body["problem"]
     assert body["result"]["nodes"] == []
+
+
+# --- the floor's findings, on the graph route ----------------------------------------
+#
+# `whetstone sidecars check` decided all of this and told CI. On the one screen that is a map of
+# the tier, an oversized `context.md` — which retrieval silently drops, leaving the folder reviewed
+# with no local context at all — drew exactly like a healthy one.
+
+
+def test_a_broken_note_arrives_flagged(
+    client: TestClient, sidecar_skill: str, source: Path
+) -> None:
+    (source / "batch" / ".agents" / "arch-review.md").write_text(
+        "---\nrole: arch-review\nstatus: confirmed\n---\n\n"
+        "- Excepts R1: batch reads whole windows.\n",  # no <!-- src --> : uncited
+        encoding="utf-8",
+    )
+    body = get(client, sidecar_skill)
+    flagged = [n for n in body["result"]["nodes"] if n["issues"]]
+    assert flagged, "the floor found a defect and the graph said nothing"
+    claim = next(n for n in flagged if n["kind"] == "claim")
+    assert claim["issues"] == ["uncited"]
+    assert claim["issue_messages"], "the code without the reason is a lookup, not a report"
+
+
+def test_the_count_is_filterable(client: TestClient, sidecar_skill: str, source: Path) -> None:
+    """A badge nobody can act on is worse than no badge: on 78 nodes "which of these" is not a
+    question you can answer by looking."""
+    (source / "payments" / ".agents" / "context.md").write_text(
+        "---\nstatus: confirmed\n---\n\n- `record()` writes the ledger.\n",
+        encoding="utf-8",
+    )
+    body = get(client, sidecar_skill)
+    assert body["counts"]["problems"] > 0
+
+    only = get(client, sidecar_skill, q="issue:true", hops=0)
+    assert only["result"]["matched"]
+    shown = {n["id"]: n for n in only["result"]["nodes"]}
+    assert all(shown[i]["issues"] for i in only["result"]["matched"])
+
+
+def test_a_clean_tree_is_flagged_with_nothing(client: TestClient, sidecar_skill: str) -> None:
+    """The control. A map that reads as entirely rotten is as useless as one that reads as fine."""
+    body = get(client, sidecar_skill)
+    assert [n["id"] for n in body["result"]["nodes"] if n["issues"]] == []
+
+
+def test_a_defect_the_notes_cannot_see_still_shows(
+    client: TestClient, sidecar_skill: str, source: Path
+) -> None:
+    """Joined at view time, never cached. Delete the file a section names and the sidecar is
+    untouched, its stamps match, and a cached answer would go on drawing the folder as healthy —
+    hiding exactly the rot this is for."""
+    (source / "payments" / ".agents" / "context.md").write_text(
+        "---\nstatus: confirmed\n---\n\n## service.py\n\n"
+        "- It is a service.\n  <!-- src: HUB-1#r1 -->\n",
+        encoding="utf-8",
+    )
+    assert get(client, sidecar_skill)["counts"].get("problems", 0) == 0
+
+    (source / "payments" / "service.py").unlink()  # the file goes; the notes do not
+    body = get(client, sidecar_skill)
+    folder = next(n for n in body["result"]["nodes"] if n["id"] == "folder:payments")
+    assert "orphan_section" in folder["issues"]
+
+
+# --- the maintainer sweep, from the console ------------------------------------------
+#
+# The third maintenance loop (§8), and the only one that reaches code nobody is touching. It
+# existed only as `whetstone sidecars verify`, so a console-driven deployment ran it never.
+
+
+def test_the_sweep_plans_two_calls_per_folder(client: TestClient, sidecar_skill: str) -> None:
+    response = client.post("/api/jobs/sidecar-sweep/plan", json={"skill_id": sidecar_skill})
+    assert response.status_code == 200, response.text
+    plan = response.json()
+    assert plan["action"] == "sidecar sweep"
+    assert plan["estimate"]["calls"] == 4, "two folders keep notes, two calls each"
+    assert any("blind" in detail for detail in plan["details"])
+    assert any("nothing is written back" in detail for detail in plan["details"])
+
+
+def test_the_crawl_is_budgeted(client: TestClient, sidecar_skill: str) -> None:
+    """Its work list is a whole repository, unlike every other job here whose list is a corpus."""
+    plan = client.post(
+        "/api/jobs/sidecar-sweep/plan", json={"skill_id": sidecar_skill, "limit": 1}
+    ).json()
+    assert plan["estimate"]["calls"] == 2
+
+
+def test_the_post_merge_sweep_takes_the_folders_a_merge_touched(
+    client: TestClient, sidecar_skill: str
+) -> None:
+    plan = client.post(
+        "/api/jobs/sidecar-sweep/plan",
+        json={"skill_id": sidecar_skill, "folders": ["payments"]},
+    ).json()
+    assert plan["estimate"]["calls"] == 2
+
+
+def test_a_skill_with_no_role_is_refused_at_the_plan(client: TestClient) -> None:
+    """Before the spend, like every other refusal in this router."""
+    response = client.post("/api/jobs/sidecar-sweep/plan", json={"skill_id": "rust-errors"})
+    assert response.status_code == 422
+    assert "declares no `sidecar:` block" in response.text
+
+
+def test_an_unresolvable_tree_is_refused_rather_than_swept(
+    client: TestClient, sidecar_skill: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ARCH_SOURCE", str(Path("nowhere") / "at" / "all"))
+    response = client.post("/api/jobs/sidecar-sweep/plan", json={"skill_id": sidecar_skill})
+    assert response.status_code == 422
+
+
+def test_a_tree_with_no_notes_warns_instead_of_planning_a_spend(
+    client: TestClient, sidecar_skill: str, source: Path
+) -> None:
+    """Nothing to verify is a normal state — absence is normal for this whole tier — so it is a
+    warning on the plan rather than an error, and the estimate is honestly zero."""
+    for folder in ("payments", "batch"):
+        for file in (source / folder / ".agents").glob("*.md"):
+            file.unlink()
+    plan = client.post(
+        "/api/jobs/sidecar-sweep/plan", json={"skill_id": sidecar_skill}
+    ).json()
+    assert plan["estimate"]["calls"] == 0
+    assert any("nothing to verify" in w for w in plan["warnings"])

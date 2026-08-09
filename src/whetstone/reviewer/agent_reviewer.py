@@ -17,7 +17,8 @@ what gets replaced — not the engine.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 from whetstone.agent.builtins import BuiltinTools
 from whetstone.agent.loop import AgentTrace, run_agent
@@ -30,6 +31,7 @@ from whetstone.domain.skill import Skill
 from whetstone.llm.tools import ToolCall, ToolClient, ToolResult, ToolSpec
 from whetstone.reviewer.base import ReviewerProvenance
 from whetstone.reviewer.llm_reviewer import number_diff
+from whetstone.sidecars.collect import AGENTS_DIR
 
 SUBMIT = "submit_findings"
 
@@ -97,6 +99,9 @@ class AgentReviewer(SkillAgent):
         self._redacted = dict(redacted or {})
         self._digest = context_digest
         self.last_trace: AgentTrace | None = None
+        # The `.agents/` files the last review was seen to open, in the shape `harness._sidecars_of`
+        # reads. Same contract as `last_trace`: written by `review`, read immediately after it.
+        self.last_sidecars: dict[str, Any] | None = None
 
     @property
     def provenance(self) -> ReviewerProvenance:
@@ -112,7 +117,6 @@ class AgentReviewer(SkillAgent):
             *(skill_tools.specs() if skill_tools else []),
             _SUBMIT_TOOL,
         ]
-
         def dispatch(call: ToolCall) -> ToolResult:
             if builtins.handles(call.name):
                 return builtins.dispatch(call)
@@ -132,6 +136,20 @@ class AgentReviewer(SkillAgent):
         )
         self.note_trace(trace)
         self.last_trace = trace
+        # Only for a skill that declares a role. Without that guard every agent-reviewed skill
+        # grows a sidecars block reading "opened nothing", which is not the same fact and would
+        # collapse `CaseRun.sidecars`'s distinction between "read nothing" and "never asked to".
+        #
+        # A fresh `BuiltinTools` per review means `reads` is this case's, not the run's — the same
+        # reason `last_trace` is safe to read here.
+        self.last_sidecars = (
+            None
+            if skill.sidecar.is_empty()
+            else {
+                "resolved_by": "reviewer",
+                "files": [{"path": p} for p in builtins.reads if _is_sidecar(p)],
+            }
+        )
         return _findings(skill.id, answer)
 
     def _source_note(self) -> str:
@@ -140,6 +158,15 @@ class AgentReviewer(SkillAgent):
             "with `read_file`, `list_dir` and `grep`. Paths are relative to its root. Use it "
             "when the change alone does not tell you whether something is a problem."
         )
+
+
+def _is_sidecar(path: str) -> bool:
+    """Whether a delivered source file sits inside an `.agents/` directory.
+
+    Not filtered by role. The reviewer chooses its own reads, so an `arch` skill that opens
+    `qa.md` has done something worth seeing in the record rather than something to quietly drop.
+    """
+    return AGENTS_DIR in PurePosixPath(path.replace("\\", "/")).parts
 
 
 def _findings(skill_id: str, answer: dict[str, object]) -> list[Finding]:

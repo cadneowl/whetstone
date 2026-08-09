@@ -643,3 +643,570 @@ def test_propose_itself_accepts_the_distill_flag(tmp_path: Path) -> None:
     )
     assert [rule.rule_id for rule in result.digest.untested_rules] == ["R1", "R2"]
     assert "Rules with nothing testing them" in seen["prompt"]
+
+
+# --- local notes beside the code ---------------------------------------------------
+#
+# A skill with sidecars keeps rules in two places: the guidance, which improve rewrites, and the
+# notes next to the code, which it must not (§7). The drafter was shown only the first, so a
+# failure caused by a stale claim read as a wording problem — it hardened a rule to compensate,
+# the claim survived, and the same failure came back with the guidance one rule heavier.
+
+from whetstone.domain.run import CaseSidecars  # noqa: E402
+from whetstone.domain.skill import SidecarSpec  # noqa: E402
+from whetstone.improve import (  # noqa: E402
+    DisputedClaim,
+    SidecarNote,
+    disputed_verdicts,
+    sidecar_reader,
+)
+
+CLAIM = "Retries are handled by the gateway, not here."
+NOTES = f"---\nstatus: confirmed\n---\n\n- {CLAIM}\n  <!-- src: HUB-9001#r1 -->\n"
+
+
+def _miss_with_notes(
+    case_id: str, paths: list[str], *, observed: bool = False, path: str = "src/a.rs"
+) -> CaseRun:
+    run = _miss(case_id, path)
+    run.sidecars = CaseSidecars(paths=paths, resolved_by="reviewer" if observed else "harness")
+    return run
+
+
+def _reader(notes: dict[str, str]):
+    return lambda paths: [SidecarNote(path=p, text=notes[p]) for p in paths if p in notes]
+
+
+def _digest_with_notes(observed: bool = False):
+    return build_digest(
+        _skill([_case("c1")]),
+        _record([_miss_with_notes("c1", ["app/.agents/context.md"], observed=observed)]),
+        FailureInputs(),
+        sidecars=_reader({"app/.agents/context.md": NOTES}),
+    )
+
+
+def test_the_notes_the_failing_reviewer_had_reach_the_drafter() -> None:
+    """The gap this closes. Without them a stale claim beside the code is invisible, and the only
+    thing the drafter can act on is the guidance."""
+    digest = _digest_with_notes()
+    assert [n.path for n in digest.sidecars] == ["app/.agents/context.md"]
+    assert CLAIM in digest.prompt_values()["sidecars"]
+
+
+def test_the_drafter_is_told_not_to_rewrite_them() -> None:
+    """The instruction is the safeguard, not decoration: a drafter handed a wrong claim and no way
+    to report it writes a rule that compensates, which is the outcome this exists to prevent."""
+    text = _digest_with_notes().render_sidecars()
+    assert "not yours to rewrite" in text
+    assert "disputed_claims" in text
+
+
+def test_an_observed_set_says_so_rather_than_claiming_completeness() -> None:
+    """An agent collects its own notes, so the record is what it was seen to read. Presenting that
+    as the complete set would let a drafter conclude a claim it cannot find does not exist."""
+    assert "complete set the reviewer was given" in _digest_with_notes().render_sidecars()
+    assert "may have read more" in _digest_with_notes(observed=True).render_sidecars()
+
+
+def test_one_folder_serving_many_failures_is_pasted_once() -> None:
+    """Clustering exists to keep the prompt bounded; repeating a folder's notes per failure would
+    spend the budget it just saved."""
+    cases = [_case(f"c{i}") for i in range(4)]
+    runs = [_miss_with_notes(f"c{i}", ["app/.agents/context.md"]) for i in range(4)]
+    digest = build_digest(
+        _skill(cases),
+        _record(runs),
+        FailureInputs(),
+        sidecars=_reader({"app/.agents/context.md": NOTES}),
+    )
+    assert digest.prompt_values()["sidecars"].count(CLAIM) == 1
+
+
+def test_notes_are_read_only_for_failures_that_survive_clustering() -> None:
+    """`shown_cases` is what the drafter reads. Notes for a failure folded into "(and N more like
+    it)" reach nobody and would be pure prompt cost."""
+    asked: list[list[str]] = []
+
+    def reader(paths):
+        asked.append(list(paths))
+        return []
+
+    cases = [_case("c1"), _case("z9", "src/z.rs")]
+    runs = [
+        _miss_with_notes("c1", ["app/.agents/context.md"]),
+        _miss_with_notes("z9", ["cut/.agents/context.md"]),
+    ]
+    runs[0].trials[0].findings = [
+        Finding(skill_id="s", path="src/a.rs", line=2, message="m", rule_id="R1")
+    ]
+    runs[1].trials[0].findings = [
+        Finding(skill_id="s", path="src/z.rs", line=2, message="m", rule_id="R2")
+    ]
+    build_digest(_skill(cases), _record(runs), FailureInputs(max=1), sidecars=reader)
+    assert asked == [["app/.agents/context.md"]], "the cut cluster's notes were read anyway"
+
+
+def test_a_skill_with_no_notes_renders_an_honest_filling() -> None:
+    """`render_template` is strict about names, so a template that says `{{sidecars}}` has to
+    render for a skill that keeps none."""
+    digest = build_digest(_skill([_case("c1")]), None, FailureInputs())
+    assert digest.prompt_values()["sidecars"] == "This skill reads no local notes."
+
+
+def test_no_reader_for_a_skill_that_declares_no_role(tmp_path: Path) -> None:
+    """None rather than a reader returning nothing, so the appendix stays absent entirely for the
+    skills this feature is not about."""
+    assert sidecar_reader(tmp_path, _skill([]), None) is None
+
+
+def test_no_reader_when_the_role_binds_to_no_tree(tmp_path: Path) -> None:
+    """A declared role with nowhere to read it from is not a reader that returns empty notes — the
+    drafter would then be told the folder keeps none, which is a different and wrong fact."""
+    skill = Skill(id="s", body="b", sidecar=SidecarSpec(role="arch"))
+    assert sidecar_reader(tmp_path, skill, None) is None
+
+
+# --- disputing a claim instead of compensating for one -------------------------------
+
+
+def test_a_dispute_is_matched_back_to_the_claim_as_written() -> None:
+    proposal = GuidanceProposal(
+        body="b",
+        disputed_claims=[
+            DisputedClaim(path="app/.agents/context.md", claim=CLAIM, evidence="svc.py:9 retries")
+        ],
+    )
+    filed, unmatched = disputed_verdicts(proposal, _digest_with_notes())
+    assert unmatched == []
+    assert [(v.path, v.claim, v.status) for v in filed] == [
+        ("app/.agents/context.md", CLAIM, "contradicted")
+    ]
+
+
+def test_an_invented_claim_is_reported_not_filed() -> None:
+    """A ledger keyed on a model's paraphrase cannot be matched back to anything, and one keyed on
+    invented text is worse than no ledger."""
+    proposal = GuidanceProposal(
+        body="b",
+        disputed_claims=[
+            DisputedClaim(path="app/.agents/context.md", claim="something nobody ever wrote here"),
+            DisputedClaim(path="nowhere/.agents/context.md", claim=CLAIM),
+        ],
+    )
+    filed, unmatched = disputed_verdicts(proposal, _digest_with_notes())
+    assert filed == []
+    assert len(unmatched) == 2, "both dropped, and both reported rather than silently lost"
+
+
+def test_the_drafter_is_offered_the_dispute_route(tmp_path: Path) -> None:
+    """End to end through `propose`: the system prompt offers it, the notes reach the user prompt,
+    and what comes back is filed rather than written."""
+    seen: dict[str, str] = {}
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        seen["system"] = system
+        seen["prompt"] = user
+        return GuidanceProposal(
+            body="new rules",
+            disputed_claims=[DisputedClaim(path="app/.agents/context.md", claim=CLAIM)],
+        )
+
+    result = propose(
+        _spec(tmp_path),
+        _skill([_case("c1")]),
+        _record([_miss_with_notes("c1", ["app/.agents/context.md"])]),
+        client=FakeLLMClient(handler),
+        sidecars=_reader({"app/.agents/context.md": NOTES}),
+    )
+    assert "disputed_claims" in seen["system"]
+    assert CLAIM in seen["prompt"], "the appendix carried the notes into the prompt"
+    assert [v.claim for v in result.disputed] == [CLAIM]
+    assert result.unmatched_disputes == []
+
+
+def test_a_dispute_carries_nothing_that_could_rewrite_the_file() -> None:
+    """§7 is the constraint: a skill that writes the notes it later reads is a closed loop, and its
+    confirmation is the same inference run twice. A verdict is for the ledger, and structurally
+    cannot be anything else."""
+    filed, _ = disputed_verdicts(
+        GuidanceProposal(
+            body="b",
+            disputed_claims=[DisputedClaim(path="app/.agents/context.md", claim=CLAIM)],
+        ),
+        _digest_with_notes(),
+    )
+    assert not hasattr(filed[0], "text")
+    assert not hasattr(filed[0], "replacement")
+
+
+# --- where a lesson goes ---------------------------------------------------------------
+#
+# A skill with sidecars has two places a lesson can live, and the drafter had only one. Every
+# lesson became a central rule — including the ones true in exactly one folder — which is how a
+# rule set rots: a fact about `payments/` is written as a rule about everything, it is wrong
+# somewhere else within a month, and it gets softened until it catches nothing anywhere.
+#
+# §6 already gave triage this choice (rule / context / exception). These give it to improve.
+
+from whetstone.improve import (  # noqa: E402
+    ROUTING,
+    ProposedClaim,
+    sidecar_patches,
+)
+
+RULES_WITH_ID = "# S\n\n- **R1 — no direct database access outside the repository layer.**\n"
+
+
+def _routed_skill(cases: list[EvalCase] | None = None) -> Skill:
+    from whetstone.domain.skill import SidecarSpec
+
+    return Skill(
+        id="s",
+        body=RULES_WITH_ID,
+        eval_cases=cases or [],
+        sidecar=SidecarSpec(role="arch"),
+    )
+
+
+def _routed_digest(path: str = "payments/service.py"):
+    """A digest whose one shown failure is in `payments/` — which is what makes that folder a
+    legal destination for a claim, and every other folder an illegal one."""
+    return build_digest(
+        _skill([_case("c1", path)]),
+        _record([_miss_with_notes("c1", ["payments/.agents/context.md"], path=path)]),
+        FailureInputs(),
+        sidecars=_reader({"payments/.agents/context.md": NOTES}),
+    )
+
+
+def _claim(**over) -> ProposedClaim:
+    base = {
+        "folder": "payments",
+        "claim": "Requests here are authenticated by the gateway; handlers do not verify tokens.",
+        "because": "true of this folder only — elsewhere the handler is the boundary",
+    }
+    return ProposedClaim(**{**base, **over})
+
+
+def test_a_local_fact_becomes_a_patch_against_the_folders_notes() -> None:
+    """The whole point. This sentence is a fact about one folder; written as a central rule it
+    would make the skill wrong everywhere the gateway is not in front."""
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim()])
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert rejected == []
+    (patch,) = patches
+    assert patch.path == "payments/.agents/context.md"
+    assert patch.folder == "payments"
+    assert "gateway" in patch.content
+    assert patch.patch.startswith("diff --git a/payments/.agents/context.md")
+
+
+def test_an_exception_goes_to_the_role_file_and_names_the_rule() -> None:
+    """`context.md` is what every role reads; an exception belongs to the role whose rule it
+    narrows. The same split `promote.DESTINATION_FILE` makes on the triage path."""
+    proposal = GuidanceProposal(
+        body="b",
+        sidecar_claims=[
+            _claim(claim="this package is a batch job, not a request path", excepts="R1")
+        ],
+    )
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert rejected == []
+    assert patches[0].path == "payments/.agents/arch.md"
+    assert "Excepts R1" in patches[0].content
+
+
+def test_nothing_is_written_anywhere(tmp_path: Path) -> None:
+    """§7, and the reason this returns text: Whetstone holds no write credentials on a reviewed
+    repository, and delivery is a pull request its owners accept."""
+    before = {p for p in tmp_path.rglob("*")}
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim()])
+    patches, _ = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert patches and {p for p in tmp_path.rglob("*")} == before
+
+
+def test_a_claim_about_code_the_run_never_saw_is_refused() -> None:
+    """The analogue of `_check_region` on the triage path. Without it a drafter can file knowledge
+    about a folder it was shown nothing from — which is §7's "generating sidecars from source"
+    arriving by another door: confident restatement, filed by path, cited forever."""
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(folder="billing")])
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert patches == []
+    assert "no failure shown to the drafter is in 'billing'" in rejected[0].reason
+    assert "payments" in rejected[0].reason, "the message names where it could have filed"
+
+
+def test_a_claim_that_argues_with_a_rule_without_excepting_it_is_refused() -> None:
+    """§7: a sidecar may not negate a central rule except through the `Excepts Rn` form. An
+    exception is countable — three folders excepting R1 is the signal R1 wants rewriting — and
+    prose that quietly contradicts it is the injection surface this tier is most exposed to."""
+    proposal = GuidanceProposal(
+        body="b", sidecar_claims=[_claim(claim="R1 does not really apply to code in this folder")]
+    )
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert patches == []
+    assert "without excepting it" in rejected[0].reason
+    assert "Excepts R1" in rejected[0].reason, "the message names the form that would be allowed"
+
+
+def test_excepting_a_rule_that_does_not_exist_is_refused() -> None:
+    """An exception against a rule nothing declares can never be counted, and counting is the only
+    thing the form is for."""
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(excepts="R9")])
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert patches == []
+    assert "not a rule this skill declares" in rejected[0].reason
+
+
+def test_an_empty_claim_is_refused() -> None:
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(claim="   ")])
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert patches == []
+    assert rejected[0].reason == "the claim is empty"
+
+
+def test_a_refused_claim_is_reported_rather_than_dropped() -> None:
+    """A drafter whose four claims were all refused must not read as one that decided everything
+    belonged in the guidance — those call for opposite next steps."""
+    proposal = GuidanceProposal(
+        body="b",
+        sidecar_claims=[_claim(folder="nowhere"), _claim(excepts="R9"), _claim()],
+    )
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert len(patches) == 1
+    assert len(rejected) == 2
+
+
+def test_a_claim_added_to_an_existing_note_patches_that_file() -> None:
+    """`with_claim` inserts into the real file, so the patch applies. Inventing a new file would
+    produce a diff that conflicts with everything already in the folder."""
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim()])
+    patches, _ = sidecar_patches(
+        proposal,
+        _routed_digest(),
+        _routed_skill(),
+        existing=lambda path: NOTES,
+    )
+    assert patches[0].creates_file is False
+    assert CLAIM in patches[0].content, "the note already there survived"
+    assert "gateway" in patches[0].content
+
+
+def test_a_first_claim_in_a_folder_creates_the_file() -> None:
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim()])
+    patches, _ = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert patches[0].creates_file is True
+    assert "new file mode" in patches[0].patch
+
+
+def test_the_claim_cites_the_cases_it_came_out_of() -> None:
+    """Every claim carries where it came from, and is rejected without one. For an improve-born
+    claim the failing cases *are* the evidence — they are what fails without it."""
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim()])
+    patches, _ = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert "case/c1" in patches[0].content
+
+
+def test_a_skill_that_reads_no_notes_is_not_given_the_routing_rule() -> None:
+    """Two places to put a lesson is a choice only a skill with notes has. Offering it to the rest
+    of the deployment is prompt cost for a destination that does not exist."""
+    plain = build_digest(_skill([_case("c1")]), None, FailureInputs())
+    assert ROUTING not in plain.prompt_values()["sidecars"]
+    assert plain.prompt_values()["sidecars"] == "This skill reads no local notes."
+
+
+def test_a_skill_with_notes_is_always_given_the_routing_rule() -> None:
+    """Including when the failures happen to be in folders that keep none — a folder with no notes
+    is exactly where a first claim belongs, and a drafter told only "there are none" reads that as
+    the destination being unavailable."""
+    with_notes = _routed_digest()
+    assert ROUTING in with_notes.prompt_values()["sidecars"]
+
+    none_yet = build_digest(
+        _skill([_case("c1")]),
+        _record([_miss_with_notes("c1", [])]),
+        FailureInputs(),
+        sidecars=lambda paths: [],
+    )
+    assert ROUTING in none_yet.prompt_values()["sidecars"]
+    assert "is where a first one belongs" in none_yet.prompt_values()["sidecars"]
+
+
+def test_the_routing_rule_says_which_way_each_kind_goes() -> None:
+    """The distinction is the feature. If the prompt does not draw it, the drafter defaults to the
+    only destination it had before, which is the behaviour being replaced."""
+    assert "true everywhere this skill runs" in ROUTING
+    assert "false, or meaningless, in another folder" in ROUTING
+    assert "One home per lesson" in ROUTING
+    assert "prefer the guidance" in ROUTING, "the tie-break, and it has to be the gated one"
+
+
+def test_propose_routes_end_to_end(tmp_path: Path) -> None:
+    """Through the real `propose`: the drafter is offered both destinations and what it routes
+    comes back as a patch rather than as guidance."""
+    seen: dict[str, str] = {}
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        seen["system"] = system
+        seen["prompt"] = user
+        return GuidanceProposal(body="unchanged rules", sidecar_claims=[_claim()])
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([
+            _miss_with_notes("c1", ["payments/.agents/context.md"], path="payments/service.py")
+        ]),
+        client=FakeLLMClient(handler),
+        sidecars=_reader({"payments/.agents/context.md": NOTES}),
+    )
+    assert "Where each lesson goes" in seen["system"]
+    assert "Where each lesson goes" in seen["prompt"]
+    assert [p.folder for p in result.sidecar_patches] == ["payments"]
+    assert result.rejected_claims == []
+    # And the lesson did NOT also land in the guidance.
+    assert "gateway" not in result.proposal.body
+
+
+# --- the rule softened to fit one folder -----------------------------------------------
+#
+# Measured on a real run before this existed: asked to fix a failure confined to one folder, the
+# drafter rewrote the central rule to carve that folder out — "R1 was too rigid and did not account
+# for batch jobs operating on their own tables" — and routed nothing. §6 names this exactly: soften
+# the rule and it is weaker everywhere, including where it was working. The prompt asked for the
+# other thing; nothing noticed when the model did this instead.
+
+
+def test_a_rule_that_names_a_folder_in_play_is_flagged() -> None:
+    from whetstone.improve import misrouted
+
+    before = "- **R1 — no direct database access outside the repository layer.**"
+    after = before + " Batch jobs in payments/reconciliation are exempt."
+
+    # Named exactly: the rule now carries a fact about the folder that failed.
+    assert misrouted(before, after, _routed_digest("payments/reconciliation/job.py")) == [
+        "payments/reconciliation"
+    ]
+    # And named as a parent, which is the same mistake one level out — the failure was in
+    # `payments/` and the rule now carves out a path inside it.
+    assert misrouted(before, after, _routed_digest("payments/service.py")) == ["payments"]
+
+
+def test_a_folder_no_failure_touched_is_not_flagged() -> None:
+    """Only folders the drafter was actually shown failures in. A rule that mentions some other
+    part of the repository is not evidence of anything this run learned."""
+    from whetstone.improve import misrouted
+
+    before = "- **R1 — no direct database access.**"
+    after = before + " Generated code under proto/ is exempt."
+    assert misrouted(before, after, _routed_digest("payments/service.py")) == []
+
+
+def test_a_folder_the_guidance_already_named_is_not_flagged_forever() -> None:
+    """Compared against the previous guidance, so a skill that has always named a path is reported
+    once by whoever wrote it and never again by every draft after."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest()
+    always = "- **R1 — no direct DB access.** Except in payments, which owns its own tables."
+    assert misrouted(always, always + "\n- **R2 — log errors.**", digest) == []
+
+
+def test_a_table_name_that_contains_a_folder_name_is_not_a_folder() -> None:
+    """The false positive that would make this unusable: `payments_ledger` is a table a rule may
+    legitimately carry, and one real draft argued about exactly that string."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest()
+    before = "- **R1 — no direct database access.**"
+    after = before + " Writes to payments_ledger go through PaymentService.record()."
+    assert misrouted(before, after, digest) == []
+
+
+def test_a_path_inside_a_longer_path_is_not_the_folder() -> None:
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest()
+    before = "- **R1 — no direct database access.**"
+    assert misrouted(before, before + " See docs/payments/guide.md.", digest) == []
+
+
+def test_propose_reports_a_softened_rule(tmp_path: Path) -> None:
+    """End to end. The draft passes every other check — no rule removed, no case invented — and is
+    still the edit §6 exists to prevent, so it has to be said out loud over the diff."""
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(
+            body=(
+                "# S\n\n- **R1 — no direct database access outside the repository layer**, except "
+                "in payments where the batch jobs own their tables.\n"
+            )
+        )
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([
+            _miss_with_notes("c1", ["payments/.agents/context.md"], path="payments/service.py")
+        ]),
+        client=FakeLLMClient(handler),
+        sidecars=_reader({"payments/.agents/context.md": NOTES}),
+    )
+    assert result.misrouted == ["payments"]
+    assert result.removed_rules == [], "R1 survives — this is a weakening, not a removal"
+    assert result.sidecar_patches == [], "and it routed nothing, which is the whole problem"
+
+
+def test_a_draft_that_routes_properly_is_not_flagged(tmp_path: Path) -> None:
+    """The control. Leaving the rule alone and filing the exception is the behaviour being asked
+    for, and it must come back clean or the warning is noise."""
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(
+            body=RULES_WITH_ID,  # untouched
+            sidecar_claims=[
+                _claim(claim="this package is a batch job, not a request path", excepts="R1")
+            ],
+        )
+
+    result = propose(
+        _spec(tmp_path),
+        _routed_skill([_case("c1", "payments/service.py")]),
+        _record([
+            _miss_with_notes("c1", ["payments/.agents/context.md"], path="payments/service.py")
+        ]),
+        client=FakeLLMClient(handler),
+        sidecars=_reader({"payments/.agents/context.md": NOTES}),
+    )
+    assert result.misrouted == []
+    assert [p.excepts for p in result.sidecar_patches] == ["R1"]
+    assert result.rejected_claims == []
+
+
+def test_the_prompt_names_the_softening_trap() -> None:
+    """It is the commonest way to get this wrong and it looks like a fix, so the instruction says
+    so in those words rather than leaving it to be inferred from the general rule."""
+    assert "Never soften a rule to accommodate one folder" in ROUTING
+    assert "weaker *everywhere*" in ROUTING
+
+
+def test_a_folder_written_with_a_trailing_slash_is_still_a_folder() -> None:
+    """The form a real draft used, and the one the first boundary missed: excluding `/` ahead of
+    the name meant `payments/reconciliation/` went unflagged while the same sentence without the
+    slash was caught. A folder written the way people write folders has to count."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest("payments/reconciliation/job.py")
+    before = "- **R1 — no direct database access.**"
+    for form in (
+        "Batch jobs in payments/reconciliation are exempt.",
+        "Batch jobs in payments/reconciliation/ are exempt.",
+        "See payments/reconciliation/.agents/arch.md for the exception.",
+        "`payments/reconciliation`, which owns its tables.",
+    ):
+        assert misrouted(before, f"{before} {form}", digest) == ["payments/reconciliation"], form

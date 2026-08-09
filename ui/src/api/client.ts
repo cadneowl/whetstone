@@ -154,6 +154,17 @@ export type JobRequest = {
    * behind a name.
    */
   fresh_baseline?: boolean
+  /**
+   * sidecar-sweep only: check a folder even though git says nothing under it has moved since its
+   * claims were confirmed. Off by default — that comparison is a Merkle-tree hash, free and exact,
+   * and paying a model to re-confirm what it settles is the one spend here with no possible
+   * finding behind it.
+   */
+  all_folders?: boolean
+  /** sidecar-sweep only: how many folders the budgeted crawl may check, least-recent first. */
+  limit?: number
+  /** sidecar-sweep only: the post-merge sweep over exactly what a merge touched. */
+  folders?: string[]
   /** task-eval only: keep each case's workspace on disk instead of a temp dir. */
   keep_workspaces?: boolean
   /** task-gate only: how far the mean score may fall before the gate fails. */
@@ -971,6 +982,16 @@ function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
   }
   // A drift probe fills the health payload's drift section; the inbox is already invalidated above.
   if (job.kind === 'drift') void client.invalidateQueries({ queryKey: keys.health(job.skill_id) })
+  // A sweep files claim verdicts, which are what the Sidecar tab's ledger panel lists and what the
+  // graph joins on. Neither is keyed on a run, so without this the tab that launched the sweep goes
+  // on drawing every claim as unquestioned until something else happens to refetch it.
+  if (job.kind === 'sidecar-sweep') {
+    void client.invalidateQueries({ queryKey: keys.skill(job.skill_id) })
+    // A prefix, not a full key: the graph is keyed on the query and hops too, and only the
+    // position currently on screen would match an exact one.
+    void client.invalidateQueries({ queryKey: keys.sidecarGraph(job.skill_id, '', 0).slice(0, 2) })
+    void client.invalidateQueries({ queryKey: keys.claims(job.skill_id) })
+  }
   // Synthesis writes candidates into the triage queue.
   if (job.kind === 'synthesize') {
     void client.invalidateQueries({ queryKey: keys.candidates })

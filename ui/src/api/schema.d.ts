@@ -716,6 +716,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/sidecar-sweep": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Sweep
+         * @description Run the maintainer sweep and file its verdicts in the claim ledger.
+         *
+         *     The third maintenance loop, and the only one that reaches code nobody is touching — consumer
+         *     confirmations cover whatever a review happens to pull in, which is the right allocation and
+         *     leaves cold folders unchecked forever. It existed only as `whetstone sidecars verify`, so a
+         *     console-driven deployment ran it never.
+         *
+         *     **Writes no sidecar.** Confirmation is automatic, correction is gated (§8): contradictions land
+         *     in the ledger and a human promotes the edit in the repository that owns the file.
+         */
+        post: operations["launch_sweep_api_jobs_sidecar_sweep_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/sidecar-sweep/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Sweep Job */
+        post: operations["plan_sweep_job_api_jobs_sidecar_sweep_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/synthesize": {
         parameters: {
             query?: never;
@@ -1912,6 +1957,7 @@ export interface components {
              * @default false
              */
             promoted: boolean;
+            sidecars?: components["schemas"]["CaseSidecars"] | null;
             /** Skill Id */
             skill_id: string;
         };
@@ -2115,6 +2161,12 @@ export interface components {
              * @default []
              */
             paths: string[];
+            /**
+             * Resolved By
+             * @default harness
+             * @enum {string}
+             */
+            resolved_by: "harness" | "reviewer";
             /**
              * Verdicts
              * @default []
@@ -3722,7 +3774,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize" | "index" | "task-eval" | "task-gate";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize" | "index" | "sidecar-sweep" | "task-eval" | "task-gate";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -4028,6 +4080,16 @@ export interface components {
             excepts: string;
             /** Id */
             id: string;
+            /**
+             * Issue Messages
+             * @default []
+             */
+            issue_messages: string[];
+            /**
+             * Issues
+             * @default []
+             */
+            issues: string[];
             /**
              * Kind
              * @enum {string}
@@ -6252,6 +6314,36 @@ export interface components {
             skipped?: string[];
         };
         /**
+         * SweepRequest
+         * @description Check a skill's `.agents/` claims against the code, blind (`docs/design/sidecars.md` §8).
+         */
+        SweepRequest: {
+            /**
+             * All Folders
+             * @default false
+             */
+            all_folders: boolean;
+            /** Folders */
+            folders?: string[];
+            /**
+             * Limit
+             * @default 10
+             */
+            limit: number;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /** Skill Id */
+            skill_id: string;
+        };
+        /**
          * SynthesizeRequest
          * @description Generate synthetic candidates into the triage queue — never into the corpus directly.
          *
@@ -8078,6 +8170,72 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_sweep_api_jobs_sidecar_sweep_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SweepRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_sweep_job_api_jobs_sidecar_sweep_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SweepRequest"];
             };
         };
         responses: {
