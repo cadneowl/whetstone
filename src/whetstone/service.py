@@ -50,7 +50,14 @@ from whetstone.domain.eval_model import (
     Provenance,
 )
 from whetstone.domain.refs import RepoRef
-from whetstone.domain.run import CaseRun, RunRecord, case_set_hash, guidance_hash, skill_hash
+from whetstone.domain.run import (
+    CaseRun,
+    CaseSidecars,
+    RunRecord,
+    case_set_hash,
+    guidance_hash,
+    skill_hash,
+)
 from whetstone.domain.score import HoldoutReport, SkillScore
 from whetstone.domain.skill import Skill
 from whetstone.drift import DRIFT_ALARM, DriftStore
@@ -1255,6 +1262,14 @@ class CaseDetail(BaseModel):
     # "no eval case" that reads like the case does not exist, when in fact it is what the run the
     # reader just came from was measuring.
     promoted: bool = False
+    # The `.agents/` context the most recent run gave this case's reviewer, when the skill declares
+    # a role (`docs/design/sidecars.md` §10). None otherwise, which is most skills.
+    #
+    # This page is where "why did it miss this?" gets asked, and local context is one of the two
+    # answers — "the reviewer never loaded the note" and "it read the note and disagreed" are
+    # opposite diagnoses that looked identical here. The record has carried this since the feature
+    # shipped and no screen showed it.
+    sidecars: CaseSidecars | None = None
 
 
 # Rules are id-tagged in bold in the guidance body ("- **R1 — no unchecked panics…**"), which is how
@@ -1617,7 +1632,30 @@ def case_detail(
         history=case_history(case_id, skill.id, store, runs=runs),
         baseline=_baseline_verdict(store, skill.id, case_id),
         promoted=case_id in set(promoted),
+        sidecars=_last_sidecars(store, skill.id, case_id),
     )
+
+
+def _last_sidecars(store: RunStore, skill_id: str, case_id: str) -> CaseSidecars | None:
+    """What the most recent scoring run gave this case's reviewer, or None.
+
+    The latest run rather than a history of them: retrieval is a pure function of the case's paths
+    and the notes on disk, so this changes when somebody edits a sidecar, not run to run — and a
+    list of twenty identical sets is not a diagnostic. `history` above is where per-run variation
+    belongs, and it is about outcomes.
+
+    Baselines are excluded by `latest`, which is right: a probe strips the guidance, and what it
+    read has nothing to say about why the real reviewer missed something.
+    """
+    latest = store.latest(skill_id)
+    if latest is None:
+        return None
+    try:
+        record = store.load(latest.id)
+    except (OSError, ValueError):
+        return None
+    run = record.case(case_id)
+    return run.sidecars if run is not None else None
 
 
 def _baseline_verdict(store: RunStore, skill_id: str, case_id: str) -> BaselineVerdict | None:

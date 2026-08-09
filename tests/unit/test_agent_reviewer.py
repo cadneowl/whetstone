@@ -255,3 +255,147 @@ def load_skill_stub():
     from whetstone.domain.skill import Skill
 
     return Skill(id="s", body="b")
+
+
+# --- what local context the agent actually reached --------------------------------
+#
+# An agent collects its own `.agents/` files, so the harness cannot report the set it injected —
+# it injected none. That left `CaseRun.sidecars` None on every record an agent deployment writes,
+# and "the reviewer never opened the notes" indistinguishable from "it read them and disagreed"
+# for exactly the reviewer kind this codebase is deployed on. What can honestly be recorded is
+# what the reviewer was *seen* to open.
+
+
+def _sidecar_skill(tmp_path: Path, role: str = "arch") -> tuple[Path, Path]:
+    """A role-declaring skill, and a source tree with notes in two folders."""
+    skill = tmp_path / "arch-review"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nid: arch-review\nname: Arch\ndescription: d\nversion: 1\n"
+        f"sidecar:\n  role: {role}\n---\n\n# Arch\n\nReview it.\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "src"
+    for folder in ("app", "billing"):
+        (root / folder / ".agents").mkdir(parents=True)
+        (root / folder / "svc.py").write_text("x = 1\n", encoding="utf-8")
+        (root / folder / ".agents" / "context.md").write_text(
+            f"Notes for {folder}.\n", encoding="utf-8"
+        )
+    return skill, root
+
+
+def _reads(*paths: str):
+    """A client that reads each path in turn, then submits."""
+
+    def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        step = sum(1 for m in messages if m.role == "assistant")
+        if step < len(paths):
+            return Turn(calls=[ToolCall(str(step), "read_file", {"path": paths[step]})])
+        return Turn(calls=[ToolCall("z", SUBMIT, {"findings": []})])
+
+    return FakeToolClient(handler)
+
+
+def test_the_notes_an_agent_opened_are_recorded(tmp_path: Path) -> None:
+    """The regression. Every agent-scored run recorded `sidecars: None`, so a deployment that
+    reviews entirely by agent had no evidence anywhere that local context reached the model."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    reviewer = AgentReviewer(
+        _reads("app/.agents/context.md", "app/svc.py"), source_root=root, max_steps=6
+    )
+    reviewer.review(load_skill(skill_path), _change())
+
+    assert reviewer.last_sidecars == {
+        "resolved_by": "reviewer",
+        "files": [{"path": "app/.agents/context.md"}],
+    }
+
+
+def test_the_account_says_it_is_an_observation_not_an_injection(tmp_path: Path) -> None:
+    """`resolved_by` is the whole safeguard. A reader that cannot tell these apart would treat an
+    empty `context_hash` as a bug and a partial path list as the exhaustive set."""
+    from whetstone.core.harness import _sidecars_of
+
+    skill_path, root = _sidecar_skill(tmp_path)
+    reviewer = AgentReviewer(_reads("billing/.agents/context.md"), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+
+    recorded = _sidecars_of(reviewer)
+    assert recorded is not None
+    assert recorded.resolved_by == "reviewer"
+    assert recorded.paths == ["billing/.agents/context.md"]
+    # Never claimed, because it was never assembled here.
+    assert recorded.context_hash == ""
+    assert recorded.dropped == []
+
+
+def test_a_skill_with_no_role_records_nothing_at_all(tmp_path: Path) -> None:
+    """None and an empty set are different facts (`CaseRun.sidecars`). Recording "opened nothing"
+    for every agent skill in the deployment would erase the one that means "never asked to"."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    (skill_path / "SKILL.md").write_text(
+        "---\nid: arch-review\nname: Arch\ndescription: d\nversion: 1\n---\n\n# Arch\n\nGo.\n",
+        encoding="utf-8",
+    )
+    reviewer = AgentReviewer(_reads("app/.agents/context.md"), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+    assert reviewer.last_sidecars is None
+
+
+def test_only_reads_that_returned_something_are_counted(tmp_path: Path) -> None:
+    """A read of a path that is not there is an attempt, not context. Counting it would make a
+    reviewer that found nothing look as well-informed as one that found the notes."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    reviewer = AgentReviewer(
+        _reads("nope/.agents/context.md", "app/.agents/context.md"), source_root=root, max_steps=6
+    )
+    reviewer.review(load_skill(skill_path), _change())
+    assert reviewer.last_sidecars == {
+        "resolved_by": "reviewer",
+        "files": [{"path": "app/.agents/context.md"}],
+    }
+
+
+def test_listing_the_notes_folder_is_not_reading_it(tmp_path: Path) -> None:
+    """Seeing that a folder keeps notes and being given them are different answers to "did local
+    context reach the model", and one path list cannot mean both."""
+    skill_path, root = _sidecar_skill(tmp_path)
+
+    def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        if len(messages) == 1:
+            return Turn(calls=[ToolCall("1", "list_dir", {"path": "app/.agents"})])
+        assert "context.md" in messages[-1].results[0].content  # it really did see the file
+        return Turn(calls=[ToolCall("2", SUBMIT, {"findings": []})])
+
+    reviewer = AgentReviewer(FakeToolClient(handler), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+    assert reviewer.last_sidecars == {"resolved_by": "reviewer", "files": []}
+
+
+def test_grep_cannot_reach_a_notes_folder_at_all(tmp_path: Path) -> None:
+    """Pinning why `reads` needs no grep branch: the walk prunes dot-directories, so a claim is
+    unreachable by search. If that pruning is ever relaxed, this fails and the recorder — which
+    would then be under-reporting — gets revisited with it."""
+    from whetstone.agent.builtins import BuiltinTools
+
+    _, root = _sidecar_skill(tmp_path)
+    tools = BuiltinTools(skill=load_skill_stub(), root=root)
+    assert "No matches" in tools.dispatch(ToolCall("1", "grep", {"pattern": "Notes for"})).content
+    assert tools.reads == []
+
+
+def test_each_case_reports_its_own_reads(tmp_path: Path) -> None:
+    """One reviewer serves every case and both sides of a gate. A set that accumulated would
+    attribute the whole run's reads to whichever case finished last."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    skill = load_skill(skill_path)
+    reviewer = AgentReviewer(_reads("app/.agents/context.md"), source_root=root, max_steps=6)
+    reviewer.review(skill, _change())
+    reviewer._client = _reads("billing/.agents/context.md")  # the next case, same instance
+    reviewer.review(skill, _change())
+
+    assert reviewer.last_sidecars == {
+        "resolved_by": "reviewer",
+        "files": [{"path": "billing/.agents/context.md"}],
+    }

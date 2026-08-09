@@ -32,7 +32,7 @@ export function CaseDetail() {
   if (error) return <ErrorNote error={error} />
   if (!data) return <Empty>Not found.</Empty>
 
-  const { case: evalCase, diff, history, baseline, promoted } = data
+  const { case: evalCase, diff, history, baseline, promoted, sidecars } = data
   const isCatch = evalCase.kind === 'should_catch'
 
   const overlays: Overlay[] = evalCase.expect.map((e) => ({
@@ -123,11 +123,7 @@ export function CaseDetail() {
               )}
             </div>
             {editing && (
-              <CaseEditor
-                skillId={skillId}
-                evalCase={evalCase}
-                onDone={() => setEditing(false)}
-              />
+              <CaseEditor skillId={skillId} evalCase={evalCase} onDone={() => setEditing(false)} />
             )}
             <ul className="space-y-2">
               {evalCase.expect.map((e) => (
@@ -173,9 +169,66 @@ export function CaseDetail() {
               </ul>
             )}
           </section>
+
+          <LocalContextRead sidecars={sidecars} />
         </aside>
       </div>
     </div>
+  )
+}
+
+/**
+ * The `.agents/` notes the last run gave this case's reviewer.
+ *
+ * This page is where "why did it miss this?" is asked, and local context is one of the two
+ * answers. "The reviewer never loaded the note" and "it read the note and disagreed" are opposite
+ * diagnoses that looked identical here — the record has carried the answer since the feature
+ * shipped and no screen showed it.
+ *
+ * Absent entirely for a skill that declares no role, which is most of them. An empty panel reading
+ * "0 files" would suggest a broken tree on every ordinary skill in the deployment.
+ */
+function LocalContextRead({ sidecars }: { sidecars: CaseDetailData['sidecars'] }) {
+  if (!sidecars) return null
+  const observed = sidecars.resolved_by === 'reviewer'
+  return (
+    <section>
+      <h2 className="mb-2 text-xs tracking-wide text-muted uppercase">Local context</h2>
+      {sidecars.paths.length === 0 ? (
+        <p className="text-sm text-warn">
+          {observed
+            ? 'The reviewer opened none of the notes for this case’s folders.'
+            : 'No folder this case touches keeps notes for this role.'}
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {sidecars.paths.map((path) => (
+            <li key={path} className="font-mono text-xs break-all text-muted">
+              {path}
+            </li>
+          ))}
+        </ul>
+      )}
+      {sidecars.dropped.length > 0 && (
+        <p className="mt-2 text-xs text-warn">
+          {sidecars.dropped.length} matched but did not reach the prompt — the caps dropped the most
+          general folders first.
+        </p>
+      )}
+      {sidecars.missing.length > 0 && (
+        <p className="mt-2 text-xs text-warn">
+          {sidecars.missing.length} folder(s) this case names are not in the source tree, so the
+          reviewer could not have had local context for them however good the notes elsewhere are.
+        </p>
+      )}
+      {/* The distinction the whole field turns on. An observation is a lower bound, and a reader
+          who treats it as the complete set will conclude a note that exists was never written. */}
+      <p className="mt-2 text-xs text-muted">
+        {observed
+          ? 'Observed: this skill’s own reviewer collects its context, so this is what it was seen to open and it may have read more. Not hashed.'
+          : 'Resolved by the harness before the call — the complete set, and part of this run’s identity.'}
+      </p>
+    </section>
   )
 }
 

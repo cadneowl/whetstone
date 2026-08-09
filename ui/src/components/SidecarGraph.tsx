@@ -109,7 +109,7 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             onKeyDown={(event) => {
               if (event.key === 'Escape') setDraft('')
             }}
-            placeholder="ledger · rule:R1 · folder:payments · kind:claim uncited:true"
+            placeholder="ledger · rule:R1 · folder:payments · kind:claim · issue:true"
             aria-label="Query the sidecar graph"
             className="w-full rounded border border-line bg-canvas py-1.5 pr-8 pl-2.5 font-mono text-sm"
           />
@@ -186,6 +186,19 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
           >
             {counts.disputed} disputed
           </Badge>
+        )}
+        {/* Clickable, unlike the counts beside it. Above roughly 60 nodes "which of these is
+            broken" cannot be answered by looking, so a number with no way to act on it is worse
+            than no number — this sets the query that shows exactly them. */}
+        {(counts.problems ?? 0) > 0 && (
+          <button
+            type="button"
+            onClick={() => navigate({ q: 'issue:true', node: null })}
+            title="Mechanical defects `whetstone sidecars check` fails on — an oversized file retrieval silently drops, notes left behind by a rename, a claim nothing can verify. Click to show only these."
+            className="rounded-full border border-bad/50 px-2 py-px text-xs whitespace-nowrap text-bad hover:bg-bad/10"
+          >
+            {counts.problems} with defects
+          </button>
         )}
         <span
           className="ml-auto font-mono text-muted"
@@ -477,6 +490,20 @@ function Canvas({
                 strokeDasharray="2 2"
               />
             )}
+            {/* A defect the floor found. A wedge rather than a third ring: two concentric rings
+                already mean two different things here, and a third would be read as a degree of
+                the same thing rather than a different kind of fact. This one is not about what the
+                reviewer is given — it is about the note being broken. */}
+            {node.issues.length > 0 && (
+              <circle
+                r={2.4}
+                cx={radius * 0.75}
+                cy={-radius * 0.75}
+                fill="var(--color-bad)"
+                stroke="var(--color-canvas)"
+                strokeWidth={0.8}
+              />
+            )}
             {/* A match ring rather than a different fill: the kind is what the colour means, and a
                 query must not be able to make a folder look like a rule. Outermost, so it never
                 hides a health ring — a query is transient and a contradiction is not. */}
@@ -527,6 +554,12 @@ function nodeTitle(node: GraphNode): string {
   }
   if (node.confirmed > 0) lines.push(`${node.confirmed} cited it as still holding`)
   if (node.missing) lines.push('not in the source tree — renamed, or misspelt')
+  // The reason, not just the code. `oversized` on its own sends someone to look up what the cap is
+  // and what happens when it is passed; the floor already wrote that sentence for CI.
+  for (const message of node.issue_messages) lines.push(message)
+  // Codes with no message of their own here — a claim's defect rolled up to its folder.
+  const explained = node.issue_messages.length
+  if (node.issues.length && !explained) lines.push(`inside: ${node.issues.join(', ')}`)
   lines.push(`${node.degree} edge(s) · double-click to centre the graph here`)
   return lines.join('\n')
 }
@@ -571,6 +604,32 @@ function Legend() {
           {kind}
         </li>
       ))}
+      {/* Three markers sit on top of the colours and each means a different kind of trouble, so
+          each needs saying. A new mark with no key reads as a rendering artefact. */}
+      <li
+        className="flex items-center gap-1.5"
+        title="A mechanical defect `whetstone sidecars check` fails on — uncited, oversized, notes left behind by a rename. On a folder, something inside it."
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-bad" />
+        has a defect
+      </li>
+      <li
+        className="flex items-center gap-1.5"
+        title="Something with the code in front of it found this claim no longer holds. Still injected into every review that touches its folder — correction is a human's call."
+      >
+        <span
+          className="inline-block h-2.5 w-2.5 rounded-full border"
+          style={{ borderColor: KIND_COLOR.unresolved }}
+        />
+        contradicted
+      </li>
+      <li
+        className="flex items-center gap-1.5"
+        title="On a rung retrieval withholds: agent-authored or bootstrap-decomposed, and nothing independent has agreed with it yet."
+      >
+        <span className="inline-block h-2.5 w-2.5 rounded-full border border-dashed border-warn" />
+        unconfirmed
+      </li>
       <li className="ml-auto">a ring marks a query match · a bigger circle has more edges</li>
     </ul>
   )
@@ -637,7 +696,8 @@ function Results({
         <code className="font-mono text-xs">file:</code>{' '}
         <code className="font-mono text-xs">status:</code>{' '}
         <code className="font-mono text-xs">excepts:</code>{' '}
-        <code className="font-mono text-xs">uncited:</code>; anything else is a substring.
+        <code className="font-mono text-xs">uncited:</code>{' '}
+        <code className="font-mono text-xs">issue:</code>; anything else is a substring.
       </p>
     )
   }
@@ -701,6 +761,15 @@ function Results({
                     {node.contradicted} contradicted
                   </span>
                 )}
+                {/* `uncited` is already its own chip above, so listing it again here would double
+                    it on the one defect that is also the commonest. */}
+                {node.issues
+                  .filter((code) => code !== 'uncited')
+                  .map((code) => (
+                    <span key={code} className="font-mono text-xs text-bad">
+                      {code}
+                    </span>
+                  ))}
               </span>
             </button>
           </li>
@@ -849,6 +918,38 @@ function Detail({
           Nothing in the source tree has this path. The link or heading outlived what it named —{' '}
           <code className="font-mono text-xs">whetstone sidecars check</code> fails it.
         </p>
+      )}
+      {/* The floor's findings, in full. Decidable, already computed, and until now delivered only
+          to whoever had wired up a pre-commit hook — while this card, the one place someone is
+          looking at a single note, said nothing about it being broken. */}
+      {node.issues.length > 0 && (
+        <div className="mt-2 rounded border border-bad/40 bg-bad/5 px-3 py-2">
+          <p className="flex flex-wrap items-baseline gap-x-2 text-xs">
+            <span className="font-semibold text-bad">
+              {node.issue_messages.length > 0 ? 'Broken' : 'Something inside is broken'}
+            </span>
+            {node.issues.map((code) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => onQuery(`issue:${code}`)}
+                title={`Show every node with this defect`}
+                className="font-mono text-bad underline decoration-dotted"
+              >
+                {code}
+              </button>
+            ))}
+          </p>
+          {node.issue_messages.map((message) => (
+            <p key={message} className="mt-1 text-xs text-muted">
+              {message}
+            </p>
+          ))}
+          <p className="mt-1 text-xs text-muted">
+            Mechanical, not a judgement about whether the claim is true —{' '}
+            <code className="font-mono">whetstone sidecars check</code> fails on exactly these.
+          </p>
+        </div>
       )}
       {/* The ledger, on the map. This is the maintenance loop's whole output, and it lived in a
           collapsed list further up the same tab while the picture beside it drew a contradicted

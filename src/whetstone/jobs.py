@@ -46,6 +46,11 @@ JobKind = Literal[
     "drift",
     "synthesize",
     "index",
+    # The maintainer sweep over a source tree's `.agents/` claims (`docs/design/sidecars.md` §8).
+    # Its own kind because it is the only job that spends against a *repository* rather than a
+    # corpus: nothing about the skill's cases changes, and a job list that filed it under "eval"
+    # would put a run with no score next to runs that have one.
+    "sidecar-sweep",
     # Task skills: scored on work they produce rather than findings they report. Their own kinds
     # rather than a flag on "eval"/"gate", because the two produce different records and land in
     # different stores — a job list that blurred them would invite comparing incomparable scores.

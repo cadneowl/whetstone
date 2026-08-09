@@ -365,6 +365,7 @@ def get_sidecar_graph(
             problem=str(exc),
         )
     _annotate(store, skill.sidecar.role, graph)
+    _annotate_floor(bound.source_root, skill, graph)
     return view(
         graph,
         q,
@@ -391,6 +392,28 @@ def _annotate(store: StoreDep, role: str, graph: SidecarGraph) -> None:
     except (OSError, ValueError):
         return
     annotate_verdicts(graph, histories)
+
+
+def _annotate_floor(source_root: str, skill: Skill, graph: SidecarGraph) -> None:
+    """Join the mechanical checks onto the graph. Best-effort, and never fatal.
+
+    The same checks `whetstone sidecars check` runs in CI, drawn where someone is already looking.
+    They were decidable, already implemented, and reaching nobody who had not wired up a pre-commit
+    hook — while the picture beside the ledger panel drew an oversized `context.md` that retrieval
+    silently drops exactly like a healthy one.
+
+    Under the skill's own `max_file_bytes`, because `oversized` means "over the cap *this skill*
+    retrieves under" — the default would report a defect a differently-configured skill does not
+    have, and miss one it does.
+    """
+    from whetstone.sidecars.floor import check_tree
+    from whetstone.sidecars.graph import annotate_problems
+
+    try:
+        problems = check_tree(source_root, max_file_bytes=skill.sidecar.max_file_bytes)
+    except (OSError, ValueError):
+        return
+    annotate_problems(graph, problems)
 
 
 def _embedder(config: Config, store: StoreDep) -> tuple[Any | None, str]:

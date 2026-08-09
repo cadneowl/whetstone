@@ -791,7 +791,10 @@ def launch_improve(
                 only=set(request.cases) or None,
                 agent=agent,
                 distill=request.distill,
+                sidecars=improve.sidecar_reader(config.skills_root, skill, store.root),
             )
+        disputed = _log_disputes(handle, result, skill, store)
+        routed = _log_routed(handle, result)
         for rule in result.unbacked_removals:
             # Logged as it happens, not only in the result: this is the one edit in the whole loop
             # that no later check can catch, so it should be visible while the job is still on
@@ -841,6 +844,17 @@ def launch_improve(
             # the unbacked ones over the diff, because the diff is where they would otherwise be a
             # deleted paragraph among reworded ones.
             "removed_rules": [rule.model_dump() for rule in result.removed_rules],
+            # Claims in the local notes the drafter says these failures contradict, filed to the
+            # ledger rather than written to the source tree (§7). Surfaced on the draft because a
+            # dispute is the one output of an improve that is *not* in the diff being reviewed.
+            "disputed_claims": disputed,
+            # Lessons the drafter sent to a folder's notes instead of the guidance. On the draft
+            # because they are the one part of it that is deliberately *not* in the diff below —
+            # an operator who did not see them would read the guidance as having dropped them.
+            "sidecar_claims": routed,
+            # Folders the draft named in the guidance instead of routing to. Shown over the diff,
+            # like the unbacked removals: both are edits that pass everything downstream.
+            "misrouted": result.misrouted,
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
             "holdout_withheld": result.digest.holdout_withheld,
@@ -848,6 +862,111 @@ def launch_improve(
         }
 
     return _launch(jobs, "improve", skill.id, work, plan, config=config)
+
+
+def _log_disputes(
+    handle: Any, result: Any, skill: Skill, store: Any
+) -> list[dict[str, str]]:
+    """File the drafter's claim disputes and report them on the job log.
+
+    To the ledger, never to the source tree — §7 keeps correction a human act, so this joins what
+    the consuming runs and the maintainer sweep file and surfaces at
+    `whetstone sidecars claims --disputed` and on the skill's Sidecar tab.
+
+    Logged even when nothing matched: a drafter that quoted three claims inexactly and had all
+    three dropped looks exactly like one that found nothing wrong, and only one of those is a
+    reason to look at the notes.
+    """
+    for claim in result.unmatched_disputes:
+        handle.log(
+            LogLine(
+                text=(
+                    f"  dropped a dispute naming no claim in {claim.path or '(no path)'} — "
+                    f"quoted inexactly, or a file this run never loaded"
+                ),
+                tone="bad",
+            )
+        )
+    if not result.disputed:
+        return []
+    from whetstone.sidecars.confirm import Ledger
+
+    try:
+        Ledger(store.root).record(result.disputed, skill_id=skill.id)
+    except OSError as exc:
+        handle.log(LogLine(text=f"  could not file claim disputes: {exc}", tone="bad"))
+        return []
+    for verdict in result.disputed:
+        handle.log(
+            LogLine(
+                text=f"  disputes a claim in {verdict.path}: {verdict.claim[:100]}", tone="bad"
+            )
+        )
+    handle.log(
+        LogLine(
+            text=(
+                f"  filed {len(result.disputed)} claim dispute(s) to the ledger — nothing in the "
+                f"source tree was written; a person promotes the correction"
+            )
+        )
+    )
+    return [
+        {"path": v.path, "claim": v.claim, "evidence": v.evidence} for v in result.disputed
+    ]
+
+
+def _log_routed(handle: Any, result: Any) -> list[dict[str, Any]]:
+    """Report the lessons routed to the code, and the proposed claims that were refused.
+
+    Delivered as patches for a human to accept in the repository that owns the file (§6, §7).
+    Nothing here is applied, and nothing reaches the source tree from this process.
+    """
+    for claim in result.rejected_claims:
+        handle.log(
+            LogLine(
+                text=f"  dropped a claim for {claim.folder or '(no folder)'} — {claim.reason}",
+                tone="bad",
+            )
+        )
+    for folder in result.misrouted:
+        handle.log(
+            LogLine(
+                text=(
+                    f"  the new guidance names {folder!r} and the old one did not — a rule that "
+                    f"has to name a folder to be correct belongs in {folder}/.agents/, not in one "
+                    f"that applies everywhere. Read the diff before accepting."
+                ),
+                tone="bad",
+            )
+        )
+    for patch in result.sidecar_patches:
+        what = f"excepts {patch.excepts}" if patch.excepts else "local context"
+        handle.log(
+            LogLine(text=f"  to the code, not the guidance: {patch.path} ({what})", tone="verdict")
+        )
+        handle.log(LogLine(text=f"    {patch.claim[:120]}"))
+    if result.sidecar_patches:
+        handle.log(
+            LogLine(
+                text=(
+                    f"  {len(result.sidecar_patches)} claim(s) belong beside the code and are not "
+                    f"in the guidance diff. Nothing was written — a person accepts the patch in "
+                    f"the repository that owns the file."
+                )
+            )
+        )
+    return [
+        {
+            "path": p.path,
+            "folder": p.folder,
+            "claim": p.claim,
+            "excepts": p.excepts,
+            "because": p.because,
+            "patch": p.patch,
+            "creates_file": p.creates_file,
+        }
+        for p in result.sidecar_patches
+    ]
 
 
 class PromptVariable(BaseModel):
@@ -950,7 +1069,15 @@ def improve_prompt(
         )
 
     digest = improve.digest_for(
-        spec, skill, record, instruction=request.instruction, only=set(request.cases) or None
+        spec,
+        skill,
+        record,
+        instruction=request.instruction,
+        only=set(request.cases) or None,
+        # The same reader `launch_improve` passes. A preview that omitted it would understate the
+        # prompt by every byte of local context — and this route exists to answer "what is the
+        # drafter actually sent", where a smaller answer is worse than none.
+        sidecars=improve.sidecar_reader(config.skills_root, skill, store.root),
     )
     template = spec.prompt or ""
     named = placeholders(template)
@@ -1709,6 +1836,167 @@ def launch_baseline(
         }
 
     return _launch(jobs, "baseline", skill.id, work, plan, config=config)
+
+
+class SweepRequest(BaseModel):
+    """Check a skill's `.agents/` claims against the code, blind (`docs/design/sidecars.md` §8)."""
+
+    skill_id: str
+    # The post-merge sweep over what a merge touched. Empty means the budgeted crawl.
+    folders: list[str] = Field(default_factory=list)
+    # The crawl's budget, spent least-recently-verified first — the only loop that reaches cold
+    # code, and the only one that needs a ceiling because its work list is the whole tree.
+    limit: int = 10
+    # Check a folder even if git says nothing under it moved since it was confirmed. Off, because
+    # the comparison is free and exact and paying a model to re-confirm it is not.
+    all_folders: bool = False
+    provider: str = ""
+    model: str = ""
+
+
+def _sweep_setup(config: Config, root: Path, skill_id: str) -> tuple[Skill, str]:
+    """The skill and the tree its notes live in, or a refusal an operator can act on.
+
+    Through `reviewer_for`, like every other question about how a role binds to a source tree.
+    Either binding serves: the sweep only ever reads, so a skill whose own reviewer collects its
+    notes has the same files in the same place.
+    """
+    skill = _skill(root, skill_id)
+    if skill.sidecar.is_empty():
+        raise Unprocessable(f"{skill.id} declares no `sidecar:` block in SKILL.md")
+    choice = _reviewer_choice(config, skill)
+    bound = choice.sidecar or choice.sidecar_view
+    if bound is None:
+        raise Unprocessable(
+            f"{skill.id} declares a sidecar role but resolves no source tree"
+            + (f": {'; '.join(choice.problems)}" if choice.problems else "")
+        )
+    return skill, bound.source_root
+
+
+@router.post("/sidecar-sweep/plan", response_model=Plan)
+def plan_sweep_job(
+    request: SweepRequest, config: ConfigDep, root: SkillsRootDep, selection: SelectionDep
+) -> Plan:
+    from whetstone.sidecars.maintain import sidecar_folders
+
+    selection = _pick(request.provider, request.model, selection)
+    skill, source_root = _sweep_setup(config, root, request.skill_id)
+    try:
+        targets = sidecar_folders(source_root, skill.sidecar.role)
+    except OSError as exc:
+        raise Unprocessable(f"cannot read {source_root}: {exc}") from exc
+    if request.folders:
+        wanted = {f.rstrip("/") or "." for f in request.folders}
+        targets = [t for t in targets if t[0] in wanted]
+    planned = min(len(targets), request.limit) if request.limit else len(targets)
+    plan = plan_calls(
+        "sidecar sweep",
+        _backend(selection, _step(root, skill, "evaluate")),
+        calls=planned * 2,
+        basis=(
+            f"{planned} sidecar(s) x 2 calls — one blind account of the folder, one comparison "
+            f"against its claims"
+        ),
+        details=[
+            f"reads {source_root} — source, and nothing is written back to it",
+            # The design decision most easily mistaken for a bug on first reading.
+            "verification is blind: the first call never sees the claims, because a model shown a "
+            "plausible claim agrees with it and the loop then verifies nothing",
+            f"{len(targets)} folder(s) keep notes for this role"
+            + (f"; this run checks {planned}" if planned < len(targets) else ""),
+        ],
+    )
+    if not planned:
+        plan.warnings.append(
+            "nothing to verify — no folder under this tree keeps notes for this role"
+            + (", or none matched the folders given" if request.folders else "")
+        )
+    check_budget(plan, config.runs.max_llm_calls_per_run)
+    return plan
+
+
+@router.post("/sidecar-sweep", response_model=Job, dependencies=[Writable])
+def launch_sweep(
+    request: SweepRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    store: StoreDep,
+    jobs: JobsDep,
+    selection: SelectionDep,
+) -> Job:
+    """Run the maintainer sweep and file its verdicts in the claim ledger.
+
+    The third maintenance loop, and the only one that reaches code nobody is touching — consumer
+    confirmations cover whatever a review happens to pull in, which is the right allocation and
+    leaves cold folders unchecked forever. It existed only as `whetstone sidecars verify`, so a
+    console-driven deployment ran it never.
+
+    **Writes no sidecar.** Confirmation is automatic, correction is gated (§8): contradictions land
+    in the ledger and a human promotes the edit in the repository that owns the file.
+    """
+    from whetstone.sidecars.confirm import Ledger
+    from whetstone.sidecars.maintain import sweep
+
+    selection = _pick(request.provider, request.model, selection)
+    skill, source_root = _sweep_setup(config, root, request.skill_id)
+    plan = plan_sweep_job(request, config, root, selection)
+    spec = _step(root, skill, "evaluate")
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, 1, "reading the tree")
+        ledger = Ledger(store.root)
+        last_seen = {h.path: h.last_seen for h in ledger.summary()}
+        client = _client(config, spec, selection, label=f"sweep-{skill.id}")
+        report = sweep(
+            client,
+            source_root,
+            skill.sidecar.role,
+            folders=request.folders or None,
+            limit=request.limit or None,
+            last_seen=last_seen,
+            skip_unchanged=not request.all_folders,
+        )
+        contradicted: list[dict[str, str]] = []
+        written = 0
+        for folder in report.folders:
+            handle.check()
+            if folder.skipped:
+                handle.log(LogLine(text=f"  {folder.sidecar}: {folder.skipped}"))
+                continue
+            for check in folder.checks:
+                if check.verdict != "contradicted":
+                    continue
+                contradicted.append(
+                    {
+                        "path": folder.sidecar,
+                        "claim": check.claim,
+                        "evidence": check.evidence,
+                    }
+                )
+                handle.log(LogLine(text=f"  {folder.sidecar}", tone="bad"))
+                handle.log(LogLine(text=f"    {check.claim[:120]}", tone="bad"))
+                handle.log(LogLine(text=f"    against: {check.evidence[:120]}"))
+            written += ledger.record(
+                [c.as_ledger_verdict(folder.sidecar) for c in folder.checks], skill_id=skill.id
+            )
+        handle.progress(1, 1, "done")
+        handle.log(
+            LogLine(
+                text=(
+                    f"  {report.contradicted} contradicted, {written} verdict(s) filed. Nothing "
+                    f"in the source tree was written — a person promotes the correction."
+                )
+            )
+        )
+        return {
+            "checked": len(report.folders),
+            "llm_calls": report.calls,
+            "contradicted": contradicted,
+            "recorded": written,
+        }
+
+    return _launch(jobs, "sidecar-sweep", skill.id, work, plan, config=config)
 
 
 class DriftRequest(BaseModel):

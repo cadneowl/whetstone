@@ -247,6 +247,20 @@ class CaseSidecars(BaseModel):
     the case pulls in invalidate nothing.
     """
 
+    # Who produced this account, and therefore what it is worth. `harness` is the built-in
+    # reviewer: the host resolved the set before the call, so `paths` is exhaustive, `dropped` says
+    # what the caps withheld and `context_hash` identifies the whole of it.
+    #
+    # `reviewer` is an agent or a program, which chooses its own reads. Then this is an
+    # *observation* — the `.agents/` files the reviewer was seen to open — and it is deliberately
+    # weaker in three ways that no consumer may forget: `context_hash` is empty (we cannot hash
+    # what we did not assemble), `dropped` is empty (the caps were the collector's, not ours), and
+    # `paths` is a lower bound (a reviewer that shells out reads nothing we can see).
+    #
+    # Recording it anyway, rather than leaving the field None: an agent deployment otherwise has no
+    # record at all of whether local context reached the model, which is the one question a missed
+    # finding turns on. A weaker account that says how weak it is beats absence.
+    resolved_by: Literal["harness", "reviewer"] = "harness"
     paths: list[str] = []
     dropped: list[DroppedSidecar] = []
     context_hash: str = ""

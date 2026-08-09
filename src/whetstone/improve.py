@@ -26,11 +26,15 @@ import json
 import re
 import subprocess
 from collections import defaultdict
+from collections.abc import Callable, Sequence
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from whetstone.deadrules import (
+    RULE_RE,
     DeadRule,
     RemovedRule,
     consolidatable,
@@ -39,7 +43,13 @@ from whetstone.deadrules import (
 )
 from whetstone.domain.eval_model import EvalCase
 from whetstone.domain.finding import Finding
-from whetstone.domain.run import CaseRun, ExpectationOutcome, RunRecord, TrialRecord
+from whetstone.domain.run import (
+    CaseRun,
+    ClaimVerdict,
+    ExpectationOutcome,
+    RunRecord,
+    TrialRecord,
+)
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.tools import ToolSpec
@@ -47,6 +57,11 @@ from whetstone.steps import STEP_FILE, FailureInputs, StepError, StepSpec, place
 from whetstone.wiki import retrieve
 
 FailureKind = Literal["fn", "fp"]
+
+# Per-file cap on the notes pasted into an improve prompt. Below `DEFAULT_MAX_FILE_BYTES`, which is
+# what a *reviewer* may be handed for one folder: a reviewer sees the notes for the one diff it is
+# looking at, and a drafter sees them for every folder in a clustered failure list.
+SIDECAR_BUDGET = 4_000
 
 
 class Failure(BaseModel):
@@ -61,6 +76,9 @@ class Failure(BaseModel):
     reviewer_said: str = ""
     rule_id: str = ""
     diff_excerpt: str = ""
+    # The `.agents/` files this case's reviewer had (`CaseRun.sidecars`). Paths only; the text is
+    # on the digest, once, because several failures in one folder share one set of notes.
+    sidecar_paths: list[str] = Field(default_factory=list)
     # True when this failure is the eval case's fault, not the guidance's: the reviewer reported
     # the issue and the structural prefilter dropped its finding before any judging. Rewriting the
     # guidance cannot fix it, so the prompt says so outright instead of letting the drafter infer a
@@ -82,6 +100,8 @@ class Failure(BaseModel):
                 "not on substance. This is a defect in the case, not in the guidance — do not "
                 "rewrite a rule to chase it, and say so in your rationale."
             )
+        if self.sidecar_paths:
+            lines.append(f"Local notes this reviewer had: {', '.join(self.sidecar_paths)}")
         if self.diff_excerpt:
             lines.append(f"\n```diff\n{self.diff_excerpt.strip()}\n```")
         return "\n".join(lines)
@@ -93,6 +113,37 @@ class Cluster(BaseModel):
     key: str
     size: int
     representative: Failure
+
+
+class SidecarNote(BaseModel):
+    """One folder's `.agents/` notes, as the reviewer that failed had them.
+
+    A skill with sidecars has two places a rule can live: the guidance, which improve rewrites, and
+    the notes beside the code, which it must not (§7 — a skill that writes what it later reads is a
+    closed loop). Without this the drafter saw only the first, so a failure caused by a stale claim
+    read as a wording problem: it hardened a rule to compensate, the claim survived, and the same
+    failure came back next cycle with the guidance one rule heavier.
+
+    `disputed` is the ledger's verdict on this file's claims — the sweep and the consuming runs
+    have already done the work of finding the wrong ones, and it was reaching nothing that drafts.
+    """
+
+    path: str
+    text: str = ""
+    truncated: bool = False
+    # Claims something with the code in front of it contradicted, and the most recent reason.
+    disputed: list[str] = Field(default_factory=list)
+    evidence: str = ""
+    # Why there is no text: the file went away, or the tree is not readable from here. Distinct
+    # from empty notes, which is a folder that keeps a sidecar with nothing in it.
+    problem: str = ""
+
+
+# Reads the notes for a set of sidecar paths. A callable rather than a source root on the digest,
+# because *which* paths matter is decided here — from the failures that survive clustering — while
+# *how* to read one is the source tree's business, guarded by `sidecars.read_sidecar`. Splitting it
+# this way keeps `build_digest` a pure function of the record it is given.
+SidecarReader = Callable[[Sequence[str]], list[SidecarNote]]
 
 
 class Digest(BaseModel):
@@ -140,6 +191,74 @@ class Digest(BaseModel):
     # want it, which this project has measured to be a real price rather than a theoretical one
     # (`docs/design/sidecars.md` §9.2).
     untested_rules: list[DeadRule] = Field(default_factory=list)
+    # The `.agents/` notes the failing reviewers had, one entry per file rather than per failure.
+    # Empty for a skill that declares no role, which is the unchanged default path.
+    sidecars: list[SidecarNote] = Field(default_factory=list)
+    # True when the notes above are what the reviewer was *seen to open* rather than the set the
+    # harness resolved and injected — an agent or a program collects its own
+    # (`CaseSidecars.resolved_by`). The prompt says so, because "the reviewer had these" and "the
+    # reviewer was observed reading these, and may have read more" license different conclusions
+    # about a claim the drafter cannot find any trace of.
+    sidecars_observed: bool = False
+    # Whether this skill reads local notes *at all* — a declared role bound to a readable tree.
+    # Distinct from `sidecars` being empty, which for such a skill means only that the failures
+    # shown pulled none in. Telling a skill with a `payments/.agents/` tree that it "reads no local
+    # notes" because this run happened to fail nowhere near it is false, and false in the direction
+    # that invites the drafter to write a rule the notes already cover.
+    reads_sidecars: bool = False
+
+    def render_sidecars(self) -> str:
+        """The notes, and the one instruction that makes showing them safe.
+
+        The instruction is not decoration. A drafter handed a wrong claim and no way to say so does
+        the only thing it can — writes a rule that compensates for it — which is precisely the
+        outcome this block exists to prevent.
+        """
+        if not self.reads_sidecars:
+            return "This skill reads no local notes."
+        if not self.sidecars:
+            # Still routed. A folder with no notes yet is exactly where a first claim belongs, and
+            # a drafter told only "there are none" reads that as "this destination is unavailable".
+            return (
+                "None of the folders below keep local notes yet. That is normal — and a folder "
+                "with no notes is where a first one belongs, if a failure calls for it.\n\n"
+                + ROUTING
+            )
+        how = (
+            "These were observed being read by the reviewer, which collects its own; it may have "
+            "read more."
+            if self.sidecars_observed
+            else "This is the complete set the reviewer was given."
+        )
+        blocks = [
+            f"{how}\n\nLocal notes live beside the code and are **not yours to rewrite**. If a "
+            f"failure below is explained by a claim here being wrong or out of date, say so in "
+            f"your rationale and list the claim in `disputed_claims` — do not add or harden a "
+            f"rule to compensate for it."
+        ]
+        for note in self.sidecars:
+            head = f"### `{note.path}`"
+            if note.problem:
+                blocks.append(f"{head}\n\n({note.problem})")
+                continue
+            body = note.text.strip() or "(empty)"
+            if note.truncated:
+                body += "\n… truncated"
+            if note.disputed:
+                listed = "\n".join(f"- {claim}" for claim in note.disputed)
+                evidence = (
+                    f"\n\nMost recent evidence against: {note.evidence}" if note.evidence else ""
+                )
+                body += (
+                    f"\n\n**Already disputed** — earlier runs or a maintainer sweep found code "
+                    f"disagreeing with:\n{listed}{evidence}"
+                )
+            blocks.append(f"{head}\n\n{body}")
+        # Last, after the notes themselves: the routing rule reads as an instruction about the
+        # thing above it, and a drafter that has just read three folders' worth of local facts is
+        # in the best position to judge which of its own lessons look like more of the same.
+        blocks.append(ROUTING)
+        return "\n\n".join(blocks)
 
     def render_failures(self) -> str:
         withheld = (
@@ -229,7 +348,54 @@ class Digest(BaseModel):
             "wiki": self.wiki or self._no_wiki(),
             "instruction": self.instruction,
             "untested_rules": render_for_drafter(self.untested_rules),
+            # Offered on every skill, not only the ones with notes, because `render_template` is
+            # strict about names: a template that says `{{sidecars}}` must render for a skill that
+            # keeps none, and "This skill reads no local notes." is the honest filling.
+            "sidecars": self.render_sidecars(),
         }
+
+
+class ProposedClaim(BaseModel):
+    """A lesson the drafter says belongs beside the code rather than in the guidance.
+
+    The third destination §6 gives triage, given to improve. Triage routes a *human's* signal to one
+    of `rule` / `context` / `exception`; an improve step draws the same distinction from a failure,
+    and until now had only the first — so every lesson became a central rule, including the ones
+    that are true in exactly one folder. That is how a rule set rots: a fact about `payments/` is
+    written as a rule about everything, and then softened everywhere the first time it is wrong.
+
+    Delivered as a patch and never as a write (§7). The drafter proposes; the folder's CODEOWNERS
+    accept. A skill that wrote the notes it later reads would be confirming its own inference and
+    would stop being a function of (skill, case).
+    """
+
+    # Repo-relative folder the claim is about. Checked against the folders the shown failures
+    # actually touch — a drafter may not file knowledge about code this run never looked at.
+    folder: str
+    claim: str
+    # `R7` when the claim narrows a central rule. §7: a sidecar may not negate a rule except
+    # through this form, which is the one that stays countable — three folders excepting R7 is the
+    # signal that R7 wants rewriting, and prose that quietly contradicts it is not.
+    excepts: str = ""
+    # Why this is local rather than generic. Recorded rather than assumed, because it is the whole
+    # of the routing decision and the reviewer of the patch is entitled to see the reasoning.
+    because: str = ""
+
+
+class DisputedClaim(BaseModel):
+    """A claim in the local notes that a drafter says the failures contradict.
+
+    `claim` must be the text **as it appears in the file**, for the same reason `ClaimVerdict`
+    demands it: a ledger keyed on a model's paraphrase cannot be matched back to anything, and one
+    keyed on invented text is worse than no ledger. `matched_claims` on the way in is how a
+    paraphrase gets rejected rather than filed.
+    """
+
+    path: str
+    claim: str
+    # What in the change or the code disagrees with it. Required in practice — `verdicts_from`
+    # downgrades an unevidenced contradiction, because assent and dissent are both free without it.
+    evidence: str = ""
 
 
 class GuidanceProposal(BaseModel):
@@ -249,6 +415,19 @@ class GuidanceProposal(BaseModel):
     pages: dict[str, str] = Field(default_factory=dict)
     rationale: str = ""
     targeted_cases: list[str] = Field(default_factory=list)
+    # Claims in the local notes the drafter believes the failures contradict. **Filed, never
+    # written.** §7 forbids a skill maintaining the sidecars it later reads — the confirmation
+    # would be the same inference run twice, and a scored run that mutates its own inputs is not a
+    # function of (skill, case). So this lands in the ledger beside what the sweep and the
+    # consuming runs file, and a human promotes the correction, exactly as for those.
+    #
+    # It exists because the alternative is worse than silence: a drafter that can see a wrong claim
+    # and has no way to report it writes a rule to compensate for it, which is how guidance grows
+    # to work around rot nobody ever fixes.
+    disputed_claims: list[DisputedClaim] = Field(default_factory=list)
+    # Lessons routed to a folder's notes instead of the guidance. Proposed as patches; a human
+    # accepts them in the repository that owns the file (§6, §7).
+    sidecar_claims: list[ProposedClaim] = Field(default_factory=list)
 
     def changed_pages(self, before: dict[str, str]) -> dict[str, str]:
         """The pages this proposal actually rewrites, ignoring ones handed back unaltered.
@@ -285,6 +464,26 @@ class ProposalResult(BaseModel):
     # reason this field exists: their removal passes every gate, because a gate can only fail on a
     # case, and having no case is what put them on the list. See `deadrules.removed_rules`.
     removed_rules: list[RemovedRule] = Field(default_factory=list)
+    # Disputes that survived matching against the notes the drafter was shown — what a caller
+    # files into the claim ledger. Separate from `proposal.disputed_claims`, which is what the
+    # model said: the gap between the two is paraphrases and invented paths, and keeping both
+    # visible is what lets a caller report "it named 3, 2 could be matched" rather than silently
+    # filing fewer than it was told about.
+    disputed: list[ClaimVerdict] = Field(default_factory=list)
+    # Disputes that matched no claim in the notes — a paraphrase, or a file the run never loaded.
+    # Reported rather than dropped, for the reason `unknown_cases` is: a drafter that named four
+    # wrong claims and had all four discarded looks identical to one that named none.
+    unmatched_disputes: list[DisputedClaim] = Field(default_factory=list)
+    # Lessons the drafter routed to a folder's notes, as patches for a human to accept. Never
+    # applied here: delivery is a pull request in front of that folder's CODEOWNERS (§6).
+    sidecar_patches: list[SidecarPatch] = Field(default_factory=list)
+    # Proposed claims that did not survive checking, with the reason. Reported for the same reason
+    # `unknown_cases` is — a drafter whose four claims were all refused must not read as one that
+    # decided everything belonged in the guidance.
+    rejected_claims: list[RejectedClaim] = Field(default_factory=list)
+    # Folders the draft named inside the guidance rather than routing to. See `misrouted`: this is
+    # the shape of the rot §6 warns about, and it is the one form of it that is decidable.
+    misrouted: list[str] = Field(default_factory=list)
     llm_calls: int = 0
 
     @property
@@ -302,6 +501,7 @@ def build_digest(
     instruction: str = "",
     only: set[str] | None = None,
     distill: bool = False,
+    sidecars: SidecarReader | None = None,
 ) -> Digest:
     """Assemble the bounded view of `record` that an improve step will be shown.
 
@@ -318,7 +518,14 @@ def build_digest(
     cases = {c.id: c for c in skill.eval_cases}
     failures = [] if record is None else _failures(record, cases, inputs, only=only)
     clusters = _cluster(failures, inputs)
+    # Read for the failures that survive clustering, not for every failure found. A cluster's
+    # non-representatives render as "(and N more like it)" and `FailureInputs.max` cuts the tail
+    # outright, so notes for those reach nobody — the same set `shown_cases` reports.
+    notes = [] if sidecars is None else sidecars(_sidecar_paths(clusters))
     return Digest(
+        sidecars=notes,
+        reads_sidecars=sidecars is not None,
+        sidecars_observed=record is not None and _observed(record),
         untested_rules=consolidatable(skill) if distill else [],
         skill_id=skill.id,
         guidance=skill.body,
@@ -344,6 +551,7 @@ def digest_for(
     instruction: str = "",
     only: set[str] | None = None,
     distill: bool = False,
+    sidecars: SidecarReader | None = None,
 ) -> Digest:
     """The digest *this step* will be handed — `build_digest` with the step's own inputs applied.
 
@@ -362,6 +570,7 @@ def digest_for(
         instruction=instruction,
         only=only,
         distill=distill,
+        sidecars=sidecars,
     )
 
 
@@ -430,6 +639,32 @@ def drafts_from(
     return {f.case_id for f in _failures(record, cases, inputs, only=only)}
 
 
+def _sidecar_paths(clusters: list[Cluster]) -> list[str]:
+    """Every distinct sidecar the shown failures' reviewers had, in the order they first appear.
+
+    Deduplicated because one folder's notes routinely serve several failures, and the digest
+    carries text once — a prompt that repeats a 3 KB `context.md` per failure spends the budget
+    the clustering just saved.
+    """
+    seen: list[str] = []
+    for cluster in clusters:
+        for path in cluster.representative.sidecar_paths:
+            if path not in seen:
+                seen.append(path)
+    return seen
+
+
+def _observed(record: RunRecord) -> bool:
+    """Whether this run's sidecar account came from watching a reviewer rather than injecting.
+
+    Any case being an observation makes the whole block one, because the honest caption is the
+    weakest one that applies — and in practice a run has one reviewer, so they agree.
+    """
+    return any(
+        c.sidecars is not None and c.sidecars.resolved_by == "reviewer" for c in record.cases
+    )
+
+
 def _withheld(record: RunRecord, inputs: FailureInputs) -> int:
     """How many failing outcomes the holdout blindfold kept out of the digest."""
     wanted = set(inputs.outcomes)
@@ -463,6 +698,7 @@ def _failure(
         rule_id=rule_id,
         case_at_fault=case_at_fault,
         diff_excerpt=_excerpt(case, path, inputs.max_diff_bytes),
+        sidecar_paths=list(case_run.sidecars.paths) if case_run.sidecars else [],
     )
 
 
@@ -633,6 +869,7 @@ def propose(
     only: set[str] | None = None,
     agent: Any = None,
     distill: bool = False,
+    sidecars: SidecarReader | None = None,
 ) -> ProposalResult:
     """Run a skill's improve step and return the guidance change it proposes.
 
@@ -654,6 +891,11 @@ def propose(
     on every path, because an improve asked to fix one failure can drop a rule while rewording
     around it, and that is the version nobody is looking for.
 
+    `sidecars` shows the drafter the local notes the failing reviewers had (`sidecar_reader`).
+    Without it a failure caused by a stale claim beside the code is indistinguishable from a
+    wording problem in the guidance, and the drafter fixes the only thing it can see. What comes
+    back in `ProposalResult.disputed` is for the ledger and never for the source tree — §7.
+
     Refuses outright for a multi-file skill on the single-call path — see `would_paste_the_folder`.
     The check is here as well as in every caller's preflight because this is the one door all of
     them go through, and a guard that lives only in the callers is a guard the next caller forgets.
@@ -661,7 +903,9 @@ def propose(
     refusal = would_paste_the_folder(spec, skill)
     if refusal:
         raise StepError(refusal)
-    digest = digest_for(spec, skill, record, instruction=instruction, only=only, distill=distill)
+    digest = digest_for(
+        spec, skill, record, instruction=instruction, only=only, distill=distill, sidecars=sidecars
+    )
     selected_missing: list[str] = []
     if only is not None and record is not None:
         # Against what reached the *prompt*, not what was merely eligible — clustering and the
@@ -724,10 +968,23 @@ def propose(
         "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
         skill,
     )
+    filed, unmatched = disputed_verdicts(proposal, digest)
+    # Against the notes already on disk, so a claim added to a folder that keeps some produces a
+    # patch that applies — `with_claim` inserts into the real file rather than inventing a new one.
+    on_disk = {note.path: note.text for note in digest.sidecars}
+    routed, refused = sidecar_patches(
+        proposal, digest, skill, existing=lambda path: on_disk.get(path, "")
+    )
     return ProposalResult(
         proposal=proposal, digest=digest, unknown_cases=unknown,
         holdout_cases=holdout_named, selected_missing=selected_missing,
-        removed_rules=removed, llm_calls=calls,
+        removed_rules=removed, disputed=filed, unmatched_disputes=unmatched,
+        sidecar_patches=routed, rejected_claims=refused, llm_calls=calls,
+        misrouted=misrouted(
+            "\n".join([skill.body, *digest.pages.values()]),
+            "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
+            digest,
+        ),
     )
 
 
@@ -841,6 +1098,17 @@ def appendices(spec: StepSpec, digest: Digest) -> list[tuple[str, str]]:
             "complete new text in `pages` under that path.\n\n"
             f"{digest.render_pages()}\n",
         ))
+    if digest.sidecars and "sidecars" not in named:
+        # Appended for the same reason as `pages`, and it matters more here: every improve template
+        # in existence was written before sidecars did, so leaving this to the template means the
+        # skills that actually have local notes are exactly the ones that never see them. An agent
+        # step gets it too, unlike `pages` — the notes are in the *source* tree, and a step whose
+        # tools reach the skill folder cannot necessarily reach that.
+        out.append((
+            "sidecars",
+            "\n\n## Local notes beside the code\n\n"
+            f"{digest.render_sidecars()}\n",
+        ))
     if digest.instruction and "instruction" not in named:
         out.append((
             "instruction",
@@ -898,6 +1166,50 @@ _SUBMIT_GUIDANCE = ToolSpec(
                 "items": {"type": "string"},
                 "description": "eval case ids this change is meant to fix",
             },
+            "sidecar_claims": {
+                "type": "array",
+                "description": (
+                    "lessons that belong in one folder's local notes rather than in the guidance "
+                    "— facts about that folder, not advice that holds everywhere. One home per "
+                    "lesson: do not also add a rule for anything filed here."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "folder": {
+                            "type": "string",
+                            "description": "a folder one of the failures above is in",
+                        },
+                        "claim": {"type": "string", "description": "the fact, as one sentence"},
+                        "excepts": {
+                            "type": "string",
+                            "description": "rule id, when this narrows a rule for this folder only",
+                        },
+                        "because": {
+                            "type": "string",
+                            "description": "why this is local rather than general",
+                        },
+                    },
+                    "required": ["folder", "claim"],
+                },
+            },
+            "disputed_claims": {
+                "type": "array",
+                "description": (
+                    "claims in the local notes that these failures contradict. Quote the claim "
+                    "exactly as written in the file — a paraphrase cannot be matched and is "
+                    "discarded. Use this instead of writing a rule to work around a wrong claim."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "the notes file it is in"},
+                        "claim": {"type": "string", "description": "the claim, verbatim"},
+                        "evidence": {"type": "string", "description": "what disagrees with it"},
+                    },
+                    "required": ["path", "claim"],
+                },
+            },
         },
         "required": ["body"],
     },
@@ -913,7 +1225,23 @@ def _proposal_from(answer: dict[str, Any]) -> GuidanceProposal:
     """
     pages = answer.get("pages")
     targeted = answer.get("targeted_cases")
+    disputed = answer.get("disputed_claims")
+    routed = answer.get("sidecar_claims")
     return GuidanceProposal(
+        sidecar_claims=(
+            [
+                ProposedClaim(
+                    folder=str(c.get("folder") or ""),
+                    claim=str(c.get("claim") or ""),
+                    excepts=str(c.get("excepts") or ""),
+                    because=str(c.get("because") or ""),
+                )
+                for c in routed
+                if isinstance(c, dict)
+            ]
+            if isinstance(routed, list)
+            else []
+        ),
         body=str(answer.get("body") or ""),
         pages=(
             {str(k): str(v) for k, v in pages.items() if isinstance(v, str)}
@@ -924,8 +1252,69 @@ def _proposal_from(answer: dict[str, Any]) -> GuidanceProposal:
         targeted_cases=(
             [str(c) for c in targeted if isinstance(c, str)] if isinstance(targeted, list) else []
         ),
+        disputed_claims=(
+            [
+                DisputedClaim(
+                    path=str(d.get("path") or ""),
+                    claim=str(d.get("claim") or ""),
+                    evidence=str(d.get("evidence") or ""),
+                )
+                for d in disputed
+                if isinstance(d, dict)
+            ]
+            if isinstance(disputed, list)
+            else []
+        ),
     )
 
+
+# Where a lesson goes. Shown to every drafter of a skill that reads local notes, and appended to
+# the notes block so it sits next to the thing it is about.
+#
+# The distinction is the whole reason the tier exists. Before it, every lesson became a central
+# rule — including the ones true in exactly one folder — and a rule set rots the same way each
+# time: a fact about `payments/` is written as a rule about everything, it is wrong somewhere else
+# within a month, and it gets softened until it catches nothing anywhere.
+#
+# Biased toward the guidance on purpose. A rule is gated by eval and a claim is not, so the
+# cheap mistake is a rule that is too narrow and the expensive one is knowledge scattered into
+# folders where no gate can see it. "Would this be false or meaningless elsewhere?" is the test
+# because it is answerable from the failure in front of the drafter, unlike "is this general?".
+ROUTING = (
+    "## Where each lesson goes\n\n"
+    "You have two places to put what you learned, and each lesson belongs in exactly one.\n\n"
+    "**The guidance** (`body` and `pages`) is for anything true everywhere this skill runs: what "
+    "to look for, how to look for it, what counts as a problem, coding style, severity, the order "
+    "to check things in. If it would still be good advice in a different folder of this "
+    "repository — or in a different repository — it is guidance.\n\n"
+    "**A folder's local notes** (`sidecar_claims`) are for facts about one particular folder: what "
+    "that code does, which invariant it relies on, why something that looks wrong there is "
+    "deliberate, what handles a concern that is handled elsewhere. Test: *would this sentence be "
+    "false, or meaningless, in another folder?* If yes, it is a local note.\n\n"
+    "Worked example. A skill keeps missing auth problems. *\"Check that the token refresh path is "
+    "covered when reviewing an auth change\"* is how to look, so it is guidance. *\"Requests here "
+    "are already authenticated by the gateway middleware; handlers in this folder do not verify "
+    "tokens themselves\"* is a fact about one folder, so it is a local note — and writing it as a "
+    "central rule would make the skill wrong everywhere the gateway is not in front.\n\n"
+    "**Never soften a rule to accommodate one folder.** This is the commonest way to get it "
+    "wrong, and it looks like a fix: a rule fails in one place, so you add \"except in batch "
+    "jobs\" or \"unless the table is not shared\" to the rule itself — and now it is weaker "
+    "*everywhere*, including the places it was working. If the rule is right in general and wrong "
+    "here, leave the rule alone and file the exception against this folder with `excepts`. A rule "
+    "that has to name a folder to be correct is a rule in the wrong place.\n\n"
+    "Rules for `sidecar_claims`:\n"
+    "- `folder` must be a folder one of the failures above is actually in. You may not file "
+    "knowledge about code you were not shown.\n"
+    "- One home per lesson. If you file it as a claim, do **not** also add a rule for it — that is "
+    "how the guidance ends up carrying the folder's problems as well as its own.\n"
+    "- `because` says why it is local rather than general. A person reads it before accepting.\n"
+    "- To narrow an existing rule for one folder, set `excepts` to that rule's id. Never write a "
+    "claim that argues with a rule without excepting it: an exception is countable, and three "
+    "folders excepting the same rule is the signal that the rule itself wants rewriting.\n"
+    "- When in doubt, prefer the guidance. A rule is measured by the corpus; a claim is not.\n\n"
+    "Nothing you put here is written anywhere. Claims are delivered as a patch that the folder's "
+    "owners accept, so say what you mean and let them decide."
+)
 
 # Public because it is half of what the drafter reads, and the console shows an operator the whole
 # of it. A diagnostic that displayed the filled template alone would be showing the smaller half.
@@ -949,7 +1338,16 @@ SYSTEM = (
     "A skill is a folder: `body` is its `SKILL.md`, and the companion pages shown to you are part "
     "of the same guidance. Fix a rule where that rule lives. To change a page, return its complete "
     "new text in `pages` under the exact path it was shown under; leave out any page you are not "
-    "changing. If the rules live in the pages, `body` should stay as it is."
+    "changing. If the rules live in the pages, `body` should stay as it is.\n\n"
+    # Without this the drafter has one move against a wrong local claim — write a rule that
+    # compensates for it — and the claim then outlives every rewrite made around it.
+    "Some skills are also given **local notes** that live beside the code, under a heading saying "
+    "so. Those are not yours to rewrite and returning them in `body` or `pages` does nothing. If a "
+    "failure is explained by a claim in them being wrong or out of date, put that claim in "
+    "`disputed_claims` — quoted exactly as it appears in the file, with what disagrees with it — "
+    "and say so in `rationale`. Do not add or harden a rule to work around it. A dispute is filed "
+    "for a person to act on; quoting a claim inexactly means it cannot be matched and is dropped."
+    f"\n\n{ROUTING}"
 )
 
 
@@ -964,6 +1362,353 @@ def _wiki_for(skill: Skill, record: RunRecord | None, spec: StepSpec) -> str:
             if case is not None:
                 paths.extend(f.path for f in case.change.files)
     return retrieve(skill.wiki, paths, spec.inputs.wiki).to_prompt()
+
+
+def sidecar_reader(
+    skills_root: Path | str,
+    skill: Skill,
+    store_root: Path | str | None = None,
+    *,
+    budget: int = SIDECAR_BUDGET,
+) -> SidecarReader | None:
+    """How to read this skill's local notes for a drafter, or None when it keeps none.
+
+    The one resolver, called by every improve entry point, for the reason `_sidecar_target` in the
+    candidates router is also one: binding a role to a source tree has a single correct answer
+    (`reviewer_for`), and a second implementation of it would eventually disagree about which
+    folder a claim lives in. Either binding serves — a skill whose own reviewer collects the notes
+    reads the same files from the same tree, and this is display, not injection.
+
+    None rather than a reader that returns nothing, so `Digest.sidecars` stays empty and the
+    appendix stays absent for the skills this feature is not about.
+
+    `store_root` brings the claim ledger in. Optional because the reader is still worth having
+    without it — the notes alone are the point, and the disputes are the improvement.
+    """
+    from whetstone.reviewer.factory import reviewer_for
+    from whetstone.sidecars import SidecarError, read_sidecar
+
+    if skill.sidecar.is_empty():
+        return None
+    try:
+        choice = reviewer_for(skills_root, skill)
+        bound = choice.sidecar or choice.sidecar_view
+    except Exception:  # noqa: BLE001 - a broken step must not take the improve step down with it
+        bound = None
+    if bound is None:
+        return None
+    root, role = bound.source_root, skill.sidecar.role
+    disputes = _disputes(store_root)
+
+    def read(paths: Sequence[str]) -> list[SidecarNote]:
+        notes: list[SidecarNote] = []
+        for path in paths:
+            hit = disputes.get(path, ([], ""))
+            try:
+                text = read_sidecar(root, path, role)
+            except (SidecarError, OSError) as exc:
+                # Named rather than skipped. A folder whose notes have gone missing since the run
+                # is a live explanation for the failure being drafted from, and dropping the entry
+                # would present the same prompt as a folder that never had any.
+                notes.append(
+                    SidecarNote(
+                        path=path, problem=str(exc), disputed=hit[0], evidence=hit[1]
+                    )
+                )
+                continue
+            clipped = len(text) > budget
+            notes.append(
+                SidecarNote(
+                    path=path,
+                    text=text[:budget] if clipped else text,
+                    truncated=clipped,
+                    disputed=hit[0],
+                    evidence=hit[1],
+                )
+            )
+        return notes
+
+    return read
+
+
+def _disputes(store_root: Path | str | None) -> dict[str, tuple[list[str], str]]:
+    """Contradicted claims per sidecar path, from the ledger. Best-effort and never fatal.
+
+    Read once per improve rather than once per note: the ledger is one file, and a drafter that
+    silently lost its disputes to a locked database would go back to hardening rules around them.
+    """
+    if store_root is None:
+        return {}
+    try:
+        from whetstone.sidecars.confirm import Ledger
+
+        histories = [h for h in Ledger(Path(store_root)).summary() if h.disputed]
+    except (OSError, ValueError, ImportError):
+        return {}
+    out: dict[str, tuple[list[str], str]] = {}
+    for history in histories:
+        claims, evidence = out.setdefault(history.path, ([], ""))
+        claims.append(history.claim)
+        out[history.path] = (claims, evidence or history.last_evidence)
+    return out
+
+
+class SidecarPatch(BaseModel):
+    """A proposed claim, as the patch that would add it. Text only — nothing is written.
+
+    The same shape triage's `SidecarDelivery` carries and produced by the same two functions
+    (`claims.with_claim`, `promote._patch`), because "how does a claim reach a source repo" must
+    have one answer. A second one would drift on exactly the details that make a patch applyable.
+    """
+
+    path: str
+    folder: str
+    claim: str
+    excepts: str = ""
+    because: str = ""
+    content: str = ""
+    patch: str = ""
+    creates_file: bool = False
+
+
+class RejectedClaim(BaseModel):
+    """A proposed claim that did not survive checking, and the reason."""
+
+    folder: str
+    claim: str
+    reason: str
+
+
+def sidecar_patches(
+    proposal: GuidanceProposal,
+    digest: Digest,
+    skill: Skill,
+    *,
+    existing: Callable[[str], str] | None = None,
+) -> tuple[list[SidecarPatch], list[RejectedClaim]]:
+    """Turn the drafter's routed lessons into patches, dropping the ones that must not be filed.
+
+    Returns `(patches, rejected)`. Nothing is written and nothing is applied: delivery is a pull
+    request the folder's owners accept (§6), so this produces text and the filesystem is somebody
+    else's.
+
+    Four refusals, each closing a way a drafter can put knowledge somewhere it does not belong:
+
+    - **A folder none of the shown failures touched.** The analogue of `_check_region` on the
+      triage path. Without it a drafter can file a claim about code this run never looked at, which
+      is `docs/design/sidecars.md` §7's *"generating sidecars from source"* arriving by another
+      door — confident restatement, filed by path, cited forever.
+    - **An empty claim**, which would deliver a bullet with nothing in it.
+    - **A rule id that this skill does not declare.** `Excepts R9` where there is no R9 is a claim
+      whose exception can never be counted, and counting is the whole point of the form.
+    - **Naming a rule without excepting it.** §7: a sidecar may not negate a central rule except
+      through `Excepts R*n*`. Prose that argues with R1 while claiming to be a plain fact is the
+      injection surface this tier is most exposed to, and it is the one shape that is decidable.
+    """
+    from whetstone.promote import _patch
+    from whetstone.sidecars.claims import with_claim
+    from whetstone.sidecars.collect import AGENTS_DIR, CONTEXT_FILE
+
+    if not proposal.sidecar_claims:
+        return [], []
+    role = skill.sidecar.role
+    touched = _folders_touched(digest)
+    # The same extractor `service.rule_ids` and the dead-rule sweep use, so "which rules does this
+    # skill declare" cannot have two answers — one of which would let an exception be filed against
+    # a rule the counting side does not believe exists.
+    declared = {
+        *RULE_RE.findall(skill.body),
+        *(rule for page in skill.pages for rule in RULE_RE.findall(page.text)),
+        *skill.provenance,
+    }
+    patches: list[SidecarPatch] = []
+    rejected: list[RejectedClaim] = []
+
+    for claim in proposal.sidecar_claims:
+        folder = _norm_folder(claim.folder)
+        text = claim.claim.strip()
+        excepts = claim.excepts.strip()
+        reason = _why_not(folder, text, excepts, touched=touched, declared=declared)
+        if reason:
+            rejected.append(RejectedClaim(folder=folder, claim=text, reason=reason))
+            continue
+        # `context.md` when it is a plain fact every role reads, the role file when it narrows a
+        # rule — the same split `promote.DESTINATION_FILE` makes, and for the same reason: an
+        # exception belongs to the role whose rule it excepts.
+        name = f"{role}.md" if excepts else CONTEXT_FILE
+        path = f"{folder}/{AGENTS_DIR}/{name}" if folder != "." else f"{AGENTS_DIR}/{name}"
+        before = (existing(path) if existing else "") or ""
+        content = with_claim(
+            before,
+            text,
+            # The failures this came out of. A claim's citation has to be checkable by whoever
+            # reads the sidecar later, and for an improve-born claim the eval cases *are* the
+            # evidence — they are what fails without it.
+            _claim_source(digest, folder),
+            role="" if name == CONTEXT_FILE else role,
+            excepts=excepts,
+            confirmed_by=f"improve/{digest.skill_id}",
+        )
+        patches.append(
+            SidecarPatch(
+                path=path,
+                folder=folder,
+                claim=text,
+                excepts=excepts,
+                because=claim.because.strip(),
+                content=content,
+                patch=_patch(path, before, content),
+                creates_file=not before.strip(),
+            )
+        )
+    return patches, rejected
+
+
+def misrouted(before: str, after: str, digest: Digest) -> list[str]:
+    """Folder names the draft wrote *into the guidance* that were not there before.
+
+    The check that makes routing more than a request. Measured on a real run: asked to fix a
+    failure confined to one folder, a drafter rewrote the central rule to carve out that folder —
+    *"R1 was too rigid and did not account for batch jobs operating on their own tables"* — and
+    routed nothing. That is `docs/design/sidecars.md` §6's named failure verbatim: someone softens
+    the central rule and degrades it everywhere to fix one folder, which is how a rule set rots
+    into uselessness. The prompt asked for the other thing and the model did this anyway.
+
+    Decidable, which is why it is this and not "does the rule feel too specific": a central rule
+    that names a concrete folder from the corpus is a fact about that folder written in the one
+    place that applies everywhere. Compared against the previous guidance so a skill that has
+    always named a path is not flagged forever for it.
+
+    A warning, never a refusal. Naming a folder in guidance is occasionally right — *"the
+    generated code under `proto/` is exempt"* is a fact about the repository's shape, not about
+    what that folder does — and a drafter that cannot be overruled by a human is worse than one
+    that is sometimes wrong out loud.
+    """
+    folders = {f for f in _folders_touched(digest) if f != "."}
+    if not folders:
+        return []
+    return sorted(
+        folder
+        for folder in folders
+        if _names_folder(after, folder) and not _names_folder(before, folder)
+    )
+
+
+def _names_folder(text: str, folder: str) -> bool:
+    """Whether `text` names this folder as a path, rather than incidentally containing its letters.
+
+    Both boundaries earn their place, and the trailing one was wrong first:
+
+    - **Behind**, nothing word-like or a `/`. Stops `payments` firing on `docs/payments/guide.md`,
+      which names a *file* under a differently-rooted path and is not a claim about the folder.
+    - **Ahead**, nothing word-like — but a `/` is fine. A trailing slash is how people write a
+      folder, and excluding it meant a real draft naming `payments/reconciliation/` went unflagged
+      while the identical sentence without the slash was caught. `payments_ledger` is still safe
+      because `_` is a word character, which is the case this boundary exists for.
+    """
+    return re.search(rf"(?<![\w/]){re.escape(folder)}(?!\w)", text) is not None
+
+
+def _why_not(
+    folder: str, text: str, excepts: str, *, touched: set[str], declared: set[str]
+) -> str:
+    """Why this claim may not be filed, or `""`. See `sidecar_patches` for the reasoning."""
+    if not text:
+        return "the claim is empty"
+    if folder not in touched:
+        shown = ", ".join(sorted(touched)) or "none"
+        return (
+            f"no failure shown to the drafter is in {folder!r} — a claim may only be filed about "
+            f"code this run actually looked at (folders in play: {shown})"
+        )
+    if excepts and excepts not in declared:
+        return (
+            f"{excepts} is not a rule this skill declares, so the exception could never be counted"
+        )
+    if not excepts:
+        named = sorted(rule for rule in declared if _mentions_rule(text, rule))
+        if named:
+            return (
+                f"the claim argues with {', '.join(named)} without excepting it — a sidecar may "
+                f"not negate a central rule except through the `Excepts {named[0]}` form, which "
+                f"is the one that stays countable"
+            )
+    return ""
+
+
+def _mentions_rule(text: str, rule: str) -> bool:
+    """Whether a claim names a rule id as a word — `R1` but not `R10` and not `CURL1`."""
+    return re.search(rf"\b{re.escape(rule)}\b", text) is not None
+
+
+def _folders_touched(digest: Digest) -> set[str]:
+    """The folders the failures the drafter was shown are in.
+
+    Off the clusters rather than every failure, so it matches exactly what reached the prompt —
+    the same set `shown_cases` reports and the same one the notes were read for.
+    """
+    out: set[str] = set()
+    for cluster in digest.clusters:
+        path = cluster.representative.path
+        if path:
+            out.add(_norm_folder(str(PurePosixPath(path).parent)))
+    return out
+
+
+def _norm_folder(folder: str) -> str:
+    parts = [p for p in folder.replace("\\", "/").split("/") if p not in ("", ".")]
+    return "/".join(parts) or "."
+
+
+def _claim_source(digest: Digest, folder: str) -> str:
+    """The failing cases in this folder, as the claim's citation."""
+    ids = [
+        c.representative.case_id
+        for c in digest.clusters
+        if c.representative.path
+        and _norm_folder(str(PurePosixPath(c.representative.path).parent)) == folder
+    ]
+    return ", ".join(f"case/{case_id}" for case_id in ids[:3]) or f"improve/{digest.skill_id}"
+
+
+def disputed_verdicts(
+    proposal: GuidanceProposal, digest: Digest
+) -> tuple[list[ClaimVerdict], list[DisputedClaim]]:
+    """The drafter's disputes, matched back against the notes it was actually shown.
+
+    Returns `(filed, unmatched)`. `confirm.verdicts_from` does the matching, unchanged and
+    un-reimplemented — it is the same question the built-in reviewer's confirmations ask, and the
+    same two ways of getting it wrong: a path the run never loaded, and a claim the model
+    paraphrased instead of quoting. A ledger keyed on invented text is worse than no ledger, and
+    there must not be two opinions about what counts as a match.
+
+    Matched one at a time so the two lists partition the input exactly. Handing the whole batch to
+    `verdicts_from` returns only what survived, and recovering which inputs died from that would
+    mean re-deriving the fuzzy match here — a second opinion, which is the thing being avoided.
+
+    Everything files as `contradicted`. A drafter is only ever asked about claims it thinks the
+    failures disagree with — there is no "still true" branch to record, because it was not shown
+    the code and its assent would be worth nothing.
+    """
+    from whetstone.sidecars.confirm import verdicts_from
+
+    if not proposal.disputed_claims:
+        return [], []
+    resolved = {
+        "files": [{"path": n.path, "text": n.text} for n in digest.sidecars if not n.problem]
+    }
+    filed: list[ClaimVerdict] = []
+    unmatched: list[DisputedClaim] = []
+    for claim in proposal.disputed_claims:
+        reported = SimpleNamespace(
+            path=claim.path, claim=claim.claim, status="contradicted", evidence=claim.evidence
+        )
+        got = [v for v in verdicts_from([reported], resolved) if v.status == "contradicted"]
+        if got:
+            filed.extend(got)
+        else:
+            unmatched.append(claim)
+    return filed, unmatched
 
 
 def _run_subprocess(spec: StepSpec, digest: Digest) -> GuidanceProposal:

@@ -118,6 +118,46 @@ The suite is 2286 tests and the bar is not "it passes".
 - **Say what you did not verify.** A green suite is not a working feature; that is the whole lesson
   of these two bugs.
 
+## 4b. Sidecars are now wired through the whole console
+
+Five gaps closed. The short version of each, and what to look at when it misbehaves:
+
+| What | Where it shows |
+|---|---|
+| Agent runs record what they read | Case page → **Local context**; `CaseSidecars.resolved_by` |
+| The improve step is shown the notes | Improve tab → *Show prompt*; the `{{sidecars}}` block |
+| The drafter can dispute a claim | Job log on an improve run; `whetstone sidecars claims --disputed` |
+| The maintainer sweep runs from the console | Sidecar tab → **Verify claims** |
+| Mechanical defects are drawn on the graph | Sidecar tab → the **N with defects** badge; click it to filter |
+| A lesson goes to the folder or to the guidance | Improve job log; `--sidecar-patches <dir>` on the CLI |
+
+**The routing is the part to watch.** A skill with sidecars has two places a lesson can live, and
+the drafter now picks per lesson: a fact about one folder becomes a proposed claim, anything true
+everywhere stays guidance. Watch for two things:
+
+- **`MISROUTED` in the log.** It means the new guidance names a folder the old one did not — a rule
+  softened to fit one place, which is weaker in every place. Read that diff before accepting it.
+  A weak model does this often; it is the commonest way to get the split wrong.
+- **Claims are patches, not writes.** They land nowhere until a person applies them. On the CLI,
+  `--sidecar-patches <dir>` writes one `.patch` per claim for a PR against the *source* repo.
+
+Verified live with a local model: a false positive on a handler behind an auth gateway produced
+`api/handlers/.agents/arch-review.md` with `Excepts R4`, cited to the case that fails without it,
+and `git apply --check` accepted it. The same run left R4 itself untouched, which is the point.
+
+**`resolved_by` is the one field to understand.** `harness` means the built-in reviewer and the set
+is exhaustive and hashed. `reviewer` means an agent — then it is what the reviewer was *seen* to
+open, `context_hash` is empty on purpose, and the path list is a **lower bound**. Your deployment
+is all agents, so every record you write is the second kind. A case page reading *"the reviewer
+opened none of the notes"* is a real answer, not a bug: it is the diagnosis that was impossible
+before, and on our test run it was correct — the agent spent its whole step budget without opening
+anything.
+
+**Disputes are filed, never written.** §7 forbids a skill maintaining the sidecars it later reads.
+A drafter that spots a wrong claim files it to the ledger and a human promotes the correction. A
+claim must be quoted verbatim or it is dropped *and reported* — on our live run the model
+paraphrased, and the log said so rather than filing a claim nobody wrote.
+
 ## 5. Things known to be missing
 
 Not bugs — decisions, so you do not spend time rediscovering them:
@@ -131,4 +171,9 @@ Not bugs — decisions, so you do not spend time rediscovering them:
   clicking a node centres it without needing the card.
 - **Nothing verifies that a `self_collected` reviewer actually calls the collector.** The flag is
   the author's claim. Whetstone checks the two ways it can be false in its own terms (no tree, no
-  installed collector) and cannot check the third.
+  installed collector) and cannot check the third. The case page's **Local context** is now the
+  closest thing to a check: a reviewer that never opens an `.agents/` file shows an empty observed
+  set, which is evidence, not proof — a reviewer that shells out reads nothing we can see.
+- **Claim disputes from the improve step are not on a screen of their own.** They land in the
+  ledger and surface on the Sidecar tab's claim panel and on the graph, mixed in with what the
+  sweep and the consuming runs filed. `whetstone sidecars claims --disputed` is still the queue.

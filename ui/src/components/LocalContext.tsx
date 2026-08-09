@@ -5,6 +5,7 @@ import {
   type SidecarStatus,
   type SkillDetail,
 } from '@/api/client'
+import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, when } from '@/components/primitives'
 import { SidecarGraph } from '@/components/SidecarGraph'
 
@@ -35,7 +36,52 @@ export function SidecarTab({ detail, skillId }: { detail: SkillDetail; skillId: 
         </p>
         <SidecarGraph skillId={skillId} />
       </section>
+      {detail.sidecar.source_ok && <SweepPanel detail={detail} />}
     </>
+  )
+}
+
+/**
+ * The maintainer sweep, launchable (`docs/design/sidecars.md` §8).
+ *
+ * The third maintenance loop, and the only one that reaches code nobody is touching. Consumer
+ * confirmations ride on reviews, which cover whatever a diff happens to pull in — the correct
+ * allocation, and one that leaves a cold folder unchecked forever. This existed only as
+ * `whetstone sidecars verify`, so a console-driven deployment ran it never and the claims in its
+ * quiet corners aged with nothing looking at them.
+ */
+function SweepPanel({ detail }: { detail: SkillDetail }) {
+  const [all, setAll] = useState(false)
+  return (
+    <section className="mt-5 rounded-lg border border-line bg-surface px-4 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="max-w-2xl">
+          <h2 className="text-sm font-semibold">Check these claims against the code</h2>
+          <p className="mt-1 text-sm text-muted">
+            Two calls per folder. The first reads the code and writes down what a reader would need
+            to be told — <em>without seeing the claims</em>. The second compares that against them.
+            Never one call asking &ldquo;is this still true?&rdquo;: a model shown a plausible claim
+            and a long file agrees, and the loop then costs money to verify nothing.
+          </p>
+          <p className="mt-1 text-sm text-muted">
+            Writes no sidecar, ever. Contradictions land in the claim ledger and show up on the
+            graph above — correction is a person editing the note in the repository that owns it.
+          </p>
+        </div>
+        <LaunchButton
+          kind="sidecar-sweep"
+          request={{ skill_id: detail.skill.id, all_folders: all }}
+          label="Verify claims"
+        >
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
+            <span title="A folder git says has not moved since its claims were confirmed is skipped, because that comparison is free and exact. This pays a model to check it anyway.">
+              Check folders that have not changed since they were confirmed
+            </span>
+          </label>
+        </LaunchButton>
+      </div>
+    </section>
   )
 }
 

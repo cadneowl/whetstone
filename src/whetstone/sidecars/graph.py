@@ -130,6 +130,19 @@ class Node(BaseModel):
     # that is not in the tree. The floor calls these `orphan_section`; here they are hollow nodes,
     # which is the form in which someone actually notices them.
     missing: bool = False
+    # Mechanical defects the floor found here (`sidecars/floor.py` codes: `uncited`, `oversized`,
+    # `frontmatter`, `orphan_dir`, `role_mismatch`, `orphan_section`, `dangling_link`), joined at
+    # view time like the ledger verdicts beside them.
+    #
+    # The floor already decided all of this and the answer went to CI and to nobody else. A map is
+    # where "which part of this tree is rotting" is a question someone actually asks, and it was
+    # drawing an oversized `context.md` that retrieval silently drops — so the folder is reviewed
+    # with no local context at all — identically to a healthy one.
+    #
+    # On a folder, its own defects plus a roll-up of its claims', so a trouble spot is visible
+    # before anything is clicked. `issue_messages` carries the text for the one node in hand.
+    issues: list[str] = []
+    issue_messages: list[str] = []
     # Filled at assembly. Carried on the node because the layout and the truncation rule both want
     # it, and computing it twice from the edge list is how the two end up disagreeing.
     degree: int = 0
@@ -763,7 +776,21 @@ def _summarise(text: str, *, width: int = 96) -> str:
 
 # `kind:claim`, `folder:payments`, `rule:R7`. Everything else in a query is free text matched
 # against labels and claim bodies.
-_FIELDS = ("kind", "folder", "status", "rule", "ref", "file", "claim", "uncited", "excepts")
+_FIELDS = (
+    "kind",
+    "folder",
+    "status",
+    "rule",
+    "ref",
+    "file",
+    "claim",
+    "uncited",
+    "excepts",
+    # `issue:true` for anything the floor flagged, `issue:oversized` for one code. The badge in the
+    # console links here — on a tree of 78 nodes, "which ones are broken" is not a question you can
+    # answer by looking, and a count nobody can act on is worse than no count.
+    "issue",
+)
 
 
 def query(
@@ -899,6 +926,15 @@ def _matches(node: Node, key: str, value: str) -> bool:
         return node.kind == "claim" and node.cited is not wants
     if key == "excepts":
         return node.excepts.lower() == needle
+    if key == "issue":
+        # `true`/`false` asks whether there is any; anything else names a code. Both, because
+        # "show me everything wrong" and "show me every oversized file" are the two ways this
+        # question gets asked and neither is served by the other.
+        if needle in ("1", "true", "yes"):
+            return bool(node.issues)
+        if needle in ("0", "false", "no"):
+            return not node.issues
+        return needle in node.issues
     # `rule:`, `ref:`, `file:` and `claim:` are kind-and-label shorthands — the two things anyone
     # types together, and typing them apart is still available.
     return node.kind == key and needle in node.label.lower()
@@ -1107,6 +1143,65 @@ def annotate_verdicts(graph: SidecarGraph, histories: Sequence[Any]) -> SidecarG
         1 for n in graph.nodes if n.kind == "claim" and n.contradicted > 0
     )
     return graph
+
+
+def annotate_problems(graph: SidecarGraph, problems: Sequence[Any]) -> SidecarGraph:
+    """Mark each node with the mechanical defects the floor found in it, and roll up to the folder.
+
+    The companion to `annotate_verdicts`, and applied the same way and for the same reason: at view
+    time, never cached. The graph cache is keyed on the *bytes of the notes*, and half of these
+    codes are facts about the tree around them — `orphan_section` fires because a file was deleted,
+    `orphan_dir` because the code moved, `dangling_link` because a folder was renamed. Baking any
+    of those in would serve a stale answer for exactly as long as the sidecar happens not to move,
+    which is precisely the rot this is for.
+
+    `problems` is anything carrying `path`, `code`, `message` and `line` — structural, like
+    `annotate_verdicts`, so this module does not import the checker that produces them.
+
+    A problem lands on a claim when its line is that claim's; otherwise on the folder that owns the
+    file. Line is the right key because the floor addresses a defect to the line that can fix it,
+    and `uncited` — the commonest — is authored per claim.
+
+    Mutates and returns `graph`.
+    """
+    if not problems:
+        return graph
+    folders: dict[str, Node] = {n.id: n for n in graph.nodes if n.kind == "folder"}
+    by_line: dict[tuple[str, int], Node] = {
+        (n.sidecar, n.line): n for n in graph.nodes if n.kind == "claim" and n.line
+    }
+    for problem in problems:
+        path = str(getattr(problem, "path", ""))
+        code = str(getattr(problem, "code", ""))
+        message = str(getattr(problem, "message", ""))
+        line = int(getattr(problem, "line", 0) or 0)
+        claim = by_line.get((path, line))
+        # `path` is the sidecar file (`payments/.agents/context.md`) or, for `orphan_dir`, the
+        # `.agents` directory itself. Both sit one level under the folder that owns them.
+        parent = folders.get(_folder_id(_owner_of(path)))
+        # The code marks both, so a collapsed folder still shows there is trouble inside it. The
+        # message goes only where the defect is, so opening a folder does not restate every claim's
+        # problem as if it were the folder's own.
+        for node in (claim, parent):
+            if node is not None and code not in node.issues:
+                node.issues.append(code)
+        owner = claim if claim is not None else parent
+        if owner is not None and message:
+            owner.issue_messages.append(message)
+    graph.counts["problems"] = sum(1 for n in graph.nodes if n.issues)
+    return graph
+
+
+def _owner_of(path: str) -> str:
+    """The code folder a sidecar path belongs to — `payments/.agents/context.md` → `payments`.
+
+    Also correct for the `orphan_dir` code, whose path is the `.agents` directory rather than a
+    file in it: both forms are the folder plus one or two segments this drops.
+    """
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
+    if AGENTS_DIR in parts:
+        parts = parts[: parts.index(AGENTS_DIR)]
+    return "/".join(parts) or "."
 
 
 def as_json(graph: SidecarGraph) -> dict[str, Any]:

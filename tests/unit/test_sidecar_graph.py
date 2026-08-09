@@ -25,6 +25,7 @@ from whetstone.sidecars.claims import parse
 from whetstone.sidecars.collect import SidecarError
 from whetstone.sidecars.floor import check_tree
 from whetstone.sidecars.graph import (
+    annotate_problems,
     annotate_verdicts,
     build,
     build_cached,
@@ -739,3 +740,134 @@ def test_the_example_fixture_builds(tmp_path: Path) -> None:
         "folder:payments",
         "folder:payments/reconciliation",
     }
+
+
+# --- the mechanical defects, drawn ---------------------------------------------------
+#
+# The floor already decided all of this and told CI. On the one screen that is a map of the tier,
+# an oversized `context.md` — which retrieval silently drops, leaving the folder reviewed with no
+# local context at all — drew exactly like a healthy one.
+
+
+def _rotten(root: Path) -> None:
+    """Two defects the floor catches and the picture could not previously show."""
+    write(
+        root / "billing" / "charge.py",
+        "def charge(): ...\n",
+    )
+    write(
+        root / "billing" / ".agents" / "context.md",
+        "---\nstatus: confirmed\n---\n\n"
+        "- Charges are idempotent by key.\n"  # no <!-- src --> : uncited
+        "\n## refunds.py\n\n"  # no refunds.py in this folder: orphan_section
+        "- Refunds reverse the charge.\n"
+        "  <!-- src: HUB-1#r1 -->\n",
+    )
+
+
+def test_a_flagged_claim_carries_its_code_and_its_reason(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    _rotten(root)
+    graph, _ = build(root, "arch-review")
+    annotate_problems(graph, check_tree(root))
+
+    claim = next(n for n in graph.nodes if n.kind == "claim" and "idempotent" in n.text)
+    assert claim.issues == ["uncited"]
+    assert claim.issue_messages and "verif" in claim.issue_messages[0]
+
+
+def test_a_folder_shows_that_something_inside_it_is_wrong(tmp_path: Path) -> None:
+    """The roll-up. A dense graph is read folder-first, and a defect only visible after clicking
+    into a claim is a defect nobody finds."""
+    root = tmp_path / "src"
+    _rotten(root)
+    graph, _ = build(root, "arch-review")
+    annotate_problems(graph, check_tree(root))
+
+    folder = next(n for n in graph.nodes if n.id == "folder:billing")
+    assert "uncited" in folder.issues
+    assert "orphan_section" in folder.issues
+
+
+def test_a_claims_reason_is_not_restated_as_its_folders(tmp_path: Path) -> None:
+    """The code rolls up so the folder shows trouble; the message does not, or opening a folder
+    reads as if every claim's problem were the folder's own."""
+    root = tmp_path / "src"
+    _rotten(root)
+    graph, _ = build(root, "arch-review")
+    annotate_problems(graph, check_tree(root))
+
+    folder = next(n for n in graph.nodes if n.id == "folder:billing")
+    claim = next(n for n in graph.nodes if n.kind == "claim" and "idempotent" in n.text)
+    assert claim.issue_messages != []
+    assert not any("verif" in m for m in folder.issue_messages)
+
+
+def test_a_defect_about_the_folder_itself_lands_on_the_folder(tmp_path: Path) -> None:
+    """`orphan_dir` names the `.agents` directory, not a claim in it — the code moved and the notes
+    stayed, which is diff-adjacency (the whole argument for sidecars) failing."""
+    root = tmp_path / "src"
+    write(root / "gone" / ".agents" / "context.md", "---\nstatus: confirmed\n---\n\n- A fact.\n")
+    graph, _ = build(root, "arch-review")
+    annotate_problems(graph, check_tree(root))
+
+    folder = next(n for n in graph.nodes if n.id == "folder:gone")
+    assert "orphan_dir" in folder.issues
+
+
+def test_a_healthy_tree_is_marked_with_nothing(tree: Path) -> None:
+    """The fixture every other test here uses is clean, so an empty result is the control: a
+    codebase that reads as entirely rotten is as useless as one that reads as entirely fine."""
+    graph, _ = build(tree, "arch-review")
+    annotate_problems(graph, check_tree(tree))
+    assert [n.id for n in graph.nodes if n.issues] == []
+    assert graph.counts.get("problems") in (0, None)
+
+
+def test_the_defects_are_joined_at_view_time_and_never_cached(tmp_path: Path) -> None:
+    """Half these codes are facts about the *tree*, not about the bytes of the notes. Delete the
+    file a section names and the sidecar is untouched, its stamps match, and a cached answer would
+    go on drawing the folder as healthy — hiding exactly the rot this is for."""
+    root = tmp_path / "src"
+    write(root / "app" / "svc.py", "x = 1\n")
+    write(
+        root / "app" / ".agents" / "context.md",
+        "---\nstatus: confirmed\n---\n\n## svc.py\n\n"
+        "- It is a service.\n  <!-- src: HUB-2#r2 -->\n",
+    )
+    assert check_tree(root) == []
+
+    (root / "app" / "svc.py").unlink()  # the file goes; the notes do not
+    graph, _ = build(root, "arch-review")
+    annotate_problems(graph, check_tree(root))
+    folder = next(n for n in graph.nodes if n.id == "folder:app")
+    assert "orphan_section" in folder.issues
+
+
+def test_the_graph_counts_how_many_nodes_are_flagged(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    _rotten(root)
+    graph, _ = build(root, "arch-review")
+    annotate_problems(graph, check_tree(root))
+    assert graph.counts["problems"] == sum(1 for n in graph.nodes if n.issues)
+    assert graph.counts["problems"] >= 2  # the claim and its folder
+
+
+def test_a_query_can_ask_for_only_what_is_broken(tmp_path: Path) -> None:
+    """On 78 nodes "which of these is wrong" is not answerable by looking, so a count nobody can
+    filter on is worse than no count."""
+    root = tmp_path / "src"
+    _rotten(root)
+    graph, _ = build(root, "arch-review")
+    annotate_problems(graph, check_tree(root))
+
+    flagged = query(graph, "issue:true", hops=0)
+    assert flagged.matched
+    assert all(next(n for n in graph.nodes if n.id == i).issues for i in flagged.matched)
+
+    one_code = query(graph, "issue:orphan_section", hops=0)
+    assert all(
+        "orphan_section" in next(n for n in graph.nodes if n.id == i).issues
+        for i in one_code.matched
+    )
+    assert query(graph, "issue:false", hops=0).matched, "clean nodes are askable too"
