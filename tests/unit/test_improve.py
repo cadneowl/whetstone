@@ -978,7 +978,11 @@ def test_a_claim_that_argues_with_a_rule_without_excepting_it_is_refused() -> No
 
     assert patches == []
     assert "without excepting it" in rejected[0].reason
-    assert "Excepts R1" in rejected[0].reason, "the message names the form that would be allowed"
+    # The *field*, by name, and the rule id in it. Saying "the `Excepts R1` form" named the rendered
+    # output instead, and a drafter that reads it as text to write puts the rule id back into the
+    # claim sentence — which is the thing being refused.
+    assert "Set the `excepts` field to 'R1'" in rejected[0].reason
+    assert "not prose in the claim" in rejected[0].reason
 
 
 def test_excepting_a_rule_that_does_not_exist_is_refused() -> None:
@@ -1313,6 +1317,19 @@ def test_the_routing_rule_says_which_way_each_kind_goes() -> None:
     assert "prefer the guidance" in ROUTING, "the tie-break, and it has to be the gated one"
 
 
+def test_the_prompt_says_importance_is_not_a_reason_to_centralise() -> None:
+    """The reasoning a real drafter wrote down, verbatim: *"scan-module-specific but still
+    important enough to warrant explicit guidance"*. It applied the locality test, got "yes", and
+    overrode it — and the old tie-break, "when in doubt, prefer the guidance", read as licence.
+
+    So the tie-break is scoped to real uncertainty, and the thing it was being read as is answered
+    directly: a claim reaches every review where the fact is true, which is the whole of what
+    importance should buy it."""
+    assert "importance is why to file it carefully, not why to file it here" in ROUTING
+    assert "not the lesser home" in ROUTING
+    assert "tie-break for real uncertainty, not a preference for the guidance" in ROUTING
+
+
 def test_propose_routes_end_to_end(tmp_path: Path) -> None:
     """Through the real `propose`: the drafter is offered both destinations and what it routes
     comes back as a patch rather than as guidance."""
@@ -1458,11 +1475,36 @@ def test_a_run_with_no_paths_says_no_claim_can_be_filed() -> None:
 def test_a_rule_that_names_the_failing_class_is_flagged() -> None:
     """The form that went unflagged on the reported run. It names no folder at all — the trigger is
     a class — and is every bit as local as a rule that writes the path out."""
-    from whetstone.improve import misrouted
+    from whetstone.improve import misrouted, named_symbols
 
     digest = _routed_digest("scan/siggen/impl/ScannerApi.java")
     after = RULES_WITH_ID + "\n- **Trigger**: removal of REQUIRES_NEW from `ScannerApi`.\n"
-    assert misrouted(RULES_WITH_ID, after, digest) == ["ScannerApi"]
+    assert named_symbols(RULES_WITH_ID, after, digest) == ["ScannerApi"]
+    # Not in the folder list, and that separation is the point: one list carrying both kinds told
+    # an operator the fact belonged in `ScannerApi/.agents/`, a directory that never existed.
+    assert misrouted(RULES_WITH_ID, after, digest) == []
+
+
+def test_the_console_never_offers_a_notes_folder_for_a_class() -> None:
+    """What the conflated list produced live: *"a rule that has to name a folder to be correct
+    belongs in `ScannerApi/.agents/`"* — a directory that has never existed, over a class name.
+    Advice that fits a folder does not fit a type, so the two get different sentences."""
+    from types import SimpleNamespace
+
+    from whetstone.ui.routers.jobs import _log_routed
+
+    lines: list[str] = []
+    handle = SimpleNamespace(log=lambda line: lines.append(line.text))
+    result = SimpleNamespace(
+        rejected_claims=[], duplicated=[], misrouted=[], named_symbols=["ScannerApi"],
+        sidecar_patches=[],
+    )
+    _log_routed(handle, result)
+
+    said = " ".join(lines)
+    assert "ScannerApi" in said
+    assert "ScannerApi/.agents" not in said, "a class is not a directory"
+    assert "belongs in the notes beside it" in said
 
 
 def test_a_one_word_ancestor_used_as_prose_is_not_a_folder_reference() -> None:
@@ -1489,19 +1531,19 @@ def test_a_one_word_ancestor_written_as_a_path_still_counts() -> None:
 def test_an_ordinary_file_stem_is_not_treated_as_an_identifier() -> None:
     """`service`, `utils`, `main` are what a general rule mentions by coincidence. Flagging those
     would fire on most drafts and the warning would stop being read."""
-    from whetstone.improve import misrouted
+    from whetstone.improve import named_symbols
 
     digest = _routed_digest("payments/service.py")
     after = RULES_WITH_ID + "\n- Every service must bound its retries.\n"
-    assert misrouted(RULES_WITH_ID, after, digest) == []
+    assert named_symbols(RULES_WITH_ID, after, digest) == []
 
 
 def test_a_class_the_guidance_already_named_is_not_flagged_forever() -> None:
-    from whetstone.improve import misrouted
+    from whetstone.improve import named_symbols
 
     before = RULES_WITH_ID + "\n- `ScannerApi` is the scan entry point.\n"
     digest = _routed_digest("scan/siggen/impl/ScannerApi.java")
-    assert misrouted(before, before + "\n- R2 — bound retries.\n", digest) == []
+    assert named_symbols(before, before + "\n- R2 — bound retries.\n", digest) == []
 
 
 def test_a_duplicate_is_not_also_reported_as_a_plain_misrouting() -> None:

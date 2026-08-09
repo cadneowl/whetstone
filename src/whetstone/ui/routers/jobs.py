@@ -857,6 +857,9 @@ def launch_improve(
             #
             # With the duplicates removed — see `plain_misroutings`.
             "misrouted": plain_misroutings(result.misrouted, result.duplicated),
+            # Class and file names the guidance now pins a rule to. Its own field because a class
+            # has no notes file, so the advice that fits a folder does not fit this.
+            "named_symbols": result.named_symbols,
             # The subset of those that also got a claim — one lesson in two homes. Its own field
             # because the panel asks a different question about it: not "is this too specific" but
             # "which copy do you want", and the answer is one click either way.
@@ -1014,6 +1017,20 @@ def _log_routed(handle: Any, result: Any) -> list[dict[str, Any]]:
                     f"  the same lesson is in both homes for {folder!r} — it was filed as a claim "
                     f"*and* written into the guidance, which the routing rule forbids. Keep one: "
                     f"take the patch and drop the paragraph, or drop the claim."
+                ),
+                tone="bad",
+            )
+        )
+    for symbol in result.named_symbols:
+        # No `{symbol}/.agents/` here, which is what folding these into the folder list produced:
+        # a real run was told the fact belonged in `ScannerApi/.agents/`, a directory that has
+        # never existed. A class has no notes file; the folder its file lives in does.
+        handle.log(
+            LogLine(
+                text=(
+                    f"  the new guidance names {symbol!r} and the old one did not — a rule whose "
+                    f"trigger is one class is a fact about that class, in the file that applies "
+                    f"everywhere. It belongs in the notes beside it."
                 ),
                 tone="bad",
             )
