@@ -241,6 +241,49 @@ class Digest(BaseModel):
     # none" and "I could not look" license opposite conclusions, and silence reads as the first.
     sidecar_problem: str = ""
 
+    def routable_folders(self) -> list[str]:
+        """The leaf folders a claim may name, deepest form, deduplicated.
+
+        Exactly what `_covers_a_failure` will accept, minus the ancestors it also allows — those
+        are described in a sentence rather than listed, because a Java path contributes seven of
+        them and a prompt full of `scan/scan.siggen/src/main` helps nobody.
+        """
+        out: set[str] = set()
+        for cluster in self.clusters:
+            path = cluster.representative.path
+            if path:
+                folder = _norm_folder(str(PurePosixPath(path).parent))
+                if folder != ".":
+                    out.add(folder)
+        return sorted(out)
+
+    def render_destinations(self) -> str:
+        """The `folder` values this run will accept, spelled out.
+
+        The gap that made routing theoretical. `folder` is the one field a drafter has to get
+        character-exact — anything else is refused — and the prompt asked it to reconstruct the
+        value from the failures block: on a real deployment that meant copying
+        `scan/scan.siggen/src/main/java/com/blackducksoftware/scan/siggen/impl` by hand, correctly,
+        while also deciding what to say. Observed live: a drafter shown two folders' notes routed
+        nothing at all and wrote the fact into the guidance instead.
+
+        Naming them costs a line and turns "derive the path" into "pick one".
+        """
+        folders = self.routable_folders()
+        if not folders:
+            # Honest, and it forecloses a refusal nobody could have predicted: with no path on any
+            # shown failure there is no legal destination, so a claim cannot be filed this run.
+            return (
+                "None of the failures below carry a file path, so no claim can be filed this run "
+                "— put what you learned in the guidance."
+            )
+        listed = "\n".join(f"- `{folder}`" for folder in folders)
+        return (
+            f"**Where a claim may go.** `folder` must be one of these exactly, or any folder above "
+            f"one of them:\n{listed}\nAnything else is refused and reported. A fact about a whole "
+            f"module goes on the module — pick the level the fact is true at, not the deepest one."
+        )
+
     def render_sidecars(self) -> str:
         """The notes, and the one instruction that makes showing them safe.
 
@@ -250,6 +293,8 @@ class Digest(BaseModel):
         """
         if not self.reads_sidecars:
             return "This skill reads no local notes."
+        # One line, in every branch that routes, and before the routing rule it belongs to.
+        where = f"{self.render_destinations()}\n\n{ROUTING}"
         if self.sidecar_problem:
             # Routed anyway: a claim is a patch against a path, and producing one needs the folder
             # name rather than the folder's current contents. What the drafter must not do is read
@@ -259,7 +304,7 @@ class Digest(BaseModel):
                 f"This skill's folders keep local notes, but they could not be read for this run: "
                 f"{self.sidecar_problem}. Do not treat that as an absence of local knowledge — "
                 f"assume a folder may already say something you cannot see, and prefer a claim "
-                f"over hardening a rule.\n\n" + ROUTING
+                f"over hardening a rule.\n\n" + where
             )
         if not self.sidecars:
             # Still routed. A folder with no notes yet is exactly where a first claim belongs, and
@@ -267,7 +312,7 @@ class Digest(BaseModel):
             return (
                 "None of the folders below keep local notes yet. That is normal — and a folder "
                 "with no notes is where a first one belongs, if a failure calls for it.\n\n"
-                + ROUTING
+                + where
             )
         how = (
             "These were observed being read by the reviewer, which collects its own; it may have "
@@ -309,7 +354,12 @@ class Digest(BaseModel):
         # Last, after the notes themselves: the routing rule reads as an instruction about the
         # thing above it, and a drafter that has just read three folders' worth of local facts is
         # in the best position to judge which of its own lessons look like more of the same.
-        blocks.append(ROUTING)
+        #
+        # It matters most in exactly this branch. The notes shown are whatever the failing paths
+        # pull in, and on a repository whose only `.agents/` files sit at the root those are two
+        # repo-wide generalities — so the sole examples of "a local note" the drafter can see look
+        # like guidance, and the folders it could actually file against are named nowhere.
+        blocks.append(where)
         return "\n\n".join(blocks)
 
     def render_failures(self) -> str:
@@ -1788,6 +1838,17 @@ def misrouted(before: str, after: str, digest: Digest) -> list[str]:
     place that applies everywhere. Compared against the previous guidance so a skill that has
     always named a path is not flagged forever for it.
 
+    **Also the file the failure is in**, by its stem, because a rule can pin itself to one place
+    without ever writing a path. Observed live, and it is the form that went unflagged: *"Removal
+    of `@Transactional(propagation = REQUIRES_NEW)` from scan status update methods in
+    `ScannerApi`"* names no folder at all and is every bit as local as one that does. A rule whose
+    trigger is a class name is a fact about that class written in the file that applies everywhere.
+
+    Bounded to compound identifiers — an internal capital, an underscore or a hyphen, and at least
+    four characters. `ScannerApi` and `feed_client` qualify; `service`, `utils`, `main` and `index`
+    do not, and those are the stems a genuinely general rule mentions by coincidence. The bound is
+    the difference between a warning worth reading and one that fires on every draft.
+
     A warning, never a refusal. Naming a folder in guidance is occasionally right — *"the
     generated code under `proto/` is exempt"* is a fact about the repository's shape, not about
     what that folder does — and a drafter that cannot be overruled by a human is worse than one
@@ -1797,33 +1858,89 @@ def misrouted(before: str, after: str, digest: Digest) -> list[str]:
     # the same at both levels: *"R2 does not apply under `scan/siggen`"* is a fact about a module
     # written in the file that applies everywhere, exactly as the leaf version is. Checking only
     # the directory a failure sits in would have left the level this change encourages unwatched.
-    folders = {
+    leaves = {leaf for leaf in _folders_touched(digest) if leaf != "."}
+    # An ancestor has to be written *as a path* — `scan/` — before it counts. The leaf may be named
+    # bare, because naming the folder a failure is actually in is the signal itself.
+    #
+    # Without the split this fires on prose. A real draft read "removal of REQUIRES_NEW from scan
+    # status update methods", and `scan` is an ancestor of the failing package, so the warning sent
+    # the reader to `scan/.agents/` over an adjective. Single-word directory names at the top of a
+    # tree — `scan`, `core`, `api`, `web` — are ordinary English, and an ancestor is only
+    # meaningfully *named* when it appears as a path prefix.
+    ancestors = {
         ancestor
-        for leaf in _folders_touched(digest)
+        for leaf in leaves
         for ancestor in _self_and_ancestors(leaf)
-        if ancestor != "."
+        if ancestor != "." and ancestor not in leaves
     }
-    if not folders:
-        return []
     named = {
         folder
-        for folder in folders
+        for folder in leaves
         if _names_folder(after, folder) and not _names_folder(before, folder)
+    } | {
+        folder
+        for folder in ancestors
+        # Only a *bare single word* is ambiguous. `scan/siggen` cannot be prose, so it is matched
+        # the ordinary way and may be written without a trailing separator, which is how anyone
+        # names a module.
+        if _named(after, folder) and not _named(before, folder)
     }
     # Most specific only. `payments/reconciliation` in the text also matches `payments`, because a
     # folder name followed by `/` is how the deeper path is spelled — reporting both would make one
     # softened rule read as two, and send the reader to a folder the guidance never mentions.
-    return sorted(
+    out = sorted(
         folder
         for folder in named
         if not any(other != folder and other.startswith(f"{folder}/") for other in named)
     )
+    return out + sorted(
+        stem
+        for stem in _file_stems(digest)
+        if _names_folder(after, stem) and not _names_folder(before, stem)
+    )
+
+
+def _file_stems(digest: Digest) -> set[str]:
+    """Compound identifiers naming one shown failure's file — `ScannerApi`, `feed_client`.
+
+    A rule triggered by a class name pins itself to one place without writing a path, which is why
+    the folder check alone missed it. Bounded to stems that read as an identifier rather than a
+    word: `service.py` and `utils.go` are named by general rules all the time and flagging those
+    would make the warning worthless.
+    """
+    out: set[str] = set()
+    for cluster in digest.clusters:
+        path = cluster.representative.path
+        if not path:
+            continue
+        stem = PurePosixPath(path.replace("\\", "/")).stem
+        compound = any(c.isupper() for c in stem[1:]) or "_" in stem or "-" in stem
+        if len(stem) >= 4 and compound:
+            out.add(stem)
+    return out
 
 
 def _self_and_ancestors(folder: str) -> list[str]:
     """`a/b/c` → `a/b/c`, `a/b`, `a`. Never `.`, which names no folder anyone would write."""
     parts = [p for p in folder.split("/") if p and p != "."]
     return ["/".join(parts[: i + 1]) for i in range(len(parts))]
+
+
+def _named(text: str, folder: str) -> bool:
+    """Whether `text` names an *ancestor* folder, which takes a stricter test than a leaf.
+
+    A single-segment ancestor must be written as a path — `scan/` — because `scan` is equally a
+    directory near the root of a Java tree and a verb every other sentence about scanning uses. A
+    real draft read *"removal of REQUIRES_NEW from scan status update methods"*, and without this
+    the warning sent its reader to `scan/.agents/` over an adjective.
+
+    Anything with a separator already in it cannot be prose, so `scan/siggen` is matched the
+    ordinary way — a module named without a trailing slash is how anyone would write it, and
+    requiring one there would have missed the level this check exists to watch.
+    """
+    if "/" in folder:
+        return _names_folder(text, folder)
+    return re.search(rf"(?<![\w/]){re.escape(folder)}/", text) is not None
 
 
 def _names_folder(text: str, folder: str) -> bool:
