@@ -31,6 +31,7 @@ function draft(over: Partial<Draft> = {}): Draft {
     disputes: [],
     rejected: [],
     misrouted: [],
+    namedSymbols: [],
     duplicated: [],
     baseline: { body: '', pages: {} },
     ...over,
@@ -117,6 +118,16 @@ describe('NotInTheDiff', () => {
 
     expect(screen.getByText(/The same lesson is in both homes/)).toBeTruthy()
     expect(screen.queryByText(/the old one did not/)).toBeNull()
+  })
+
+  it('never offers a notes folder for a class', () => {
+    // What one conflated list produced live: the log told an operator the fact belonged in
+    // `ScannerApi/.agents/`, a directory that has never existed. A class has no notes file.
+    show(draft({ namedSymbols: ['ScannerApi'] }))
+
+    expect(screen.getByText(/pins a rule to ScannerApi/)).toBeTruthy()
+    expect(screen.queryByText(/ScannerApi\/\.agents/)).toBeNull()
+    expect(screen.getByText(/belongs in the notes beside it/)).toBeTruthy()
   })
 
   it('reports a misrouting on its own when nothing was routed there', () => {

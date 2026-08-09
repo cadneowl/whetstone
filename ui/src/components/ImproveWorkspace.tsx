@@ -290,6 +290,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       disputes,
       rejected: (r.rejected_claims ?? []) as RejectedClaim[],
       misrouted: (r.misrouted ?? []) as string[],
+      namedSymbols: (r.named_symbols ?? []) as string[],
       duplicated: (r.duplicated ?? []) as string[],
       // Snapshotted here, once, while it still describes what the draft was written against.
       baseline: { body: proposal?.body ?? '', pages: proposal?.pages ?? {} },
@@ -740,6 +741,7 @@ export type Draft = {
   disputes: DisputedClaim[]
   rejected: RejectedClaim[]
   misrouted: string[]
+  namedSymbols: string[]
   duplicated: string[]
   // The on-disk guidance as it stood when this draft arrived, captured rather than read live.
   //
@@ -931,13 +933,14 @@ export function NotInTheDiff({ draft, editorSearch }: { draft: Draft; editorSear
   // `misrouted` arrives with the duplicates already taken out — see `_log_routed`. Filtering here
   // as well would be a second spelling of `improve.same_place`, in a second language, free to
   // disagree with the first about which folder contains which.
-  const { claims, disputes, rejected, duplicated, misrouted } = draft
+  const { claims, disputes, rejected, duplicated, misrouted, namedSymbols } = draft
   if (
     !claims.length &&
     !disputes.length &&
     !rejected.length &&
     !duplicated.length &&
-    !misrouted.length
+    !misrouted.length &&
+    !namedSymbols.length
   )
     return null
 
@@ -963,6 +966,22 @@ export function NotInTheDiff({ draft, editorSearch }: { draft: Draft; editorSear
             before applying. Or keep it central: apply the diff and do not deliver the patch.
           </p>
         </div>
+      )}
+      {namedSymbols.length > 0 && (
+        <p className="rounded border border-warn/50 bg-warn/5 px-2.5 py-2 text-xs text-warn">
+          <strong>
+            The new guidance pins a rule to {namedSymbols.join(', ')}; the old one did not.
+          </strong>{' '}
+          <span className="text-ink">
+            A rule whose trigger is one class is a fact about that class, written in the file that
+            applies everywhere. It belongs in the notes beside it — the folder its file lives in is
+            listed in the prompt. Occasionally naming a type is right;{' '}
+            <Link to={{ search: editorSearch }} className="text-accent underline">
+              edit it out
+            </Link>{' '}
+            if it is not.
+          </span>
+        </p>
       )}
       {misrouted.length > 0 && (
         <p className="rounded border border-warn/50 bg-warn/5 px-2.5 py-2 text-xs text-warn">

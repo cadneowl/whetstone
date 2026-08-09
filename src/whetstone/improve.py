@@ -586,6 +586,9 @@ class ProposalResult(BaseModel):
     # Folders the draft named inside the guidance rather than routing to. See `misrouted`: this is
     # the shape of the rot §6 warns about, and it is the one form of it that is decidable.
     misrouted: list[str] = Field(default_factory=list)
+    # Code names from the failing files that the new guidance now pins a rule to. Separate from
+    # `misrouted` because a class has no notes file — see `named_symbols`.
+    named_symbols: list[str] = Field(default_factory=list)
     # Folders the draft sent a claim to *and* named in the new guidance — the same lesson filed in
     # both homes, which the routing prompt forbids in as many words. A strict subset of `misrouted`
     # and the strongest member of it: elsewhere the warning has to allow that naming a path was
@@ -1121,6 +1124,11 @@ def propose(
         removed_rules=removed, disputed=filed, unmatched_disputes=unmatched,
         sidecar_patches=routed, rejected_claims=refused, llm_calls=calls,
         misrouted=named,
+        named_symbols=named_symbols(
+            "\n".join([skill.body, *digest.pages.values()]),
+            "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
+            digest,
+        ),
         duplicated=both_homes(routed, named),
     )
 
@@ -1492,7 +1500,15 @@ ROUTING = (
     "- To narrow an existing rule for one folder, set `excepts` to that rule's id. Never write a "
     "claim that argues with a rule without excepting it: an exception is countable, and three "
     "folders excepting the same rule is the signal that the rule itself wants rewriting.\n"
-    "- When in doubt, prefer the guidance. A rule is measured by the corpus; a claim is not.\n\n"
+    "- **How important the fact is has nothing to do with where it goes.** A claim is not the "
+    "lesser home, or the place for things that did not quite make the cut: it reaches every "
+    "review of that folder, which is every review where the fact is true. The guidance also "
+    "reaches the reviews where it is false, and there it is noise at best. If you find yourself "
+    "writing \"specific to X, but important enough to state centrally\", that is this mistake with "
+    "a reason attached — the importance is why to file it carefully, not why to file it here.\n"
+    "- When you genuinely cannot tell whether it holds elsewhere, prefer the guidance. A rule is "
+    "measured by the corpus and a claim is not, so an unsure guess is cheaper there. This is a "
+    "tie-break for real uncertainty, not a preference for the guidance.\n\n"
     "Nothing you put here is written anywhere. Claims are delivered as a patch that the folder's "
     "owners accept, so say what you mean and let them decide."
 )
@@ -1893,7 +1909,23 @@ def misrouted(before: str, after: str, digest: Digest) -> list[str]:
         for folder in named
         if not any(other != folder and other.startswith(f"{folder}/") for other in named)
     )
-    return out + sorted(
+    return out
+
+
+def named_symbols(before: str, after: str, digest: Digest) -> list[str]:
+    """Code names from the failing files that the new guidance pins a rule to — `ScannerApi`.
+
+    The twin of `misrouted`, and separate from it because the two want different sentences. A
+    folder has a notes file: *"that belongs in `payments/.agents/`"* is advice a reader can act on.
+    A class does not — and folding these into the folder list produced exactly that mistake on a
+    real run, which told an operator the fact belonged in `ScannerApi/.agents/`, a directory that
+    has never existed. One list of two kinds of thing, and the only consumer had to guess which.
+
+    Same shape of rot, one level down: a rule whose trigger is a class name is a fact about that
+    class written in the file that applies everywhere. It just cannot be fixed by naming a folder,
+    so it is reported as what it is — the file the class lives in is where the claim goes.
+    """
+    return sorted(
         stem
         for stem in _file_stems(digest)
         if _names_folder(after, stem) and not _names_folder(before, stem)
@@ -1991,8 +2023,9 @@ def _why_not(
         if named:
             return (
                 f"the claim argues with {', '.join(named)} without excepting it — a sidecar may "
-                f"not negate a central rule except through the `Excepts {named[0]}` form, which "
-                f"is the one that stays countable"
+                f"not negate a central rule except through the countable form. Set the `excepts` "
+                f"field to {named[0]!r} (one rule id, not prose in the claim), and say the fact "
+                f"plainly without naming the rule in the sentence"
             )
     return ""
 
