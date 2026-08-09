@@ -264,7 +264,12 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     const r = (job.result ?? {}) as Record<string, unknown>
     const body = String(r.body ?? '')
     const pages = (r.pages ?? {}) as Record<string, string>
-    if (!body && !Object.keys(pages).length) {
+    const claims = (r.sidecar_claims ?? []) as RoutedClaim[]
+    const disputes = (r.disputed_claims ?? []) as DisputedClaim[]
+    // A draft with no guidance change is not necessarily an empty one. A run that routes every
+    // lesson to a folder's notes is the *best* outcome this loop has — and it arrives with an empty
+    // body, so bailing on the body alone threw the claims away and reported "no change".
+    if (!body && !Object.keys(pages).length && !claims.length && !disputes.length) {
       setNotice('The drafter proposed no change.')
       return
     }
@@ -274,6 +279,10 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       rationale: String(r.rationale ?? ''),
       selectedMissing: (r.selected_missing ?? []) as string[],
       removedRules: (r.removed_rules ?? []) as RemovedRule[],
+      claims,
+      disputes,
+      misrouted: (r.misrouted ?? []) as string[],
+      duplicated: (r.duplicated ?? []) as string[],
       // Snapshotted here, once, while it still describes what the draft was written against.
       baseline: { body: proposal?.body ?? '', pages: proposal?.pages ?? {} },
     })
@@ -285,6 +294,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       applying={save.isPending}
       readOnly={readOnly}
       error={save.error}
+      editorSearch={editorSearch}
       onApply={applyDraft}
       onDiscard={() => setDraft(null)}
     />
@@ -685,12 +695,38 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
 /** A rule the draft takes out, and the cases that would notice — see `deadrules.removed_rules`. */
 export type RemovedRule = { rule_id: string; linked_cases: string[] }
 
-type Draft = {
+/**
+ * A lesson the drafter sent to a folder's notes instead of the guidance.
+ *
+ * The one output of an improve that is deliberately *not* in the diff below it: a claim is
+ * delivered as a patch the folder's owners accept in the repository that owns the file, and
+ * Whetstone holds no write credentials there. So this panel is the whole of the handover — without
+ * `patch` on the wire there is no way to get it out of the console at all, and an operator who read
+ * only the diff would conclude the drafter had dropped the lesson.
+ */
+export type RoutedClaim = {
+  path: string
+  folder: string
+  claim: string
+  excepts: string
+  because: string
+  patch: string
+  creates_file: boolean
+}
+
+/** A claim in the notes the drafter says the failures contradict. Filed to the ledger, not written. */
+export type DisputedClaim = { path: string; claim: string; evidence?: string }
+
+export type Draft = {
   body: string
   pages: Record<string, string>
   rationale: string
   selectedMissing: string[]
   removedRules: RemovedRule[]
+  claims: RoutedClaim[]
+  disputes: DisputedClaim[]
+  misrouted: string[]
+  duplicated: string[]
   // The on-disk guidance as it stood when this draft arrived, captured rather than read live.
   //
   // Applying invalidates the skill, so the live `proposal` refetches to the *new* on-disk text —
@@ -774,6 +810,27 @@ export function draftedFiles(
 }
 
 /**
+ * What this draft produced, in one sentence — guidance files *and* claims.
+ *
+ * The count was files alone, and read as the whole of the output: a run that filed a claim and
+ * rewrote `SKILL.md` said "a change to 1 file", so an operator who read the diff and stopped there
+ * never learned the second half existed. It is not in the diff by design — a claim is a patch
+ * against someone else's repository — which is exactly why the count has to say so.
+ */
+export function draftSummary(files: number, claims: number): string {
+  const f = `${files} file${files === 1 ? '' : 's'}`
+  const c = `${claims} claim${claims === 1 ? '' : 's'} beside the code`
+  if (claims === 0) return `a change to ${f}`
+  if (files === 0) return `${c} and no change to the guidance`
+  return `a change to ${f}, and ${c}`
+}
+
+/** The `.patch` filename for a claim: the target path, flattened so it survives a download. */
+export function patchFilename(path: string): string {
+  return `${path.replace(/[\\/]/g, '_').replace(/\.md$/, '')}.patch`
+}
+
+/**
  * What this draft removes from the guidance, split by whether anything would notice.
  *
  * The split is the point. A rule with cases linked to it can be removed carelessly and the gate
@@ -810,11 +867,155 @@ function RemovedRules({ removed }: { removed: RemovedRule[] }) {
   )
 }
 
+/** Copy to the clipboard, then say so for a moment. Falls back to a visible failure, not silence. */
+function useCopy(): [string, (key: string, text: string) => void] {
+  const [copied, setCopied] = useState('')
+  const copy = (key: string, text: string) => {
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => setCopied(key))
+      .catch(() => setCopied('failed'))
+    window.setTimeout(() => setCopied(''), 2000)
+  }
+  return [copied, copy]
+}
+
+function download(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/x-patch' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * The half of a draft that is not in the diff, and what to do about each part of it.
+ *
+ * Three outputs land here, and all three used to be on the wire and rendered nowhere — the server
+ * comments said *"Surfaced on the draft"* and *"Shown over the diff"* of fields no component read.
+ * The job log carried them, which is a different screen and one scrolled past.
+ *
+ * Every block ends in something the reader can do. A claim is only useful if it can leave the
+ * console, so it carries the patch itself; a duplicate is only a problem if you cannot pick a side,
+ * so it says which two sides and links to the editor that resolves it. A panel that reported these
+ * and stopped would be handing over a diagnosis and keeping the cure.
+ */
+export function NotInTheDiff({ draft, editorSearch }: { draft: Draft; editorSearch: string }) {
+  const [copied, copy] = useCopy()
+  const { claims, disputes, duplicated, misrouted } = draft
+  const onlyMisrouted = misrouted.filter(
+    (folder) =>
+      !duplicated.some(
+        (dup) => folder === dup || folder.startsWith(`${dup}/`) || dup.startsWith(`${folder}/`),
+      ),
+  )
+  if (!claims.length && !disputes.length && !duplicated.length && !onlyMisrouted.length) return null
+
+  return (
+    <div className="space-y-2">
+      {duplicated.length > 0 && (
+        <div className="rounded border border-bad/50 bg-bad/5 px-2.5 py-2 text-xs">
+          <p className="text-bad">
+            <strong>
+              The same lesson is in both homes for {duplicated.map((f) => f).join(', ')}.
+            </strong>{' '}
+            <span className="text-ink">
+              It was filed as a claim <em>and</em> written into the guidance. One home per lesson: a
+              rule that has to name a folder to be correct is weaker everywhere it was already
+              working.
+            </span>
+          </p>
+          <p className="mt-1.5 text-muted">
+            Keep it local — take the patch below and{' '}
+            <Link to={{ search: editorSearch }} className="text-accent underline">
+              delete the paragraph in the Edit tab
+            </Link>{' '}
+            before applying. Or keep it central: apply the diff and do not deliver the patch.
+          </p>
+        </div>
+      )}
+      {onlyMisrouted.length > 0 && (
+        <p className="rounded border border-warn/50 bg-warn/5 px-2.5 py-2 text-xs text-warn">
+          <strong>The new guidance names {onlyMisrouted.join(', ')}; the old one did not.</strong>{' '}
+          <span className="text-ink">
+            A fact about one folder belongs in that folder&rsquo;s notes, not in the file that
+            applies everywhere. Occasionally naming a path is right —{' '}
+            <Link to={{ search: editorSearch }} className="text-accent underline">
+              edit it out
+            </Link>{' '}
+            if it is not.
+          </span>
+        </p>
+      )}
+      {claims.map((c) => (
+        <div key={c.path} className="rounded border border-accent/40 bg-accent/5 px-2.5 py-2">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <span className="font-mono text-xs text-accent">{c.path}</span>
+            {c.excepts && (
+              <span className="rounded bg-warn/15 px-1 text-[11px] text-warn">
+                Excepts {c.excepts}
+              </span>
+            )}
+            <span className="text-[11px] text-muted">
+              {c.creates_file ? 'creates the file' : 'adds to the file'}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-ink">{c.claim}</p>
+          {c.because && <p className="mt-0.5 text-[11px] text-muted">Local because: {c.because}</p>}
+          <div className="mt-1.5 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => copy(c.path, c.patch)}
+              className="rounded border border-line px-2 py-0.5 text-xs text-ink hover:bg-line/30"
+            >
+              {copied === c.path ? 'Copied' : 'Copy patch'}
+            </button>
+            <button
+              type="button"
+              onClick={() => download(patchFilename(c.path), c.patch)}
+              className="rounded border border-line px-2 py-0.5 text-xs text-ink hover:bg-line/30"
+            >
+              Download .patch
+            </button>
+          </div>
+        </div>
+      ))}
+      {claims.length > 0 && (
+        <p className="text-[11px] text-muted">
+          Nothing was written. A claim is delivered as a pull request in the repository that owns
+          the file, in front of that folder&rsquo;s owners — the console holds no credentials there.
+        </p>
+      )}
+      {disputes.map((d) => (
+        <div key={`${d.path}:${d.claim}`} className="rounded border border-warn/40 px-2.5 py-2">
+          <p className="font-mono text-xs text-warn">{d.path}</p>
+          <p className="mt-1 text-xs text-ink">
+            Disputed: <q>{d.claim}</q>
+          </p>
+          {d.evidence && <p className="mt-0.5 text-[11px] text-muted">Because: {d.evidence}</p>}
+          <p className="mt-0.5 text-[11px] text-muted">
+            Filed to the ledger — a skill never rewrites the notes it reads. It shows on the Sidecar
+            tab, and <code className="font-mono">whetstone sidecars claims --disputed</code> is the
+            queue.
+          </p>
+        </div>
+      ))}
+      {copied === 'failed' && (
+        <p className="text-xs text-bad">
+          The clipboard refused. Use <strong>Download .patch</strong> instead.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function DraftReview({
   draft,
   applying,
   readOnly,
   error,
+  editorSearch,
   onApply,
   onDiscard,
 }: {
@@ -822,6 +1023,7 @@ function DraftReview({
   applying: boolean
   readOnly: boolean
   error: unknown
+  editorSearch: string
   onApply: () => void
   onDiscard: () => void
 }) {
@@ -841,11 +1043,19 @@ function DraftReview({
           <>
             Applied to disk — {files.length} file{files.length === 1 ? '' : 's'} written. This is
             what was written; re-score to see whether it caught them.
+            {draft.claims.length > 0 && (
+              <>
+                {' '}
+                {draft.claims.length === 1
+                  ? 'The claim below was not written — deliver it separately.'
+                  : `The ${draft.claims.length} claims below were not written — deliver them separately.`}
+              </>
+            )}
           </>
         ) : (
           <>
-            Drafted a change to {files.length} file{files.length === 1 ? '' : 's'}. Read it before
-            applying — the drafter is not the reviewer.
+            Drafted {draftSummary(files.length, draft.claims.length)}. Read it before applying — the
+            drafter is not the reviewer.
           </>
         )}
       </p>
@@ -855,8 +1065,16 @@ function DraftReview({
           that no later step can catch — scoring it, gating it and merging it all pass, because
           passing is what "no case is linked to it" means. */}
       <RemovedRules removed={draft.removedRules} />
+      {/* Above the diff for the same reason: what is *not* in the diff is the thing a reader
+          scrolling a diff will never find. The duplicate warning in particular has to be read
+          before "Apply", not after. */}
+      <NotInTheDiff draft={draft} editorSearch={editorSearch} />
       {files.length === 0 ? (
-        <p className="text-xs text-warn">The drafter returned no change to any file.</p>
+        <p className="text-xs text-warn">
+          {draft.claims.length > 0
+            ? 'No change to the guidance — every lesson went to a folder’s notes. That is a result, not an empty draft.'
+            : 'The drafter returned no change to any file.'}
+        </p>
       ) : (
         <div className="space-y-3">
           {files.map((f) => (

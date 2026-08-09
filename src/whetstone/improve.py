@@ -536,6 +536,13 @@ class ProposalResult(BaseModel):
     # Folders the draft named inside the guidance rather than routing to. See `misrouted`: this is
     # the shape of the rot §6 warns about, and it is the one form of it that is decidable.
     misrouted: list[str] = Field(default_factory=list)
+    # Folders the draft sent a claim to *and* named in the new guidance — the same lesson filed in
+    # both homes, which the routing prompt forbids in as many words. A strict subset of `misrouted`
+    # and the strongest member of it: elsewhere the warning has to allow that naming a path was
+    # deliberate, but here the drafter has already decided the fact is local by filing it, and
+    # written it centrally anyway. Separated because the two want different answers from a reader —
+    # "is this rule too specific?" against "which of these two copies do you want?".
+    duplicated: list[str] = Field(default_factory=list)
     llm_calls: int = 0
 
     @property
@@ -1053,17 +1060,49 @@ def propose(
     routed, refused = sidecar_patches(
         proposal, digest, skill, existing=lambda path: on_disk.get(path, "")
     )
+    named = misrouted(
+        "\n".join([skill.body, *digest.pages.values()]),
+        "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
+        digest,
+    )
     return ProposalResult(
         proposal=proposal, digest=digest, unknown_cases=unknown,
         holdout_cases=holdout_named, selected_missing=selected_missing,
         removed_rules=removed, disputed=filed, unmatched_disputes=unmatched,
         sidecar_patches=routed, rejected_claims=refused, llm_calls=calls,
-        misrouted=misrouted(
-            "\n".join([skill.body, *digest.pages.values()]),
-            "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
-            digest,
-        ),
+        misrouted=named,
+        duplicated=both_homes(routed, named),
     )
+
+
+def both_homes(patches: list[SidecarPatch], named: list[str]) -> list[str]:
+    """Folders this draft filed a claim about *and* named in the new guidance.
+
+    The one-home rule, broken and provable from the draft alone. Everywhere else `misrouted` has to
+    hedge — naming a path in a rule is occasionally right — but not here: the drafter decided the
+    fact was local when it filed the claim, and then wrote it centrally as well. Observed on a real
+    run, where the same `@Transactional` fact went into `…/impl/.agents/context.md` and into
+    `SKILL.md` in the same reply, and the two warnings that said so had to be joined up by hand.
+
+    Matched by containment in both directions, because the two need not name the same level: a
+    claim on a module and a rule naming one package inside it are still one lesson in two places.
+    Reported as the claim's folder, which is the one a reader can act on — it is the file the patch
+    is against.
+    """
+    out = []
+    for patch in patches:
+        if any(same_place(patch.folder, folder) for folder in named):
+            out.append(patch.folder)
+    return sorted(set(out))
+
+
+def same_place(a: str, b: str) -> bool:
+    """Whether two folders name the same part of the tree — equal, or one inside the other.
+
+    Public because the console asks the same question when deciding which warning to print, and two
+    spellings of "is this the folder I already reported" would eventually disagree.
+    """
+    return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
 
 
 # How much copied text is needed before a tail counts as echo rather than coincidence. A sentence
