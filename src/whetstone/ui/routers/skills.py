@@ -156,7 +156,12 @@ def _sidecar_status(
         status.problems = [str(exc)]
         return status
     status.problems = list(choice.problems)
-    declared = (choice.context.redacted if choice.context else {}).get("source_root")
+    # `display`, not `redacted`: this is a screen, and the Sidecar tab renders this string in
+    # preference to the resolved root — so taking the record's view meant the one panel devoted to
+    # local context said "Read from <env:HUB_REPO_ROOT> per changed path" and never named the tree.
+    # Same rule as the cost plan (`ResolvedContext.display`): resolved when it is a real path here,
+    # the variable alone when it is anything else.
+    declared = (choice.context.display if choice.context else {}).get("source_root")
     status.source_declared = str(declared or "")
     # One of the two, never both. The view is the self-collecting reviewer's read-only twin of the
     # plan; everything this panel does with a root — scan it, count claims, draw the graph — is the

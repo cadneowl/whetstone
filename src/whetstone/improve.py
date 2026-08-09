@@ -1627,19 +1627,32 @@ def _disputes(store_root: Path | str | None) -> dict[str, tuple[list[str], str]]
     return out
 
 
+class RoutedLesson(BaseModel):
+    """One claim inside a patch — what it says, the rule it narrows, and why it is local."""
+
+    claim: str
+    excepts: str = ""
+    because: str = ""
+
+
 class SidecarPatch(BaseModel):
-    """A proposed claim, as the patch that would add it. Text only — nothing is written.
+    """One folder's notes file, as the patch that would add every claim routed to it.
 
     The same shape triage's `SidecarDelivery` carries and produced by the same two functions
     (`claims.with_claim`, `promote._patch`), because "how does a claim reach a source repo" must
     have one answer. A second one would drift on exactly the details that make a patch applyable.
+
+    **Per file, not per claim**, and that is a correction. A draft routing two lessons to the same
+    folder produced two patches, each computed against the file as it stood *before* either — so
+    they were not a sequence, they were two rival versions of the same file. Applying both left
+    whichever landed second, and the other claim was gone with nothing saying so. It is also what
+    delivery actually looks like: one file changed, in one pull request, in front of that folder's
+    owners.
     """
 
     path: str
     folder: str
-    claim: str
-    excepts: str = ""
-    because: str = ""
+    claims: list[RoutedLesson] = Field(default_factory=list)
     content: str = ""
     patch: str = ""
     creates_file: bool = False
@@ -1708,7 +1721,12 @@ def sidecar_patches(
         *RULE_RE.findall(proposal.body),
         *(rule for text in proposal.pages.values() for rule in RULE_RE.findall(text)),
     } - declared
-    patches: list[SidecarPatch] = []
+    # Keyed by target path and built up in order, so a second claim about the same folder patches
+    # the file *as the first claim leaves it*. Both were previously computed from the untouched
+    # original, which made them rivals rather than a sequence: applying both kept whichever landed
+    # second and dropped the other without a word.
+    patches: dict[str, SidecarPatch] = {}
+    starting: dict[str, str] = {}
     rejected: list[RejectedClaim] = []
 
     for claim in proposal.sidecar_claims:
@@ -1726,9 +1744,12 @@ def sidecar_patches(
         # exception belongs to the role whose rule it excepts.
         name = f"{role}.md" if excepts else CONTEXT_FILE
         path = f"{folder}/{AGENTS_DIR}/{name}" if folder != "." else f"{AGENTS_DIR}/{name}"
-        before = (existing(path) if existing else "") or ""
+        if path not in starting:
+            starting[path] = (existing(path) if existing else "") or ""
+        before = starting[path]
+        held = patches.get(path)
         content = with_claim(
-            before,
+            held.content if held else before,
             text,
             # The failures this came out of. A claim's citation has to be checkable by whoever
             # reads the sidecar later, and for an improve-born claim the eval cases *are* the
@@ -1738,19 +1759,18 @@ def sidecar_patches(
             excepts=excepts,
             confirmed_by=f"improve/{digest.skill_id}",
         )
-        patches.append(
-            SidecarPatch(
-                path=path,
-                folder=folder,
-                claim=text,
-                excepts=excepts,
-                because=claim.because.strip(),
-                content=content,
-                patch=_patch(path, before, content),
-                creates_file=not before.strip(),
-            )
+        lesson = RoutedLesson(claim=text, excepts=excepts, because=claim.because.strip())
+        patches[path] = SidecarPatch(
+            path=path,
+            folder=folder,
+            claims=[*(held.claims if held else []), lesson],
+            content=content,
+            # Always against the file as it stands on disk, never against the interim state, so one
+            # patch delivers the whole of what this draft wants in this file.
+            patch=_patch(path, before, content),
+            creates_file=not before.strip(),
         )
-    return patches, rejected
+    return list(patches.values()), rejected
 
 
 def misrouted(before: str, after: str, digest: Digest) -> list[str]:

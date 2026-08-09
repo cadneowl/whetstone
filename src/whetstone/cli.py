@@ -2253,8 +2253,11 @@ def _write_patches(result: Any, directory: Path) -> None:
     credentials on a reviewed repository and this is the seam where that stays true: what comes out
     is a file you can read, `git apply` yourself, and send to the folder's CODEOWNERS.
 
-    One file per claim rather than one combined diff — §6 delivers one sidecar per PR, because a
-    folder's owners should not have to accept another folder's claim to get their own.
+    One file per *destination file* rather than one combined diff — §6 delivers one sidecar per PR,
+    because a folder's owners should not have to accept another folder's claim to get their own. It
+    was one per claim, which is not the same thing when a draft routes two lessons to one folder:
+    the two diffs were then rival versions of that file rather than a sequence, and applying both
+    kept whichever went second.
     """
     if not result.sidecar_patches:
         typer.echo("# no claims were routed to the code — no patches to write", err=True)
@@ -2277,15 +2280,17 @@ def _report_routed(result: Any) -> None:
     Printed, never applied. Delivery is a pull request the folder's owners accept (§6), so the
     patch is here to be read and taken somewhere else.
     """
+    lessons = sum(len(p.claims) for p in result.sidecar_patches)
     for patch in result.sidecar_patches:
-        what = f"excepts {patch.excepts}" if patch.excepts else "local context"
-        typer.echo(f"# TO THE CODE, not the guidance — {patch.path} ({what})", err=True)
-        typer.echo(f"#   {patch.claim[:110]}", err=True)
-        if patch.because:
-            typer.echo(f"#   because: {patch.because[:110]}", err=True)
+        typer.echo(f"# TO THE CODE, not the guidance — {patch.path}", err=True)
+        for lesson in patch.claims:
+            what = f" (excepts {lesson.excepts})" if lesson.excepts else ""
+            typer.echo(f"#   {lesson.claim[:110]}{what}", err=True)
+            if lesson.because:
+                typer.echo(f"#   because: {lesson.because[:110]}", err=True)
     if result.sidecar_patches:
         typer.echo(
-            f"# {len(result.sidecar_patches)} claim(s) belong beside the code and are NOT in the "
+            f"# {lessons} claim(s) belong beside the code and are NOT in the "
             f"guidance below. Nothing was written — `--sidecar-patches <dir>` writes the diffs out "
             f"for a pull request against the source repo.",
             err=True,
