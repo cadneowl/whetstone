@@ -1332,6 +1332,49 @@ def test_a_rule_that_names_the_module_above_the_failure_is_flagged() -> None:
     assert misrouted(RULES_WITH_ID, after, digest) == ["scan/siggen"]
 
 
+def test_one_lesson_filed_in_both_homes_is_its_own_finding() -> None:
+    """Observed on a real run: the drafter filed a claim against `…/impl/.agents/context.md` and
+    wrote the same `@Transactional` fact into `SKILL.md` in the same reply. Two separate warnings
+    said so, and joining them up was left to whoever read the log.
+
+    Its own field because the question is different. Elsewhere `misrouted` has to allow that naming
+    a path was deliberate; here the drafter has already decided the fact is local by filing it, so
+    there is nothing left to judge — only which copy to keep."""
+    from whetstone.improve import both_homes
+
+    digest = _routed_digest("payments/service.py")
+    proposal = GuidanceProposal(
+        body=RULES_WITH_ID + "\n- **R2** — in `payments`, the gateway authenticates.\n",
+        sidecar_claims=[_claim()],
+    )
+    patches, rejected = sidecar_patches(proposal, digest, _routed_skill())
+    assert rejected == [] and patches
+
+    assert both_homes(patches, ["payments"]) == ["payments"]
+
+
+def test_a_claim_with_no_matching_rule_in_the_guidance_is_not_a_duplicate() -> None:
+    """The ordinary good outcome — routed, and the guidance left alone about that folder."""
+    from whetstone.improve import both_homes
+
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim()])
+    patches, _ = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert both_homes(patches, []) == []
+
+
+def test_the_two_homes_need_not_name_the_same_level() -> None:
+    """A claim on a module and a rule naming one package inside it are still one lesson in two
+    places. Reported as the claim's folder, which is the file the patch is against."""
+    from whetstone.improve import both_homes
+
+    digest = _routed_digest("scan/siggen/impl/ScannerApi.java")
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(folder="scan/siggen")])
+    patches, rejected = sidecar_patches(proposal, digest, _routed_skill())
+    assert rejected == [] and patches
+
+    assert both_homes(patches, ["scan/siggen/impl"]) == ["scan/siggen"]
+
+
 def test_a_folder_no_failure_touched_is_not_flagged() -> None:
     """Only folders the drafter was actually shown failures in. A rule that mentions some other
     part of the repository is not evidence of anything this run learned."""

@@ -45,7 +45,7 @@ from whetstone.domain.run import RunEvent
 from whetstone.domain.skill import Skill
 from whetstone.drift import DriftError, compute_drift, drift_inputs
 from whetstone.explain import explain_gate, explain_run
-from whetstone.improve import propose
+from whetstone.improve import propose, same_place
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.judge.spec import load_judge
 from whetstone.llm.embedding import build_embedder
@@ -855,6 +855,10 @@ def launch_improve(
             # Folders the draft named in the guidance instead of routing to. Shown over the diff,
             # like the unbacked removals: both are edits that pass everything downstream.
             "misrouted": result.misrouted,
+            # The subset of those that also got a claim — one lesson in two homes. Its own field
+            # because the panel asks a different question about it: not "is this too specific" but
+            # "which copy do you want", and the answer is one click either way.
+            "duplicated": result.duplicated,
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
             "holdout_withheld": result.digest.holdout_withheld,
@@ -979,7 +983,23 @@ def _log_routed(handle: Any, result: Any) -> list[dict[str, Any]]:
                 tone="bad",
             )
         )
+    for folder in result.duplicated:
+        # Ahead of the plain misrouting, and worded as a choice rather than a caution: this is the
+        # one case where the drafter has already agreed the fact is local and written it centrally
+        # too, so there is nothing left to judge — only which copy to keep.
+        handle.log(
+            LogLine(
+                text=(
+                    f"  the same lesson is in both homes for {folder!r} — it was filed as a claim "
+                    f"*and* written into the guidance, which the routing rule forbids. Keep one: "
+                    f"take the patch and drop the paragraph, or drop the claim."
+                ),
+                tone="bad",
+            )
+        )
     for folder in result.misrouted:
+        if any(same_place(folder, dup) for dup in result.duplicated):
+            continue  # already reported above, as the stronger thing it is
         handle.log(
             LogLine(
                 text=(
