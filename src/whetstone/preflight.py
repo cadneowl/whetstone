@@ -446,9 +446,8 @@ def annotate_reviewer(
                 f"(~{size:,} chars) alongside the diff — unbudgeted, because your program chooses "
                 f"what to read"
             )
-    if choice.context and choice.context.redacted:
-        shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
-        plan.details.append(f"reviewer context: {shown}")
+    if choice.context and choice.context.display:
+        plan.details.append(f"reviewer context: {choice.context.describe()}")
     if gate:
         plan.warnings.append(
             "this gate scores with a custom reviewer that reads source Whetstone does not hash — "

@@ -394,7 +394,8 @@ def _with_sidecars(
     declaration = declaration_of(skill.sidecar, enabled=enabled)
     resolved.hashable[DECLARATION_KEY] = declaration
     resolved.hashable[COLLECTOR_KEY] = collector_digest()
-    # Shown too, so a run record explains why its digest differs from a neighbour's.
+    # Shown too, so a run record explains why its digest differs from a neighbour's. `display`
+    # derives from this, so the plan picks it up without a second line to keep in step.
     resolved.redacted[DECLARATION_KEY] = declaration
     choice.sidecar = SidecarPlan(
         spec=skill.sidecar,

@@ -158,6 +158,45 @@ A drafter that spots a wrong claim files it to the ledger and a human promotes t
 claim must be quoted verbatim or it is dropped *and reported* — on our live run the model
 paraphrased, and the log said so rather than filing a claim nobody wrote.
 
+## 4c. The tier was inert on your deployment, and here is why
+
+You reported an improve run that put a `ScannerApi`-specific `@Transactional` fact into `SKILL.md`
+and `references/invariants.md` — two skill files — when it plainly belonged in a sidecar. It was
+not the model's judgement. **The drafter was never told the sidecars existed.** Four things, each
+silent, and the first two are the whole of it:
+
+| What was wrong | What it looked like |
+|---|---|
+| An agent could not reach a sidecar at all | `list_dir` filters dotted entries, `grep` prunes dotted directories. Only an exact `read_file` path worked, and nothing named the path. |
+| The routing block was gated on notes having been *read* | A skill with an `.agents/` tree whose reviewer opened nothing got a prompt byte-identical to a skill with no sidecars — no routing rule, one destination. |
+| A claim could only be filed on the leaf directory | The resolver reads every ancestor. `scan/siggen/.agents/` was honoured at review time and unfileable by improve. |
+| A binding failure returned silence | A missing `self_collected: true` looked exactly like a skill with no local knowledge. |
+
+Together they closed a loop: the reviewer cannot find the notes → improve sees none → the lesson
+goes central → the notes stay unread. Every record along the way was accurate, which is why a green
+suite said nothing.
+
+**What changed.**
+
+- **`collect_local_context`** is a new tool, offered only to a skill that declares a `sidecar:`
+  role and has a source root. It calls the same `resolve` the built-in reviewer's injection uses
+  and the same one the installed `collect_sidecars.py` runs — three callers, one resolution
+  (§3.5). Your reviewers will start recording non-empty sets; a case page that still reads *"the
+  reviewer opened none"* now means it chose not to call it.
+- **The improve step resolves the failing folders itself** and shows the drafter what they keep,
+  whether or not the reviewer read any of it. A note the reviewer never opened is shown and
+  labelled *"the reviewer did not open this file"* — that is the diagnosis, not a reason to
+  harden a rule.
+- **A claim may name any folder above the failure**, up to `source_root`, so a module-wide fact
+  goes on the module. Siblings are still refused; the repository root is still refused.
+- **The improve job log has a `local context:` line** on every run of a sidecar-keeping skill. It
+  says how many notes were shown, or that the folders keep none yet, or why they could not be read
+  — and names the fix, which for an agent-reviewed skill is usually `self_collected: true`.
+
+**Check first:** run one improve and read the `local context:` line. If it says the notes could not
+be read, the message names the fix. If it says the reviewer opened none of them, the notes are now
+in front of the drafter anyway and the routing is live.
+
 ## 5. Things known to be missing
 
 Not bugs — decisions, so you do not spend time rediscovering them:
@@ -173,7 +212,10 @@ Not bugs — decisions, so you do not spend time rediscovering them:
   the author's claim. Whetstone checks the two ways it can be false in its own terms (no tree, no
   installed collector) and cannot check the third. The case page's **Local context** is now the
   closest thing to a check: a reviewer that never opens an `.agents/` file shows an empty observed
-  set, which is evidence, not proof — a reviewer that shells out reads nothing we can see.
+  set, which is evidence, not proof — a reviewer that shells out reads nothing we can see. With
+  `collect_local_context` in the tool list this finally distinguishes *chose not to* from *could
+  not*, which is the half that was previously unknowable — but it is still not a guarantee, and
+  nothing forces the call.
 - **Claim disputes from the improve step are not on a screen of their own.** They land in the
   ledger and surface on the Sidecar tab's claim panel and on the graph, mixed in with what the
   sweep and the consuming runs filed. `whetstone sidecars claims --disputed` is still the queue.

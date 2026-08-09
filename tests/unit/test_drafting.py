@@ -185,3 +185,24 @@ def test_the_blindfold_keeps_everything_agentic_triage_is_for() -> None:
     assert blind.id == "s"
     assert blind.pages == []
     assert "# rules" not in blind.body
+
+
+def test_the_blindfolded_skill_cannot_ask_for_local_notes(tmp_path: Path) -> None:
+    """The third route into the same leak, opened the day agents got a collector tool.
+
+    `collect_local_context` is offered to any agent whose skill declares a `sidecar:` role, and a
+    local note may carry `Excepts R4` — the one form §7 allows for narrowing a rule. So a
+    blindfolded drafter that can ask for a folder's notes can read a rule id straight out of them,
+    which is a smaller version of exactly what the blindfold withholds.
+    """
+    from whetstone.agent.builtins import COLLECT, BuiltinTools
+    from whetstone.domain.skill import SidecarSpec, Skill
+    from whetstone.drafting import blindfolded
+
+    skill = Skill(id="s", body="# rules", sidecar=SidecarSpec(role="arch"))
+    # The real skill would be offered it — this is not a test that the tool is hard to reach.
+    assert COLLECT in {t.name for t in BuiltinTools(skill=skill, root=tmp_path).specs()}
+
+    blind = blindfolded(skill)
+    assert blind.sidecar.is_empty()
+    assert COLLECT not in {t.name for t in BuiltinTools(skill=blind, root=tmp_path).specs()}

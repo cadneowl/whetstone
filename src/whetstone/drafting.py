@@ -43,7 +43,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from whetstone.candidates import CandidateEntry
-from whetstone.domain.skill import Skill
+from whetstone.domain.skill import SidecarSpec, Skill
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.tools import ToolSpec
 from whetstone.steps import DraftInputs, StepError, StepSpec
@@ -174,8 +174,16 @@ def blindfolded(skill: Skill) -> Skill:
     well as the prompt one. Everything `agent:` is actually wanted for on this step survives: the
     source tree, the skill's declared tools, and the resolved context are all held by the runner,
     not by this object.
+
+    **The sidecar declaration goes too**, which is the third route into the same leak. A local note
+    may carry `Excepts R4` — the one form §7 allows for narrowing a rule — so it names rule ids,
+    and `collect_local_context` is offered to any agent whose skill declares a role. A blindfolded
+    drafter that can ask for the folder's notes can read a rule id out of them, which is a smaller
+    version of exactly what the blindfold withholds. Triage's own destinations (§6) are decided
+    from the *real* skill after the draft comes back, so nothing downstream needs this field to be
+    set on the copy the agent runs as.
     """
-    return skill.model_copy(update={"body": _SYSTEM, "pages": []})
+    return skill.model_copy(update={"body": _SYSTEM, "pages": [], "sidecar": SidecarSpec()})
 
 
 def draft_semantic(

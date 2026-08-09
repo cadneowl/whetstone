@@ -27,6 +27,7 @@ import re
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -62,6 +63,10 @@ FailureKind = Literal["fn", "fp"]
 # what a *reviewer* may be handed for one folder: a reviewer sees the notes for the one diff it is
 # looking at, and a drafter sees them for every folder in a clustered failure list.
 SIDECAR_BUDGET = 4_000
+
+# Stands in for the notes when the walk that finds them fails. Prose, not a path, so it can never
+# collide with a resolved entry — those all end in `.agents/<name>.md`.
+UNREADABLE = "the folders these failures are in"
 
 
 class Failure(BaseModel):
@@ -137,13 +142,38 @@ class SidecarNote(BaseModel):
     # Why there is no text: the file went away, or the tree is not readable from here. Distinct
     # from empty notes, which is a folder that keeps a sidecar with nothing in it.
     problem: str = ""
+    # Whether the reviewer that failed actually had this file. False is the interesting value and
+    # the reason this field exists: a folder keeps notes, the reviewer never opened them, and the
+    # miss being drafted from is in that folder. Before this, such a note was simply absent from
+    # the digest, so the drafter saw a folder with no local knowledge and wrote a central rule —
+    # which is how a note nobody reads makes the guidance heavier every cycle.
+    seen_by_reviewer: bool = True
 
 
-# Reads the notes for a set of sidecar paths. A callable rather than a source root on the digest,
-# because *which* paths matter is decided here — from the failures that survive clustering — while
-# *how* to read one is the source tree's business, guarded by `sidecars.read_sidecar`. Splitting it
-# this way keeps `build_digest` a pure function of the record it is given.
-SidecarReader = Callable[[Sequence[str]], list[SidecarNote]]
+@dataclass
+class SidecarReader:
+    """How to show a drafter the local notes for a set of failing paths.
+
+    A pair rather than a bare callable, because there are two things to say and the second one used
+    to be swallowed. `read` answers "what do these folders keep"; `problem` answers "why can I not
+    tell you" — a declared role whose source tree will not bind produced no notes and no exception,
+    and for the whole of this feature's life that was indistinguishable from a skill whose folders
+    simply keep none.
+
+    `read(code_paths, had)` takes the *source* paths the shown failures are about and the sidecar
+    paths the record says the reviewer had. It returns one note per file, resolved the same way a
+    reviewer's would be — so a folder's notes reach the drafter whether or not the reviewer that
+    failed ever opened them, with `seen_by_reviewer` carrying which it was.
+
+    A callable rather than a source root on the digest, because *which* paths matter is decided
+    here — from the failures that survive clustering — while *how* to read one is the source tree's
+    business. That keeps `build_digest` a pure function of the record it is given.
+    """
+
+    read: Callable[[Sequence[str], Sequence[str]], list[SidecarNote]]
+    # Set when the skill declares a role but its notes could not be reached. Empty on the happy
+    # path and for every skill that declares no role at all.
+    problem: str = ""
 
 
 class Digest(BaseModel):
@@ -206,6 +236,10 @@ class Digest(BaseModel):
     # notes" because this run happened to fail nowhere near it is false, and false in the direction
     # that invites the drafter to write a rule the notes already cover.
     reads_sidecars: bool = False
+    # Why the notes could not be reached, for a skill that declares a role. From
+    # `SidecarReader.problem`, and rendered where the notes would have been: "this folder keeps
+    # none" and "I could not look" license opposite conclusions, and silence reads as the first.
+    sidecar_problem: str = ""
 
     def render_sidecars(self) -> str:
         """The notes, and the one instruction that makes showing them safe.
@@ -216,6 +250,17 @@ class Digest(BaseModel):
         """
         if not self.reads_sidecars:
             return "This skill reads no local notes."
+        if self.sidecar_problem:
+            # Routed anyway: a claim is a patch against a path, and producing one needs the folder
+            # name rather than the folder's current contents. What the drafter must not do is read
+            # the silence as "these folders keep nothing", which is the one conclusion this says is
+            # unavailable.
+            return (
+                f"This skill's folders keep local notes, but they could not be read for this run: "
+                f"{self.sidecar_problem}. Do not treat that as an absence of local knowledge — "
+                f"assume a folder may already say something you cannot see, and prefer a claim "
+                f"over hardening a rule.\n\n" + ROUTING
+            )
         if not self.sidecars:
             # Still routed. A folder with no notes yet is exactly where a first claim belongs, and
             # a drafter told only "there are none" reads that as "this destination is unavailable".
@@ -238,6 +283,13 @@ class Digest(BaseModel):
         ]
         for note in self.sidecars:
             head = f"### `{note.path}`"
+            if not note.seen_by_reviewer:
+                # Said before the text, not after it. This note did not reach the reviewer that
+                # failed, so it explains nothing about the failure — and a drafter reading it as
+                # context the reviewer had would conclude the claim was insufficient and write a
+                # rule, when the actual finding is that the folder already says this and nobody
+                # read it.
+                head += " — **the reviewer did not open this file**"
             if note.problem:
                 blocks.append(f"{head}\n\n({note.problem})")
                 continue
@@ -518,13 +570,24 @@ def build_digest(
     cases = {c.id: c for c in skill.eval_cases}
     failures = [] if record is None else _failures(record, cases, inputs, only=only)
     clusters = _cluster(failures, inputs)
-    # Read for the failures that survive clustering, not for every failure found. A cluster's
+    # For the failures that survive clustering, not for every failure found. A cluster's
     # non-representatives render as "(and N more like it)" and `FailureInputs.max` cuts the tail
     # outright, so notes for those reach nobody — the same set `shown_cases` reports.
-    notes = [] if sidecars is None else sidecars(_sidecar_paths(clusters))
+    #
+    # Two inputs, and the first is the one that was missing. The *code* paths say which folders are
+    # in play, so the drafter is shown what those folders keep; the sidecar paths say what the
+    # reviewer had, which is a strictly smaller set whenever the reviewer collects its own and did
+    # not go looking. Reading only the second made the routing destination invisible in exactly the
+    # case it exists for: a miss in a folder whose notes the reviewer never opened.
+    notes = (
+        []
+        if sidecars is None
+        else sidecars.read(_failure_paths(clusters), _sidecar_paths(clusters))
+    )
     return Digest(
         sidecars=notes,
         reads_sidecars=sidecars is not None,
+        sidecar_problem="" if sidecars is None else sidecars.problem,
         sidecars_observed=record is not None and _observed(record),
         untested_rules=consolidatable(skill) if distill else [],
         skill_id=skill.id,
@@ -637,6 +700,21 @@ def drafts_from(
     """
     cases = {c.id: c for c in skill.eval_cases}
     return {f.case_id for f in _failures(record, cases, inputs, only=only)}
+
+
+def _failure_paths(clusters: list[Cluster]) -> list[str]:
+    """The source files the shown failures are about, in order and deduplicated.
+
+    What the notes are resolved *for*. The same ancestor walk a reviewer's context goes through
+    (`sidecars.collect.resolve`) turns these into candidate `.agents/` files, so the drafter is
+    shown the folders' notes whether or not the failing reviewer opened any of them.
+    """
+    seen: list[str] = []
+    for cluster in clusters:
+        path = cluster.representative.path
+        if path and path not in seen:
+            seen.append(path)
+    return seen
 
 
 def _sidecar_paths(clusters: list[Cluster]) -> list[str]:
@@ -1098,12 +1176,21 @@ def appendices(spec: StepSpec, digest: Digest) -> list[tuple[str, str]]:
             "complete new text in `pages` under that path.\n\n"
             f"{digest.render_pages()}\n",
         ))
-    if digest.sidecars and "sidecars" not in named:
+    if digest.reads_sidecars and "sidecars" not in named:
         # Appended for the same reason as `pages`, and it matters more here: every improve template
         # in existence was written before sidecars did, so leaving this to the template means the
         # skills that actually have local notes are exactly the ones that never see them. An agent
         # step gets it too, unlike `pages` — the notes are in the *source* tree, and a step whose
         # tools reach the skill folder cannot necessarily reach that.
+        #
+        # On `reads_sidecars`, not on `sidecars`. `render_sidecars` distinguishes three states and
+        # only one of them has notes in it; gating on the notes meant the other two — "these
+        # folders keep none yet, which is where a first claim belongs" and "they keep some and I
+        # could not read them" — were composed and then thrown away. A skill with an `.agents/`
+        # tree whose reviewer happened to open nothing got the identical prompt to a skill with no
+        # sidecars at all, so the drafter never learned the second destination existed and put
+        # every lesson in the guidance. Skills that declare no role are still untouched: this is
+        # false for them, which is the whole of the opt-in.
         out.append((
             "sidecars",
             "\n\n## Local notes beside the code\n\n"
@@ -1178,7 +1265,10 @@ _SUBMIT_GUIDANCE = ToolSpec(
                     "properties": {
                         "folder": {
                             "type": "string",
-                            "description": "a folder one of the failures above is in",
+                            "description": (
+                                "a folder one of the failures above is in, or a folder above one "
+                                "— pick the level the fact is true at"
+                            ),
                         },
                         "claim": {"type": "string", "description": "the fact, as one sentence"},
                         "excepts": {
@@ -1303,8 +1393,10 @@ ROUTING = (
     "here, leave the rule alone and file the exception against this folder with `excepts`. A rule "
     "that has to name a folder to be correct is a rule in the wrong place.\n\n"
     "Rules for `sidecar_claims`:\n"
-    "- `folder` must be a folder one of the failures above is actually in. You may not file "
-    "knowledge about code you were not shown.\n"
+    "- `folder` must be a folder one of the failures above is in, or a folder above one — a note "
+    "is read by everything beneath it, so pick the level the fact is actually true at. A fact "
+    "about a whole module goes on the module, not on the one package that happened to fail. You "
+    "may not file knowledge about code you were not shown.\n"
     "- One home per lesson. If you file it as a claim, do **not** also add a rule for it — that is "
     "how the guidance ends up carrying the folder's problems as well as its own.\n"
     "- `because` says why it is local rather than general. A person reads it before accepting.\n"
@@ -1379,56 +1471,99 @@ def sidecar_reader(
     folder a claim lives in. Either binding serves — a skill whose own reviewer collects the notes
     reads the same files from the same tree, and this is display, not injection.
 
-    None rather than a reader that returns nothing, so `Digest.sidecars` stays empty and the
-    appendix stays absent for the skills this feature is not about.
+    None *only* when the skill declares no role, so the appendix stays absent for the skills this
+    feature is not about. A declared role whose tree will not bind comes back as a reader that
+    reads nothing and carries the reason: returning None there is what made a misconfigured
+    deployment look exactly like a skill with no local knowledge, in the one prompt whose job is to
+    decide where knowledge goes.
 
     `store_root` brings the claim ledger in. Optional because the reader is still worth having
     without it — the notes alone are the point, and the disputes are the improvement.
     """
     from whetstone.reviewer.factory import reviewer_for
     from whetstone.sidecars import SidecarError, read_sidecar
+    from whetstone.sidecars.collect import resolve
 
     if skill.sidecar.is_empty():
         return None
+    problem = ""
     try:
         choice = reviewer_for(skills_root, skill)
         bound = choice.sidecar or choice.sidecar_view
-    except Exception:  # noqa: BLE001 - a broken step must not take the improve step down with it
-        bound = None
+        if bound is None:
+            # The reviewer's own preflight already worked out why and said it in a sentence that
+            # names the fix — most often a `self_collected: true` an agent-reviewed skill is
+            # missing. Reprinting it beats inventing a vaguer second explanation, and it puts the
+            # fix in front of whoever is reading the improve log rather than only the plan.
+            problem = next(
+                iter(choice.problems),
+                "this skill's evaluate step binds no source tree, so there is nowhere to read "
+                "them from",
+            )
+    except Exception as exc:  # noqa: BLE001 - a broken step must not take improve down with it
+        bound, problem = None, f"its evaluate step could not be loaded ({exc})"
     if bound is None:
-        return None
+        return SidecarReader(read=lambda _paths, _had: [], problem=problem)
     root, role = bound.source_root, skill.sidecar.role
     disputes = _disputes(store_root)
 
-    def read(paths: Sequence[str]) -> list[SidecarNote]:
-        notes: list[SidecarNote] = []
-        for path in paths:
-            hit = disputes.get(path, ([], ""))
+    def one(path: str, *, seen: bool, text: str | None = None) -> SidecarNote:
+        hit = disputes.get(path, ([], ""))
+        if text is None:
             try:
                 text = read_sidecar(root, path, role)
             except (SidecarError, OSError) as exc:
                 # Named rather than skipped. A folder whose notes have gone missing since the run
                 # is a live explanation for the failure being drafted from, and dropping the entry
                 # would present the same prompt as a folder that never had any.
-                notes.append(
-                    SidecarNote(
-                        path=path, problem=str(exc), disputed=hit[0], evidence=hit[1]
-                    )
+                return SidecarNote(
+                    path=path, problem=str(exc), disputed=hit[0], evidence=hit[1],
+                    seen_by_reviewer=seen,
                 )
-                continue
-            clipped = len(text) > budget
-            notes.append(
-                SidecarNote(
-                    path=path,
-                    text=text[:budget] if clipped else text,
-                    truncated=clipped,
-                    disputed=hit[0],
-                    evidence=hit[1],
-                )
-            )
-        return notes
+        clipped = len(text) > budget
+        return SidecarNote(
+            path=path,
+            text=text[:budget] if clipped else text,
+            truncated=clipped,
+            disputed=hit[0],
+            evidence=hit[1],
+            seen_by_reviewer=seen,
+        )
 
-    return read
+    def read(code_paths: Sequence[str], had: Sequence[str]) -> list[SidecarNote]:
+        was_had = set(had)
+        notes: dict[str, SidecarNote] = {}
+        # The canonical resolver, not a second walk: what a reviewer of this skill would be given
+        # for these paths is exactly the question, and two implementations of it would eventually
+        # disagree about which folder a claim belongs in (`docs/design/sidecars.md` §3.5).
+        try:
+            resolved = resolve(root, [p for p in code_paths if p], role)
+        except (SidecarError, OSError, ValueError) as exc:
+            # Not fatal — the notes the reviewer *did* have are still worth showing and the folders
+            # are still routable — and not silent either. Both binding paths check the root is a
+            # directory, so this needs the tree to go away between the plan and the draft; but
+            # swallowing it would render as "none of these folders keep notes yet", which is the
+            # precise false sentence this whole change exists to stop writing.
+            resolved = {"files": []}
+            # Keyed by the display path, which is prose rather than a path and so cannot collide
+            # with a resolved entry — every one of those ends in `.agents/<name>.md`.
+            notes[UNREADABLE] = SidecarNote(
+                path=UNREADABLE,
+                problem=f"could not be read just now — {exc}",
+                seen_by_reviewer=False,
+            )
+        for entry in resolved["files"]:
+            path = str(entry["path"])
+            notes[path] = one(path, seen=path in was_had, text=str(entry["text"]))
+        # Anything the reviewer opened that the walk did not produce. An agent chooses its own
+        # reads, so it can open a role file for a folder no failure is in — worth seeing rather
+        # than dropping, for the same reason `_is_sidecar` does not filter by role.
+        for path in had:
+            if path not in notes:
+                notes[path] = one(path, seen=True)
+        return list(notes.values())
+
+    return SidecarReader(read=read)
 
 
 def _disputes(store_root: Path | str | None) -> dict[str, tuple[list[str], str]]:
@@ -1500,7 +1635,13 @@ def sidecar_patches(
       door — confident restatement, filed by path, cited forever.
     - **An empty claim**, which would deliver a bullet with nothing in it.
     - **A rule id that this skill does not declare.** `Excepts R9` where there is no R9 is a claim
-      whose exception can never be counted, and counting is the whole point of the form.
+      whose exception can never be counted, and counting is the whole point of the form. Judged
+      against the skill as it stands, not as the draft would leave it: the two artifacts are
+      accepted separately — the claim by the folder's owners in the source repo, the guidance by
+      whoever reviews the draft here — so a claim excepting a rule the same draft invents is
+      `Excepts R4` against nothing the moment the draft is turned down. Observed live: a drafter
+      added R4 and filed two exceptions to it in the same reply, which is why the refusal says so
+      in those words instead of insisting the rule does not exist.
     - **Naming a rule without excepting it.** §7: a sidecar may not negate a central rule except
       through `Excepts R*n*`. Prose that argues with R1 while claiming to be a plain fact is the
       injection surface this tier is most exposed to, and it is the one shape that is decidable.
@@ -1521,6 +1662,13 @@ def sidecar_patches(
         *(rule for page in skill.pages for rule in RULE_RE.findall(page.text)),
         *skill.provenance,
     }
+    # Rules this draft would add. Not merged into `declared` — see the docstring — but named
+    # separately so the refusal can tell a drafter it invented the rule from one that hallucinated
+    # an id, which read identically before and sent the reader looking for a rule nobody wrote.
+    drafted = {
+        *RULE_RE.findall(proposal.body),
+        *(rule for text in proposal.pages.values() for rule in RULE_RE.findall(text)),
+    } - declared
     patches: list[SidecarPatch] = []
     rejected: list[RejectedClaim] = []
 
@@ -1528,7 +1676,9 @@ def sidecar_patches(
         folder = _norm_folder(claim.folder)
         text = claim.claim.strip()
         excepts = claim.excepts.strip()
-        reason = _why_not(folder, text, excepts, touched=touched, declared=declared)
+        reason = _why_not(
+            folder, text, excepts, touched=touched, declared=declared, drafted=drafted
+        )
         if reason:
             rejected.append(RejectedClaim(folder=folder, claim=text, reason=reason))
             continue
@@ -1584,14 +1734,37 @@ def misrouted(before: str, after: str, digest: Digest) -> list[str]:
     what that folder does — and a drafter that cannot be overruled by a human is worse than one
     that is sometimes wrong out loud.
     """
-    folders = {f for f in _folders_touched(digest) if f != "."}
+    # Ancestors as well as the leaves, because a claim may now be filed on either and the rot looks
+    # the same at both levels: *"R2 does not apply under `scan/siggen`"* is a fact about a module
+    # written in the file that applies everywhere, exactly as the leaf version is. Checking only
+    # the directory a failure sits in would have left the level this change encourages unwatched.
+    folders = {
+        ancestor
+        for leaf in _folders_touched(digest)
+        for ancestor in _self_and_ancestors(leaf)
+        if ancestor != "."
+    }
     if not folders:
         return []
-    return sorted(
+    named = {
         folder
         for folder in folders
         if _names_folder(after, folder) and not _names_folder(before, folder)
+    }
+    # Most specific only. `payments/reconciliation` in the text also matches `payments`, because a
+    # folder name followed by `/` is how the deeper path is spelled — reporting both would make one
+    # softened rule read as two, and send the reader to a folder the guidance never mentions.
+    return sorted(
+        folder
+        for folder in named
+        if not any(other != folder and other.startswith(f"{folder}/") for other in named)
     )
+
+
+def _self_and_ancestors(folder: str) -> list[str]:
+    """`a/b/c` → `a/b/c`, `a/b`, `a`. Never `.`, which names no folder anyone would write."""
+    parts = [p for p in folder.split("/") if p and p != "."]
+    return ["/".join(parts[: i + 1]) for i in range(len(parts))]
 
 
 def _names_folder(text: str, folder: str) -> bool:
@@ -1610,16 +1783,28 @@ def _names_folder(text: str, folder: str) -> bool:
 
 
 def _why_not(
-    folder: str, text: str, excepts: str, *, touched: set[str], declared: set[str]
+    folder: str,
+    text: str,
+    excepts: str,
+    *,
+    touched: set[str],
+    declared: set[str],
+    drafted: set[str] = frozenset(),  # type: ignore[assignment]
 ) -> str:
     """Why this claim may not be filed, or `""`. See `sidecar_patches` for the reasoning."""
     if not text:
         return "the claim is empty"
-    if folder not in touched:
+    if not _covers_a_failure(folder, touched):
         shown = ", ".join(sorted(touched)) or "none"
         return (
             f"no failure shown to the drafter is in {folder!r} — a claim may only be filed about "
             f"code this run actually looked at (folders in play: {shown})"
+        )
+    if excepts and excepts in drafted:
+        return (
+            f"{excepts} is a rule this same draft adds, not one the skill has — the claim and the "
+            f"guidance are accepted separately, so this would be an exception to nothing if the "
+            f"draft is turned down. Add the rule first, or file the fact without `excepts`"
         )
     if excepts and excepts not in declared:
         return (
@@ -1634,6 +1819,28 @@ def _why_not(
                 f"is the one that stays countable"
             )
     return ""
+
+
+def _covers_a_failure(folder: str, touched: set[str]) -> bool:
+    """Whether a claim in `folder` would be read by code one of the shown failures is in.
+
+    The leaf directory, or any directory above it. `collect._ancestor_dirs` walks every ancestor up
+    to `source_root`, so a note at `scan/siggen/.agents/context.md` reaches a review of
+    `scan/siggen/src/main/java/…/ScannerApi.java` — and refusing to file one there while honouring
+    it at review time made the natural home for a module-wide fact unreachable. On a deep tree that
+    is most of them: the leaf is a package directory, and a fact about the module is not a fact
+    about `impl/`.
+
+    Still bounded by the failures. An ancestor of nothing shown is refused exactly as before, so
+    the door §7 closes — a claim filed about code this run never looked at — stays closed. The
+    repository root is not special-cased open: `.` qualifies only when a failure is itself at the
+    root, because a claim there is read by every review in the repository and that is a rule
+    wearing a sidecar's clothes.
+    """
+    if folder in touched:
+        return True
+    prefix = f"{folder}/"
+    return folder != "." and any(leaf.startswith(prefix) for leaf in touched)
 
 
 def _mentions_rule(text: str, rule: str) -> bool:
@@ -1661,12 +1868,20 @@ def _norm_folder(folder: str) -> str:
 
 
 def _claim_source(digest: Digest, folder: str) -> str:
-    """The failing cases in this folder, as the claim's citation."""
+    """The failing cases this claim would be read by, as its citation.
+
+    Under the folder, not only in it — the same containment `_covers_a_failure` allows, so a claim
+    filed one level up cites the failures that motivated it instead of falling through to the bare
+    `improve/<skill>` stamp. A citation nobody can check is what §8's blind verification has to
+    work from, so it is worth the containment test.
+    """
     ids = [
         c.representative.case_id
         for c in digest.clusters
         if c.representative.path
-        and _norm_folder(str(PurePosixPath(c.representative.path).parent)) == folder
+        and _covers_a_failure(
+            folder, {_norm_folder(str(PurePosixPath(c.representative.path).parent))}
+        )
     ]
     return ", ".join(f"case/{case_id}" for case_id in ids[:3]) or f"improve/{digest.skill_id}"
 
