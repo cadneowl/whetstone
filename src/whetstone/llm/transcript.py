@@ -24,15 +24,17 @@ added later.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 
 from whetstone.llm.base import Effort, LLMClient, T
+from whetstone.llm.tools import Message, ToolClient, ToolSpec, Turn
 
 
 class Exchange(BaseModel):
@@ -50,6 +52,42 @@ class Exchange(BaseModel):
     error: str = ""
 
 
+class AgentTurn(BaseModel):
+    """One `converse` call in an agent conversation — what was added, and what came back.
+
+    An agent's prompt is not one string. It is a system prompt and a conversation that only ever
+    grows, so the naive record — the whole history, once per turn — writes the same bytes N times
+    for an N-step review. Measured on a 12-step agent with a 7 KB system prompt and 5 KB file
+    reads, that is 435 KB on disk for 63 KB of distinct content. This is a file of somebody's
+    source code (see the module docstring); writing it seven times over is not a rounding error.
+
+    So each line carries only what turn N added, and the reader folds the file forward. That is
+    lossless because `agent.loop` only ever appends — and `first`/`total` make a gap visible rather
+    than silently reconstructing a conversation that is missing a turn.
+    """
+
+    at: datetime
+    # In full on a conversation's first turn and empty after, because it does not change within
+    # one. `first == 0` is what says this line carries it.
+    system: str = ""
+    # The messages added since the previous turn, as plain dicts.
+    messages: list[Any] = []
+    # Where `messages` starts in the conversation, and how long the conversation was when this was
+    # sent. A reader that has folded `first` messages already is in step; anything else is a gap.
+    first: int = 0
+    total: int = 0
+    tools: list[str] = []
+    force_tool: str | None = None
+    response: Any = None
+    error: str = ""
+
+
+# Both line kinds. A transcript has always been "one object per call"; an agent turn is a call
+# whose input is a conversation rather than a string, and it lands in the same file so that the
+# order of a run's calls survives on disk.
+Record = Exchange | AgentTurn
+
+
 class Transcript:
     """A JSONL file of exchanges. Thread-safe; the harness reviews cases concurrently."""
 
@@ -64,7 +102,7 @@ class Transcript:
         with self._lock:
             return self._count
 
-    def record(self, exchange: Exchange) -> None:
+    def record(self, exchange: Record) -> None:
         line = exchange.model_dump_json() + "\n"
         with self._lock:
             self._count += 1
@@ -87,6 +125,10 @@ class RecordingClient:
     def __init__(self, inner: LLMClient, transcript: Transcript) -> None:
         self._inner = inner
         self._transcript = transcript
+        # How far into each live conversation this client has already recorded, so a turn can write
+        # what it added rather than the whole history again. See `_added`.
+        self._lock = threading.Lock()
+        self._folded: dict[int, int] = {}
 
     def structured(self, system: str, user: str, schema: type[T], *, effort: Effort = "high") -> T:
         at = datetime.now(UTC)
@@ -118,6 +160,88 @@ class RecordingClient:
             )
         )
         return result
+
+    def converse(
+        self,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        *,
+        force_tool: str | None = None,
+    ) -> Turn:
+        """The agent-mode twin of `structured`, and the reason this class is not a passthrough.
+
+        A `__getattr__` that forwarded whatever it did not implement would have avoided the crash
+        this fixes, and would have been the wrong trade for a *transcript*: the next protocol method
+        would work perfectly and go unrecorded, leaving a file that looks complete and is not. A
+        wrapper that has to be taught each call it records fails loudly when it has not been.
+        """
+        at = datetime.now(UTC)
+        first, added = self._added(messages)
+        # Cast rather than `getattr`: when a backend genuinely cannot hold a tool-calling
+        # conversation the AttributeError should name *it*, not this wrapper. Naming the wrapper is
+        # what made the original failure hard to read.
+        inner = cast(ToolClient, self._inner)
+        turn = self._turn(at, system, first, added, messages, tools, force_tool)
+        try:
+            result = inner.converse(system, messages, tools, force_tool=force_tool)
+        except Exception as exc:
+            turn.error = f"{type(exc).__name__}: {exc}"
+            self._transcript.record(turn)
+            raise
+        turn.response = {
+            "text": result.text,
+            "calls": [
+                {"id": c.id, "name": c.name, "arguments": c.arguments} for c in result.calls
+            ],
+        }
+        self._transcript.record(turn)
+        return result
+
+    @staticmethod
+    def _turn(
+        at: datetime,
+        system: str,
+        first: int,
+        added: list[Message],
+        messages: list[Message],
+        tools: list[ToolSpec],
+        force_tool: str | None,
+    ) -> AgentTurn:
+        return AgentTurn(
+            at=at,
+            # Only on the first turn: it is identical on every later one, and at 7 KB of guidance
+            # it would otherwise be the largest thing in the file after the conversation itself.
+            system=system if first == 0 else "",
+            messages=[dataclasses.asdict(m) for m in added],
+            first=first,
+            total=len(messages),
+            tools=[t.name for t in tools],
+            force_tool=force_tool,
+        )
+
+    def _added(self, messages: list[Message]) -> tuple[int, list[Message]]:
+        """Where this conversation was last recorded, and everything appended since.
+
+        Keyed on the identity of the list, because `agent.loop` mutates one list in place for the
+        length of a conversation and several conversations run at once — there is nothing else to
+        tell them apart, and the client is shared. An id can be recycled once a finished
+        conversation's list is collected, which would attribute one conversation's history to
+        another; a conversation always opens with a single message, so that case resets first and
+        the recycled entry never gets read.
+
+        Every other surprise falls back to recording the whole history. Writing a message twice
+        costs bytes in a diagnostics file; dropping one costs the answer someone opened it for.
+        """
+        key = id(messages)
+        with self._lock:
+            if len(messages) <= 1:
+                self._folded.pop(key, None)
+            first = self._folded.get(key, 0)
+            if first > len(messages):
+                first = 0
+            self._folded[key] = len(messages)
+        return first, list(messages[first:])
 
 
 def transcript_path(directory: str | Path, label: str, at: datetime | None = None) -> Path:

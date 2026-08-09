@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from whetstone.llm.fake_client import FakeLLMClient
+from whetstone.agent.loop import run_agent
+from whetstone.llm.fake_client import FakeLLMClient, FakeToolClient
+from whetstone.llm.tools import Message, ToolCall, ToolResult, ToolSpec, Turn
 from whetstone.llm.transcript import Exchange, RecordingClient, Transcript, transcript_path
 
 
@@ -100,3 +102,142 @@ def test_the_writer_counts_what_it_wrote(tmp_path: Path) -> None:
         )
     )
     assert transcript.calls == 1
+
+
+# --- agent mode: a call whose input is a conversation --------------------------------------------
+#
+# `RecordingClient` implemented `structured` and nothing else, with no passthrough — so turning
+# transcripts on made every agent-reviewed skill die on `AttributeError: no attribute 'converse'`,
+# at the first model call, on a feature whose whole job is to be invisible. Nothing here covered
+# agent mode, so a green suite said the recorder was fine.
+
+TOOLS = [
+    ToolSpec(name="read", description="read a file"),
+    ToolSpec(name="submit", description="finish"),
+]
+
+
+def _agent_client(path: Path, steps: int = 3) -> RecordingClient:
+    """A client whose agent reads a file per step, then submits."""
+
+    def script(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        seen = sum(1 for m in messages if m.role == "assistant")
+        if seen < steps - 1:
+            return Turn(
+                text=f"step {seen}",
+                calls=[ToolCall(id=str(seen), name="read", arguments={"path": f"f{seen}.py"})],
+            )
+        return Turn(text="done", calls=[ToolCall(id="z", name="submit", arguments={"ok": True})])
+
+    return RecordingClient(FakeToolClient(script), Transcript(path))
+
+
+def _run(client: RecordingClient, *, system: str = "SYSTEM") -> dict:
+    out, _ = run_agent(
+        client,
+        system=system,
+        task="review this diff",
+        tools=TOOLS,
+        # Distinct per call, so a test can ask how many times each landed on disk.
+        dispatch=lambda call: ToolResult(call.id, f"RESULT-{call.id}-BODY"),
+        terminal_tool="submit",
+        max_steps=8,
+    )
+    return out
+
+
+def test_an_agent_conversation_is_recorded_rather_than_crashing(tmp_path: Path) -> None:
+    """The regression. A recorder that only knows `structured` takes the run down with it."""
+    path = tmp_path / "t.jsonl"
+    assert _run(_agent_client(path, steps=3)) == {"ok": True}
+
+    lines = _lines(path)
+    assert len(lines) == 3, "one line per model call, agent turns included"
+    assert lines[0]["system"] == "SYSTEM"
+    assert lines[0]["tools"] == ["read", "submit"]
+    assert lines[-1]["response"]["calls"][0]["name"] == "submit"
+
+
+def test_a_failing_turn_keeps_what_provoked_it(tmp_path: Path) -> None:
+    def boom(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        raise RuntimeError("the provider hung up")
+
+    path = tmp_path / "t.jsonl"
+    client = RecordingClient(FakeToolClient(boom), Transcript(path))
+    with pytest.raises(RuntimeError):
+        _run(client)
+
+    (line,) = _lines(path)
+    assert "the provider hung up" in line["error"]
+    assert line["messages"][0]["text"] == "review this diff"
+
+
+def test_the_file_carries_each_message_once(tmp_path: Path) -> None:
+    """A conversation only ever grows, so recording the whole of it per turn writes the same bytes
+    N times — 435 KB for 63 KB of content on a 12-step review, of somebody's source code."""
+    path = tmp_path / "t.jsonl"
+    _run(_agent_client(path, steps=6))
+
+    whole = path.read_text(encoding="utf-8")
+    # Five reads before the sixth turn submits. Recording the history each time would put the
+    # first result in five lines, the second in four, and so on.
+    assert [whole.count(f"RESULT-{i}-BODY") for i in range(5)] == [1, 1, 1, 1, 1]
+    lines = _lines(path)
+    assert sum(1 for line in lines if line["system"]) == 1, "the system prompt does not change"
+
+
+def test_the_lines_fold_back_into_the_whole_conversation(tmp_path: Path) -> None:
+    """What makes recording a delta safe. `first` and `total` have to describe a walk with no gap
+    and no repetition, or the saving costs the reader the thing they opened the file for."""
+    path = tmp_path / "t.jsonl"
+    _run(_agent_client(path, steps=4))
+
+    folded: list[dict] = []
+    for line in _lines(path):
+        assert line["first"] == len(folded), "a gap, or a message recorded twice"
+        folded.extend(line["messages"])
+        assert line["total"] == len(folded)
+    assert folded[0]["text"] == "review this diff"
+    assert [m["role"] for m in folded[-2:]] == ["assistant", "tool"]
+
+
+def test_two_conversations_on_one_client_do_not_fold_into_each_other(tmp_path: Path) -> None:
+    """One client serves every case in a run. Carrying one conversation's position into the next
+    would make the second file start mid-walk — and drop its opening prompt."""
+    path = tmp_path / "t.jsonl"
+    client = _agent_client(path, steps=3)
+    _run(client, system="FIRST")
+    _run(client, system="SECOND")
+
+    openers = [line for line in _lines(path) if line["first"] == 0]
+    assert [line["system"] for line in openers] == ["FIRST", "SECOND"]
+
+
+def test_concurrent_conversations_each_fold_on_their_own(tmp_path: Path) -> None:
+    """The harness reviews cases in parallel against one client, so the bookkeeping that makes a
+    delta correct is shared mutable state and has to hold under threads."""
+    import threading
+
+    path = tmp_path / "t.jsonl"
+    client = _agent_client(path, steps=4)
+    threads = [threading.Thread(target=_run, args=(client,)) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    lines = _lines(path)
+    assert len(lines) == 24, "six conversations of four turns"
+    # Each conversation contributes exactly one opener and no line may claim to start beyond the
+    # conversation it belongs to.
+    assert sum(1 for line in lines if line["first"] == 0) == 6
+    assert all(line["first"] <= line["total"] for line in lines)
+
+
+def test_a_backend_that_cannot_converse_names_itself(tmp_path: Path) -> None:
+    """Not the wrapper. Reading `RecordingClient has no attribute 'converse'` sent the last person
+    looking at the recorder, when the question is which backend was configured."""
+    inner = FakeLLMClient(lambda s, u, schema: Answer(text="x"))
+    client = RecordingClient(inner, Transcript(tmp_path / "t.jsonl"))
+    with pytest.raises(AttributeError, match="FakeLLMClient"):
+        client.converse("s", [Message(role="user", text="t")], TOOLS)
