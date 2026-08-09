@@ -29,6 +29,7 @@ function draft(over: Partial<Draft> = {}): Draft {
     removedRules: [],
     claims: [],
     disputes: [],
+    rejected: [],
     misrouted: [],
     duplicated: [],
     baseline: { body: '', pages: {} },
@@ -36,12 +37,16 @@ function draft(over: Partial<Draft> = {}): Draft {
   }
 }
 
-const CLAIM = {
-  path: 'payments/.agents/context.md',
-  folder: 'payments',
+const LESSON = {
   claim: 'Requests here are authenticated by the gateway.',
   excepts: '',
   because: 'true of this folder only',
+}
+
+const CLAIM = {
+  path: 'payments/.agents/context.md',
+  folder: 'payments',
+  claims: [LESSON],
   patch: PATCH,
   creates_file: true,
 }
@@ -74,7 +79,7 @@ describe('NotInTheDiff', () => {
   })
 
   it('marks an exception with the rule it narrows', () => {
-    show(draft({ claims: [{ ...CLAIM, excepts: 'R4' }] }))
+    show(draft({ claims: [{ ...CLAIM, claims: [{ ...LESSON, excepts: 'R4' }] }] }))
     expect(screen.getByText('Excepts R4')).toBeTruthy()
   })
 
@@ -105,8 +110,12 @@ describe('NotInTheDiff', () => {
   })
 
   it('does not report a duplicate twice as a plain misrouting', () => {
-    show(draft({ claims: [CLAIM], misrouted: ['payments'], duplicated: ['payments'] }))
-    // The weaker wording would send the reader to judge a question already settled.
+    // `misrouted` arrives with the duplicates already removed — the server does that with
+    // `improve.same_place`, so this panel holds no second spelling of "which folder contains
+    // which". The weaker wording would send the reader to judge a question already settled.
+    show(draft({ claims: [CLAIM], misrouted: [], duplicated: ['payments'] }))
+
+    expect(screen.getByText(/The same lesson is in both homes/)).toBeTruthy()
     expect(screen.queryByText(/the old one did not/)).toBeNull()
   })
 
@@ -115,6 +124,47 @@ describe('NotInTheDiff', () => {
 
     expect(screen.getByText(/The new guidance names payments/)).toBeTruthy()
     expect(screen.getByRole('link', { name: 'edit it out' })).toBeTruthy()
+  })
+
+  it('lists every lesson routed to one file, under one patch', () => {
+    // Two claims about one folder are a sequence, not two rival versions of the file: the
+    // per-claim patches they used to be were each computed against the untouched original, so
+    // applying both kept the second and lost the first.
+    show(
+      draft({
+        claims: [
+          {
+            ...CLAIM,
+            claims: [LESSON, { claim: 'Retries are capped upstream.', excepts: '', because: '' }],
+          },
+        ],
+      }),
+    )
+
+    expect(screen.getByText(/authenticated by the gateway/)).toBeTruthy()
+    expect(screen.getByText(/Retries are capped upstream/)).toBeTruthy()
+    expect(screen.getByText(/2 claims/)).toBeTruthy()
+    // One deliverable, so one of each button.
+    expect(screen.getAllByRole('button', { name: 'Copy patch' })).toHaveLength(1)
+  })
+
+  it('reports a refused claim rather than letting it vanish', () => {
+    // Every other refusal in this loop is surfaced; this one reached the log and no screen, so a
+    // drafter whose every claim was thrown out read as one that chose the guidance.
+    show(
+      draft({
+        rejected: [
+          {
+            folder: 'billing',
+            claim: 'Billing retries forever.',
+            reason: "no failure shown to the drafter is in 'billing'",
+          },
+        ],
+      }),
+    )
+
+    expect(screen.getByText(/Refused a claim for billing/)).toBeTruthy()
+    expect(screen.getByText(/Billing retries forever/)).toBeTruthy()
   })
 
   it('shows a dispute with its evidence and where it went', () => {

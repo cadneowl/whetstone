@@ -266,10 +266,17 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
     const pages = (r.pages ?? {}) as Record<string, string>
     const claims = (r.sidecar_claims ?? []) as RoutedClaim[]
     const disputes = (r.disputed_claims ?? []) as DisputedClaim[]
+    const rejected = (r.rejected_claims ?? []) as RejectedClaim[]
     // A draft with no guidance change is not necessarily an empty one. A run that routes every
     // lesson to a folder's notes is the *best* outcome this loop has — and it arrives with an empty
     // body, so bailing on the body alone threw the claims away and reported "no change".
-    if (!body && !Object.keys(pages).length && !claims.length && !disputes.length) {
+    if (
+      !body &&
+      !Object.keys(pages).length &&
+      !claims.length &&
+      !disputes.length &&
+      !rejected.length
+    ) {
       setNotice('The drafter proposed no change.')
       return
     }
@@ -281,6 +288,7 @@ export function ImproveWorkspace({ detail }: { detail: Detail }) {
       removedRules: (r.removed_rules ?? []) as RemovedRule[],
       claims,
       disputes,
+      rejected: (r.rejected_claims ?? []) as RejectedClaim[],
       misrouted: (r.misrouted ?? []) as string[],
       duplicated: (r.duplicated ?? []) as string[],
       // Snapshotted here, once, while it still describes what the draft was written against.
@@ -704,15 +712,20 @@ export type RemovedRule = { rule_id: string; linked_cases: string[] }
  * `patch` on the wire there is no way to get it out of the console at all, and an operator who read
  * only the diff would conclude the drafter had dropped the lesson.
  */
+export type RoutedLesson = { claim: string; excepts: string; because: string }
+
 export type RoutedClaim = {
   path: string
   folder: string
-  claim: string
-  excepts: string
-  because: string
+  /** Every lesson routed to this file. One patch per file, so two claims about one folder are a
+   *  sequence rather than two rival versions of it — see `improve.SidecarPatch`. */
+  claims: RoutedLesson[]
   patch: string
   creates_file: boolean
 }
+
+/** A proposed claim the checks refused, and why. Reported, never silently dropped. */
+export type RejectedClaim = { folder: string; claim: string; reason: string }
 
 /** A claim in the notes the drafter says the failures contradict. Filed to the ledger, not written. */
 export type DisputedClaim = { path: string; claim: string; evidence?: string }
@@ -725,6 +738,7 @@ export type Draft = {
   removedRules: RemovedRule[]
   claims: RoutedClaim[]
   disputes: DisputedClaim[]
+  rejected: RejectedClaim[]
   misrouted: string[]
   duplicated: string[]
   // The on-disk guidance as it stood when this draft arrived, captured rather than read live.
@@ -871,11 +885,19 @@ function RemovedRules({ removed }: { removed: RemovedRule[] }) {
 function useCopy(): [string, (key: string, text: string) => void] {
   const [copied, setCopied] = useState('')
   const copy = (key: string, text: string) => {
+    // The timer starts when the write *settles*, not when it is requested. Started alongside, a
+    // slow clipboard clears the label before it is ever set and the button never says anything.
+    const clear = () => window.setTimeout(() => setCopied(''), 2000)
     void navigator.clipboard
       .writeText(text)
-      .then(() => setCopied(key))
-      .catch(() => setCopied('failed'))
-    window.setTimeout(() => setCopied(''), 2000)
+      .then(() => {
+        setCopied(key)
+        clear()
+      })
+      .catch(() => {
+        setCopied('failed')
+        clear()
+      })
   }
   return [copied, copy]
 }
@@ -886,7 +908,10 @@ function download(name: string, text: string) {
   a.href = url
   a.download = name
   a.click()
-  URL.revokeObjectURL(url)
+  // Revoked on the next tick, not on this one. The click is dispatched synchronously but the
+  // fetch the browser starts for it is not, and revoking in the same task cancels the download on
+  // enough browsers to be worth the timeout.
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 /**
@@ -903,14 +928,18 @@ function download(name: string, text: string) {
  */
 export function NotInTheDiff({ draft, editorSearch }: { draft: Draft; editorSearch: string }) {
   const [copied, copy] = useCopy()
-  const { claims, disputes, duplicated, misrouted } = draft
-  const onlyMisrouted = misrouted.filter(
-    (folder) =>
-      !duplicated.some(
-        (dup) => folder === dup || folder.startsWith(`${dup}/`) || dup.startsWith(`${folder}/`),
-      ),
+  // `misrouted` arrives with the duplicates already taken out — see `_log_routed`. Filtering here
+  // as well would be a second spelling of `improve.same_place`, in a second language, free to
+  // disagree with the first about which folder contains which.
+  const { claims, disputes, rejected, duplicated, misrouted } = draft
+  if (
+    !claims.length &&
+    !disputes.length &&
+    !rejected.length &&
+    !duplicated.length &&
+    !misrouted.length
   )
-  if (!claims.length && !disputes.length && !duplicated.length && !onlyMisrouted.length) return null
+    return null
 
   return (
     <div className="space-y-2">
@@ -935,9 +964,9 @@ export function NotInTheDiff({ draft, editorSearch }: { draft: Draft; editorSear
           </p>
         </div>
       )}
-      {onlyMisrouted.length > 0 && (
+      {misrouted.length > 0 && (
         <p className="rounded border border-warn/50 bg-warn/5 px-2.5 py-2 text-xs text-warn">
-          <strong>The new guidance names {onlyMisrouted.join(', ')}; the old one did not.</strong>{' '}
+          <strong>The new guidance names {misrouted.join(', ')}; the old one did not.</strong>{' '}
           <span className="text-ink">
             A fact about one folder belongs in that folder&rsquo;s notes, not in the file that
             applies everywhere. Occasionally naming a path is right —{' '}
@@ -952,17 +981,27 @@ export function NotInTheDiff({ draft, editorSearch }: { draft: Draft; editorSear
         <div key={c.path} className="rounded border border-accent/40 bg-accent/5 px-2.5 py-2">
           <div className="flex flex-wrap items-baseline gap-x-2">
             <span className="font-mono text-xs text-accent">{c.path}</span>
-            {c.excepts && (
-              <span className="rounded bg-warn/15 px-1 text-[11px] text-warn">
-                Excepts {c.excepts}
-              </span>
-            )}
             <span className="text-[11px] text-muted">
               {c.creates_file ? 'creates the file' : 'adds to the file'}
+              {c.claims.length > 1 ? ` · ${c.claims.length} claims` : ''}
             </span>
           </div>
-          <p className="mt-1 text-xs text-ink">{c.claim}</p>
-          {c.because && <p className="mt-0.5 text-[11px] text-muted">Local because: {c.because}</p>}
+          {/* Every lesson routed to this file, in the order the one patch below adds them. */}
+          {c.claims.map((lesson) => (
+            <div key={lesson.claim} className="mt-1">
+              <p className="text-xs text-ink">
+                {lesson.excepts && (
+                  <span className="mr-1.5 rounded bg-warn/15 px-1 text-[11px] text-warn">
+                    Excepts {lesson.excepts}
+                  </span>
+                )}
+                {lesson.claim}
+              </p>
+              {lesson.because && (
+                <p className="mt-0.5 text-[11px] text-muted">Local because: {lesson.because}</p>
+              )}
+            </div>
+          ))}
           <div className="mt-1.5 flex flex-wrap gap-2">
             <button
               type="button"
@@ -987,6 +1026,17 @@ export function NotInTheDiff({ draft, editorSearch }: { draft: Draft; editorSear
           the file, in front of that folder&rsquo;s owners — the console holds no credentials there.
         </p>
       )}
+      {rejected.map((r) => (
+        <div key={`${r.folder}:${r.claim}`} className="rounded border border-line px-2.5 py-2">
+          <p className="text-xs text-muted">
+            <strong className="text-ink">Refused a claim for {r.folder || '(no folder)'}</strong> —{' '}
+            {r.reason}
+          </p>
+          <p className="mt-1 text-[11px] text-muted">
+            <q>{r.claim}</q>
+          </p>
+        </div>
+      ))}
       {disputes.map((d) => (
         <div key={`${d.path}:${d.claim}`} className="rounded border border-warn/40 px-2.5 py-2">
           <p className="font-mono text-xs text-warn">{d.path}</p>

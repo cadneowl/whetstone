@@ -1109,6 +1109,52 @@ def test_the_repository_root_is_not_a_free_destination() -> None:
     assert patches == [] and rejected
 
 
+def test_two_lessons_for_one_folder_become_one_patch_that_keeps_both() -> None:
+    """The claim-losing bug. Both land in `context.md`, and both patches used to be computed
+    against the file as it stood *before either* — so they were not a sequence, they were two rival
+    versions of the same file. Applying both kept whichever went second and the other was gone,
+    with nothing anywhere saying so. It also gave the console two entries keyed by the same path."""
+    proposal = GuidanceProposal(
+        body="b",
+        sidecar_claims=[
+            _claim(claim="The gateway authenticates every request here."),
+            _claim(claim="Retries are capped by the gateway, not by this code."),
+        ],
+    )
+    patches, rejected = sidecar_patches(
+        proposal, _routed_digest(), _routed_skill(), existing=lambda _p: ""
+    )
+
+    assert rejected == []
+    assert [p.path for p in patches] == ["payments/.agents/context.md"], "one file, one patch"
+    assert [c.claim for c in patches[0].claims] == [
+        "The gateway authenticates every request here.",
+        "Retries are capped by the gateway, not by this code.",
+    ]
+    # Both survive in the delivered text, which is the whole point.
+    assert "authenticates every request" in patches[0].content
+    assert "Retries are capped" in patches[0].content
+
+
+def test_a_fact_and_an_exception_for_one_folder_stay_in_separate_files() -> None:
+    """Grouping is by destination, not by folder. `context.md` is what every role reads and the
+    role file is where an exception belongs — the split `promote.DESTINATION_FILE` makes."""
+    proposal = GuidanceProposal(
+        body=RULES_WITH_ID,
+        sidecar_claims=[
+            _claim(claim="The gateway authenticates every request here."),
+            _claim(claim="this package is a batch job", excepts="R1"),
+        ],
+    )
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert rejected == []
+    assert sorted(p.path for p in patches) == [
+        "payments/.agents/arch.md",
+        "payments/.agents/context.md",
+    ]
+
+
 def test_the_claim_cites_the_cases_it_came_out_of() -> None:
     """Every claim carries where it came from, and is rejected without one. For an improve-born
     claim the failing cases *are* the evidence — they are what fails without it."""
@@ -1375,6 +1421,19 @@ def test_the_two_homes_need_not_name_the_same_level() -> None:
     assert both_homes(patches, ["scan/siggen/impl"]) == ["scan/siggen"]
 
 
+def test_a_duplicate_is_not_also_reported_as_a_plain_misrouting() -> None:
+    """One softened rule must not read as two problems. Filtered on the server so `same_place` is
+    the only implementation of "which folder contains which" — a second one in the panel's
+    TypeScript would disagree exactly when the claim and the rule name different levels."""
+    from whetstone.ui.routers.jobs import plain_misroutings
+
+    assert plain_misroutings(["payments"], ["payments"]) == []
+    assert plain_misroutings(["scan/siggen/impl"], ["scan/siggen"]) == []
+    assert plain_misroutings(["scan/siggen"], ["scan/siggen/impl"]) == []
+    # A folder the guidance names with no claim behind it is still the ordinary warning.
+    assert plain_misroutings(["billing", "payments"], ["payments"]) == ["billing"]
+
+
 def test_a_folder_no_failure_touched_is_not_flagged() -> None:
     """Only folders the drafter was actually shown failures in. A rule that mentions some other
     part of the repository is not evidence of anything this run learned."""
@@ -1462,7 +1521,7 @@ def test_a_draft_that_routes_properly_is_not_flagged(tmp_path: Path) -> None:
         sidecars=_reader({"payments/.agents/context.md": NOTES}),
     )
     assert result.misrouted == []
-    assert [p.excepts for p in result.sidecar_patches] == ["R1"]
+    assert [c.excepts for p in result.sidecar_patches for c in p.claims] == ["R1"]
     assert result.rejected_claims == []
 
 

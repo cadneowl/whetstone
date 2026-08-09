@@ -854,11 +854,17 @@ def launch_improve(
             "sidecar_claims": routed,
             # Folders the draft named in the guidance instead of routing to. Shown over the diff,
             # like the unbacked removals: both are edits that pass everything downstream.
-            "misrouted": result.misrouted,
+            #
+            # With the duplicates removed — see `plain_misroutings`.
+            "misrouted": plain_misroutings(result.misrouted, result.duplicated),
             # The subset of those that also got a claim — one lesson in two homes. Its own field
             # because the panel asks a different question about it: not "is this too specific" but
             # "which copy do you want", and the answer is one click either way.
             "duplicated": result.duplicated,
+            # Claims the checks refused, with the reason. On the draft for the reason
+            # `unknown_cases` is: a drafter whose every claim was thrown out must not read as one
+            # that decided the guidance was the right home. The log had these and no screen did.
+            "rejected_claims": [c.model_dump() for c in result.rejected_claims],
             "from_run": record.id if record else "",
             "total_failures": result.digest.total_failures,
             "holdout_withheld": result.digest.holdout_withheld,
@@ -917,6 +923,21 @@ def _log_disputes(
     return [
         {"path": v.path, "claim": v.claim, "evidence": v.evidence} for v in result.disputed
     ]
+
+
+def plain_misroutings(misrouted: list[str], duplicated: list[str]) -> list[str]:
+    """Folders the guidance names that did *not* also get a claim.
+
+    The duplicates are reported separately and more strongly, so repeating them here would make one
+    softened rule read as two problems and ask the reader to judge a question already settled.
+
+    Done on this side rather than in the panel so `improve.same_place` stays the one implementation
+    of "is this the folder I already mentioned". A second one, in TypeScript, would be free to
+    disagree with it about which folder contains which — and the two disagree exactly when a claim
+    and a rule name different levels of the same path, which is the case this whole split exists
+    for.
+    """
+    return [f for f in misrouted if not any(same_place(f, dup) for dup in duplicated)]
 
 
 def _log_local_context(handle: Any, digest: Any) -> None:
@@ -997,9 +1018,7 @@ def _log_routed(handle: Any, result: Any) -> list[dict[str, Any]]:
                 tone="bad",
             )
         )
-    for folder in result.misrouted:
-        if any(same_place(folder, dup) for dup in result.duplicated):
-            continue  # already reported above, as the stronger thing it is
+    for folder in plain_misroutings(result.misrouted, result.duplicated):
         handle.log(
             LogLine(
                 text=(
@@ -1010,19 +1029,23 @@ def _log_routed(handle: Any, result: Any) -> list[dict[str, Any]]:
                 tone="bad",
             )
         )
+    lessons = 0
     for patch in result.sidecar_patches:
-        what = f"excepts {patch.excepts}" if patch.excepts else "local context"
+        lessons += len(patch.claims)
+        excepted = ", ".join(f"excepts {c.excepts}" for c in patch.claims if c.excepts)
+        what = excepted or "local context"
         handle.log(
             LogLine(text=f"  to the code, not the guidance: {patch.path} ({what})", tone="verdict")
         )
-        handle.log(LogLine(text=f"    {patch.claim[:120]}"))
+        for lesson in patch.claims:
+            handle.log(LogLine(text=f"    {lesson.claim[:120]}"))
     if result.sidecar_patches:
         handle.log(
             LogLine(
                 text=(
-                    f"  {len(result.sidecar_patches)} claim(s) belong beside the code and are not "
-                    f"in the guidance diff. Nothing was written — a person accepts the patch in "
-                    f"the repository that owns the file."
+                    f"  {lessons} claim(s) in {len(result.sidecar_patches)} file(s) belong beside "
+                    f"the code and are not in the guidance diff. Nothing was written — a person "
+                    f"accepts the patch in the repository that owns the file."
                 )
             )
         )
@@ -1030,9 +1053,7 @@ def _log_routed(handle: Any, result: Any) -> list[dict[str, Any]]:
         {
             "path": p.path,
             "folder": p.folder,
-            "claim": p.claim,
-            "excepts": p.excepts,
-            "because": p.because,
+            "claims": [c.model_dump() for c in p.claims],
             "patch": p.patch,
             "creates_file": p.creates_file,
         }
