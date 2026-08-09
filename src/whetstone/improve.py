@@ -620,6 +620,16 @@ class ProposalResult(BaseModel):
     # Code names from the failing files that the new guidance now pins a rule to. Separate from
     # `misrouted` because a class has no notes file — see `named_symbols`.
     named_symbols: list[str] = Field(default_factory=list)
+    # Why this run produced nothing, or `""` when it produced something. **Never both empty and
+    # silent.**
+    #
+    # The defect this closes, reported from a real deployment: the scorer says every case fails and
+    # the improve beside it returns "no change" — rendered as a neutral notice, indistinguishable
+    # from a healthy run with nothing left to fix. Two screens describing the same skill, one
+    # saying broken and the other saying fine, and no way to tell which was lying. An improve
+    # handed failures and returning nothing is a *failed* improve; it has to say so, and where the
+    # harness knows the cause it has to name it rather than leave the reader to guess.
+    stalled: str = ""
     # Folders the draft sent a claim to *and* named in the new guidance — the same lesson filed in
     # both homes, which the routing prompt forbids in as many words. A strict subset of `misrouted`
     # and the strongest member of it: elsewhere the warning has to allow that naming a path was
@@ -1175,6 +1185,51 @@ def propose(
             )
         ],
         duplicated=duplicated,
+        stalled=_stalled(proposal, digest, skill, routed, filed, refused),
+    )
+
+
+def _stalled(
+    proposal: GuidanceProposal,
+    digest: Digest,
+    skill: Skill,
+    routed: list[SidecarPatch],
+    filed: list[ClaimVerdict],
+    refused: list[RejectedClaim],
+) -> str:
+    """Why this run produced nothing, in one sentence ending in what to do about it.
+
+    An empty draft is only good news when there was nothing to fix. Given failures it is a dead
+    end, and the console reported it as a neutral notice — beside a scorer showing every case
+    failing. Whichever of the two the reader believed, one of them was wrong, and nothing on
+    either screen said which.
+
+    A refused claim counts as having produced something: the drafter tried, the refusal is loud,
+    and the reader has a concrete thing to act on. Silence is the only failure mode here.
+    """
+    body = proposal.body.strip()
+    rewrote = bool(body) and body != skill.body.strip()
+    if rewrote or proposal.changed_pages(digest.pages) or routed or filed or refused:
+        return ""
+    if not digest.clusters:
+        # Nothing was shown, so nothing is exactly the right answer and calling it a failure would
+        # train the reader to ignore this line on the runs that matter.
+        return ""
+    unread = [note.path for note in digest.sidecars if not note.seen_by_reviewer]
+    if digest.sidecars and len(unread) == len(digest.sidecars):
+        # The one cause the harness can name for certain, and the one no guidance edit can fix.
+        # `resolved_by: reviewer` with nothing opened is recorded on every case and, until now, was
+        # read by nothing outside this module's console line.
+        listed = ", ".join(unread[:3]) + (" …" if len(unread) > 3 else "")
+        return (
+            f"This run proposed nothing, and the reason is not the guidance: the reviewer never "
+            f"opened {listed}. A rule cannot fix a miss caused by context that was never read — "
+            f"fix the reviewer's collection, then score again."
+        )
+    return (
+        f"This run proposed nothing, though it was shown {len(digest.clusters)} failing "
+        f"case(s). That is a dead end, not a pass — the failures are still failing. Re-run, "
+        f"narrow the selection to one case, or use an instruction to say what to fix."
     )
 
 

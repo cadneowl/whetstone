@@ -793,6 +793,11 @@ def launch_improve(
                 sidecars=improve.sidecar_reader(config.skills_root, skill, store.root),
             )
         _log_local_context(handle, result.digest)
+        if result.stalled:
+            # Ahead of everything else and marked bad, because it is the whole outcome. A run that
+            # produced nothing used to end on a green "done" beside a scorer showing every case
+            # failing, and nothing anywhere reconciled the two.
+            handle.log(LogLine(text=f"  {result.stalled}", tone="bad"))
         disputed = _log_disputes(handle, result, skill, store)
         routed = _log_routed(handle, result)
         for rule in result.unbacked_removals:
@@ -833,6 +838,9 @@ def launch_improve(
             # opens each one, so a page returned unchanged would show as an edit to review.
             "pages": result.proposal.pages,
             "rationale": result.proposal.rationale,
+            # Why the run produced nothing, when it produced nothing. The console shows this
+            # instead of "the drafter proposed no change", which read as a clean bill of health.
+            "stalled": result.stalled,
             "targeted_cases": result.proposal.targeted_cases,
             "unknown_cases": result.unknown_cases,
             "holdout_cases": result.holdout_cases,
