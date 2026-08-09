@@ -1421,6 +1421,89 @@ def test_the_two_homes_need_not_name_the_same_level() -> None:
     assert both_homes(patches, ["scan/siggen/impl"]) == ["scan/siggen"]
 
 
+def test_the_prompt_names_the_folders_a_claim_may_go_to() -> None:
+    """The gap that made routing theoretical. `folder` has to be character-exact or the claim is
+    refused, and the prompt asked the drafter to reconstruct it from the failures block — on a real
+    deployment that meant copying a seventy-character Java path by hand while also deciding what to
+    say. It routed nothing, twice, and wrote the fact into the guidance instead."""
+    deep = "scan/scan.siggen/src/main/java/com/bd/scan/siggen/impl"
+    text = _routed_digest(f"{deep}/ScannerApi.java").render_sidecars()
+
+    assert deep in text
+    assert "must be one of these exactly, or any folder above one of them" in text
+
+
+def test_the_destinations_are_named_even_when_no_folder_keeps_notes_yet() -> None:
+    """The branch where it matters most is the one with nothing to copy from."""
+    digest = build_digest(
+        _skill([_case("c1", "payments/service.py")]),
+        _record([_miss_with_notes("c1", [], path="payments/service.py")]),
+        FailureInputs(),
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
+    )
+    assert "`payments`" in digest.render_sidecars()
+
+
+def test_a_run_with_no_paths_says_no_claim_can_be_filed() -> None:
+    """Rather than listing nothing and leaving a refusal nobody could have predicted."""
+    digest = build_digest(
+        _skill([_case("c1")]),
+        None,
+        FailureInputs(),
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
+    )
+    assert "no claim can be filed this run" in digest.render_sidecars()
+
+
+def test_a_rule_that_names_the_failing_class_is_flagged() -> None:
+    """The form that went unflagged on the reported run. It names no folder at all — the trigger is
+    a class — and is every bit as local as a rule that writes the path out."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest("scan/siggen/impl/ScannerApi.java")
+    after = RULES_WITH_ID + "\n- **Trigger**: removal of REQUIRES_NEW from `ScannerApi`.\n"
+    assert misrouted(RULES_WITH_ID, after, digest) == ["ScannerApi"]
+
+
+def test_a_one_word_ancestor_used_as_prose_is_not_a_folder_reference() -> None:
+    """Found by running the reported draft through the check. `scan` is an ancestor of the failing
+    package *and* an ordinary adjective, so "scan status update methods" sent the reader to
+    `scan/.agents/` over a word. Single-word directories at the top of a tree — `scan`, `core`,
+    `api`, `web` — are all like this, and an ancestor is only named when written as a path."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest("scan/siggen/src/impl/ScannerApi.java")
+    after = RULES_WITH_ID + "\n- Removal of REQUIRES_NEW from scan status update methods.\n"
+    assert "scan" not in misrouted(RULES_WITH_ID, after, digest)
+
+
+def test_a_one_word_ancestor_written_as_a_path_still_counts() -> None:
+    """The other half. Requiring the separator must not make the check blind to the real thing."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest("scan/siggen/src/impl/ScannerApi.java")
+    after = RULES_WITH_ID + "\n- R2 does not apply to anything under `scan/`.\n"
+    assert misrouted(RULES_WITH_ID, after, digest) == ["scan"]
+
+
+def test_an_ordinary_file_stem_is_not_treated_as_an_identifier() -> None:
+    """`service`, `utils`, `main` are what a general rule mentions by coincidence. Flagging those
+    would fire on most drafts and the warning would stop being read."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest("payments/service.py")
+    after = RULES_WITH_ID + "\n- Every service must bound its retries.\n"
+    assert misrouted(RULES_WITH_ID, after, digest) == []
+
+
+def test_a_class_the_guidance_already_named_is_not_flagged_forever() -> None:
+    from whetstone.improve import misrouted
+
+    before = RULES_WITH_ID + "\n- `ScannerApi` is the scan entry point.\n"
+    digest = _routed_digest("scan/siggen/impl/ScannerApi.java")
+    assert misrouted(before, before + "\n- R2 — bound retries.\n", digest) == []
+
+
 def test_a_duplicate_is_not_also_reported_as_a_plain_misrouting() -> None:
     """One softened rule must not read as two problems. Filtered on the server so `same_place` is
     the only implementation of "which folder contains which" — a second one in the panel's
