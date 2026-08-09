@@ -359,13 +359,23 @@ def test_only_reads_that_returned_something_are_counted(tmp_path: Path) -> None:
 
 def test_listing_the_notes_folder_is_not_reading_it(tmp_path: Path) -> None:
     """Seeing that a folder keeps notes and being given them are different answers to "did local
-    context reach the model", and one path list cannot mean both."""
+    context reach the model", and one path list cannot mean both.
+
+    This reviewer now has to be turned down once to reach the end — listing the directory is not
+    collecting — and the point survives it: what it saw was a file name, so `last_sidecars` stays
+    empty even though the review completed.
+    """
     skill_path, root = _sidecar_skill(tmp_path)
 
     def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
         if len(messages) == 1:
             return Turn(calls=[ToolCall("1", "list_dir", {"path": "app/.agents"})])
-        assert "context.md" in messages[-1].results[0].content  # it really did see the file
+        if len(messages) == 3:
+            assert "context.md" in messages[-1].results[0].content  # it really did see the file
+        else:
+            # Turned down for ending without reading. It keeps trying to submit anyway, which is
+            # the pathological case the nudge bound exists for.
+            assert messages[-1].results[-1].is_error
         return Turn(calls=[ToolCall("2", SUBMIT, {"findings": []})])
 
     reviewer = AgentReviewer(FakeToolClient(handler), source_root=root, max_steps=6)
@@ -531,3 +541,122 @@ def test_collecting_is_still_an_observation_not_an_injection(tmp_path: Path) -> 
     assert recorded is not None
     assert recorded.resolved_by == "reviewer"
     assert recorded.context_hash == "" and recorded.dropped == []
+
+
+# --- and making it actually do so -------------------------------------------------
+#
+# Everything above records or enables. None of it *requires*: a reviewer handed the collector and
+# told in its prompt to call it can simply not, and the review is then scored as though local
+# context had been considered. On the deployment this came from that is what happened on every
+# case, while `improve` — which resolves the same notes unconditionally — could see the note that
+# explained the miss and concluded there was nothing to add. Two halves of one loop, disagreeing
+# about what was knowable.
+
+
+def test_a_review_may_not_end_before_the_notes_are_read(tmp_path: Path) -> None:
+    """The gate. Submitting first is refused, and the refusal names the tool to call."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    seen: list[str] = []
+
+    def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        if len(messages) == 1:
+            return Turn(calls=[ToolCall("1", SUBMIT, {"findings": []})])
+        if len(messages) == 3:
+            seen.append(messages[-1].results[-1].content)
+            return Turn(calls=[ToolCall("2", COLLECT, {"paths": ["app/svc.py"]})])
+        return Turn(calls=[ToolCall("3", SUBMIT, {"findings": []})])
+
+    reviewer = AgentReviewer(FakeToolClient(handler), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+
+    assert COLLECT in seen[0]
+    assert reviewer.last_sidecars == {
+        "resolved_by": "reviewer",
+        "files": [{"path": "app/.agents/context.md"}],
+    }
+    assert reviewer.last_trace is not None and reviewer.last_trace.refused == 1
+
+
+@pytest.mark.parametrize("submit_first", [False, True], ids=["collect-then-submit", "submit-first"])
+def test_collecting_and_submitting_in_one_turn_is_not_a_skipped_read(
+    tmp_path: Path, submit_first: bool
+) -> None:
+    """A model told to collect before submitting will reasonably do both at once — and the loop
+    returned the moment it *saw* the ending, dropping every sibling call in that turn.
+
+    Both orderings, because only one of them was broken and it is not the one you would write
+    first. With the collect listed first it happened to be dispatched before the loop reached the
+    ending and returned; with the ending listed first the collect was silently discarded, the
+    reviewer was recorded as having opened nothing, and the gate then refused the very turn that
+    complied with it. Tool calls in a turn are not ordered by the model's intent.
+    """
+    skill_path, root = _sidecar_skill(tmp_path)
+    collect = ToolCall("1", COLLECT, {"paths": ["app/svc.py"]})
+    submit = ToolCall("2", SUBMIT, {"findings": []})
+    calls = [submit, collect] if submit_first else [collect, submit]
+
+    def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        return Turn(calls=list(calls))
+
+    reviewer = AgentReviewer(FakeToolClient(handler), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+
+    assert reviewer.last_sidecars == {
+        "resolved_by": "reviewer",
+        "files": [{"path": "app/.agents/context.md"}],
+    }
+    # Admitted on that same turn: the precondition was met by the call beside it.
+    assert reviewer.last_trace is not None and reviewer.last_trace.refused == 0
+
+
+def test_a_folder_that_keeps_no_notes_still_satisfies_the_gate(tmp_path: Path) -> None:
+    """The requirement is that the reviewer asked, not that it received. Gating on a non-empty
+    answer would make an honest "this folder keeps none" loop until the budget ran out."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    (root / "bare").mkdir()
+    (root / "bare" / "svc.py").write_text("x = 1\n", encoding="utf-8")
+
+    reviewer = AgentReviewer(_collects("bare/svc.py"), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+
+    assert reviewer.last_sidecars == {"resolved_by": "reviewer", "files": []}
+    assert reviewer.last_trace is not None and reviewer.last_trace.refused == 0
+
+
+def test_a_skill_with_no_sidecar_role_is_never_held_up(tmp_path: Path) -> None:
+    """The gate is for skills that keep notes. Every other agent-reviewed skill must submit on the
+    first call exactly as before — this is most of the deployment."""
+    skill = tmp_path / "plain"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nid: plain\nname: P\ndescription: d\nversion: 1\n---\n\n# P\n\nReview it.\n",
+        encoding="utf-8",
+    )
+
+    def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        return Turn(calls=[ToolCall("1", SUBMIT, {"findings": []})])
+
+    reviewer = AgentReviewer(FakeToolClient(handler), source_root=tmp_path, max_steps=6)
+    reviewer.review(load_skill(skill), _change())
+
+    assert reviewer.last_trace is not None and reviewer.last_trace.refused == 0
+    assert reviewer.last_sidecars is None
+
+
+def test_a_reviewer_that_will_not_collect_is_let_go_after_two_refusals(tmp_path: Path) -> None:
+    """Bounded on purpose. Refusing until it complies costs a model that never will its whole
+    budget on every case and ends in the forced ending anyway — the same review, several calls
+    later. Two refusals, then the run finishes and the empty read stands as the evidence."""
+    skill_path, root = _sidecar_skill(tmp_path)
+
+    def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        return Turn(calls=[ToolCall("1", SUBMIT, {"findings": []})])
+
+    reviewer = AgentReviewer(FakeToolClient(handler), source_root=root, max_steps=9)
+    reviewer.review(load_skill(skill_path), _change())
+
+    assert reviewer.last_trace is not None
+    assert reviewer.last_trace.refused == 2
+    # Not forced: it ended inside the budget rather than burning it on refusals.
+    assert reviewer.last_trace.forced is False
+    assert reviewer.last_sidecars == {"resolved_by": "reviewer", "files": []}
