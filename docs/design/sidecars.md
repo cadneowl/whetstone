@@ -218,7 +218,7 @@ measures a retrieval that no user ever exercises. That is `patterns/rust.md` aga
 (`domain/run.py:331`) in a new place: guidance reaching the prompt through a door the hash does not
 watch.
 
-So retrieval is **one script, living in the skill folder**, and both callers run it:
+So retrieval is **one script, living in the skill folder**, and every caller runs it:
 
 ```
 skills/arch-review/
@@ -234,6 +234,20 @@ $ git diff --name-only main | python tools/collect_sidecars.py --root . --paths 
 - **Whetstone** imports it — `src/whetstone/sidecars/collect.py`, called in-process.
 - **Claude Code** runs the copy `whetstone sidecars install` wrote to `<skill>/tools/`, per one line
   in `SKILL.md`.
+- **A Whetstone agent** calls `collect_local_context`, a built-in tool offered only to a skill that
+  declares a role, which calls that same in-process `resolve`.
+
+The third caller was missing and its absence was silent. An agent reviewer collects its own context
+by definition — but `list_dir` filters dotted entries and `grep` prunes dotted directories, both
+older than `.agents/` and both correct for their own reasons, so a folder's notes were unreachable
+by search and unlistable by name. Only an agent that already knew the exact path could `read_file`
+one, and nothing told it the path. On an all-agent deployment that made the entire tier inert while
+every record and every screen reported, accurately, that the reviewer had opened nothing.
+
+**A tool, not a relaxation of those filters.** Letting an agent grep its way to a subset of the
+notes would be a fourth retrieval, resolving a different set than the other three — which is the
+`patterns/rust.md` failure this section exists to prevent, arriving through the search path instead
+of the prompt. One `resolve`, now three callers of it, still identical by construction.
 
 Identical resolution then holds *by construction* rather than by convention, which is the only
 version of this that survives a year of edits.
@@ -400,6 +414,24 @@ Four checks refuse a claim, each closing a way knowledge lands somewhere it does
 folder none of the shown failures touched (the analogue of `_check_region`, and the door §7's
 *"generating sidecars from source"* would otherwise come back through), an empty claim, an
 `Excepts` naming a rule nothing declares, and prose that argues with a rule without excepting it.
+
+**"Touched" means the leaf directory or any directory above it**, because §3's walk reads every
+ancestor up to `source_root` — honouring a note at review time while refusing to file one there
+made the natural home for a module-wide fact unreachable. On a deep tree that is most facts: the
+leaf is a package directory, and *"this module's status updates commit in their own transaction"*
+is not a fact about `impl/`. The bound is unchanged in the direction that matters — an ancestor of
+nothing shown is still refused — and the repository root is not special-cased open, since a claim
+there is read by every review in the repo, which is a rule wearing a sidecar's clothes.
+
+**The routing is only offered when the drafter can see the destination.** Two failures here were
+the same shape and both silent. The block was gated on there being notes rather than on the skill
+keeping any, so a skill whose reviewer happened to open nothing got a prompt identical to one with
+no sidecars at all — no routing rule, one destination, every folder-specific lesson written into
+the guidance. And the notes shown were only those the *reviewer* was recorded as having, which on
+an all-agent deployment is the empty set precisely when the failure is a miss. The drafter is now
+shown what the failing folders keep, resolved by the same walk, with each note marked for whether
+the reviewer actually opened it — *"the reviewer did not open this file"* being a diagnosis in its
+own right, and the opposite of a reason to harden a rule.
 
 And one warning that is not a refusal: `misrouted` reports a folder the new guidance names that the
 old one did not. A central rule that has to name a folder to be correct is a fact about that folder
@@ -665,9 +697,16 @@ provenance attached — the improve digest captions an observed set *"it may hav
 than presenting it as complete, because a drafter told a set is exhaustive will conclude that a
 claim it cannot find does not exist.
 
-Only `read_file` counts. `list_dir` hands over no claim text, and `grep` prunes dot-directories so
-it cannot reach an `.agents/` folder at all — recording either would make one path list mean two
-different things.
+`read_file` and `collect_local_context` count — the two calls that hand over a file's contents.
+`list_dir` hands over no claim text, and `grep` returns matching lines rather than a file;
+recording either would make one path list mean two different things.
+
+**An empty observation used to be unfalsifiable, and was.** For the whole of this tier's first
+life an agent had no way to reach a sidecar: `list_dir` filters dotted entries, `grep` prunes
+dotted directories, and nothing in an agent's prompt or tool list named a path. The record was
+therefore honest, empty, and empty *for a reason no reader could see* — every test passed with the
+feature unreachable. `collect_local_context` (§3.5) is the affordance that makes the account
+mean something; the account itself is unchanged, and stays the weaker one for the same reasons.
 
 ---
 

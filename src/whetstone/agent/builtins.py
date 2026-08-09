@@ -51,6 +51,8 @@ MAX_GREP_FILES = 20_000
 # still means holding 500 MB first.
 MAX_READ_BYTES = 2_000_000
 
+COLLECT = "collect_local_context"
+
 
 class SandboxError(ValueError):
     """A path that would leave the declared root — refused before anything is opened."""
@@ -79,6 +81,51 @@ def skill_tools(skill: Skill) -> list[ToolSpec]:
                     "end": {"type": "integer", "description": "last line (optional)"},
                 },
                 "required": ["path"],
+            },
+        )
+    ]
+
+
+def collector_tool(role: str) -> list[ToolSpec]:
+    """The one way an agent can reach the notes committed beside the code.
+
+    Without this a self-collecting reviewer cannot get at its own sidecars *at all*, which was true
+    from the day the tier shipped and invisible because the record it writes — the files it was
+    seen to open — was correctly empty every time. `list_dir` filters dotted entries and `_grep`
+    prunes dotted directories, both for good reasons that predate `.agents/`; between them a
+    folder's notes are unreachable by search and unlistable by name, so only an agent that already
+    knew the exact path could `read_file` one. Nothing told it the path.
+
+    A tool rather than lifting those filters, because `docs/design/sidecars.md` §3.5 makes
+    resolution *one* implementation with two callers: an agent that greps its way to a subset of
+    the notes has performed a retrieval no other caller performs, and the gate then measures
+    something no deployment reproduces. This calls the same `resolve` the harness calls for a
+    built-in reviewer and the same one the installed `collect_sidecars.py` runs under Claude Code,
+    so all three agree by construction.
+
+    Offered only to a skill that declares a role. For every other skill the tool list is unchanged,
+    and an agent cannot spend a step on a concept its skill knows nothing about.
+    """
+    return [
+        ToolSpec(
+            name=COLLECT,
+            description=(
+                "Read the local context committed beside the code — the `.agents/` notes for the "
+                f"folders you name and every folder above them, for the `{role}` role. These are "
+                "facts about the code maintained by the people who own it, not review rules. Call "
+                "this before judging a change, with the paths the change touches. An empty answer "
+                "is a complete answer: it means those folders keep no notes."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "source paths from the change, relative to the root",
+                    }
+                },
+                "required": ["paths"],
             },
         )
     ]
@@ -143,16 +190,26 @@ class BuiltinTools:
     # which comes back as an ordinary non-error result. A caller inferring that from the content
     # would be reimplementing this method's error strings.
     #
-    # `read_file` alone. `list_dir` delivers no file content, and `grep` prunes dot-directories
-    # (see `_grep`) so it cannot reach an `.agents/` folder at all — recording either would make
-    # "was given this file" mean two things. One instance serves one review, so this is per case.
+    # `read_file` and `collect_local_context`, the two calls that hand over a file's contents.
+    # `list_dir` delivers none, and `grep` delivers matching lines rather than a file — recording
+    # either would make "was given this file" mean two things. One instance serves one review, so
+    # this is per case.
     reads: list[str] = field(default_factory=list)
 
     def specs(self) -> list[ToolSpec]:
-        return [*skill_tools(self.skill), *(source_tools() if self.root else [])]
+        return [
+            *skill_tools(self.skill),
+            *(source_tools() if self.root else []),
+            *(collector_tool(self.skill.sidecar.role) if self._collects else []),
+        ]
+
+    @property
+    def _collects(self) -> bool:
+        """Whether this skill has local notes to collect, and somewhere to collect them from."""
+        return self.root is not None and not self.skill.sidecar.is_empty()
 
     def handles(self, name: str) -> bool:
-        return name in {"read_skill_file", "read_file", "list_dir", "grep"}
+        return name in {"read_skill_file", "read_file", "list_dir", "grep", COLLECT}
 
     def dispatch(self, call: ToolCall) -> ToolResult:
         args = call.arguments
@@ -173,6 +230,12 @@ class BuiltinTools:
             return ToolResult(call.id, self._list(str(args.get("path", "") or "")))
         if call.name == "grep":
             return ToolResult(call.id, self._grep(str(args.get("pattern", "")), args.get("glob")))
+        if call.name == COLLECT:
+            if not self._collects:
+                return ToolResult(
+                    call.id, "This skill declares no local-context role.", is_error=True
+                )
+            return ToolResult(call.id, self._collect(args.get("paths")))
         # Unreachable behind `handles`, and spelled out rather than left as a fall-through: a name
         # added to `handles` without a branch here would otherwise silently run a search.
         return ToolResult(call.id, f"No tool named {call.name!r}.", is_error=True)
@@ -244,6 +307,40 @@ class BuiltinTools:
         shown = entries[:MAX_DIR_ENTRIES]
         note = "" if len(entries) <= MAX_DIR_ENTRIES else f"\n… {len(entries) - len(shown)} more"
         return "\n".join(shown) + note if shown else "(empty directory)"
+
+    def _collect(self, paths: object) -> str:
+        """The `.agents/` notes for these paths, through the canonical resolver.
+
+        The reads are recorded, so `CaseSidecars` for an agent-reviewed case finally reflects
+        something the reviewer could actually do. It stays an *observation* — `resolved_by:
+        reviewer` — because calling this is the agent's choice and it may pass fewer paths than the
+        change touches; it is a lower bound, exactly as the record claims.
+        """
+        from whetstone.sidecars.collect import SidecarError, resolve, to_prompt
+
+        assert self.root is not None
+        wanted = [str(p) for p in paths if str(p).strip()] if isinstance(paths, list) else []
+        if not wanted:
+            return "Pass the paths the change touches; there is nothing to resolve without them."
+        try:
+            resolved = resolve(self.root, wanted, self.skill.sidecar.role)
+        except (SidecarError, OSError) as exc:
+            # An answer, not a raise. `resolve` stats and reads real files, so a note deleted
+            # mid-walk is an `OSError` — and every other tool here hands failure back as text for
+            # the same reason `SkillTools` does: an agent told a thing is unavailable tries
+            # something else, where an exception ends the run and loses the case.
+            return f"Could not read local context: {exc}"
+        for entry in resolved["files"]:
+            rel = str(entry["path"])
+            if rel not in self.reads:
+                self.reads.append(rel)
+        body = to_prompt(resolved)
+        # §3.4: absence is normal and must be stated, or the model treats a missing file as a
+        # puzzle and spends its remaining steps probing for one.
+        return body or (
+            "These folders keep no local notes. That is normal and complete — do not search for "
+            "them, and do not infer what they would have said."
+        )
 
     def _grep(self, pattern: str, glob: object) -> str:
         if not pattern:

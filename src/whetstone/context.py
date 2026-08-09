@@ -12,14 +12,16 @@ Three value forms (see `docs/design/agentic-reviewers.md` §4):
     db_schema:    { file: ./references/schema.sql }         # file contents, committed w/ the skill
     api_spec_url: https://internal/api/spec.json            # a literal (scalar / list / map)
 
-The output is split four ways so each consumer takes only what it should:
+The output is split five ways so each consumer takes only what it should:
 
   - `values`   — the resolved bag forwarded to the reviewer program.
   - `hashable` — the slice that identifies *what the reviewer reads*: literals, file contents, and
     pinned refs. A machine-local `env:` path is deliberately excluded, so a shared gate survives a
     teammate whose checkout lives elsewhere. (Consumed by Phase 2's `skill_hash` fold; see the doc.)
-  - `redacted` — safe to print in a plan or store in a record: an `env:` value shows as its source,
+  - `redacted` — safe to store in a record or put in a prompt: an `env:` value shows as its source,
     never its contents, so a token declared this way is never surfaced.
+  - `display`  — `redacted`, plus the resolved value for anything that names a real path on this
+    machine. For the operator's own screen only; see `ResolvedContext.display`.
   - `missing`  — required `env:` vars that are not set, collected (not raised) so a preflight can
     report all of them at once, the same way a missing model or token is caught at the click.
 """
@@ -53,8 +55,37 @@ class ResolvedContext:
     values: dict[str, Any] = field(default_factory=dict)
     hashable: dict[str, Any] = field(default_factory=dict)
     redacted: dict[str, Any] = field(default_factory=dict)
+    # Overrides for `display`, and nothing else reads them: the resolved value of an `env:` entry
+    # that names a real path on this machine. Only the exceptions are stored, so a key can never be
+    # in one view and missing from the other — the first draft kept a second full dict and
+    # `_with_sidecars`, which adds an entry to `redacted` by hand, silently dropped out of the plan.
+    expanded: dict[str, str] = field(default_factory=dict)
     # `(name, env_var)` pairs for each required `env:` that is unset — reported, never raised here.
     missing: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def display(self) -> dict[str, Any]:
+        """`redacted`, with a path resolved wherever one could be. The operator's screen only.
+
+        Never a record and never a prompt — those take `redacted`, and that is the whole reason
+        there are two views rather than one with a flag. A run record is shared, and a path from
+        one machine in one would make two teammates' records disagree about the same run.
+
+        `source_root=<env:WHETSTONE_HUB_BACKEND_FOLDER>` answers the wrong question at the one
+        moment it is asked. An operator reading a cost plan is deciding whether *this* run, on
+        *this* machine, is about to read the tree they have in mind — and a variable name cannot be
+        wrong in a way they can see. Two checkouts, a stale `export`, and a shell that never sourced
+        the profile all render identically.
+        """
+        return {name: self.expanded.get(name, shown) for name, shown in self.redacted.items()}
+
+    def describe(self) -> str:
+        """The bag as one line for a plan — resolved where it can be, named where it cannot.
+
+        One renderer for every surface that shows it. Three call sites had grown the same join by
+        hand, which is three places for the record's view and the operator's view to drift apart.
+        """
+        return ", ".join(f"{k}={v}" for k, v in self.display.items())
 
     @property
     def digest(self) -> str:
@@ -139,6 +170,23 @@ def _resolve_env(out: ResolvedContext, name: str, decl: dict[str, Any]) -> None:
     out.redacted[name] = value if pinned else f"<env:{env_var}>"
     if pinned:
         out.hashable[name] = value
+    elif Path(value).exists():
+        # Resolved for the operator **only when it names something that exists on this filesystem**.
+        # That test is doing real work: `context:` is where credentials are declared (§4 — "the
+        # token is named in the step and never committed"), and a plan is pasted into tickets and
+        # chat often enough that "it is only the local console" is not a safety argument. A path is
+        # checkable and a secret is not, so the filesystem answers the question a key name like
+        # `source_root` can only guess at.
+        #
+        # The variable is named alongside, not replaced. It is what the skill commits, what a
+        # teammate has to set, and the first thing to look at when the path turns out to be the
+        # wrong checkout.
+        #
+        # No guard around `exists()`: it answers False rather than raising for anything the OS
+        # cannot evaluate — a 5,000-character token, an embedded NUL, `C:\\<>|?*`. It *does* answer
+        # True for the empty string, which is the current directory, but the early return above
+        # means an empty value never reaches here.
+        out.expanded[name] = f"{value} (env:{env_var})"
 
 
 def _resolve_file(
@@ -159,6 +207,8 @@ def _resolve_file(
     except OSError as exc:
         raise ContextError(f"context {name!r}: cannot read {rel!r}: {exc}") from exc
     out.values[name] = text
+    # The path, not the contents, in both views: a schema dump inlined into a cost plan is noise,
+    # and the file is committed with the skill, so naming it is enough to go and read it.
     out.redacted[name] = f"<file:{rel}>"
     out.hashable[name] = text  # by content, like a guidance page
 

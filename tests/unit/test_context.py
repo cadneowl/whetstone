@@ -142,3 +142,117 @@ def test_empty_env_counts_as_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     pinned = resolve_context({"source_ref": {"env": "REF", "pin": True}}, skill_dir=tmp_path)
     assert pinned.hashable == {}
     assert pinned.digest == ""
+
+
+# --- what the operator sees, which is not what the record stores ----------------------
+#
+# `source_root=<env:WHETSTONE_HUB_BACKEND_FOLDER>` in a cost plan answers the wrong question at the
+# one moment it is asked: whether *this* run, on *this* machine, is about to read the tree the
+# operator thinks it is. A stale export, a second checkout and an unsourced profile all render
+# identically. So there is a fifth view — screen only, never a record and never a prompt.
+
+
+def test_a_path_that_exists_is_shown_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SRC", str(tmp_path))
+    r = resolve_context({"source_root": {"env": "SRC", "required": True}}, skill_dir=tmp_path)
+
+    assert r.display == {"source_root": f"{tmp_path} (env:SRC)"}
+    assert r.describe() == f"source_root={tmp_path} (env:SRC)"
+    # The variable is still named: it is what the skill commits and what a teammate has to set.
+    assert "env:SRC" in r.describe()
+
+
+def test_the_record_and_the_prompt_still_see_only_the_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The split is the point. `redacted` reaches run records and an agent's system prompt, so a
+    resolved path there would put one machine's layout into a shared artifact."""
+    monkeypatch.setenv("SRC", str(tmp_path))
+    r = resolve_context({"source_root": {"env": "SRC"}}, skill_dir=tmp_path)
+    assert r.redacted == {"source_root": "<env:SRC>"}
+    assert r.hashable == {}
+
+
+def test_a_value_that_is_not_a_path_is_never_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`context:` is where credentials are declared, and a plan gets pasted into tickets. A path is
+    checkable and a secret is not, so the filesystem decides rather than the key's name."""
+    monkeypatch.setenv("TOKEN", "not-a-real-credential-0000")
+    r = resolve_context({"api_token": {"env": "TOKEN"}}, skill_dir=tmp_path)
+    assert r.display == {"api_token": "<env:TOKEN>"}
+    assert "not-a-real-credential" not in r.describe()
+
+
+def test_a_secret_named_like_a_path_is_still_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Naming the key `source_root` does not make the value a tree. Only the filesystem does."""
+    monkeypatch.setenv("SRC", "/definitely/not/here/xyzzy")
+    r = resolve_context({"source_root": {"env": "SRC"}}, skill_dir=tmp_path)
+    assert r.display == {"source_root": "<env:SRC>"}
+
+
+@pytest.mark.parametrize("value", ["x" * 5000, "C:\\<>|?*", "\n", "  "])
+def test_a_value_the_os_cannot_evaluate_is_hidden_not_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """`exists()` answers False rather than raising for these, which is why `_for_operator` has no
+    guard around it. Pinned because the plan is the thing an operator is waiting on: if a future
+    Python raises here instead, this fails rather than the console."""
+    monkeypatch.setenv("ODD", value)
+    r = resolve_context({"t": {"env": "ODD"}}, skill_dir=tmp_path)
+    assert r.display == {"t": "<env:ODD>"}
+
+
+def test_an_empty_value_never_reaches_the_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Path("").exists()` is True — it is the current directory. `_resolve_env` returns on an empty
+    value before the display view is built, so this can only ever be a latent trap; if that early
+    return is ever relaxed, a cost plan would name whatever directory the console was started in as
+    the source tree."""
+    monkeypatch.setenv("SRC", "")
+    r = resolve_context({"source_root": {"env": "SRC", "required": True}}, skill_dir=tmp_path)
+    assert r.display == {}
+    assert r.missing == [("source_root", "SRC")]
+
+
+def test_pinned_refs_and_literals_read_the_same_in_both_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither is a secret and neither is machine-local, so splitting the views must not change
+    what a plan already said about them."""
+    monkeypatch.setenv("REF2", "abc123")
+    r = resolve_context({"source_ref": {"env": "REF2", "pin": True}, "n": 3}, skill_dir=tmp_path)
+    assert r.display == r.redacted == {"source_ref": "abc123", "n": 3}
+
+
+def test_a_file_shows_its_path_not_its_contents(tmp_path: Path) -> None:
+    """A schema dump inlined into a cost plan is noise, and the file is committed with the skill."""
+    (tmp_path / "schema.sql").write_text("CREATE TABLE t (id int);\n", encoding="utf-8")
+    r = resolve_context({"db": {"file": "./schema.sql"}}, skill_dir=tmp_path)
+    assert r.display == {"db": "<file:./schema.sql>"}
+    assert "CREATE TABLE" not in r.describe()
+
+
+def test_a_key_added_to_the_redacted_view_shows_up_in_the_plan(tmp_path: Path) -> None:
+    """`display` derives from `redacted` rather than being a second dict filled in alongside it.
+
+    `_with_sidecars` adds an entry to `redacted` by hand after resolution, so a parallel dict meant
+    the sidecar declaration silently stopped appearing in the cost plan — a whole line gone, with
+    nothing failing."""
+    r = resolve_context({"a": 1}, skill_dir=tmp_path)
+    r.redacted["added_later"] = "by-a-caller"
+    assert r.display["added_later"] == "by-a-caller"
+    assert "added_later=by-a-caller" in r.describe()
+
+
+def test_an_unset_variable_is_absent_from_the_operator_view_too(tmp_path: Path) -> None:
+    """`missing` is what reports it, and it does so by name with the fix attached."""
+    declared = {"x": {"env": "DEFINITELY_UNSET_XYZ", "required": True}}
+    r = resolve_context(declared, skill_dir=tmp_path)
+    assert r.display == {}
+    assert r.describe() == ""

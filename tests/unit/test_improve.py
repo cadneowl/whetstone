@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -652,12 +653,16 @@ def test_propose_itself_accepts_the_distill_flag(tmp_path: Path) -> None:
 # failure caused by a stale claim read as a wording problem — it hardened a rule to compensate,
 # the claim survived, and the same failure came back with the guidance one rule heavier.
 
+from whetstone.core.loader import load_skill  # noqa: E402
 from whetstone.domain.run import CaseSidecars  # noqa: E402
 from whetstone.domain.skill import SidecarSpec  # noqa: E402
 from whetstone.improve import (  # noqa: E402
+    ROUTING,
     DisputedClaim,
     SidecarNote,
+    SidecarReader,
     disputed_verdicts,
+    render_step_prompt,
     sidecar_reader,
 )
 
@@ -673,8 +678,20 @@ def _miss_with_notes(
     return run
 
 
-def _reader(notes: dict[str, str]):
-    return lambda paths: [SidecarNote(path=p, text=notes[p]) for p in paths if p in notes]
+def _reader(notes: dict[str, str], *, exists: dict[str, str] | None = None):
+    """A stand-in for the real reader. `notes` is what the reviewer had; `exists` is what the
+    folders keep that it never opened."""
+
+    def read(code_paths, had):
+        out = [SidecarNote(path=p, text=notes[p]) for p in had if p in notes]
+        out += [
+            SidecarNote(path=p, text=text, seen_by_reviewer=False)
+            for p, text in (exists or {}).items()
+            if p not in set(had)
+        ]
+        return out
+
+    return SidecarReader(read=read)
 
 
 def _digest_with_notes(observed: bool = False):
@@ -728,10 +745,11 @@ def test_notes_are_read_only_for_failures_that_survive_clustering() -> None:
     it)" reach nobody and would be pure prompt cost."""
     asked: list[list[str]] = []
 
-    def reader(paths):
-        asked.append(list(paths))
+    def read(code_paths, had):
+        asked.append(list(had))
         return []
 
+    reader = SidecarReader(read=read)
     cases = [_case("c1"), _case("z9", "src/z.rs")]
     runs = [
         _miss_with_notes("c1", ["app/.agents/context.md"]),
@@ -760,11 +778,21 @@ def test_no_reader_for_a_skill_that_declares_no_role(tmp_path: Path) -> None:
     assert sidecar_reader(tmp_path, _skill([]), None) is None
 
 
-def test_no_reader_when_the_role_binds_to_no_tree(tmp_path: Path) -> None:
-    """A declared role with nowhere to read it from is not a reader that returns empty notes — the
-    drafter would then be told the folder keeps none, which is a different and wrong fact."""
+def test_a_role_that_binds_to_no_tree_says_so_instead_of_going_quiet(tmp_path: Path) -> None:
+    """A declared role with nowhere to read it from is not the same fact as a folder that keeps no
+    notes, and returning None made the two identical: the appendix vanished, the drafter was told
+    nothing, and a misconfigured deployment looked exactly like a skill with no local knowledge."""
     skill = Skill(id="s", body="b", sidecar=SidecarSpec(role="arch"))
-    assert sidecar_reader(tmp_path, skill, None) is None
+    reader = sidecar_reader(tmp_path, skill, None)
+    assert reader is not None
+    assert reader.read([], []) == []
+    assert reader.problem, "silence is what made a misconfiguration look like an empty tier"
+
+    digest = build_digest(_skill([_case("c1")]), None, FailureInputs(), sidecars=reader)
+    text = digest.prompt_values()["sidecars"]
+    assert "could not be read" in text
+    assert "Do not treat that as an absence of local knowledge" in text
+    assert ROUTING in text, "routing is still on: a claim is a patch against a path, not a rewrite"
 
 
 # --- disputing a claim instead of compensating for one -------------------------------
@@ -850,7 +878,6 @@ def test_a_dispute_carries_nothing_that_could_rewrite_the_file() -> None:
 # §6 already gave triage this choice (rule / context / exception). These give it to improve.
 
 from whetstone.improve import (  # noqa: E402
-    ROUTING,
     ProposedClaim,
     sidecar_patches,
 )
@@ -1004,6 +1031,84 @@ def test_a_first_claim_in_a_folder_creates_the_file() -> None:
     assert "new file mode" in patches[0].patch
 
 
+def test_a_claim_can_go_on_a_folder_above_the_one_that_failed() -> None:
+    """`collect._ancestor_dirs` walks every directory up to `source_root`, so a note on the module
+    is read by a review of any file under it. Refusing to file one there while honouring it at
+    review time made the natural home for a module-wide fact unreachable — and on a deep tree the
+    leaf is a package directory, where "a fact about the module" is not true of the folder it
+    would have been written on."""
+    digest = _routed_digest("scan/siggen/src/main/java/impl/ScannerApi.java")
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(folder="scan/siggen")])
+    patches, rejected = sidecar_patches(proposal, digest, _routed_skill())
+
+    assert rejected == []
+    assert patches[0].path == "scan/siggen/.agents/context.md"
+
+
+def test_an_ancestor_claim_still_cites_the_failures_beneath_it() -> None:
+    """A citation nobody can check is what §8's blind verification has to work from. Matching the
+    leaf exactly meant a claim filed one level up fell through to the bare `improve/<skill>`
+    stamp."""
+    digest = _routed_digest("scan/siggen/src/main/java/impl/ScannerApi.java")
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(folder="scan/siggen")])
+    patches, _ = sidecar_patches(proposal, digest, _routed_skill())
+    assert "case/c1" in patches[0].content
+
+
+def test_a_sibling_folder_is_still_refused() -> None:
+    """Widening to ancestors must not become "anywhere". A sibling contains none of the code this
+    run looked at, so a claim there is §7's "generating sidecars from source" by another door."""
+    digest = _routed_digest("scan/siggen/impl/ScannerApi.java")
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(folder="scan/other")])
+    patches, rejected = sidecar_patches(proposal, digest, _routed_skill())
+
+    assert patches == []
+    assert "no failure shown to the drafter is in 'scan/other'" in rejected[0].reason
+
+
+def test_a_folder_that_merely_starts_with_the_same_letters_is_not_an_ancestor() -> None:
+    """`scan/sig` is not above `scan/siggen`, and a prefix test without the separator would say it
+    is — filing a claim into a folder that does not exist and that no review would ever read."""
+    digest = _routed_digest("scan/siggen/impl/ScannerApi.java")
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(folder="scan/sig")])
+    patches, rejected = sidecar_patches(proposal, digest, _routed_skill())
+    assert patches == [] and rejected
+
+
+def test_excepting_a_rule_the_same_draft_invents_says_which() -> None:
+    """Seen live: the drafter added R4 to the guidance and filed two exceptions to it in the same
+    reply. Still refused — the claim goes to the folder's owners and the guidance to whoever reviews
+    the draft, so a turned-down draft leaves `Excepts R4` pointing at nothing — but the old wording
+    said R4 was "not a rule this skill declares" to a reader looking straight at R4 in the diff."""
+    proposal = GuidanceProposal(
+        body=RULES_WITH_ID + "\n- **R4** — declare propagation explicitly.\n",
+        sidecar_claims=[_claim(excepts="R4")],
+    )
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert patches == []
+    assert "a rule this same draft adds" in rejected[0].reason
+    assert "file the fact without `excepts`" in rejected[0].reason
+
+
+def test_a_rule_id_out_of_thin_air_still_reads_as_one() -> None:
+    """The other half. R9 is in neither the skill nor the draft, and that is a different mistake
+    with a different fix, so it keeps the message it had."""
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(excepts="R9")])
+    _, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+    assert "is not a rule this skill declares" in rejected[0].reason
+
+
+def test_the_repository_root_is_not_a_free_destination() -> None:
+    """`.` is above everything, so allowing ancestors unguarded would make a claim there always
+    legal — and a note at the root is read by every review in the repository, which is a rule
+    wearing a sidecar's clothes and skips the gate a rule has to pass."""
+    digest = _routed_digest("payments/service.py")
+    proposal = GuidanceProposal(body="b", sidecar_claims=[_claim(folder=".")])
+    patches, rejected = sidecar_patches(proposal, digest, _routed_skill())
+    assert patches == [] and rejected
+
+
 def test_the_claim_cites_the_cases_it_came_out_of() -> None:
     """Every claim carries where it came from, and is rejected without one. For an improve-born
     claim the failing cases *are* the evidence — they are what fails without it."""
@@ -1031,10 +1136,126 @@ def test_a_skill_with_notes_is_always_given_the_routing_rule() -> None:
         _skill([_case("c1")]),
         _record([_miss_with_notes("c1", [])]),
         FailureInputs(),
-        sidecars=lambda paths: [],
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
     )
     assert ROUTING in none_yet.prompt_values()["sidecars"]
     assert "is where a first one belongs" in none_yet.prompt_values()["sidecars"]
+
+
+def test_the_routing_rule_survives_a_template_that_never_heard_of_sidecars(tmp_path: Path) -> None:
+    """Through `render_step_prompt`, which is what `propose` sends — the tests above render the
+    variable directly and passed throughout the whole time this was broken.
+
+    `appendices` gated the block on there being notes rather than on the skill keeping any, so a
+    skill with an `.agents/` tree whose reviewer opened none of it produced a prompt byte-identical
+    to a skill with no sidecars at all: no routing rule, one destination, every folder-specific
+    lesson written into the guidance. Every improve template predates the feature, so the gate
+    applied to all of them."""
+    spec = _prompt_spec(tmp_path, "{{guidance}}\n{{failures}}")
+    none_yet = build_digest(
+        _skill([_case("c1")]),
+        _record([_miss_with_notes("c1", [])]),
+        FailureInputs(),
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
+    )
+    assert ROUTING in render_step_prompt(spec, none_yet)
+    assert "Local notes beside the code" in render_step_prompt(spec, none_yet)
+
+
+def test_a_skill_with_no_notes_still_pays_nothing_for_the_feature(tmp_path: Path) -> None:
+    """The other half of the gate, and the reason it is `reads_sidecars` rather than always-on.
+    A skill that declares no role has one destination, and a routing rule about a second one is
+    prompt cost and a chance to route somewhere that does not exist."""
+    spec = _prompt_spec(tmp_path, "{{guidance}}\n{{failures}}")
+    plain = build_digest(_skill([_case("c1")]), None, FailureInputs())
+    assert ROUTING not in render_step_prompt(spec, plain)
+    assert "Local notes beside the code" not in render_step_prompt(spec, plain)
+
+
+def test_a_note_the_reviewer_never_opened_reaches_the_drafter_and_says_so() -> None:
+    """The circular failure this breaks. On an all-agent deployment the notes shown were whatever
+    the reviewer was seen to read — and a *miss* is precisely the case where it read nothing. So
+    the folder's notes were invisible to the one step deciding where the lesson goes, the lesson
+    went central, the note stayed unread, and the next cycle repeated it.
+
+    Shown, and labelled: a note the reviewer never had explains nothing about the failure, and a
+    drafter that mistook it for context the reviewer used would conclude the claim was too weak and
+    write a rule."""
+    digest = build_digest(
+        _skill([_case("c1", "payments/service.py")]),
+        _record([_miss_with_notes("c1", [], observed=True, path="payments/service.py")]),
+        FailureInputs(),
+        sidecars=_reader({}, exists={"payments/.agents/context.md": NOTES}),
+    )
+    text = digest.render_sidecars()
+    assert CLAIM in text, "the folder's notes reach the drafter even though nothing read them"
+    assert "the reviewer did not open this file" in text
+
+
+def test_a_note_the_reviewer_did_open_is_not_labelled(tmp_path: Path) -> None:
+    """The label has to mean something. Marking every note would make the useful case invisible."""
+    assert "did not open this file" not in _digest_with_notes(observed=True).render_sidecars()
+
+
+def _sidecar_skill_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path]:
+    """An agent-reviewed, self-collecting skill and a source tree with one folder's notes.
+
+    On disk, because the stub reader above cannot show that the ancestor walk happens at all.
+    """
+    from whetstone.sidecars import install
+
+    skills = tmp_path / "skills"
+    skill_dir = skills / "s"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nid: s\nname: S\ndescription: d\nversion: 1\n"
+        "sidecar:\n  role: arch\n  self_collected: true\n---\n\nGo.\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "src"
+    (root / "payments" / ".agents").mkdir(parents=True)
+    (root / "payments" / ".agents" / "context.md").write_text(NOTES, encoding="utf-8")
+    (skill_dir / "evaluate").mkdir()
+    (skill_dir / "evaluate" / "step.yaml").write_text(
+        "agent:\n  enabled: true\n"
+        "context:\n  source_root: { env: IMPROVE_SRC, required: true }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("IMPROVE_SRC", str(root))
+    install(skill_dir, load_skill(skill_dir).sidecar)
+    return skills, skill_dir, root
+
+
+def test_the_reader_resolves_what_the_folders_keep_not_only_what_was_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`had` is empty — an agent that opened nothing — and the notes still arrive."""
+    skills, skill_dir, _ = _sidecar_skill_on_disk(tmp_path, monkeypatch)
+
+    reader = sidecar_reader(skills, load_skill(skill_dir), None)
+    assert reader is not None and reader.problem == ""
+    notes = reader.read(["payments/service.py"], [])
+    assert [n.path for n in notes] == ["payments/.agents/context.md"]
+    assert CLAIM in notes[0].text
+    assert notes[0].seen_by_reviewer is False
+
+
+def test_a_tree_that_vanishes_mid_run_is_reported_not_read_as_an_empty_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both binding paths check the root is a directory, so this needs the tree to go away between
+    the plan and the draft. Worth the branch anyway: swallowing it renders as "none of these
+    folders keep notes yet", which is the exact false sentence this change exists to stop."""
+    skills, skill_dir, root = _sidecar_skill_on_disk(tmp_path, monkeypatch)
+    reader = sidecar_reader(skills, load_skill(skill_dir), None)
+    assert reader is not None
+
+    shutil.rmtree(root)
+    notes = reader.read(["payments/service.py"], [])
+    assert [n.path for n in notes] == ["the folders these failures are in"]
+    assert "could not be read just now" in notes[0].problem
 
 
 def test_the_routing_rule_says_which_way_each_kind_goes() -> None:
@@ -1095,6 +1316,20 @@ def test_a_rule_that_names_a_folder_in_play_is_flagged() -> None:
     # And named as a parent, which is the same mistake one level out — the failure was in
     # `payments/` and the rule now carves out a path inside it.
     assert misrouted(before, after, _routed_digest("payments/service.py")) == ["payments"]
+
+
+def test_a_rule_that_names_the_module_above_the_failure_is_flagged() -> None:
+    """The level this change encourages a claim to go to, so it is the level the warning has to
+    watch. *"R2 does not apply under scan/siggen"* is a fact about a module written in the file
+    that applies everywhere — the same rot as naming the leaf, one directory up."""
+    from whetstone.improve import misrouted
+
+    digest = _routed_digest("scan/siggen/src/main/java/impl/ScannerApi.java")
+    after = RULES_WITH_ID + "\n- **R2** — bound retries, except under `scan/siggen`.\n"
+    # `scan` matches too — a folder followed by `/` is how the deeper path is spelled — and
+    # reporting both would make one softened rule read as two, pointing at a folder the guidance
+    # never mentions.
+    assert misrouted(RULES_WITH_ID, after, digest) == ["scan/siggen"]
 
 
 def test_a_folder_no_failure_touched_is_not_flagged() -> None:

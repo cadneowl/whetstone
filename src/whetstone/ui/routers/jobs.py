@@ -600,9 +600,8 @@ def plan_improve_job(
         if agent.tools:
             names = ", ".join(t.name for t in agent.tools)
             plan.details.append(f"skill-provided tools: {names} — run as programs by this skill")
-        if agent.context.redacted:
-            shown = ", ".join(f"{k}={v}" for k, v in agent.context.redacted.items())
-            plan.details.append(f"step context: {shown}")
+        if agent.context.display:
+            plan.details.append(f"step context: {agent.context.describe()}")
     if request.distill:
         untested = deadrules.consolidatable(skill)
         plan.details.append(
@@ -793,6 +792,7 @@ def launch_improve(
                 distill=request.distill,
                 sidecars=improve.sidecar_reader(config.skills_root, skill, store.root),
             )
+        _log_local_context(handle, result.digest)
         disputed = _log_disputes(handle, result, skill, store)
         routed = _log_routed(handle, result)
         for rule in result.unbacked_removals:
@@ -913,6 +913,57 @@ def _log_disputes(
     return [
         {"path": v.path, "claim": v.claim, "evidence": v.evidence} for v in result.disputed
     ]
+
+
+def _log_local_context(handle: Any, digest: Any) -> None:
+    """What the drafter was told about the notes beside the code, before what it did with them.
+
+    Silence here used to be ambiguous in the worst possible way. A skill with an `.agents/` tree
+    whose reviewer opened none of it produced a draft indistinguishable from a skill with no local
+    knowledge at all, and no line anywhere said which had happened — so an operator reading a
+    folder-specific rule in the guidance diff had no way to know the routing had never been
+    offered. Each branch below is a different answer to "why is this lesson in the guidance".
+    """
+    if not digest.reads_sidecars:
+        return
+    if digest.sidecar_problem:
+        handle.log(
+            LogLine(
+                text=(
+                    f"  local context: this skill keeps notes beside the code, but they could not "
+                    f"be read — {digest.sidecar_problem}. The drafter routed without them."
+                ),
+                tone="bad",
+            )
+        )
+        return
+    if not digest.sidecars:
+        handle.log(
+            LogLine(
+                text=(
+                    "  local context: the failing folders keep no notes yet — a first claim "
+                    "can go there"
+                )
+            )
+        )
+        return
+    unseen = [note.path for note in digest.sidecars if not note.seen_by_reviewer]
+    handle.log(
+        LogLine(text=f"  local context: {len(digest.sidecars)} note(s) shown to the drafter")
+    )
+    if unseen:
+        # The diagnosis that was unavailable before, and on an all-agent deployment the likeliest
+        # one: the folder already documents this and the reviewer never opened the file.
+        handle.log(
+            LogLine(
+                text=(
+                    f"    the reviewer opened none of {', '.join(unseen[:3])}"
+                    f"{' …' if len(unseen) > 3 else ''} — a note it never read cannot explain the "
+                    f"miss, and hardening a rule will not fix it"
+                ),
+                tone="bad",
+            )
+        )
 
 
 def _log_routed(handle: Any, result: Any) -> list[dict[str, Any]]:
@@ -1255,9 +1306,8 @@ def _task_plan(
         f"the skill runs as an agent: {choice.identity} — up to {choice.task.max_calls} call(s) "
         f"per case ({choice.task.max_steps} steps + one forced answer)"
     )
-    if choice.context and choice.context.redacted:
-        shown = ", ".join(f"{k}={v}" for k, v in choice.context.redacted.items())
-        plan.details.append(f"step context: {shown}")
+    if choice.context and choice.context.display:
+        plan.details.append(f"step context: {choice.context.describe()}")
     check_budget(plan, config.runs.max_llm_calls_per_run)
     return plan
 

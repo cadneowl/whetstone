@@ -136,11 +136,37 @@ def test_the_plan_names_the_program_its_context_and_how_often_it_runs(
 
     assert "subprocess:" in details and "reviewer.py" in details
     assert "invoked up to 2 time(s)" in details, details  # 2 cases x 1 trial
-    # The env form shows its source, never its value — a token declared this way never surfaces.
-    assert "source_root=<env:WHETSTONE_TEST_SOURCE>" in details
-    assert str(source) not in details
+    # A path that exists is resolved, because the question this plan answers is whether *this* run
+    # on *this* machine is about to read the tree the operator has in mind — and a variable name
+    # cannot be wrong in a way they can see. The variable is still named, since it is what the
+    # skill commits and the first thing to check when the path is the wrong checkout.
+    assert f"source_root={source} (env:WHETSTONE_TEST_SOURCE)" in details
     assert "conventions=<file:./conventions.md>" in details
     assert "project=payments" in details
+
+
+def test_the_plan_resolves_a_path_and_still_hides_anything_that_is_not_one(
+    client: TestClient, agentic: Path, source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule that makes resolving safe. `context:` is where credentials are declared, and a plan
+    is pasted into tickets — so the filesystem decides what may be shown, not the key's name."""
+    monkeypatch.setenv("WHETSTONE_TEST_SOURCE", "not-a-path-just-a-value-0000")
+    details = " | ".join(
+        client.post("/api/jobs/eval/plan", json={"skill_id": "rust-errors"}).json()["details"]
+    )
+    assert "source_root=<env:WHETSTONE_TEST_SOURCE>" in details
+    assert "not-a-path-just-a-value" not in details
+
+
+def test_the_run_record_keeps_the_variable_not_the_path(
+    client: TestClient, agentic: Path, source: Path
+) -> None:
+    """The other half of the split, and the reason there are two maps. A record is shared and a
+    machine-local path in one would make two teammates' records disagree about the same run."""
+    job = _run(client, "/api/jobs/eval")
+    record = client.get(f"/api/runs/{job['result']['run_id']}").json()
+    assert record["reviewer_context"]["source_root"] == "<env:WHETSTONE_TEST_SOURCE>"
+    assert str(source) not in json.dumps(record["reviewer_context"])
 
 
 def test_the_estimate_stops_counting_review_calls_whetstone_will_not_make(

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from whetstone.agent.builtins import BuiltinTools, SandboxError
+from whetstone.agent.builtins import COLLECT, BuiltinTools, SandboxError
 from whetstone.core.loader import load_skill
 from whetstone.domain.change import parse_unified_diff
 from whetstone.domain.refs import RepoRef
@@ -399,3 +399,135 @@ def test_each_case_reports_its_own_reads(tmp_path: Path) -> None:
         "resolved_by": "reviewer",
         "files": [{"path": "billing/.agents/context.md"}],
     }
+
+
+# --- and how it reaches them in the first place -----------------------------------
+#
+# The above records what an agent opened. It took a live run to notice that an agent had no way to
+# open anything: `list_dir` filters dotted entries, `_grep` prunes dotted directories, and no
+# prompt anywhere named a path. The record was honest and permanently empty, which is the hardest
+# kind of bug to see — every test above passes with the feature entirely unreachable.
+
+
+def _collects(*paths: str, tool: str = COLLECT):
+    """A client that calls the collector once with `paths`, then submits."""
+
+    def handler(system: str, messages: list[Message], tools: list[ToolSpec]) -> Turn:
+        if len(messages) == 1:
+            return Turn(calls=[ToolCall("1", tool, {"paths": list(paths)})])
+        return Turn(calls=[ToolCall("2", SUBMIT, {"findings": []})])
+
+    return FakeToolClient(handler)
+
+
+def test_the_notes_folder_is_invisible_to_both_search_tools(tmp_path: Path) -> None:
+    """The reason the collector exists, written as the failure. Neither tool that *finds* things
+    can see an `.agents/` directory, so an agent could only reach one by guessing its exact path.
+    Both filters are deliberate and older than sidecars; this pins that they stay, because relaxing
+    either would give a second retrieval path that resolves a different set than the collector."""
+    _, root = _sidecar_skill(tmp_path)
+    tools = BuiltinTools(skill=load_skill_stub(), root=root)
+
+    listed = tools.dispatch(ToolCall("1", "list_dir", {"path": "app"})).content
+    assert ".agents" not in listed, "a dotted directory is filtered out of a listing"
+    assert "svc.py" in listed
+
+    found = tools.dispatch(ToolCall("2", "grep", {"pattern": "Notes for"})).content
+    assert "No matches" in found, "the walk prunes dotted directories"
+
+
+def test_a_skill_that_declares_a_role_is_offered_the_collector(tmp_path: Path) -> None:
+    skill_path, root = _sidecar_skill(tmp_path)
+    names = [s.name for s in BuiltinTools(skill=load_skill(skill_path), root=root).specs()]
+    assert COLLECT in names
+
+
+def test_a_skill_with_no_role_is_not(tmp_path: Path) -> None:
+    """Unchanged for every skill this feature is not about. An agent cannot spend a step on a
+    concept its skill knows nothing about, and the tool list is prompt cost on every call."""
+    _, root = _sidecar_skill(tmp_path)
+    names = [s.name for s in BuiltinTools(skill=load_skill_stub(), root=root).specs()]
+    assert COLLECT not in names
+
+
+def test_a_role_with_no_source_tree_is_not_offered_it_either(tmp_path: Path) -> None:
+    """Nothing to resolve against. Offering it would spend a step to be told so."""
+    skill_path, _ = _sidecar_skill(tmp_path)
+    names = [s.name for s in BuiltinTools(skill=load_skill(skill_path), root=None).specs()]
+    assert COLLECT not in names
+
+
+def test_the_collector_hands_over_the_notes_and_records_them(tmp_path: Path) -> None:
+    """The fix. An agent naming the paths its change touches gets the same set a built-in reviewer
+    would have been injected — and the run record finally has something in it."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    reviewer = AgentReviewer(_collects("app/svc.py"), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+
+    assert reviewer.last_sidecars == {
+        "resolved_by": "reviewer",
+        "files": [{"path": "app/.agents/context.md"}],
+    }
+
+
+def test_the_collector_walks_ancestors_like_every_other_caller(tmp_path: Path) -> None:
+    """One resolution, three callers (§3.5). A note above the changed file reaches the reviewer
+    here exactly as it does for the built-in one and for the installed script."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    (root / ".agents").mkdir()
+    (root / ".agents" / "context.md").write_text("Repo-wide note.\n", encoding="utf-8")
+
+    tools = BuiltinTools(skill=load_skill(skill_path), root=root)
+    out = tools.dispatch(ToolCall("1", COLLECT, {"paths": ["app/svc.py"]})).content
+    assert "Repo-wide note." in out and "Notes for app." in out
+    assert tools.reads == [".agents/context.md", "app/.agents/context.md"]
+
+
+def test_the_collector_states_absence_rather_than_returning_nothing(tmp_path: Path) -> None:
+    """§3.4. A model handed an empty answer treats a missing file as a puzzle and spends its
+    remaining steps probing for one."""
+    skill_path, root = _sidecar_skill(tmp_path)
+    (root / "quiet").mkdir()
+    (root / "quiet" / "x.py").write_text("y = 2\n", encoding="utf-8")
+
+    tools = BuiltinTools(skill=load_skill(skill_path), root=root)
+    out = tools.dispatch(ToolCall("1", COLLECT, {"paths": ["quiet/x.py"]})).content
+    assert "keep no local notes" in out
+    assert "do not infer what they would have said" in out
+    assert tools.reads == []
+
+
+def test_the_collector_answers_rather_than_raising_when_a_note_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`resolve` stats and reads real files, so a note deleted mid-walk is an `OSError`. Every
+    other tool here hands failure back as text for the reason `SkillTools` states: an agent told a
+    thing is unavailable tries something else, where a raise ends the run and loses the case."""
+    from whetstone.sidecars import collect
+
+    skill_path, root = _sidecar_skill(tmp_path)
+    tools = BuiltinTools(skill=load_skill(skill_path), root=root)
+
+    def boom(*args: object, **kwargs: object) -> dict[str, object]:
+        raise OSError("the file went away")
+
+    monkeypatch.setattr(collect, "resolve", boom)
+    result = tools.dispatch(ToolCall("1", COLLECT, {"paths": ["app/svc.py"]}))
+    assert "Could not read local context" in result.content
+    assert "the file went away" in result.content
+
+
+def test_collecting_is_still_an_observation_not_an_injection(tmp_path: Path) -> None:
+    """The account stays the weaker one on purpose. Calling the collector is the agent's choice and
+    it may pass fewer paths than the change touches, so the set remains a lower bound — which is
+    what `resolved_by: reviewer` means and what every consumer is worded against."""
+    from whetstone.core.harness import _sidecars_of
+
+    skill_path, root = _sidecar_skill(tmp_path)
+    reviewer = AgentReviewer(_collects("app/svc.py"), source_root=root, max_steps=6)
+    reviewer.review(load_skill(skill_path), _change())
+
+    recorded = _sidecars_of(reviewer)
+    assert recorded is not None
+    assert recorded.resolved_by == "reviewer"
+    assert recorded.context_hash == "" and recorded.dropped == []
