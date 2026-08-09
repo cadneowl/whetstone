@@ -26,7 +26,7 @@ import json
 import re
 import subprocess
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -54,6 +54,12 @@ from whetstone.domain.run import (
 from whetstone.domain.skill import Skill
 from whetstone.llm.base import Effort, LLMClient
 from whetstone.llm.tools import ToolSpec
+
+# The `<!-- src: … -->` pattern, from the one module that defines the sidecar format. `_why_not`
+# refuses a claim that writes its own, and it has to refuse exactly what the parser would read
+# back — a second spelling here would drift from `claims.parse` and let a fabricated citation
+# through the day one of them changed.
+from whetstone.sidecars.claims import SRC
 from whetstone.steps import STEP_FILE, FailureInputs, StepError, StepSpec, placeholders
 from whetstone.wiki import retrieve
 
@@ -268,6 +274,22 @@ class Digest(BaseModel):
         nothing at all and wrote the fact into the guidance instead.
 
         Naming them costs a line and turns "derive the path" into "pick one".
+
+        **Do not add that a listed destination keeps no notes yet.** It is the obvious next idea —
+        a claim against an empty folder is delivered as a patch that *creates* it (`creates_file`),
+        the drafter is nowhere told so, and saying it looks like closing a gap. Measured against
+        one model on the tree shape this was reported from, arms differing only in this sentence:
+
+        - nothing said: 26/26 routed
+        - each empty destination marked `— no notes yet`: 0/20, in both A/B orders
+        - prose asserting that *these* destinations are empty: 0/14
+        - the same fact stated generally ("a folder that keeps no notes yet is a normal
+          destination"), naming no folder: 12/12
+
+        So the hazard is not the wording but the assertion: told the folder on offer is empty, the
+        drafter stops offering to write there, whatever reassurance follows. The general phrasing
+        is safe and was still left out — it measured identical to silence, and §9.2 counts prompt
+        attention as a real price rather than a theoretical one.
         """
         folders = self.routable_folders()
         if not folders:
@@ -309,6 +331,15 @@ class Digest(BaseModel):
         if not self.sidecars:
             # Still routed. A folder with no notes yet is exactly where a first claim belongs, and
             # a drafter told only "there are none" reads that as "this destination is unavailable".
+            #
+            # This sentence asserts that the destinations are empty, which is the shape
+            # `render_destinations` measured at 0/14 — so it was A/B'd here too, on a tree with no
+            # `.agents/` anywhere, which is the only tree that reaches this branch. As written
+            # 0/6; the assertion removed 1/6; stated generally 0/6. Nothing to choose between
+            # them: with no notes in the tree at all the drafter has never seen a local note and
+            # routes rarely whatever this says. Left as written, because "no evidence either way"
+            # is not a reason to change a sentence, and the numbers are here so the next person
+            # does not have to re-derive them.
             return (
                 "None of the folders below keep local notes yet. That is normal — and a folder "
                 "with no notes is where a first one belongs, if a failure calls for it.\n\n"
@@ -1113,24 +1144,57 @@ def propose(
     routed, refused = sidecar_patches(
         proposal, digest, skill, existing=lambda path: on_disk.get(path, "")
     )
-    named = misrouted(
-        "\n".join([skill.body, *digest.pages.values()]),
-        "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
-        digest,
-    )
+    before_text = "\n".join([skill.body, *digest.pages.values()])
+    after_text = "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()])
+    named = misrouted(before_text, after_text, digest)
+    symbols = named_symbols(before_text, after_text, digest)
+    # A symbol counts towards the one-home rule through the folder its file is in. Splitting
+    # `misrouted` into folders and symbols left this call taking only the folder half, so the
+    # commonest shape of the violation went unreported *as* one: a claim filed against
+    # `…/siggen/impl` and a rule keyed on `ScannerApi`, whose file is in that folder, is one lesson
+    # in two homes — and the console said only "the new guidance names a class", which reads as a
+    # routing suggestion for a lesson that had already been routed.
+    homes = _symbol_folders(digest, symbols)
+    duplicated = both_homes(routed, [*named, *(f for found in homes.values() for f in found)])
     return ProposalResult(
         proposal=proposal, digest=digest, unknown_cases=unknown,
         holdout_cases=holdout_named, selected_missing=selected_missing,
         removed_rules=removed, disputed=filed, unmatched_disputes=unmatched,
         sidecar_patches=routed, rejected_claims=refused, llm_calls=calls,
         misrouted=named,
-        named_symbols=named_symbols(
-            "\n".join([skill.body, *digest.pages.values()]),
-            "\n".join([proposal.body, *{**digest.pages, **proposal.pages}.values()]),
-            digest,
-        ),
-        duplicated=both_homes(routed, named),
+        # Symbols whose folder is already reported as a duplicate are dropped for the same reason
+        # `plain_misroutings` drops folders: "file it beside the code" is not advice for a lesson
+        # that is beside the code, and the duplicate message is the one with something to decide.
+        named_symbols=[
+            symbol
+            for symbol in symbols
+            if not any(
+                same_place(folder, dup)
+                for folder in homes.get(symbol, [])
+                for dup in duplicated
+            )
+        ],
+        duplicated=duplicated,
     )
+
+
+def _symbol_folders(digest: Digest, symbols: Iterable[str]) -> dict[str, list[str]]:
+    """Each named symbol mapped to the folders its file sits in, from the failures that were shown.
+
+    Only the shown failures, because that is where `_file_stems` drew the symbols from — there is
+    no separate index of the source tree here, and inventing one would let a rule naming a class
+    this run never looked at be scored against a folder nobody saw.
+    """
+    wanted = set(symbols)
+    out: dict[str, list[str]] = {}
+    for cluster in digest.clusters:
+        path = cluster.representative.path
+        if not path:
+            continue
+        parsed = PurePosixPath(path.replace("\\", "/"))
+        if parsed.stem in wanted:
+            out.setdefault(parsed.stem, []).append(_norm_folder(str(parsed.parent)))
+    return {stem: sorted(set(found)) for stem, found in out.items()}
 
 
 def both_homes(patches: list[SidecarPatch], named: list[str]) -> list[str]:
@@ -1367,7 +1431,13 @@ _SUBMIT_GUIDANCE = ToolSpec(
                                 "— pick the level the fact is true at"
                             ),
                         },
-                        "claim": {"type": "string", "description": "the fact, as one sentence"},
+                        "claim": {
+                            "type": "string",
+                            "description": (
+                                "the fact, as one plain sentence — no markup and no `<!-- src: "
+                                "… -->` citation; the citation is written for you"
+                            ),
+                        },
                         "excepts": {
                             "type": "string",
                             "description": "rule id, when this narrows a rule for this folder only",
@@ -1497,6 +1567,10 @@ ROUTING = (
     "- One home per lesson. If you file it as a claim, do **not** also add a rule for it — that is "
     "how the guidance ends up carrying the folder's problems as well as its own.\n"
     "- `because` says why it is local rather than general. A person reads it before accepting.\n"
+    "- `claim` is one plain sentence, with no markup and **no citation**. The notes you were shown "
+    "carry `<!-- src: … -->` lines; do not copy them. Yours is written for you, from the eval "
+    "cases that fail without the claim — one in your sentence replaces a checkable citation with "
+    "an invented one, and the claim is refused.\n"
     "- To narrow an existing rule for one folder, set `excepts` to that rule's id. Never write a "
     "claim that argues with a rule without excepting it: an exception is countable, and three "
     "folders excepting the same rule is the signal that the rule itself wants rewriting.\n"
@@ -2002,6 +2076,25 @@ def _why_not(
     """Why this claim may not be filed, or `""`. See `sidecar_patches` for the reasoning."""
     if not text:
         return "the claim is empty"
+    # Keyed on the parser's own pattern rather than "any HTML comment", so the refusal covers
+    # exactly what would be read back as provenance and nothing else — a claim about a folder full
+    # of templates may still say `<!-- ko -->` without being turned down for it.
+    if SRC.search(text):
+        # Found live, and only live: the drafter is shown real notes, every claim in them carries a
+        # `<!-- src: … -->` line, and a model shown a format copies it — this one invented
+        # `HUB-1003` and appended it to its sentence. `claims.SRC` matches the *first* such comment
+        # in a bullet, so the fabricated ticket becomes the claim's recorded provenance and the
+        # real citation `render_claim` writes underneath is never read. The CI floor then passes
+        # the claim as cited, and §8's blind verification has a source id pointing at nothing.
+        #
+        # Refused rather than stripped. Every other thing a drafter gets wrong here is reported to
+        # a human who can re-run, and quietly deleting markup from a model's sentence would be the
+        # one place this loop edits what it was told instead of declining it.
+        return (
+            "the claim writes its own `<!-- src: … -->` citation — the real citation is written "
+            "for you from the eval cases that fail without the claim, and one in the sentence "
+            "overrides it with a source nobody can check. Say the fact plainly, without it"
+        )
     if not _covers_a_failure(folder, touched):
         shown = ", ".join(sorted(touched)) or "none"
         return (

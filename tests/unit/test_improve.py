@@ -1461,6 +1461,140 @@ def test_the_destinations_are_named_even_when_no_folder_keeps_notes_yet() -> Non
     assert "`payments`" in digest.render_sidecars()
 
 
+def _routed_run(tmp_path: Path, body: str, claims: list[ProposedClaim], path: str):
+    """A whole `propose` over one deep failure, so the cross-checks that only run there are real.
+
+    `duplicated` and the symbol suppression are assembled in `propose` from three separate
+    functions; testing the pieces in isolation is exactly how the wiring between them went wrong.
+    """
+    skill = _routed_skill([_case("c1", path)])
+    record = _record([_miss_with_notes("c1", [], path=path)])
+
+    def handler(system: str, user: str, schema: type[BaseModel]) -> BaseModel:
+        return GuidanceProposal(body=body, sidecar_claims=claims)
+
+    return propose(
+        _spec(tmp_path),
+        skill,
+        record,
+        client=FakeLLMClient(handler),
+        sidecars=SidecarReader(read=lambda code_paths, had: []),
+    )
+
+
+DEEP = "scan/siggen/impl/ScannerApi.java"
+
+
+def test_a_claim_and_a_rule_keyed_on_a_class_in_that_folder_are_one_lesson_in_two_homes(
+    tmp_path: Path,
+) -> None:
+    """The shape the console got wrong, and the commonest form of the violation.
+
+    Splitting `misrouted` into folders and symbols left `both_homes` taking only the folder half.
+    So a draft that filed a claim against `scan/siggen/impl` *and* wrote a rule triggered by
+    `ScannerApi` — whose file is in that folder — was never reported as a duplicate. What the
+    reader got instead was "the new guidance names a class; it belongs in the notes beside it",
+    which is advice for a lesson that had already been filed in the notes beside it.
+    """
+    result = _routed_run(
+        tmp_path,
+        RULES_WITH_ID + "\n- **Trigger**: removal of REQUIRES_NEW from `ScannerApi`.\n",
+        [_claim(folder="scan/siggen/impl", claim="Status updates here commit separately.")],
+        DEEP,
+    )
+
+    assert result.duplicated == ["scan/siggen/impl"]
+    # And not *also* reported as a bare naming, which would send the reader to settle a question
+    # the duplicate message has already settled.
+    assert result.named_symbols == []
+
+
+def test_a_rule_keyed_on_a_class_nobody_filed_a_claim_about_is_still_reported(
+    tmp_path: Path,
+) -> None:
+    """The suppression above must not swallow the case it was built for."""
+    result = _routed_run(
+        tmp_path,
+        RULES_WITH_ID + "\n- **Trigger**: removal of REQUIRES_NEW from `ScannerApi`.\n",
+        [],
+        DEEP,
+    )
+
+    assert result.duplicated == []
+    assert result.named_symbols == ["ScannerApi"]
+
+
+def test_a_claim_carrying_its_own_citation_is_refused() -> None:
+    """Found on a live run and by nothing else. The drafter is shown real notes, every claim in
+    them ends in a `<!-- src: … -->` line, and the model copied the shape — inventing `HUB-1003`
+    and appending it to its sentence.
+
+    `claims.SRC` matches the first such comment in a bullet, so the fabricated ticket becomes the
+    claim's provenance and the real citation written underneath is never read. The CI floor then
+    passes it as cited. A wrong source that reads as checkable is worse than a missing one.
+    """
+    proposal = GuidanceProposal(
+        body="b",
+        sidecar_claims=[_claim(claim="Handlers here trust the gateway. <!-- src: HUB-1003 -->")],
+    )
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert patches == []
+    assert "citation is written for you" in rejected[0].reason
+
+
+def test_the_parser_would_have_taken_the_invented_citation() -> None:
+    """Pins the reason the refusal above exists, rather than trusting the reading of it. Without
+    this, a later change to `claims.SRC` could make the refusal pointless and nothing would say
+    so."""
+    from whetstone.sidecars.claims import parse
+
+    doc = parse(
+        "---\nstatus: confirmed\n---\n\n- A fact. <!-- src: HUB-1003 -->\n  <!-- src: real -->\n"
+    )
+    assert doc.claims[0].source == "HUB-1003"
+
+
+def test_a_claim_may_still_mention_a_comment_that_is_not_a_citation() -> None:
+    """The refusal is keyed on the parser's own pattern, not on angle brackets — a folder full of
+    templates is a legitimate thing to have a fact about."""
+    proposal = GuidanceProposal(
+        body="b", sidecar_claims=[_claim(claim="Bindings here are declared with <!-- ko --> tags.")]
+    )
+    patches, rejected = sidecar_patches(proposal, _routed_digest(), _routed_skill())
+
+    assert rejected == [] and len(patches) == 1
+
+
+def test_a_destination_is_listed_bare_and_never_marked_as_empty() -> None:
+    """Pins a result that measurement produced and reading would not have — see
+    `render_destinations` for the numbers.
+
+    The reported tree keeps its only `.agents/` files at the repository root, so every listed
+    destination is a folder a claim would have to *create*. Telling the drafter so is the obvious
+    next idea, and it is the one thing this block must not do: annotating the destination `— no
+    notes yet`, or asserting in prose that these folders keep none, took one model from 6/6 routed
+    to 0/14 in both A/B orders. Stated generally, naming no folder, it was harmless — and left out
+    anyway, because it measured identical to silence.
+
+    A test rather than only a comment: the next person improving this block will run the suite
+    before they run a model.
+    """
+    deep = "scan/scan.siggen/src/main/java/com/bd/scan/siggen/impl"
+    code = f"{deep}/ScannerApi.java"
+    digest = build_digest(
+        _skill([_case("c1", code)]),
+        _record([_miss_with_notes("c1", [".agents/context.md"], path=code)]),
+        FailureInputs(),
+        sidecars=_reader({".agents/context.md": NOTES}),
+    )
+    text = digest.render_sidecars()
+
+    # The destination is offered, and offered without a caveat attached to it.
+    assert f"- `{deep}`\n" in text
+    assert "no notes yet" not in text.split("**Where a claim may go.**")[1]
+
+
 def test_a_run_with_no_paths_says_no_claim_can_be_filed() -> None:
     """Rather than listing nothing and leaving a refusal nobody could have predicted."""
     digest = build_digest(
