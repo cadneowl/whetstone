@@ -311,6 +311,27 @@ def judge(expected: str, finding: str) -> dict[str, Any]:
     }
 
 
+def negative(expected: str, finding: str) -> dict[str, Any]:
+    """The two questions a `not_appear` verdict asks, answered separately.
+
+    `objecting` is true of every finding a reviewer reports — the demo's reviewers do not emit
+    approvals — so the topic overlap decides `about_this_code`, which is the same test `judge`
+    makes. Kept as its own function rather than a flag on `judge`, because the shapes differ and
+    a combined one would have to know which caller it was serving.
+    """
+    shared = topics_of(expected) & topics_of(finding)
+    return {
+        "objecting": True,
+        "about_this_code": bool(shared),
+        "confidence": 0.9 if shared else 0.8,
+        "reason": (
+            f"the finding objects to the same thing ({', '.join(sorted(shared))})"
+            if shared
+            else "the finding is about something else at this location"
+        ),
+    }
+
+
 # --- drafting a guidance change ---------------------------------------------------
 
 
@@ -490,6 +511,14 @@ def respond_to(system: str, user: str) -> dict[str, Any]:
         expected = _between(user, "Expected issue:", "\n")
         finding = _between(user, "Reviewer finding:", "\n")
         return judge(expected, finding)
+    # `not_appear` expectations — every no-flag case in the demo corpus. The judge splits the
+    # question in two rather than asking for the conclusion (see `NegativeVerdict`), so the stub
+    # has to answer in the same shape. Without this the seed dies partway through scoring and the
+    # demo the README calls "every button works" never comes up at all.
+    if "NegativeVerdict" in system:
+        expected = _between(user, "Expected issue:", "\n")
+        finding = _between(user, "Reviewer finding:", "\n")
+        return negative(expected, finding)
     if "LLMFindingList" in system:
         # The guidance is everything before the output instructions Whetstone appends. Passing the
         # whole system prompt would let the schema's own words ("findings", "severity") read as

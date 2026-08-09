@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from whetstone.agent.builtins import BuiltinTools
+from whetstone.agent.builtins import COLLECT, BuiltinTools
 from whetstone.agent.loop import AgentTrace, run_agent
 from whetstone.agent.runner import SkillAgent
 from whetstone.agent.skilltools import SkillTools
@@ -34,6 +34,11 @@ from whetstone.reviewer.llm_reviewer import number_diff
 from whetstone.sidecars.collect import AGENTS_DIR
 
 SUBMIT = "submit_findings"
+
+# How many times a review of a sidecar-bearing skill may be turned down for ending without reading
+# the notes. See `AgentReviewer.review`'s `admit`: enough that a model which merely forgot is put
+# right, few enough that one which will not comply does not spend a whole budget being asked.
+_NUDGES = 2
 
 _SUBMIT_TOOL = ToolSpec(
     name=SUBMIT,
@@ -124,6 +129,47 @@ class AgentReviewer(SkillAgent):
                 return skill_tools.dispatch(call)
             return ToolResult(call.id, f"No tool named {call.name!r}.", is_error=True)
 
+        told = 0
+
+        def admit(_: dict[str, Any]) -> str | None:
+            """Refuse to end a review of a sidecar-bearing skill that never read the sidecars.
+
+            The gap this closes was the whole of a reported failure. Whetstone deliberately does
+            not inject local notes into an agent review — the agent reads what it chooses, and
+            recording injected text as the reviewer's context would be false provenance and would
+            corrupt the hash the gate rests on (`factory._self_collected`). So the only thing
+            asking the reviewer to collect was a sentence in the skill's own prompt, and a model
+            that ignores it produces a review with no local context, scored as though it had some.
+
+            Improve, meanwhile, resolves the same notes unconditionally. The two sides of the loop
+            therefore disagreed about what was knowable: the scorer failed a case the drafter could
+            see was already answered beside the code, and no screen reconciled them.
+
+            A refusal rather than an injection keeps the provenance honest — the reviewer still
+            does its own reading, it is simply not allowed to skip it.
+
+            Bounded at `_NUDGES`, and the bound is not timidity. Refusing until it complies costs
+            a model that will never comply its entire step budget on every case, and ends in the
+            forced ending anyway — the same review, several calls later, on every case in the
+            corpus. Most models comply on the first refusal; one that has been told twice is a
+            configuration problem, and the useful response is to let the run finish and leave the
+            evidence. `AgentTrace.refused` counts it, and `last_sidecars` still reports an empty
+            read, which is what `improve` turns into a sentence naming the reviewer.
+            """
+            nonlocal told
+            if builtins.collected or not builtins.collects:
+                return None
+            told += 1
+            if told > _NUDGES:
+                return None
+            return (
+                f"Not yet. This skill reads notes kept beside the code, and they are part of the "
+                f"review — a folder can say that something which looks wrong there is deliberate, "
+                f"or that a concern is handled elsewhere. Call `{COLLECT}` with the paths this "
+                f"change touches, read what comes back, then submit. If those folders keep no "
+                f"notes it will say so, and you can submit straight after."
+            )
+
         answer, trace = run_agent(
             self._client,
             system=self._system(skill, SUBMIT),
@@ -133,6 +179,7 @@ class AgentReviewer(SkillAgent):
             terminal_tool=SUBMIT,
             max_steps=self._max_steps,
             cancel=self._cancel,
+            admit=admit,
         )
         self.note_trace(trace)
         self.last_trace = trace

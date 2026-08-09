@@ -79,6 +79,11 @@ class AgentTrace:
     llm_calls: int = 0
     calls: list[str] = field(default_factory=list)
     forced: bool = False
+    # How many times the ending was turned down for missing a precondition — see `admit`. Worth
+    # the field because "complied when told" and "complied unprompted" are different reviewers,
+    # and a rising count across a corpus is the signal that the skill's own prompt needs fixing
+    # rather than the harness catching it every time.
+    refused: int = 0
 
     def note(self, call: ToolCall) -> None:
         detail = call.arguments.get("path") or call.arguments.get("pattern") or ""
@@ -98,11 +103,20 @@ def run_agent(
     terminal_tool: str,
     max_steps: int = 12,
     cancel: threading.Event | None = None,
+    admit: Callable[[dict[str, Any]], str | None] = lambda _: None,
 ) -> tuple[dict[str, Any], AgentTrace]:
     """Run until the agent calls `terminal_tool`, and return that call's arguments.
 
     `tools` must include the terminal tool. `dispatch` is only ever asked for the others — the
     terminal call is the loop's business, not a tool's.
+
+    `admit` inspects the terminal call and returns a refusal to send back, or `None` to accept.
+    It is how a caller makes a precondition binding rather than advisory: a reviewer told in its
+    prompt to read the notes beside the code simply does not, and the run then scores a review
+    that had no local context while recording that the reviewer chose its own. Refusing costs the
+    agent a step and it tries again — it does not end the run, and the out-of-budget path below
+    does not consult `admit` at all, so a model that will not comply still produces a review
+    rather than nothing.
     """
     if not any(t.name == terminal_tool for t in tools):
         raise AgentError(f"the terminal tool {terminal_tool!r} was not offered to the model")
@@ -125,12 +139,24 @@ def run_agent(
             continue
 
         messages.append(Message(role="assistant", text=turn.text, calls=turn.calls))
+        # Every other call in the turn first, and only then the ending. Returning the moment the
+        # terminal call was *seen* threw away its siblings: a model that emits
+        # `[collect_local_context, submit_findings]` together — a reasonable thing to do, and what
+        # one told to collect before submitting will try — had the collect silently dropped and
+        # was then recorded as a reviewer that never opened the notes. It asked. We hung up.
         results: list[ToolResult] = []
         for call in turn.calls:
             if call.name == terminal_tool:
-                return call.arguments, trace
+                continue
             trace.note(call)
             results.append(_dispatch_one(call, dispatch, known))
+        ending = next((c for c in turn.calls if c.name == terminal_tool), None)
+        if ending is not None:
+            refusal = admit(ending.arguments)
+            if refusal is None:
+                return ending.arguments, trace
+            trace.refused += 1
+            results.append(ToolResult(ending.id, refusal, is_error=True))
         messages.append(Message(role="tool", results=results))
 
     # Out of budget. Rather than fail — the agent may well have everything it needs and simply be

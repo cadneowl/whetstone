@@ -195,16 +195,21 @@ class BuiltinTools:
     # either would make "was given this file" mean two things. One instance serves one review, so
     # this is per case.
     reads: list[str] = field(default_factory=list)
+    # Whether the collector was called at all this review. Distinct from `reads` having a sidecar
+    # in it: a folder that keeps none is a complete answer, and the reviewer that asked has done
+    # the thing being required of it. See `AgentReviewer.review`, which refuses to let a review
+    # end before this is true.
+    collected: bool = False
 
     def specs(self) -> list[ToolSpec]:
         return [
             *skill_tools(self.skill),
             *(source_tools() if self.root else []),
-            *(collector_tool(self.skill.sidecar.role) if self._collects else []),
+            *(collector_tool(self.skill.sidecar.role) if self.collects else []),
         ]
 
     @property
-    def _collects(self) -> bool:
+    def collects(self) -> bool:
         """Whether this skill has local notes to collect, and somewhere to collect them from."""
         return self.root is not None and not self.skill.sidecar.is_empty()
 
@@ -231,10 +236,15 @@ class BuiltinTools:
         if call.name == "grep":
             return ToolResult(call.id, self._grep(str(args.get("pattern", "")), args.get("glob")))
         if call.name == COLLECT:
-            if not self._collects:
+            if not self.collects:
                 return ToolResult(
                     call.id, "This skill declares no local-context role.", is_error=True
                 )
+            # Set before the call runs, and regardless of what comes back. The precondition is
+            # that the reviewer *asked* — a folder that keeps no notes, or a tree that could not
+            # be read, are both complete answers, and gating on a non-empty result would make an
+            # honest empty one loop until the step budget ran out.
+            self.collected = True
             return ToolResult(call.id, self._collect(args.get("paths")))
         # Unreachable behind `handles`, and spelled out rather than left as a fall-through: a name
         # added to `handles` without a branch here would otherwise silently run a search.
