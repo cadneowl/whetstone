@@ -53,11 +53,17 @@ RULE_RE = re.compile(r"\*\*\s*([A-Z][A-Z0-9]*\d)\b")
 CONSOLIDATABLE: tuple[DeadRuleVerdict, ...] = ("no-evidence", "evidence-archived")
 
 
-def _mentioned(rule_id: str, text: str) -> bool:
+def mentions(rule_id: str, text: str) -> bool:
     """Whether the rule's id appears at all — declared, or merely referred to in passing.
 
     The same test `dead_rules` uses for "does the guidance still mention this", so the two cannot
     disagree about whether a rule is still in the file.
+
+    Public because `skillgraph.py` draws a `refers` edge wherever one rule's prose names another,
+    and that edge has to mean exactly what `removed_rules` means by "still mentioned" — otherwise
+    the picture shows a rule as connected that the removal warning treats as gone, and the two
+    screens disagree about the same file. The boundary is `(?<![A-Za-z0-9_])`, which is why `R1`
+    does not match inside `R12`.
     """
     return bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(rule_id)}(?![A-Za-z0-9_])", text))
 
@@ -88,7 +94,7 @@ def dead_rules(skill: Skill) -> list[DeadRule]:
     out: list[DeadRule] = []
     for rule_id in sorted(skill.provenance):
         refs = [p.ref for p in skill.provenance[rule_id] if p.ref]
-        if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(rule_id)}(?![A-Za-z0-9_])", guidance):
+        if not mentions(rule_id, guidance):
             out.append(
                 DeadRule(
                     rule_id=rule_id,
@@ -99,7 +105,7 @@ def dead_rules(skill: Skill) -> list[DeadRule]:
                 )
             )
             continue
-        supporting = _supporting_cases(skill, refs)
+        supporting = supporting_cases(skill, refs)
         if not supporting:
             plural = "s" if len(refs) != 1 else ""
             out.append(
@@ -226,7 +232,7 @@ def removed_rules(before: str, after: str, skill: Skill) -> list[RemovedRule]:
     gone = declared_before - set(RULE_RE.findall(after))
     out: list[RemovedRule] = []
     for rule_id in sorted(gone, key=_rule_key):
-        if _mentioned(rule_id, after):
+        if mentions(rule_id, after):
             continue
         refs = [p.ref for p in skill.provenance.get(rule_id, []) if p.ref]
         out.append(
@@ -234,7 +240,7 @@ def removed_rules(before: str, after: str, skill: Skill) -> list[RemovedRule]:
                 rule_id=rule_id,
                 linked_cases=[
                     case_id
-                    for case_id, tier in _supporting_cases(skill, refs)
+                    for case_id, tier in supporting_cases(skill, refs)
                     if tier != "archive"
                 ],
             )
@@ -242,20 +248,29 @@ def removed_rules(before: str, after: str, skill: Skill) -> list[RemovedRule]:
     return out
 
 
-def _supporting_cases(skill: Skill, refs: list[str]) -> list[tuple[str, str]]:
+def supporting_cases(skill: Skill, refs: list[str]) -> list[tuple[str, str]]:
     """(case_id, tier) for every case mined from one of the rule's merge requests.
 
     Matched on MR identity: a rule's ref points at the discussion (`acme/payments!812#note_44`),
     a case's at the MR it was mined from (`acme/payments!812`). The note suffix is where in the
     conversation, not which evidence.
+
+    Public for `skillgraph.py`'s `tested_by` edge, which must draw exactly the linkage the verdicts
+    above are computed from. Deriving it a second way would let the graph show a rule as tested
+    while the same page's dead-rule count called it unbacked.
     """
-    mrs = {_mr_of(ref) for ref in refs}
+    mrs = {mr_of(ref) for ref in refs}
     return [
         (case.id, case.tier)
         for case in skill.eval_cases
-        if case.provenance.ref and _mr_of(case.provenance.ref) in mrs
+        if case.provenance.ref and mr_of(case.provenance.ref) in mrs
     ]
 
 
-def _mr_of(ref: str) -> str:
+def mr_of(ref: str) -> str:
+    """The merge request a ref identifies, without the comment it points at.
+
+    `acme/payments!812#note_44` and `acme/payments!812#note_9` are two places in one review, and
+    grouping by this is what makes two rules mined from the same discussion sit on one node.
+    """
     return ref.split("#", 1)[0]

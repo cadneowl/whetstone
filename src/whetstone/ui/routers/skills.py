@@ -10,7 +10,7 @@ import yaml
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from whetstone import staging
+from whetstone import skillgraph, staging
 from whetstone.config import Config
 from whetstone.context import ContextError
 from whetstone.core.loader import (
@@ -28,6 +28,7 @@ from whetstone.domain.skill import Skill
 from whetstone.guidance import DEFAULT_LIMIT, GuidanceSearchResult, search, wants_meaning
 from whetstone.llm.semantic import SemanticResult
 from whetstone.naming import describe_unsafe, is_safe_segment
+from whetstone.reviewer.llm_reviewer import render_pages
 from whetstone.sampling import partition_for, pinned_partitions
 from whetstone.service import (
     CaseDetail,
@@ -36,6 +37,7 @@ from whetstone.service import (
     SkillDetail,
     SkillSummary,
     case_detail,
+    review_mode,
     skill_detail,
     skill_summaries,
     step_runtimes,
@@ -43,6 +45,8 @@ from whetstone.service import (
 from whetstone.sharpening import DEFAULT_WINDOW, SharpeningReport, sharpening_report
 from whetstone.sidecars.confirm import ClaimHistory
 from whetstone.sidecars.graph import DEFAULT_QUERY_LIMIT, SidecarGraph, SidecarGraphView
+from whetstone.skillgraph import DEFAULT_QUERY_LIMIT as SHAPE_QUERY_LIMIT
+from whetstone.skillgraph import SkillGraphView
 from whetstone.steps import StepError
 from whetstone.taskruns import TaskRunRecord
 from whetstone.ui.deps import (
@@ -299,6 +303,47 @@ def get_claims(skill_id: str, root: SkillsRootDep, store: StoreDep) -> list[Clai
         return [h for h in Ledger(store.root).summary() if h.path.endswith(suffixes)]
     except (OSError, ValueError):
         return []
+
+
+@router.get("/{skill_id}/shape", response_model=SkillGraphView)
+def get_shape(
+    skill_id: str,
+    root: SkillsRootDep,
+    q: str = "",
+    hops: int = 1,
+    limit: int = SHAPE_QUERY_LIMIT,
+) -> SkillGraphView:
+    """This skill's own guidance as a graph, filtered by `q`.
+
+    The Guidance tab renders the folder top to bottom, which says what the rules are and not how the
+    skill is *shaped*: which rule narrows another one three files away, which rule nothing in the
+    corpus tests, which page the reviewer never receives, which link outlived what it named. All of
+    that is in the folder already and was visible nowhere.
+
+    **Read-only and off the scoring path**, like the sidecar graph beside it: `skill_hash` covers
+    the same bytes it did before and no prompt changes because a picture exists.
+
+    Two of the defects reported depend on *how the skill is run* — a page dropped by the byte cap
+    only exists when the folder is pasted, and a page nothing links to is only unreachable when an
+    agent has to ask for it by path. So the runtime is resolved first (`step_runtimes`, the same
+    answer the header strip shows) and the view says which mode it described. A skill whose reviewer
+    is its own program gets neither: Whetstone assembles no prompt there and has no standing to say
+    what reaches one.
+
+    No cache and no embedder, both deliberate — see `skillgraph.py`. The skill is re-read from disk
+    on every request anyway, and the Guidance tab's own search box already ranks these blocks by
+    meaning through the one ranking policy this project has.
+    """
+    skill = _load_one(root, skill_id)
+    graph = skillgraph.build(skill, mode=review_mode(skill, _skill_dir(root, skill)))
+    # `render_pages`' own answer, never a second model of it: this is the function that assembles
+    # the real prompt, so a page it drops is a page the reviewer does not get, and nothing here may
+    # disagree with that.
+    _, dropped = render_pages(skill)
+    skillgraph.annotate_defects(graph, skill, dropped=dropped)
+    return skillgraph.view(
+        graph, q, hops=max(0, min(hops, 4)), limit=max(1, min(limit, 2_000))
+    )
 
 
 @router.get("/{skill_id}/sidecars/graph", response_model=SidecarGraphView)

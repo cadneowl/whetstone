@@ -23,6 +23,19 @@ export type GraphNodeKind = GraphNode['kind']
 export type GraphEdgeKind = GraphEdge['kind']
 /** One `.agents/` file verbatim, for the panel behind a claim in the graph. */
 export type SidecarFile = Schemas['SidecarFile']
+/** One query over a skill's *own* guidance, and what the whole graph holds. */
+export type SkillGraphView = Schemas['SkillGraphView']
+/** A file, a section, a rule, a directive, a citation, a case — or a link that resolves to none. */
+export type ShapeNode = Schemas['ShapeNode']
+export type ShapeEdge = Schemas['ShapeEdge']
+export type ShapeNodeKind = ShapeNode['kind']
+export type ShapeEdgeKind = ShapeEdge['kind']
+/** What a review of this skill costs, and which context windows can afford it. */
+export type FitReport = Schemas['FitReport']
+export type ModelFit = Schemas['ModelFit']
+/** One thing taking up room in a review prompt, with the sentence that produced its size. */
+export type FitComponent = Schemas['Component']
+export type FitWindow = Schemas['Window']
 /** A search over a skill's own guidance — SKILL.md, its companion pages and its wiki. */
 export type GuidanceSearchResult = Schemas['GuidanceSearchResult']
 export type GuidanceChunk = Schemas['GuidanceChunk']
@@ -235,6 +248,13 @@ export const keys = {
   // cache keyed on the skill alone would show the previous question's picture while typing.
   sidecarGraph: (id: string, q: string, hops: number) => ['sidecar-graph', id, q, hops] as const,
   sidecarFile: (id: string, path: string) => ['sidecar-file', id, path] as const,
+  // The skill's own guidance as a graph. Same reasoning as `sidecarGraph`: the query is a
+  // server-side traversal, so it belongs in the key.
+  shape: (id: string, q: string, hops: number) => ['shape', id, q, hops] as const,
+  // `probe` is in the key because a probed answer and an unprobed one are different answers — the
+  // first carries a row the second cannot, and caching them together would show a measured window
+  // to someone who never asked for one (or hide it from someone who did).
+  fit: (id: string, probe: boolean) => ['fit', id, probe] as const,
   guidanceSearch: (id: string, q: string) => ['guidance-search', id, q] as const,
   tasks: (id: string) => ['tasks', id] as const,
   runs: (skillId?: string) => ['runs', skillId ?? 'all'] as const,
@@ -381,6 +401,45 @@ export function useSidecarFile(skillId: string, path: string | null) {
       ),
     enabled: !!path,
     staleTime: Infinity,
+  })
+}
+
+/**
+ * The skill's own guidance as a graph, filtered by `q`.
+ *
+ * `enabled` mirrors `useSidecarGraph` so the two read alike. The Guidance tab's caller passes `true`
+ * and gates by mounting instead (`ShapeDisclosure`), which is the stronger form of the same idea:
+ * a closed panel runs no query because the component does not exist.
+ *
+ * `placeholderData` keeps the previous answer on screen while a new query resolves. Without it every
+ * keystroke blanks the picture, and a graph that flashes empty between letters reads as a skill that
+ * lost its rules.
+ */
+export function useSkillShape(skillId: string, q: string, hops: number, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.shape(skillId, q, hops),
+    queryFn: () =>
+      get<SkillGraphView>(
+        `/api/skills/${encodeURIComponent(skillId)}/shape?q=${encodeURIComponent(q)}&hops=${hops}`,
+      ),
+    enabled,
+    placeholderData: (previous) => previous,
+  })
+}
+
+/**
+ * What a review of this skill costs, per context window.
+ *
+ * `probe` asks the configured endpoint what window it actually serves, and is off unless somebody
+ * presses the button: a page load must not call a model endpoint. `staleTime` is deliberately absent
+ * — the answer is a pure function of files on disk that a person may be editing in another window,
+ * which is the same reason the skill itself is re-read on every request.
+ */
+export function useSkillFit(skillId: string, probe: boolean) {
+  return useQuery({
+    queryKey: keys.fit(skillId, probe),
+    queryFn: () => get<FitReport>(`/api/skills/${encodeURIComponent(skillId)}/fit?probe=${probe}`),
+    placeholderData: (previous) => previous,
   })
 }
 

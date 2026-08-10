@@ -8,6 +8,7 @@ import {
   type SkillHealth,
   type UncoveredMr,
 } from '@/api/client'
+import { FitPanel } from '@/components/FitPanel'
 import { LaunchButton } from '@/components/LaunchButton'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 import { mergeRequestOf } from '@/routes/triageFilters'
@@ -38,6 +39,15 @@ export function HealthPanel({ skillId }: { skillId: string }) {
       <JudgeSection health={data} />
       <ProductionSection health={data} />
       <CadenceSection skillId={skillId} health={data} />
+      {/* Beside the dead-rule report rather than among the score sections: both are about the
+          guidance as written rather than about the corpus, and this one is the question the score
+          sections cannot raise — whether the rules being measured actually reach the model. */}
+      <Section
+        title="Context fit"
+        intro="Whether the guidance fits the window it is served through, and what every review pays before the diff arrives. Arithmetic, not a score."
+      >
+        <FitPanel skillId={skillId} />
+      </Section>
       <DeadRulesSection skillId={skillId} health={data} />
     </div>
   )

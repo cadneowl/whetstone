@@ -82,6 +82,81 @@ preflight, and in the drafting-prompt preview — when a non-agent step's guidan
 Nothing is ever truncated to fit. It catches the case the refusal does not: one `SKILL.md` that has
 simply grown too big to keep pasting.
 
+That warning has one threshold for every deployment, though, and "too big" is a question about a
+*window*. §2b is how you get the number.
+
+---
+
+## 2b. Does it fit? — the context budget
+
+**Health tab → Context fit**, or `whetstone skills fit --skill <dir>`.
+
+Two figures, and the split is the whole point:
+
+| | is |
+|---|---|
+| **floor** | what *every* review pays before anything varies. Pasted: `SKILL.md` + every companion page. As an agent: `SKILL.md` alone. |
+| **ceiling** | the floor plus the wiki cap, the `sidecar:` budget, the precedent cap, and the largest diff in your own corpus. |
+
+The floor is the number you control and the one that multiplies — it is paid on every case of every
+trial, on both sides of a gate. Each window gets a letter and a word with the arithmetic beside it:
+
+```
+F  overflows        4k      4,096   194% guidance     -3,868 spare  [published]
+     the guidance alone is ~7,964 tokens against a 4,096-token window — it does not fit
+     before a diff is even added
+C  crowded        128k    131,072    31% guidance    114,000 spare  [published]
+     the guidance takes 31% of the window on every review, of every case, of every trial,
+     on both sides of a gate — it fits, and it is not free
+```
+
+Three things worth knowing about it:
+
+- **The rows are size bands, not models.** A shipped table of vendors' published limits would rot
+  within a quarter and rot silently. For an exact number, `--probe` asks the endpoint what it serves
+  (`GET /v1/models`, which several local runners answer and most cloud APIs do not), or state it as a
+  `[[models]]` row in `whetstone.toml`. Every row says which of the three it is.
+- **A local runner serves whatever context length it was started with**, which may be far below what
+  the model was trained for — and `/v1/models` sometimes reports the trained length. If a measured row
+  looks generous, check the runner's own setting.
+- **It grades fit, never quality.** Whether a model *follows* rules that fit is a measurement, and the
+  instrument is a scored run on that backend (`--no-sidecars` for what local context is worth).
+
+`--probe` is off by default: a command that reports on a folder should not have to call a model.
+
+---
+
+## 2c. The shape of the folder
+
+**Guidance tab → "The shape of it"**, or `whetstone skills shape --skill <dir> -q '…'`.
+
+The rules as a graph, with the edges the folder already carries and nothing drew: one rule naming
+another across files, the review a rule came from, the eval case linked to it through that review, and
+the links between pages. Query it with the same field syntax the guidance search uses — `rule:R7`,
+`file:patterns`, `kind:directive`, `issue:true`.
+
+It also reports what is mechanically wrong. Six of these are true whatever the runtime:
+
+| | means |
+|---|---|
+| `no-evidence` | no eval case is linked to this rule — nothing goes red if it is removed |
+| `evidence-archived` | every case linked to it is archived |
+| `unreferenced` | a `meta.yaml` provenance entry whose rule the prose no longer mentions |
+| `untraceable` | an instruction with **no rule id**. It reaches the model like any other, and nothing can provenance it, no case can be linked to it, and no warning fires when a draft deletes it |
+| `dangling` | a link naming no page in this skill |
+| `unpaged` | a link to a real `.md` that is **not** a guidance page — under `eval_cases/`, `wiki/` or a step folder. `read_skill_file` refuses it (§7) |
+
+And two that are true in **exactly one runtime each**, which is why the header names the runtime it
+read:
+
+| | fires when | because |
+|---|---|---|
+| `dropped` | pasted | the guidance byte cap drops the page whole, so its rules are not sent and your score was measured without them |
+| `unreachable` | as an agent | nothing links to the page, and an agent asks for a page by the exact path the instructions name — so it is never read |
+
+`unreachable` is the one that surprises people: turning on `agent:` fixes `dropped` and can introduce
+this. A page is only reachable if the guidance points at it.
+
 ---
 
 ## 3. `source:` — and the one word that matters
@@ -336,6 +411,9 @@ get. The skill page shows the same per step, before you click anything.
 ## 11. Checklist
 
 - [ ] More than one guidance file, or a rule that depends on code outside the diff → `agent: enabled: true`
+- [ ] `whetstone skills fit` grades the window you actually serve this on as `fits` or `crowded`, not `tight` or `overflows`
+- [ ] `whetstone skills shape -q issue:true` is empty, or every code left in it is one you have decided to accept
+- [ ] Every companion page is linked from the guidance — under `agent:` an unlinked page is never read
 - [ ] Every `source:` has **`required: true`**
 - [ ] Secrets are plain `{ env: … }`; only non-secret, run-determining values are `pin: true`
 - [ ] Anything the model must *read* is a literal or a `file:`, never a bare `env:`

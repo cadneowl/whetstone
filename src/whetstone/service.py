@@ -1537,6 +1537,30 @@ def step_runtimes(
     return out
 
 
+def review_mode(skill: Skill, skill_dir: Path) -> Literal["agent", "prompt", "unknown"]:
+    """How this skill's reviews actually run: pasted into one prompt, run as an agent, or neither.
+
+    Read off `step_runtimes`, which is what the skill page's header strip shows, so nothing else can
+    disagree with the strip about a runtime. The `evaluate` step is the one that decides it: it is
+    the step that reviews code, and it is the prompt every score was measured through.
+
+    Lives here rather than in either caller because two of them need it — the shape graph's route,
+    and `whetstone skills shape`/`fit` — and the answer is load-bearing rather than cosmetic:
+    `skillgraph` reports two defects that are true in exactly one runtime each, so two
+    implementations of this could put opposite badges on the same folder from the browser and the
+    terminal.
+
+    `unknown` for a step that is a program, a task, absent or unreadable. All four are cases where
+    Whetstone does not build the prompt, and inventing a runtime for them would put a confident
+    badge on a page whose contents Whetstone never sends.
+    """
+    rows = {row.kind: row for row in step_runtimes(skill, skill_dir)}
+    mode = rows["evaluate"].mode if "evaluate" in rows else "none"
+    if mode == "agent":
+        return "agent"
+    return "prompt" if mode == "prompt" else "unknown"
+
+
 def _large_prompt(skill: Skill, kind: str, limit: int) -> str:
     """Whether this non-agent step's guidance alone is already a large prompt.
 
