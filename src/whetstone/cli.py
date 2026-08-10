@@ -1961,7 +1961,7 @@ def skills_shape(
     counts = graph.counts
     typer.echo(
         f"{sk.id}  {counts.get('file', 0)} file(s), {counts.get('rule', 0)} rule(s), "
-        f"{counts.get('directive', 0)} unnumbered, {counts.get('edges', 0)} edge(s)"
+        f"{counts.get('directive', 0):,} guidance with no id, {counts.get('edges', 0)} edge(s)"
     )
     typer.echo(f"  runtime {mode}  digest {graph.digest[:12]}")
     if counts.get("defects"):

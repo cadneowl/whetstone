@@ -1069,10 +1069,31 @@ def test_the_two_runtime_dependent_defects_cannot_fire_in_the_wrong_runtime() ->
         "no-evidence",
         "evidence-archived",
         "unreferenced",
-        "untraceable",
         "dangling",
         "unpaged",
     }
+
+
+def test_unnumbered_guidance_is_not_a_defect_anywhere() -> None:
+    """`authoring-skills.md` §2c now says so in a section of its own, and the README repeats it.
+
+    It was a code, and on a real 15-file skill it reported 1,128 defects — 1,074 of them one per
+    unnumbered bullet. A skill may carry generic guidance that no ticket justified; what is true of
+    it is that nothing traces it and no warning fires if a draft deletes it, which is a fact rather
+    than a fault. Asserted in three places, because the urge to re-add it is the tidiness instinct.
+    """
+    from whetstone.skillgraph import CODES
+
+    assert "untraceable" not in CODES
+
+    doc = _read("docs", "authoring-skills.md")
+    assert "Guidance with no rule id is not a defect" in doc
+    assert "never flagged" in _read("README.md")
+
+    # And the picture must not colour it like something to fix.
+    graph = (ROOT / "ui" / "src" / "components" / "SkillGraph.tsx").read_text(encoding="utf-8")
+    assert "directive: 'var(--color-good-soft)'" in graph, "a lighter green, not amber"
+    assert "--color-good-soft" in (ROOT / "ui" / "src" / "index.css").read_text(encoding="utf-8")
 
 
 def test_the_graph_and_the_dead_rule_report_agree_about_what_is_tested() -> None:

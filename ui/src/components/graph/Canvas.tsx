@@ -33,18 +33,33 @@ export const HEIGHT = 460
 const LABEL_REACH = 110
 
 /**
- * Past this many nodes a picture stops being readable and starts being a texture.
- *
- * Two things key off it: the anchor kinds stop drawing labels (they would overlap into a smear), and
- * `tooManyToRead` lets a caller say so above the canvas rather than presenting a blob as an answer.
- * Chosen by looking — at ~60 the layout is still legible, and a broad `issue:true` on a real 12-page
- * skill draws 150 and is not.
+ * Past this many nodes the anchor kinds stop drawing labels — a dozen file names in a hundred-node
+ * drawing overlap into a smear, which is worse than no label. Hovering still answers, and the list
+ * below the picture is where names are read at that size.
  */
-export const CROWDED = 60
+const LABEL_LIMIT = 60
 
-/** Whether this many nodes is more picture than anyone can read. */
-export function tooManyToRead(count: number): boolean {
-  return count > CROWDED
+/** Past this, no arrangement of dots is readable however well connected they are. */
+export const CROWDED = 150
+
+/**
+ * Below this many edges per node a drawing is mostly unconnected dots.
+ *
+ * Which is the thing that actually makes a picture worthless, and it took shipping the wrong test to
+ * see it. A broad query like `issue:true` can match more nodes than the limit allows, so `hops` adds
+ * no neighbours at all and the result is edgeless — mutual repulsion with nothing pulling back, which
+ * force layout renders as a ring of dots around the boundary. Meanwhile a 73-node graph with 73 edges
+ * draws as legible clusters. Node count alone flagged the second and would have missed a sparse 50.
+ */
+const CONNECTED_ENOUGH = 0.5
+
+/** The fewest nodes worth complaining about, however sparse. A handful of dots is readable. */
+const SPARSE_FLOOR = 40
+
+/** Whether this drawing is more texture than picture — by connectedness first, then by size. */
+export function tooManyToRead(nodes: number, edges: number): boolean {
+  if (nodes > CROWDED) return true
+  return nodes > SPARSE_FLOOR && edges < nodes * CONNECTED_ENOUGH
 }
 
 /**
@@ -96,10 +111,7 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
   // selected. A small result set gets them all, because a dozen unlabelled dots is a picture of
   // nothing and the whole point of narrowing a query is to be able to read the answer.
   const roomy = nodes.length <= 14
-  // Even the anchor kinds lose their labels once there are too many of them: thirteen file names in
-  // a hundred-node blob overlap into an unreadable smear, which is worse than no label at all —
-  // hovering still answers, and the node list below the picture is where names are read at this size.
-  const crowded = nodes.length > CROWDED
+  const crowded = nodes.length > LABEL_LIMIT
   const labelled = (node: N) =>
     roomy || node.id === selected || (!crowded && alwaysLabelled(node, palette))
 

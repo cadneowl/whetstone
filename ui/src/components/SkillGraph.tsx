@@ -154,14 +154,16 @@ export function SkillGraph({ skillId }: { skillId: string }) {
         >
           {counts.rule ?? 0} rule{counts.rule === 1 ? '' : 's'}
         </Badge>
+        {/* Counted, never flagged. This is information about what can be traced, not a fault — see
+            the note under `CODES` in `skillgraph.py`, and the 1,074-defect report that earned it. */}
         {(counts.directive ?? 0) > 0 && (
           <button
             type="button"
             onClick={() => navigate({ gq: 'kind:directive', gnode: null })}
-            title="Instructions with no rule id. They reach the model like any other, but nothing can trace, test or protect them. Click to show only these."
-            className="rounded-full border border-warn/50 px-2 py-px text-xs whitespace-nowrap text-warn hover:bg-warn/10"
+            title="Guidance with no rule id — generic advice rather than a rule tied to a review. It reaches the model like anything else; what it has is nothing pointing at it. Click to show only these."
+            className="rounded-full border border-good-soft/50 px-2 py-px text-xs whitespace-nowrap text-good-soft hover:bg-good-soft/10"
           >
-            {counts.directive} unnumbered
+            {(counts.directive ?? 0).toLocaleString()} guidance with no direct reference
           </button>
         )}
         <Badge
@@ -205,11 +207,11 @@ export function SkillGraph({ skillId }: { skillId: string }) {
       {/* Said rather than drawn silently. A hundred-and-fifty-node picture is a texture, and
           presenting one as an answer teaches a reader that the graph is useless — when in fact the
           answer is one term away, and the list under the picture is exact at any size. */}
-      {tooManyToRead(nodes.length) && (
+      {tooManyToRead(nodes.length, edges.length) && (
         <p className="text-xs text-warn">
-          {nodes.length} nodes is more than a picture can show — the list below is exact. Narrow
-          with a field (<code className="font-mono">kind:rule</code>,{' '}
-          <code className="font-mono">file:…</code>) or drop hops to 0 to read the shape.
+          {nodes.length} nodes and {edges.length} edges is more texture than picture — the list
+          below is exact. Narrow with a field (<code className="font-mono">kind:rule</code>,{' '}
+          <code className="font-mono">file:…</code>) so the connections have room to show.
         </p>
       )}
       <Canvas
@@ -262,7 +264,10 @@ const KIND_COLOR: Record<ShapeNodeKind, string> = {
   file: 'var(--color-accent)',
   section: 'var(--color-muted)',
   rule: 'var(--color-ink)',
-  directive: 'var(--color-warn)',
+  // A lighter green, not amber. Guidance with no rule id is a normal way to write a skill — plenty
+  // of the best guidance is generic — so it must not be coloured like something to fix. It is drawn
+  // apart from `rule` only because what can be *traced* differs, which is a fact worth seeing.
+  directive: 'var(--color-good-soft)',
   ref: 'var(--color-muted)',
   case: 'var(--color-good)',
   unresolved: 'var(--color-bad)',
@@ -272,8 +277,9 @@ const KIND_HELP: Record<ShapeNodeKind, string> = {
   skill: 'The folder itself.',
   file: 'A guidance file — SKILL.md, a companion page, or a wiki page.',
   section: 'A `#` heading, and what sits under it.',
-  rule: 'An instruction with an id, which is what makes it traceable.',
-  directive: 'An instruction with no id — nothing can provenance, test or protect it.',
+  rule: 'An instruction with an id, which is what lets provenance and a case be attached to it.',
+  directive:
+    'Guidance with no rule id. Perfectly normal, and not a defect — it simply has nothing pointing at it: no review to trace it to, no case linked to it, and no warning if a draft removes it.',
   ref: 'The merge request or ADR a rule came from.',
   case: 'An eval case mined from the same review as a rule.',
   unresolved: 'A link naming no page this skill serves.',
@@ -301,6 +307,13 @@ const EDGE_TITLE: Record<ShapeEdgeKind, string> = {
 const PALETTE: GraphPalette = {
   colour: KIND_COLOR,
   help: KIND_HELP,
+  // `directive` is a fine identifier and a poor label: it makes plain generic guidance sound like a
+  // category of problem, which is exactly the reading this feature had to stop making.
+  //
+  // Deliberately not "unreferenced" — that is the name of an actual defect code (a `meta.yaml`
+  // entry whose rule the prose dropped), and reusing the word for the one thing here that is *not*
+  // a defect would be the worst available label.
+  label: { directive: 'guidance, no id' },
   hollow: 'unresolved',
   // Files are the map anyone orients by here, the way folders are in the sidecar graph.
   anchors: ['file', 'skill'],
@@ -312,9 +325,9 @@ const PALETTE: GraphPalette = {
  * Health rings for one node.
  *
  * One ring, and only for the defect that changes *what the model is given*: a page the reviewer never
- * receives. Everything else the floor finds is about the guidance being untraceable rather than
- * unsent, and gets the corner wedge — which is the same division of labour the sidecar graph makes
- * between "this changes the prompt" and "this note is broken".
+ * receives. Everything else the floor finds is about the guidance being broken rather than unsent — a
+ * link that outlived its file, provenance that outlived its rule — and gets the corner wedge. Same
+ * division of labour the sidecar graph makes between "this changes the prompt" and "this is broken".
  */
 function ringsFor(node: ShapeNode): Ring[] {
   const unsent = node.issues.includes('dropped') || node.issues.includes('unreachable')

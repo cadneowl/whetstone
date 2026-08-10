@@ -231,11 +231,11 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
         <>
           {/* Same restraint as the guidance graph: a picture this size is a texture, and saying so
               points at the fix instead of leaving a reader to conclude the graph does not work. */}
-          {tooManyToRead(nodes.length) && (
+          {tooManyToRead(nodes.length, edges.length) && (
             <p className="text-xs text-warn">
-              {nodes.length} nodes is more than a picture can show — the list below is exact. Narrow
-              with a field (<code className="font-mono">folder:…</code>,{' '}
-              <code className="font-mono">kind:claim</code>) or drop hops to 0.
+              {nodes.length} nodes and {edges.length} edges is more texture than picture — the list
+              below is exact. Narrow with a field (<code className="font-mono">folder:…</code>,{' '}
+              <code className="font-mono">kind:claim</code>) so the connections have room to show.
             </p>
           )}
           <Canvas

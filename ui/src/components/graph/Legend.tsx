@@ -30,7 +30,7 @@ export function Legend({
                 : { backgroundColor: colourOf(palette, kind) }
             }
           />
-          {kind}
+          {palette.label?.[kind] ?? kind}
         </li>
       ))}
       {marks.map((mark) => (

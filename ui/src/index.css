@@ -9,6 +9,10 @@
   --color-ink: #1a1a1a;
   --color-muted: #666666;
   --color-good: #1a7f37;
+  /* A lighter green for something that is fine but worth counting — guidance nothing references, as
+     opposed to `good` (verified) or `warn` (you should look at this). It exists so the skill graph
+     can draw plain unnumbered guidance without implying a defect. */
+  --color-good-soft: #4ac26b;
   --color-bad: #cf222e;
   --color-warn: #9a6700;
   --color-accent: #0969da;
@@ -25,6 +29,7 @@
     --color-ink: #e6edf3;
     --color-muted: #8b949e;
     --color-good: #3fb950;
+    --color-good-soft: #56d364;
     --color-bad: #f85149;
     --color-warn: #d29922;
     --color-accent: #58a6ff;

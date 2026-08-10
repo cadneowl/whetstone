@@ -41,17 +41,28 @@ describe('palette lookups', () => {
 })
 
 describe('when a picture stops being readable', () => {
-  it('is a threshold, not a hard limit', () => {
-    // The server still returns the nodes and the list below the picture is still exact. What changes
-    // is that the panel says so instead of presenting a texture as an answer.
-    expect(tooManyToRead(CROWDED)).toBe(false)
-    expect(tooManyToRead(CROWDED + 1)).toBe(true)
-    expect(tooManyToRead(0)).toBe(false)
+  it('judges connectedness before size', () => {
+    // The failure that motivated this: a broad query matched more nodes than the limit allows, so
+    // `hops` added no neighbours and the drawing was *edgeless* — which force layout renders as a
+    // ring of dots round the boundary. Node count alone would have missed a sparse 50.
+    expect(tooManyToRead(400, 3)).toBe(true)
+    expect(tooManyToRead(50, 4)).toBe(true)
   })
 
-  it('is crossed by a real broad query on a real multi-page skill', () => {
-    // `issue:true` on a 12-page skill draws ~150 nodes. That case is why this exists: the first
-    // version drew the blob silently, and a blob teaches the reader that the graph is useless.
-    expect(tooManyToRead(150)).toBe(true)
+  it('leaves a well-connected drawing alone', () => {
+    // 73 nodes with 73 edges draws as legible clusters on a real skill. The first version warned
+    // about it anyway, which is the same crying-wolf mistake as flagging generic guidance.
+    expect(tooManyToRead(73, 73)).toBe(false)
+    expect(tooManyToRead(60, 40)).toBe(false)
+  })
+
+  it('gives up past a hard size whatever the connectedness', () => {
+    expect(tooManyToRead(CROWDED, CROWDED * 2)).toBe(false)
+    expect(tooManyToRead(CROWDED + 1, CROWDED * 2)).toBe(true)
+  })
+
+  it('says nothing about a handful of dots', () => {
+    expect(tooManyToRead(0, 0)).toBe(false)
+    expect(tooManyToRead(12, 0)).toBe(false)
   })
 })
