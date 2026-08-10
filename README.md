@@ -434,6 +434,35 @@ ignore"* finds **R2 — no swallowed errors**, which contains none of those word
 is additive: it can never reorder or hide an exact match, and an embedding endpoint that is down
 costs those rows and nothing else.
 
+**And the shape of it.** A skill is a folder, and the folder already carries edges nothing drew: a
+rule that says *"unless R3 applies"* is coupled to a rule three files away, `meta.yaml` ties a rule to
+the review it came from, an eval case is linked to that rule through the same review, and a link
+points at a page that may since have been renamed. The **Guidance** tab draws all of it as a graph
+and lets you query it — `rule:R7` and one hop out is the file it lives in, the review it came from and
+the cases that test it; `kind:directive` is every instruction with no id, which nothing can
+provenance, no case can be linked to, and no warning fires for when a draft deletes it. It reports
+what is mechanically wrong the way `whetstone sidecars check` does for notes: a rule no case is linked
+to, a link naming no page, and — depending on how the skill is *run* — a page the byte cap drops from
+every review, or one nothing links to so an agent never fetches it. Those last two are true in exactly
+one runtime each, so the header says which it read. Same answers on the command line with
+`whetstone skills shape --skill <dir> -q '…'`. **Read-only and off the scoring path**: no hash moves
+because a picture exists.
+
+**Does it fit the model you actually run it on?** `[runs] large_prompt_chars` is one global threshold,
+and it warns the same for a skill about to run on a 200,000-token window and one about to run on a
+4,096-token local model — so the commonest way a skill goes quietly wrong, everything poured into one
+`SKILL.md`, has no signal at all. The **Health** tab does the arithmetic per window: the **floor** is
+what every review pays before the diff, the wiki or any local context arrive, and the **ceiling** adds
+the caps and the largest diff in your own corpus. Each row gets a letter and a word — `F / overflows`,
+`C / crowded`, `A / fits` — with the number that produced it, and the advice names the file to edit
+(*"the floor drops from ~7,900 tokens to ~1,600 as an agent"*, and which pages the byte cap is already
+dropping). It asks `render_pages` rather than modelling it, so it cannot describe a prompt the
+reviewer does not send. The default rows are **size bands**, not vendor claims: a shipped table of
+published limits would be stale within a quarter and stale invisibly, so an exact number comes from
+`--probe`, which asks the endpoint, or from `[[models]]` in `whetstone.toml`, where you state it.
+`whetstone skills fit --skill <dir>` prints the same thing. It grades *fit*, never quality — whether a
+model follows rules that fit is a measurement, and a scored run is the instrument for it.
+
 **Writing one: [docs/authoring-skills.md](docs/authoring-skills.md)** — the working reference for
 these files, organised around the mistakes that are silent (`required:` on a source root, `pin:`
 un-redacting, `grep` being a substring, `meta.yaml` not being readable). Full behavioural reference:
@@ -2357,6 +2386,10 @@ dir = ".whetstone/runs"
 max_llm_calls_per_run = 2000       # preflight warning; see the note below
 large_prompt_chars = 40000         # warn when a non-agent step pastes this much; 0 disables
 
+[[models]]                         # optional: context windows the fit report should name exactly
+name = "our-gateway"               #   a label — the model id, or whatever you call the endpoint
+context = 48000                    #   total context, prompt and reply together
+
 [gate]                             # defaults for `whetstone eval gate`; --recall-tol overrides
 recall_tol = 0.0
 fp_tol = 0.0
@@ -2368,6 +2401,12 @@ dir = ".whetstone/gates"           # stored gate records — what gate-before-pr
 > console (`preflight.check_budget`) — so the operator confirms with the number in front of them.
 > It is a warning rather than a refusal because the estimate is an upper bound; nothing stops a run
 > mid-flight if the actual calls run over. A hard backstop comes with run-level metering later.
+
+> **`[[models]]` is empty by default and only affects a report.** The fit report on the Health tab
+> lists *size bands* — 4k, 8k, 32k, 128k, 200k, 1M — because a shipped table of vendors' published
+> limits would be stale within a quarter and stale invisibly. A row here states the window your
+> deployment actually has, labelled `configured` so a reader can see where the number came from;
+> `whetstone skills fit --probe` asks the endpoint instead, and a measured answer beats a written one.
 
 > **`large_prompt_chars` catches a skill outgrowing the way it is being run.** A step without
 > `agent:` pastes the guidance into every prompt it sends, so the skill page, the cost preflight and

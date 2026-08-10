@@ -1369,6 +1369,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills/{skill_id}/fit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Fit
+         * @description What every review of this skill costs, and which context windows can afford it.
+         *
+         *     `[runs] large_prompt_chars` is one global threshold that warns identically for a skill about to
+         *     run on a 200,000-token window and one about to run on a 4,096-token local model. This is that
+         *     warning with the arithmetic done, per window, with the components that produced it named.
+         *
+         *     **A separate route from `/health`**, deliberately. The health payload is fetched on every visit
+         *     to the tab and this one can make an outbound request; keeping them apart means the probe happens
+         *     because somebody pressed a button.
+         *
+         *     `probe=true` asks the configured endpoint what window it actually serves (`llm/limits.discover`)
+         *     and adds a row labelled `measured`. Off by default: a page load must not call somebody's model
+         *     endpoint. It never raises — an endpoint that 404s the route, answers something unexpected or is
+         *     simply down costs that row and nothing else, reported in `probe_status` the way the
+         *     meaning-search boxes report an absent embedder.
+         *
+         *     Read-only and off the scoring path. It calls `render_pages` rather than modelling what that
+         *     function does, which is the one thing here that must not be approximated: a report describing a
+         *     prompt the reviewer does not send would be worse than no report.
+         */
+        get: operations["get_fit_api_skills__skill_id__fit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/skills/{skill_id}/guidance": {
         parameters: {
             query?: never;
@@ -1500,6 +1538,45 @@ export interface paths {
          *     found. See `staging.with_promoted_cases`.
          */
         get: operations["get_proposal_api_skills__skill_id__proposal_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{skill_id}/shape": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Shape
+         * @description This skill's own guidance as a graph, filtered by `q`.
+         *
+         *     The Guidance tab renders the folder top to bottom, which says what the rules are and not how the
+         *     skill is *shaped*: which rule narrows another one three files away, which rule nothing in the
+         *     corpus tests, which page the reviewer never receives, which link outlived what it named. All of
+         *     that is in the folder already and was visible nowhere.
+         *
+         *     **Read-only and off the scoring path**, like the sidecar graph beside it: `skill_hash` covers
+         *     the same bytes it did before and no prompt changes because a picture exists.
+         *
+         *     Two of the defects reported depend on *how the skill is run* — a page dropped by the byte cap
+         *     only exists when the folder is pasted, and a page nothing links to is only unreachable when an
+         *     agent has to ask for it by path. So the runtime is resolved first (`step_runtimes`, the same
+         *     answer the header strip shows) and the view says which mode it described. A skill whose reviewer
+         *     is its own program gets neither: Whetstone assembles no prompt there and has no standing to say
+         *     what reaches one.
+         *
+         *     No cache and no embedder, both deliberate — see `skillgraph.py`. The skill is re-read from disk
+         *     on every request anyway, and the Guidance tab's own search box already ranks these blocks by
+         *     meaning through the one ranking policy this project has.
+         */
+        get: operations["get_shape_api_skills__skill_id__shape_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2342,6 +2419,22 @@ export interface components {
             repo: components["schemas"]["RepoRef"];
         };
         /**
+         * Component
+         * @description One thing that takes up room in a review prompt, and where its size came from.
+         */
+        Component: {
+            /** Basis */
+            basis: string;
+            /** Chars */
+            chars: number;
+            /** Fixed */
+            fixed: boolean;
+            /** Name */
+            name: string;
+            /** Tokens */
+            tokens: number;
+        };
+        /**
          * Composition
          * @description What the corpus is made of — the denominator under every score.
          */
@@ -3110,6 +3203,68 @@ export interface components {
              * @default
              */
             principal: string;
+        };
+        /**
+         * FitReport
+         * @description What every review of this skill costs, and which windows can afford it.
+         */
+        FitReport: {
+            /**
+             * Advice
+             * @default []
+             */
+            advice: string[];
+            /**
+             * Ceiling Tokens
+             * @default 0
+             */
+            ceiling_tokens: number;
+            /**
+             * Chars Per Token
+             * @default 4
+             */
+            chars_per_token: number;
+            /**
+             * Components
+             * @default []
+             */
+            components: components["schemas"]["Component"][];
+            /**
+             * Floor Tokens
+             * @default 0
+             */
+            floor_tokens: number;
+            /**
+             * Mode
+             * @default unknown
+             * @enum {string}
+             */
+            mode: "agent" | "prompt" | "unknown";
+            /**
+             * Models
+             * @default []
+             */
+            models: components["schemas"]["ModelFit"][];
+            /**
+             * Notes
+             * @default []
+             */
+            notes: string[];
+            /**
+             * Probe Status
+             * @default
+             */
+            probe_status: string;
+            /**
+             * Problem
+             * @default
+             */
+            problem: string;
+            /**
+             * Skill Id
+             * @default
+             */
+            skill_id: string;
         };
         /**
          * GateConfig
@@ -4020,6 +4175,33 @@ export interface components {
              * @default
              */
             resolved_model: string;
+        };
+        /**
+         * ModelFit
+         * @description What one window makes of this skill.
+         */
+        ModelFit: {
+            /** Ceiling Tokens */
+            ceiling_tokens: number;
+            /** Floor Share */
+            floor_share: number;
+            /** Floor Tokens */
+            floor_tokens: number;
+            /**
+             * Grade
+             * @enum {string}
+             */
+            grade: "A" | "B" | "C" | "D" | "F";
+            /** Headroom */
+            headroom: number;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "fits" | "crowded" | "tight" | "overflows";
+            /** Why */
+            why: string;
+            window: components["schemas"]["Window"];
         };
         /**
          * NextAction
@@ -5406,6 +5588,169 @@ export interface components {
          */
         Severity: 10 | 20 | 30;
         /**
+         * ShapeEdge
+         * @description See `ShapeNode` for why these three models carry a prefix.
+         */
+        ShapeEdge: {
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "contains" | "states" | "refers" | "cites" | "tested_by" | "links";
+            /** Source */
+            source: string;
+            /** Target */
+            target: string;
+        };
+        /**
+         * ShapeNode
+         * @description One thing a skill's guidance is made of, or one thing that guidance is attached to.
+         *
+         *     Prefixed rather than called `Node`, which is what it would otherwise be. `sidecars/graph.py`
+         *     already exports `Node`, `Edge` and `QueryResult`, and FastAPI names an OpenAPI schema after the
+         *     class — resolving a collision by falling back to the fully-qualified module path. So a second
+         *     graph called its models `Node` would silently rename the *first* graph's schema to
+         *     `whetstone__sidecars__graph__Node` and break every `Schemas['Node']` alias in the console, for a
+         *     reason no one reading the console would be able to guess. Pydantic's `title` does not help: the
+         *     ref name comes from the class. Distinct names here leave the existing ones untouched.
+         */
+        ShapeNode: {
+            /**
+             * Blocks
+             * @default 0
+             */
+            blocks: number;
+            /**
+             * Bytes
+             * @default 0
+             */
+            bytes: number;
+            /**
+             * Case Kind
+             * @default
+             */
+            case_kind: string;
+            /**
+             * Degree
+             * @default 0
+             */
+            degree: number;
+            /** Delivery */
+            delivery?: ("always" | "on-demand" | "retrieved") | null;
+            /** Id */
+            id: string;
+            /**
+             * Issue Messages
+             * @default []
+             */
+            issue_messages: string[];
+            /**
+             * Issues
+             * @default []
+             */
+            issues: string[];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "skill" | "file" | "section" | "rule" | "directive" | "ref" | "case" | "unresolved";
+            /** Label */
+            label: string;
+            /**
+             * Line
+             * @default 0
+             */
+            line: number;
+            /**
+             * Missing
+             * @default false
+             */
+            missing: boolean;
+            /**
+             * Path
+             * @default
+             */
+            path: string;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /**
+             * Rule
+             * @default
+             */
+            rule: string;
+            /**
+             * Rules
+             * @default 0
+             */
+            rules: number;
+            /**
+             * Section
+             * @default
+             */
+            section: string;
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+            /**
+             * Tier
+             * @default
+             */
+            tier: string;
+        };
+        /**
+         * ShapeQueryResult
+         * @description A query's matches, and the neighbourhood they pull in.
+         *
+         *     See `ShapeNode` for why these three models carry a prefix.
+         */
+        ShapeQueryResult: {
+            /**
+             * Edges
+             * @default []
+             */
+            edges: components["schemas"]["ShapeEdge"][];
+            /**
+             * Hops
+             * @default 1
+             */
+            hops: number;
+            /**
+             * Matched
+             * @default []
+             */
+            matched: string[];
+            /**
+             * Nodes
+             * @default []
+             */
+            nodes: components["schemas"]["ShapeNode"][];
+            /**
+             * Query
+             * @default
+             */
+            query: string;
+            /**
+             * Total Matched
+             * @default 0
+             */
+            total_matched: number;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /**
          * SharpeningReport
          * @description What Whetstone can and cannot demonstrate about one skill's progress.
          */
@@ -6007,6 +6352,61 @@ export interface components {
             pages?: {
                 [key: string]: string;
             };
+        };
+        /**
+         * SkillGraphView
+         * @description One query's answer, plus what the whole graph holds — the Guidance tab's picture.
+         *
+         *     The totals sit alongside the result rather than being derived from it, for the reason
+         *     `SidecarGraphView` gives: a query that matched four rules out of sixty must say so, and a screen
+         *     that could only count what it was handed would show `4` and read as a skill with four rules.
+         */
+        SkillGraphView: {
+            /**
+             * Counts
+             * @default {}
+             */
+            counts: {
+                [key: string]: number;
+            };
+            /**
+             * Digest
+             * @default
+             */
+            digest: string;
+            /**
+             * Mode
+             * @default unknown
+             * @enum {string}
+             */
+            mode: "agent" | "prompt" | "unknown";
+            /**
+             * Problem
+             * @default
+             */
+            problem: string;
+            /**
+             * @default {
+             *       "edges": [],
+             *       "hops": 1,
+             *       "matched": [],
+             *       "nodes": [],
+             *       "query": "",
+             *       "total_matched": 0,
+             *       "truncated": false
+             *     }
+             */
+            result: components["schemas"]["ShapeQueryResult"];
+            /**
+             * Skill Id
+             * @default
+             */
+            skill_id: string;
+            /**
+             * Unresolved
+             * @default []
+             */
+            unresolved: string[];
         };
         /** SkillHealth */
         SkillHealth: {
@@ -7065,6 +7465,31 @@ export interface components {
              * @default
              */
             revision: string;
+        };
+        /**
+         * Window
+         * @description One context window a skill might be served through.
+         */
+        Window: {
+            /**
+             * Example
+             * @default
+             */
+            example: string;
+            /** Label */
+            label: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "published" | "configured" | "measured";
+            /** Tokens */
+            tokens: number;
         };
     };
     responses: never;
@@ -9279,6 +9704,39 @@ export interface operations {
             };
         };
     };
+    get_fit_api_skills__skill_id__fit_get: {
+        parameters: {
+            query?: {
+                probe?: boolean;
+            };
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FitReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     put_guidance_api_skills__skill_id__guidance_put: {
         parameters: {
             query?: never;
@@ -9468,6 +9926,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Proposal"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_shape_api_skills__skill_id__shape_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                hops?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillGraphView"];
                 };
             };
             /** @description Validation Error */

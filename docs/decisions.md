@@ -1026,3 +1026,81 @@ Measure it or delete it — the standard ADR-013 already applies to guidance, ap
 **A skill that declares no role behaves exactly as before.** No traversal, no prompt change, no
 digest change, and `CaseRun.sidecars` absent rather than empty — because "read nothing" and "was
 never asked to read" are different facts about a missed finding.
+
+## ADR-030 — A skill's shape is drawn, and its fit is arithmetic rather than a score
+
+**Status:** accepted
+
+**Context.** ADR-021 made guidance the whole folder and ADR-023 made that folder something you *run*
+rather than concatenate. Both were right, and both left a skill's own structure unreadable. The
+Guidance tab renders the files top to bottom, which answers *what are the rules* and not the question
+anyone editing them has: which rule narrows another one three files away, which rule no case in the
+corpus is linked to, which page the reviewer never actually receives, which link outlived the file it
+named. Every one of those facts was already in the folder, and none of them was on a screen.
+
+The size question was worse than unanswered — it was answered by a guess. `[runs]
+large_prompt_chars` is one global threshold, so it warns identically for a skill about to run on a
+200,000-token window and one about to run on a 4,096-token local model, and cannot say which. That is
+the commonest way a skill goes quietly wrong: the guidance is poured into one `SKILL.md`, the
+character count looks unremarkable because nothing compares it to a window, and the skill is poor on
+the model it is actually served by. Meanwhile `render_pages` drops whole pages past its byte cap,
+names them to the model and to nobody who could act on it, and the run produces an ordinary-looking
+score measured against rules that were never sent.
+
+**Decision.** Two read-only instruments over the folder, and one rule about what they may claim.
+
+**The graph is the sidecar graph's twin, deliberately.** Same node/edge/query shapes, the same field
+syntax in the box, the same visual language — hollow means "names something that is not there", a ring
+means "this matched", size means connectedness. Someone who has learnt to read one picture can read
+the other, and the SVG canvas is now one component rather than two that would drift. It stays off the
+scoring path exactly as §16 requires of the first one, asserted in `test_docs_match_reality.py` rather
+than left as an intention: a graph that already knows which rules relate is precisely the thing
+somebody later wires into retrieval.
+
+**Nothing is parsed twice.** `guidance.chunks_of` already splits the folder into the blocks the
+Guidance tab renders and its search matches; whether a rule is tested is `deadrules.supporting_cases`;
+whether one rule mentions another is `deadrules.mentions`, the same test the removal warning uses. A
+second implementation of any of those would eventually disagree with the first, and the two screens
+would then describe different documents. The three helpers were promoted from private for that reason
+and no other.
+
+**The fit report asks `render_pages`; it does not model it.** The paste-mode floor is that function's
+own output with its own dropped list, because the one thing this must never do is describe a prompt
+the reviewer does not send. An independent estimate would drift from the code that assembles the real
+thing, and the drift would favour whichever number flattered the skill.
+
+**Two figures, never one.** The *floor* is what every review pays before anything varies; the *ceiling*
+adds the caps and the largest diff measured from the corpus. A single number would hide the finding,
+because the floor is the half an author controls and the half that multiplies — every case, every
+trial, both sides of a gate. The recommendation is literally the gap between the floor in one runtime
+and the other.
+
+**Windows are bands, a probe, or configuration — never a shipped table of vendor claims.** A list of
+published limits would be wrong within a quarter and wrong silently, and a reader would have no way to
+tell a number this project measured from one it copied out of a changelog. That is the failure
+`llm/limits.py` already refuses by asking the endpoint instead of assuming. So the default rows are
+sizes with an illustrative example, which cannot rot; `--probe` asks; `[[models]]` lets an operator
+state it; and every row says which of the three it is, because a reader trusting a grade is really
+trusting its window. A test forbids naming a model in a band's example.
+
+**A grade about fit may never be read as a grade about quality.** Everything here is decidable from
+the folder and some integers. Whether the model *follows* rules that fit is a measurement, the
+instrument for it already exists (a scored run; `--no-sidecars` for the ablation), and this is not
+that instrument. So the letter travels with a word, every row quotes the arithmetic that produced it,
+and the report carries the sentence saying so — because a letter grade outlives the paragraph under
+it. This is ADR-013's standard applied to a report rather than to a feature: say what the number is,
+and say what it is not.
+
+**Two defect codes are true in exactly one runtime each, and the runtime is resolved rather than
+assumed.** A page dropped by the byte cap only exists when the folder is pasted; a page nothing links
+to is only unreachable when an agent has to ask for it by path. Both invert between the two runtimes,
+so the mode comes from `step_runtimes` — the same answer the header strip shows — it rides in the
+graph's digest, and a reviewer Whetstone does not build a prompt for gets neither rather than a guess.
+Turning on `agent:` fixes one of these and can introduce the other, which is exactly the fact the
+panel exists to surface.
+
+**Consequences.** `deadrules` exports three former privates. `whetstone.toml` grows an empty-by-default
+`[[models]]`. The sidecar graph's SVG moved into `components/graph/` and both graphs now share it. The
+skill graph's URL params are namespaced (`gq`, `ghops`, `gnode`) because the tab strip preserves query
+params across a tab change and the two graphs' queries mean different things. Neither instrument
+changes a prompt, a hash, or a score.

@@ -13,11 +13,12 @@ payload admits what it does not know and the UI never restructures when one fill
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from whetstone import staging
+from whetstone import fit, staging
 from whetstone.cadence import CadenceSection, CadenceStore, clocks, last_anchor_at
 from whetstone.caseindex import stale_cases
 from whetstone.config import Config
@@ -27,10 +28,13 @@ from whetstone.domain.run import RunRecord
 from whetstone.domain.score import HoldoutReport
 from whetstone.domain.skill import Skill
 from whetstone.drift import DRIFT_ALARM, DriftPoint, DriftReport, DriftStore, trend_point
+from whetstone.fit import FitReport
 from whetstone.inbox import Retirement
+from whetstone.reviewer.llm_reviewer import render_pages
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
-from whetstone.service import precision_evidence
+from whetstone.service import precision_evidence, review_mode
+from whetstone.steps import StepSpec, load_step
 from whetstone.ui.deps import (
     CadenceDep,
     ConfigDep,
@@ -44,7 +48,7 @@ from whetstone.ui.deps import (
 from whetstone.ui.errors import Unprocessable
 from whetstone.ui.routers.inbox import GATE_HISTORY
 from whetstone.ui.routers.judge import JudgeView, get_judge
-from whetstone.ui.routers.skills import _load_one
+from whetstone.ui.routers.skills import _load_one, _skill_dir
 
 router = APIRouter(prefix="/skills", tags=["health"])
 
@@ -206,6 +210,72 @@ def get_health(
         cadence=_cadence_section(store, drift, cadence, skill, probe),
         dead_rules=dead_rules(curated),
     )
+
+
+@router.get("/{skill_id}/fit", response_model=FitReport)
+def get_fit(
+    skill_id: str,
+    root: SkillsRootDep,
+    config: ConfigDep,
+    probe: bool = False,
+) -> FitReport:
+    """What every review of this skill costs, and which context windows can afford it.
+
+    `[runs] large_prompt_chars` is one global threshold that warns identically for a skill about to
+    run on a 200,000-token window and one about to run on a 4,096-token local model. This is that
+    warning with the arithmetic done, per window, with the components that produced it named.
+
+    **A separate route from `/health`**, deliberately. The health payload is fetched on every visit
+    to the tab and this one can make an outbound request; keeping them apart means the probe happens
+    because somebody pressed a button.
+
+    `probe=true` asks the configured endpoint what window it actually serves (`llm/limits.discover`)
+    and adds a row labelled `measured`. Off by default: a page load must not call somebody's model
+    endpoint. It never raises — an endpoint that 404s the route, answers something unexpected or is
+    simply down costs that row and nothing else, reported in `probe_status` the way the
+    meaning-search boxes report an absent embedder.
+
+    Read-only and off the scoring path. It calls `render_pages` rather than modelling what that
+    function does, which is the one thing here that must not be approximated: a report describing a
+    prompt the reviewer does not send would be worse than no report.
+    """
+    skill = _load_one(root, skill_id)
+    skill_dir = _skill_dir(root, skill)
+    mode = review_mode(skill, skill_dir)
+    text, dropped = render_pages(skill)
+    spec = _evaluate_step(skill, skill_dir)
+
+    windows = [*fit.BANDS, *fit.configured(config.models)]
+    status = ""
+    if probe:
+        window, status = fit.probe_window(config.llm.provider, config.llm.model)
+        if window is not None:
+            windows.append(window)
+
+    report = fit.measure(
+        skill,
+        mode=mode,
+        dropped=dropped,
+        page_chars=len(text),
+        wiki=spec.inputs.wiki if spec else None,
+        precedents=spec.inputs.precedents if spec else None,
+        reply_tokens=config.llm.max_tokens or 0,
+        windows=windows,
+    )
+    report.probe_status = status
+    return report
+
+
+def _evaluate_step(skill: Skill, skill_dir: Path) -> StepSpec | None:
+    """This skill's evaluate step, or None when there is not a readable one.
+
+    Best-effort like `step_runtimes`: a malformed step file means the report falls back to the
+    default caps rather than 500-ing the tab someone opened to find out what is wrong.
+    """
+    try:
+        return load_step(skill_dir, "evaluate", skill_id=skill.id)
+    except Exception:  # noqa: BLE001 - a broken step must not take the panel down with it
+        return None
 
 
 def _cadence_section(

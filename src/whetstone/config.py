@@ -214,6 +214,28 @@ class LLMConfig(BaseModel):
     timeout: float | None = Field(default=None, gt=0)
 
 
+class ModelWindow(BaseModel):
+    """One model's context window, as an operator states it.
+
+    A row in the skill's fit table (`fit.py`), which otherwise reports *bands* — sizes with an
+    example — rather than named models. That default is deliberate and this is its escape hatch: the
+    bands cannot go stale, but they also cannot tell you whether your skill fits *the* model your
+    deployment actually calls. Naming it here does, and the row is labelled `configured` so a reader
+    can see the number came from this file rather than from anything Whetstone measured.
+
+    Not a shipped table, and never populated by default. A list of vendors' published limits would
+    be wrong within a quarter and wrong silently, which is the failure `llm/limits.py` already
+    refuses by asking the endpoint instead of assuming. `whetstone skills fit --probe` is that same
+    asking: where an endpoint publishes its window, the measured number beats anything written down.
+    """
+
+    # Whatever the operator calls it — the model id, or "our gateway". It is a label on a row.
+    name: str
+    # Total context, prompt and reply together. That is the number a fit question is about; an
+    # output cap is a different quantity and `fit.measured` refuses to treat one as the other.
+    context: int = Field(gt=0)
+
+
 class WatchConfig(BaseModel):
     """Polling merge requests on a schedule, so signal arrives without anyone going to look.
 
@@ -256,6 +278,9 @@ class Config(BaseModel):
     cadence: CadenceConfig = CadenceConfig()
     llm: LLMConfig = LLMConfig()
     watch: WatchConfig = WatchConfig()
+    # `[[models]]` — context windows an operator has stated, added to the fit table alongside the
+    # bands it ships. Empty by default, so every existing deployment reads exactly as it did.
+    models: list[ModelWindow] = []
     # Directory the config was loaded from; relative paths resolve against it. None when defaulted.
     source_dir: Path | None = Field(default=None, exclude=True)
 

@@ -965,6 +965,266 @@ def test_the_readme_says_the_graph_is_queryable() -> None:
     assert "read-only and off the scoring path" in readme
 
 
+# --- the skill's own shape, and whether it fits (ADR-030) ---------------------------------------
+#
+# The same discipline the sidecar graph gets above, for the same reason. These two instruments read
+# a skill's folder and report on it; the moment either can reach a prompt, a hash or a score,
+# everything the README and ADR-030 promise about them stops being true.
+
+_SCORING_PATH = (
+    ("src", "whetstone", "sidecars", "collect.py"),
+    ("src", "whetstone", "sidecars", "__init__.py"),
+    ("src", "whetstone", "reviewer", "llm_reviewer.py"),
+    ("src", "whetstone", "reviewer", "factory.py"),
+    ("src", "whetstone", "domain", "run.py"),
+)
+
+
+@pytest.mark.parametrize("module", ["skillgraph", "fit"])
+def test_the_shape_instruments_stay_off_the_scoring_path(module: str) -> None:
+    """ADR-030 and the README both say neither changes a prompt, a hash or a score.
+
+    The dependency runs one way on purpose: `fit` imports `render_pages` *from* the reviewer,
+    because it must describe the prompt that function actually builds. Nothing on the scoring path
+    may import back — a report that fed a reviewer would be retrieval by a screen, unmeasured.
+    """
+    import ast
+
+    offenders = []
+    for parts in _SCORING_PATH:
+        tree = ast.parse(_read(*parts))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                f"whetstone.{module}"
+            ):
+                offenders.append("/".join(parts))
+            if isinstance(node, ast.Import) and any(
+                alias.name.startswith(f"whetstone.{module}") for alias in node.names
+            ):
+                offenders.append("/".join(parts))
+    assert offenders == [], f"{offenders} reach whetstone.{module} from the scoring path — ADR-030"
+
+
+def test_the_fit_report_asks_render_pages_rather_than_modelling_it() -> None:
+    """The claim ADR-030 calls the one thing this must never get wrong.
+
+    A page `render_pages` drops is a page the reviewer does not get, so it must be absent from the
+    floor *and* named in the advice. Asserted against behaviour rather than against the import,
+    because "it imports the right function" is not the same as "it uses that function's answer".
+    """
+    from whetstone.domain.skill import GuidancePage, Skill
+    from whetstone.fit import measure, tokens_for
+    from whetstone.reviewer.llm_reviewer import MAX_PAGE_BYTES, render_pages
+
+    skill = Skill(
+        id="s",
+        body="# R\n\n- **R1 — x.**\n",
+        pages=[
+            GuidancePage(path=f"references/p{i}.md", text="x" * (MAX_PAGE_BYTES // 3))
+            for i in range(4)
+        ],
+    )
+    text, dropped = render_pages(skill)
+    assert dropped, "the fixture must overflow the cap or this proves nothing"
+
+    report = measure(skill, mode="prompt", dropped=dropped, page_chars=len(text))
+    pages = next(c for c in report.components if c.name.startswith("companion pages"))
+
+    assert pages.chars == len(text), "the floor is what render_pages produced, not what is on disk"
+    assert pages.tokens == tokens_for(len(text))
+    assert any(dropped[0] in line for line in report.advice), "and the unsent pages are named"
+
+
+def test_a_shipped_window_band_never_names_a_model() -> None:
+    """ADR-030: a band is a size, and a named model is a claim about what it allows *today*.
+
+    The temptation is real — naming one is what makes 32,768 recognisable — and it is the exact
+    thing that would leave this table quietly wrong. `--probe` and `[[models]]` are where exact
+    numbers come from, and both are labelled as such on the row.
+    """
+    from whetstone.fit import BANDS
+
+    for window in BANDS:
+        assert window.source == "published"
+        assert window.example, f"{window.label} has no example, so its size means nothing"
+        assert not re.search(
+            r"gpt|claude-|gemini|llama\d|qwen[\d.]|opus|sonnet|haiku", window.example, re.I
+        ), f"{window.label} names a specific model, which is a claim that rots"
+
+
+def test_the_two_runtime_dependent_defects_cannot_fire_in_the_wrong_runtime() -> None:
+    """The claim `docs/authoring-skills.md` §2c makes in a table, and the README repeats.
+
+    `dropped` needs a byte cap and an agent step has none; `unreachable` needs a page to be *asked
+    for* and a pasted prompt asks for nothing. Each is therefore false in the other runtime, and a
+    badge that fired anyway would be confidently wrong about the one thing the panel is for.
+    """
+    from whetstone.skillgraph import CODES
+
+    assert CODES["dropped"] == "prompt"
+    assert CODES["unreachable"] == "agent"
+    # Every other code is runtime-independent. A new one with no entry cannot be emitted at all,
+    # which is what makes this list the single authority the legend and the docs read.
+    assert {code for code, mode in CODES.items() if mode is None} == {
+        "no-evidence",
+        "evidence-archived",
+        "unreferenced",
+        "untraceable",
+        "dangling",
+        "unpaged",
+    }
+
+
+def test_the_graph_and_the_dead_rule_report_agree_about_what_is_tested() -> None:
+    """One authority per question, which is ADR-030's reuse claim.
+
+    The picture must not show a rule as tested while the dead-rule count on the same page calls it
+    unbacked. Both go through `deadrules`, and these three are public *for* that — so a private
+    reimplementation would be a second opinion about the same folder.
+    """
+    from whetstone import deadrules
+
+    for name in ("mentions", "mr_of", "supporting_cases"):
+        assert hasattr(deadrules, name), f"skillgraph imports deadrules.{name}"
+    source = _read("src", "whetstone", "skillgraph.py")
+    for name in ("mentions", "supporting_cases", "mr_of"):
+        assert name in source, f"skillgraph no longer defers to deadrules.{name}"
+
+
+def test_the_docs_grade_table_matches_the_thresholds_the_code_uses() -> None:
+    """`authoring-skills.md` §2b prints a worked example with a percentage in it.
+
+    A tutorial that has drifted is worse than none: it is believed, and it is read *instead of* the
+    code. So the bands the prose describes are asserted against the ones that decide a grade.
+    """
+    from whetstone.fit import _CROWDED_SHARE, _TIGHT_SHARE
+
+    assert (_CROWDED_SHARE, _TIGHT_SHARE) == (0.25, 0.50)
+    doc = _read("docs", "authoring-skills.md")
+    assert "31% guidance" in doc, "the worked `crowded` example must be above the 25% cut"
+    assert "194% guidance" in doc, "and the `overflows` one must be a floor larger than its window"
+
+
+def test_both_shape_commands_the_docs_tell_you_to_run_exist() -> None:
+    """The README and the tutorial print these for someone to paste."""
+    from typer.testing import CliRunner
+
+    from whetstone.cli import app
+
+    runner = CliRunner()
+    for words in (["skills", "shape"], ["skills", "fit"]):
+        result = runner.invoke(app, [*words, "--help"])
+        assert result.exit_code == 0, f"`whetstone {' '.join(words)}` does not resolve"
+        assert "COMMAND [ARGS]" not in result.output, "it is a group, not a command"
+    for doc in (("README.md",), ("docs", "authoring-skills.md")):
+        text = _read(*doc)
+        assert "whetstone skills shape" in text
+        assert "whetstone skills fit" in text
+
+
+def test_the_fit_report_says_out_loud_that_it_is_not_a_quality_score() -> None:
+    """ADR-030's central restraint. A letter grade outlives the paragraph under it, so the paragraph
+    ships inside the payload rather than only in the docs."""
+    from whetstone.fit import DISCLAIMER
+
+    assert "not a measurement of whether the model follows it" in DISCLAIMER
+    assert "scored run" in DISCLAIMER
+    # Both reader-facing docs make the same restraint, with the emphasis each file's style uses.
+    # Flattened so a `*fit*` that loses its asterisks in an edit does not fail a test about honesty.
+    for doc in (("README.md",), ("docs", "authoring-skills.md")):
+        assert "grades fit, never quality" in _read(*doc).replace("*", "")
+
+
+def test_there_is_one_answer_to_how_a_skill_is_run() -> None:
+    """ADR-030 makes the runtime load-bearing: two defect codes are true in exactly one mode each.
+
+    So the resolution lives in `service.review_mode` and both the route and the CLI call it. Two
+    implementations — which is what shipped first — could put opposite badges on the same folder
+    depending on whether you looked in the browser or the terminal.
+    """
+    from whetstone.service import review_mode
+
+    assert callable(review_mode)
+    for parts in (
+        ("src", "whetstone", "cli.py"),
+        ("src", "whetstone", "ui", "routers", "skills.py"),
+    ):
+        source = _read(*parts)
+        assert "review_mode(" in source, f"{parts[-1]} does not use the shared resolver"
+        assert 'rows["evaluate"].mode' not in source, f"{parts[-1]} resolves the runtime itself"
+
+
+def test_the_cli_does_not_import_the_web_layer_to_probe_an_endpoint() -> None:
+    """`whetstone skills fit --probe` wants one integer from an HTTP endpoint.
+
+    The first version imported a private helper out of a FastAPI router to get it, which pulled 67
+    web modules into a terminal command. `fit.probe_window` is that code with no router attached.
+    """
+    import ast
+
+    tree = ast.parse(_read("src", "whetstone", "cli.py"))
+    offenders = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith("whetstone.ui.routers")
+    ]
+    assert offenders == [], f"the CLI imports a router: {offenders}"
+
+    from whetstone import fit
+
+    assert callable(fit.probe_window)
+
+
+def test_the_shape_disclosure_runs_no_query_until_it_is_opened() -> None:
+    """The comment used to promise this while `enabled: true` did the opposite on every tab visit.
+
+    Cheap enough that nobody would have noticed — which is why the prose was the only thing keeping
+    it honest, and why it is asserted now. The panel gates by *mounting*, and opens itself when the
+    URL carries a query so a pasted view still resolves.
+    """
+    detail = (ROOT / "ui" / "src" / "routes" / "SkillDetail.tsx").read_text(encoding="utf-8")
+
+    assert "function ShapeDisclosure" in detail
+    assert "{open && <SkillGraph" in detail, "a closed panel must not mount the graph"
+    assert "params.get('gq')" in detail, "and a pasted `?gq=` view must open it"
+
+
+def test_there_is_one_graph_canvas() -> None:
+    """ADR-030 moved the SVG into `components/graph/` and put both graphs on it.
+
+    Two copies would drift, and the drift would be in the part nobody notices — whether a hollow
+    node means the same thing on both screens, whether a match ring can hide a health ring. So the
+    drawing lives in one component and each graph supplies only its vocabulary.
+    """
+    ui = ROOT / "ui" / "src" / "components"
+    canvas = (ui / "graph" / "Canvas.tsx").read_text(encoding="utf-8")
+    assert "export function Canvas" in canvas
+
+    for panel in ("SidecarGraph.tsx", "SkillGraph.tsx"):
+        text = (ui / panel).read_text(encoding="utf-8")
+        assert "from '@/components/graph/Canvas'" in text, f"{panel} does not use the shared canvas"
+        assert "<svg" not in text, f"{panel} draws its own SVG again"
+
+
+def test_the_two_graphs_do_not_share_url_parameters() -> None:
+    """ADR-030's namespacing, and it is load-bearing rather than tidy.
+
+    `SkillDetail.withTab` deliberately preserves every param but `tab` across a tab change, so the
+    Improve workspace survives a round trip. Two graphs sharing `q` would therefore carry a sidecar
+    query — `folder:payments`, meaningless to the other — into the skill graph the moment somebody
+    switched tabs, and the picture would come back empty for no visible reason.
+    """
+    ui = ROOT / "ui" / "src" / "components"
+    sidecar = (ui / "SidecarGraph.tsx").read_text(encoding="utf-8")
+    shape = (ui / "SkillGraph.tsx").read_text(encoding="utf-8")
+
+    assert "params.get('q')" in sidecar and "params.get('node')" in sidecar
+    assert "params.get('gq')" in shape and "params.get('gnode')" in shape
+    for shared in ("params.get('q')", "params.get('hops')", "params.get('node')"):
+        assert shared not in shape, f"the skill graph reads {shared}, which the sidecar graph owns"
+
+
 def test_the_deterministic_judge_never_reaches_a_scoring_path() -> None:
     """It cannot tell a complaint from agreement, and on a negative case that decides the score.
 

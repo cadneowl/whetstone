@@ -70,6 +70,7 @@ from whetstone.providers.jira.provider import JiraConnector
 from whetstone.providers.registry import available_providers
 from whetstone.report import render_run_html, render_run_text
 from whetstone.reviewer.factory import ReviewerChoice, TaskPlan, reviewer_from_step, step_agent
+from whetstone.reviewer.llm_reviewer import render_pages
 from whetstone.reviews import ReviewSource, ReviewStore, ReviewUpload, build_review
 from whetstone.runs import RunStore, stale_version_ids
 from whetstone.scaffold import write_scaffold
@@ -83,6 +84,7 @@ from whetstone.service import (
     record_eval,
     record_gate,
     record_review,
+    review_mode,
     stream_corpus,
     stream_defects,
 )
@@ -1905,6 +1907,168 @@ def skills_rules(
             typer.echo(f"    signal: {ref}")
         for case_id in rule.case_ids:
             typer.echo(f"    case:   {case_id}")
+
+
+@skills_app.command("shape")
+def skills_shape(
+    skill: SkillDirOpt,
+    query: Annotated[
+        str,
+        typer.Option("--query", "-q", help="Terms to match; `kind:`, `file:`, `rule:`, `issue:`"),
+    ] = "",
+    hops: Annotated[
+        int, typer.Option(help="How far out from each match to follow edges")
+    ] = 1,
+    limit: Annotated[int, typer.Option(help="Most nodes to return")] = 400,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write the whole graph as JSON to this path")
+    ] = None,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """This skill's own guidance as a graph you can query — rules, files, and what they connect to.
+
+    The folder already carries the edges and nothing showed them: a rule that says *"unless R3
+    applies"* is coupled to a rule three files away, `meta.yaml` ties a rule to the review it came
+    from, an eval case is linked to a rule through that review, and a link points at a page that may
+    no longer exist. This builds all of it and answers questions over the result.
+
+    It also reports what is mechanically wrong: a rule no case is linked to, an instruction with no
+    id that nothing can trace, a link naming no page — and, depending on how the skill is *run*, a
+    page the byte cap drops from every review, or one nothing links to so an agent never fetches it.
+    Those last two are true in exactly one runtime each, which is why the header says which it read.
+
+    Read-only and off the scoring path: it changes nothing a reviewer is given, and no hash.
+    """
+    from whetstone.skillgraph import annotate_defects, build
+    from whetstone.skillgraph import query as run_query
+
+    sk = load_skill(skill)
+    mode = review_mode(sk, skill)
+    graph = build(sk, mode=mode)
+    # `render_pages`' own answer, never a second model of it — see `skillgraph.annotate_defects`.
+    _, dropped = render_pages(sk)
+    annotate_defects(graph, sk, dropped=dropped)
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(graph.model_dump(mode="json"), indent=2), encoding="utf-8")
+
+    result = run_query(graph, query, hops=hops, limit=limit)
+    if json_out:
+        typer.echo(json.dumps(result.model_dump(mode="json"), indent=2))
+        return
+
+    counts = graph.counts
+    typer.echo(
+        f"{sk.id}  {counts.get('file', 0)} file(s), {counts.get('rule', 0)} rule(s), "
+        f"{counts.get('directive', 0)} unnumbered, {counts.get('edges', 0)} edge(s)"
+    )
+    typer.echo(f"  runtime {mode}  digest {graph.digest[:12]}")
+    if counts.get("defects"):
+        typer.echo(f"  {counts['defects']} node(s) with defects — narrow with `-q issue:true`")
+    if graph.unresolved:
+        typer.echo(f"  dangling: {', '.join(graph.unresolved)}")
+    if out is not None:
+        typer.echo(f"  wrote {out}")
+
+    typer.echo(
+        f"\n{result.total_matched} match(es) for {query or '(everything)'}"
+        f", {len(result.nodes)} node(s) within {hops} hop(s)"
+    )
+    shown = {node.id: node for node in result.nodes}
+    for node_id in result.matched:
+        node = shown.get(node_id)
+        if node is None:  # pragma: no cover - matched ids are always kept
+            continue
+        where = f"{node.path}:{node.line}" if node.line else node.path
+        codes = f"  [{', '.join(node.issues)}]" if node.issues else ""
+        typer.echo(f"  [{node.kind}] {node.label}" + (f"  {where}" if where else "") + codes)
+    if result.truncated:
+        typer.echo("  … more matched than the limit allowed; narrow the query or raise --limit")
+
+
+@skills_app.command("fit")
+def skills_fit(
+    skill: SkillDirOpt,
+    probe: Annotated[
+        bool,
+        typer.Option("--probe", help="Ask the configured endpoint what window it actually serves"),
+    ] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Whether this skill fits the context window it is served through, per window size.
+
+    `[runs] large_prompt_chars` is one global threshold, and it warns identically for a skill about
+    to run on a 200,000-token window and one about to run on a 4,096-token local model. This is that
+    warning with the arithmetic done: what every review pays before anything varies (the floor),
+    what the worst case costs (the ceiling), and which windows can afford either.
+
+    The grade is about *fit*, never about quality. Whether a model follows rules that fit is a
+    measurement, and the instrument for it is a scored run on that backend.
+
+    `--probe` asks the endpoint what window it actually serves. Off by default, because a command
+    that reports on a folder should not have to call a model to do it.
+    """
+    from whetstone import fit as fitmod
+    from whetstone.steps import load_step
+
+    sk = load_skill(skill)
+    config = load_config()
+    mode = review_mode(sk, skill)
+    text, dropped = render_pages(sk)
+    try:
+        spec = load_step(skill, "evaluate", skill_id=sk.id)
+    except Exception:  # noqa: BLE001 - a broken step falls back to the default caps
+        spec = None
+
+    windows = [*fitmod.BANDS, *fitmod.configured(config.models)]
+    status = ""
+    if probe:
+        window, status = fitmod.probe_window(config.llm.provider, config.llm.model)
+        if window is not None:
+            windows.append(window)
+
+    report = fitmod.measure(
+        sk,
+        mode=mode,
+        dropped=dropped,
+        page_chars=len(text),
+        wiki=spec.inputs.wiki if spec else None,
+        precedents=spec.inputs.precedents if spec else None,
+        reply_tokens=config.llm.max_tokens or 0,
+        windows=windows,
+    )
+    report.probe_status = status
+
+    if json_out:
+        typer.echo(json.dumps(report.model_dump(mode="json"), indent=2))
+        return
+
+    typer.echo(f"{sk.id}  runtime {report.mode}")
+    for component in report.components:
+        kind = "fixed " if component.fixed else "varies"
+        typer.echo(
+            f"  {kind} {component.name:<28} {component.chars:>9,} chars "
+            f"~{component.tokens:>7,} tok"
+        )
+    typer.echo(
+        f"  floor ~{report.floor_tokens:,} tok · ceiling ~{report.ceiling_tokens:,} tok "
+        f"(at {report.chars_per_token} chars/token)"
+    )
+    typer.echo("")
+    for row in report.models:
+        typer.echo(
+            f"  {row.grade}  {row.verdict:<10} {row.window.label:>10} "
+            f"{row.window.tokens:>10,}  {row.floor_share:>5.0%} guidance  "
+            f"{row.headroom:>9,} spare  [{row.window.source}]"
+        )
+        typer.echo(f"       {row.why}")
+    if report.probe_status:
+        typer.echo(f"\n  probe: {report.probe_status}")
+    for line in report.advice:
+        typer.echo(f"\n  → {line}")
+    for note in report.notes:
+        typer.echo(f"\n  note: {note}")
 
 
 @skills_app.command("improve")

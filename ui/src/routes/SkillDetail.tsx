@@ -22,6 +22,7 @@ import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/prim
 import { SkillReviews } from '@/components/reviews'
 import { SharpeningPanel } from '@/components/SharpeningPanel'
 import { SourceBadge } from '@/components/signals'
+import { SkillGraph } from '@/components/SkillGraph'
 import { StepRuntimes } from '@/components/StepRuntimes'
 import { TasksPanel } from '@/components/TasksPanel'
 
@@ -206,6 +207,11 @@ export function SkillDetail() {
               one file "read it all" stops being how anyone finds the rule they are about to
               duplicate. */}
           <GuidanceSearch skillId={skillId} />
+          {/* Collapsed, so the tab still opens on the prose it is named for. The picture answers a
+              different question from the text below it — not *what are the rules* but *how is this
+              shaped*: which rule narrows another one three files away, which rule no case is linked
+              to, which page the reviewer never receives. */}
+          <ShapeDisclosure skillId={skillId} />
           <Guidance detail={data} />
         </Tabs.Content>
 
@@ -424,6 +430,38 @@ export function SkillDetail() {
         </Tabs.Content>
       </Tabs.Root>
     </div>
+  )
+}
+
+/**
+ * The guidance graph, behind a disclosure that does no work until it is opened.
+ *
+ * Its own component so the `open` state can gate the query. An earlier version passed `enabled: true`
+ * under a comment promising the build happened on open — false, and the kind of false a reader
+ * believes: the request fired on every visit to the Guidance tab whether or not anyone wanted a
+ * picture. It is cheap (a few milliseconds, no filesystem walk beyond the skill the page already
+ * loaded), which is exactly why the wrong comment could have survived indefinitely.
+ *
+ * **Open when the URL carries a graph query**, because the point of keeping the position in the URL
+ * is that a view can be pasted to someone. A link to `?gq=issue:true` landing on a collapsed panel
+ * would answer nothing, and deferring a few milliseconds is not worth breaking that for.
+ */
+function ShapeDisclosure({ skillId }: { skillId: string }) {
+  const [params] = useSearchParams()
+  const asked = Boolean(params.get('gq') || params.get('gnode'))
+  const [open, setOpen] = useState(asked)
+
+  return (
+    <details
+      open={open}
+      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
+      className="mb-4 rounded-lg border border-line bg-surface px-3 py-2"
+    >
+      <summary className="cursor-pointer text-sm text-muted">
+        The shape of it — rules, the files they live in, and what each one is attached to
+      </summary>
+      <div className="mt-3">{open && <SkillGraph skillId={skillId} />}</div>
+    </details>
   )
 }
 

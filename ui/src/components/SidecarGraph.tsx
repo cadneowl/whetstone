@@ -9,7 +9,10 @@ import {
   type GraphNodeKind,
   type SidecarFile,
 } from '@/api/client'
-import { layout, radiusFor } from '@/components/graphLayout'
+import { Canvas, HEIGHT, tooManyToRead, WIDTH } from '@/components/graph/Canvas'
+import { EdgeLegend, Legend } from '@/components/graph/Legend'
+import type { GraphPalette, Ring } from '@/components/graph/types'
+import { layout } from '@/components/graphLayout'
 import {
   clampHops,
   crumbsFor,
@@ -226,17 +229,32 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
         </p>
       ) : (
         <>
+          {/* Same restraint as the guidance graph: a picture this size is a texture, and saying so
+              points at the fix instead of leaving a reader to conclude the graph does not work. */}
+          {tooManyToRead(nodes.length) && (
+            <p className="text-xs text-warn">
+              {nodes.length} nodes is more than a picture can show — the list below is exact. Narrow
+              with a field (<code className="font-mono">folder:…</code>,{' '}
+              <code className="font-mono">kind:claim</code>) or drop hops to 0.
+            </p>
+          )}
           <Canvas
             nodes={nodes}
             edges={edges}
             positions={positions}
             matched={matched}
             selected={selected}
+            palette={PALETTE}
+            rings={ringsFor}
+            flag={(node) => node.issues.length > 0}
+            nodeTitle={nodeTitle}
+            edgeTitle={edgeTitle}
+            ariaLabel="Sidecar knowledge graph"
             onSelect={(id) => navigate({ node: id }, { replace: true })}
             onFocus={(node) => navigate({ q: focusQuery(node), node: node.id })}
           />
-          <Legend />
-          <EdgeLegend />
+          <Legend palette={PALETTE} marks={MARKS} note={LEGEND_NOTE} />
+          <EdgeLegend palette={PALETTE} groups={EDGE_GROUPS} />
           <Results
             nodes={nodes}
             matched={data.result.matched}
@@ -340,13 +358,7 @@ function Crumb({
   )
 }
 
-// The layout box. Fixed rather than measured: the SVG scales to its container through `viewBox`,
-// and measuring would make the positions depend on the panel's width — so the same query would
-// draw differently on two screens, which is the one property this whole layout is built to avoid.
-const WIDTH = 900
-const HEIGHT = 460
-
-/** Semantic colours, reusing the palette rather than introducing a second one. */
+/** Semantic colours, reusing the app palette rather than introducing a second one. */
 const KIND_COLOR: Record<GraphNodeKind, string> = {
   folder: 'var(--color-accent)',
   claim: 'var(--color-ink)',
@@ -376,159 +388,90 @@ const EDGE_STYLE: Record<GraphEdgeKind, { opacity: number; dash?: string }> = {
   see: { opacity: 0.7, dash: '5 3' },
 }
 
-function Canvas({
-  nodes,
-  edges,
-  positions,
-  matched,
-  selected,
-  onSelect,
-  onFocus,
-}: {
-  nodes: GraphNode[]
-  edges: GraphEdge[]
-  positions: Map<string, { x: number; y: number }>
-  matched: Set<string>
-  selected: string | null
-  onSelect: (id: string | null) => void
-  onFocus: (node: GraphNode) => void
-}) {
-  // Labels for every node turn a 200-node graph into a wall of text, so most nodes earn one by
-  // being selected. Folders always keep theirs — they are the map anyone orients by — and a small
-  // result set gets them all, because a dozen unlabelled dots is a picture of nothing and the
-  // whole point of narrowing a query is to be able to read the answer.
-  const roomy = nodes.length <= 14
-  const labelled = (node: GraphNode) => roomy || node.kind === 'folder' || node.id === selected
-
-  // A ring means "this one matched". With no query everything matched, so a ring on every node
-  // says nothing and reads as though the graph were highlighting something.
-  const ringing = matched.size < nodes.length
-
-  return (
-    <svg
-      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-      role="img"
-      aria-label="Sidecar knowledge graph"
-      className="w-full rounded-lg border border-line bg-surface"
-      onClick={() => onSelect(null)}
-    >
-      {edges.map((edge) => {
-        const a = positions.get(edge.source)
-        const b = positions.get(edge.target)
-        if (!a || !b) return null
-        const style = EDGE_STYLE[edge.kind]
-        const touched = selected !== null && (edge.source === selected || edge.target === selected)
-        return (
-          <g key={`${edge.source}|${edge.target}|${edge.kind}`}>
-            <line
-              x1={a.x}
-              y1={a.y}
-              x2={b.x}
-              y2={b.y}
-              stroke={touched ? 'var(--color-accent)' : 'var(--color-muted)'}
-              strokeWidth={touched ? 1.6 : 1}
-              strokeDasharray={style.dash}
-              opacity={selected !== null && !touched ? 0.15 : style.opacity}
-            />
-            {/* An invisible fat line over the thin one, so a 1px edge has a hoverable target. The
-                legend explains the dash patterns as a class; this says what *this* line is, which
-                is the question anyone actually has while looking at a specific pair of nodes. */}
-            <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="transparent" strokeWidth={8}>
-              <title>{edgeTitle(edge)}</title>
-            </line>
-          </g>
-        )
-      })}
-      {nodes.map((node) => {
-        const point = positions.get(node.id)
-        if (!point) return null
-        const radius = radiusFor(node.degree)
-        const isMatch = ringing && matched.has(node.id)
-        const dimmed = selected !== null && node.id !== selected
-        return (
-          <g
-            key={node.id}
-            transform={`translate(${point.x} ${point.y})`}
-            className="cursor-pointer"
-            opacity={dimmed ? 0.4 : 1}
-            onClick={(event) => {
-              event.stopPropagation()
-              onSelect(node.id === selected ? null : node.id)
-            }}
-            onDoubleClick={(event) => {
-              event.stopPropagation()
-              onFocus(node)
-            }}
-          >
-            <title>{nodeTitle(node)}</title>
-            <circle
-              r={radius}
-              fill={node.missing ? 'none' : KIND_COLOR[node.kind]}
-              stroke={node.missing ? KIND_COLOR.unresolved : 'var(--color-canvas)'}
-              strokeWidth={node.missing ? 1.5 : 1}
-              strokeDasharray={node.missing ? '3 2' : undefined}
-            />
-            {/* Health, on the picture rather than a click away. The two facts worth seeing without
-                asking are the two that change what a review is given: a claim the code has
-                contradicted is still injected into every review touching its folder, and an
-                `unconfirmed` folder is injected into none of them. Both drew identically to a
-                healthy node, which made the map silent about the only thing it could warn of. */}
-            {node.contradicted > 0 && (
-              <circle
-                r={radius + 3.5}
-                fill="none"
-                stroke={KIND_COLOR.unresolved}
-                strokeWidth={1.6}
-              />
-            )}
-            {node.status === 'unconfirmed' && (
-              <circle
-                r={radius + 3.5}
-                fill="none"
-                stroke="var(--color-warn)"
-                strokeWidth={1.4}
-                strokeDasharray="2 2"
-              />
-            )}
-            {/* A defect the floor found. A wedge rather than a third ring: two concentric rings
-                already mean two different things here, and a third would be read as a degree of
-                the same thing rather than a different kind of fact. This one is not about what the
-                reviewer is given — it is about the note being broken. */}
-            {node.issues.length > 0 && (
-              <circle
-                r={2.4}
-                cx={radius * 0.75}
-                cy={-radius * 0.75}
-                fill="var(--color-bad)"
-                stroke="var(--color-canvas)"
-                strokeWidth={0.8}
-              />
-            )}
-            {/* A match ring rather than a different fill: the kind is what the colour means, and a
-                query must not be able to make a folder look like a rule. Outermost, so it never
-                hides a health ring — a query is transient and a contradiction is not. */}
-            {isMatch && (
-              <circle r={radius + 6} fill="none" stroke="var(--color-accent)" strokeWidth={1.4} />
-            )}
-            {labelled(node) && (
-              <text
-                y={-radius - 5}
-                // Centred except near an edge, where half a centred label falls outside the SVG
-                // and is clipped — which is worse than an off-centre one, because the half that
-                // survives reads as the whole label.
-                textAnchor={anchorFor(point.x)}
-                className="fill-ink"
-                style={{ fontSize: 10, pointerEvents: 'none' }}
-              >
-                {node.label.length > 34 ? `${node.label.slice(0, 33)}…` : node.label}
-              </text>
-            )}
-          </g>
-        )
-      })}
-    </svg>
-  )
+/** What each edge kind asserts, for the hover on one specific line. */
+const EDGE_TITLE: Record<GraphEdgeKind, string> = {
+  parent: 'is inside — the ancestor walk retrieval performs',
+  contains: 'keeps this claim',
+  describes: 'this claim is about that file',
+  excepts: 'this claim narrows that central rule',
+  cites: 'this claim came out of that review, ticket or ADR',
+  links: 'a [[link]] written inside the claim',
+  see: 'a `see:` link in the folder’s frontmatter',
 }
+
+/** Everything `graph/Canvas` needs to know about this graph's vocabulary. */
+const PALETTE: GraphPalette = {
+  colour: KIND_COLOR,
+  help: KIND_HELP,
+  hollow: 'unresolved',
+  // Folders are the map anyone orients by, so they keep their label at any node count.
+  anchors: ['folder'],
+  edge: EDGE_STYLE,
+  edgeHelp: EDGE_TITLE,
+}
+
+/**
+ * The health rings for one node, outermost last.
+ *
+ * The two facts worth seeing without asking are the two that change what a review is given: a claim
+ * the code has contradicted is still injected into every review touching its folder, and an
+ * `unconfirmed` folder is injected into none of them. Both drew identically to a healthy node, which
+ * made the map silent about the only thing it could warn of.
+ */
+function ringsFor(node: GraphNode): Ring[] {
+  const out: Ring[] = []
+  if (node.contradicted > 0) out.push({ colour: KIND_COLOR.unresolved, width: 1.6 })
+  if (node.status === 'unconfirmed') {
+    out.push({ colour: 'var(--color-warn)', width: 1.4, dash: '2 2' })
+  }
+  return out
+}
+
+const MARKS = [
+  {
+    label: 'has a defect',
+    help: 'A mechanical defect `whetstone sidecars check` fails on — uncited, oversized, notes left behind by a rename. On a folder, something inside it.',
+    swatch: 'dot' as const,
+    colour: 'var(--color-bad)',
+  },
+  {
+    label: 'contradicted',
+    help: 'Something with the code in front of it found this claim no longer holds. Still injected into every review that touches its folder — correction is a human’s call.',
+    swatch: 'ring' as const,
+    colour: KIND_COLOR.unresolved,
+  },
+  {
+    label: 'unconfirmed',
+    help: 'On a rung retrieval withholds: agent-authored or bootstrap-decomposed, and nothing independent has agreed with it yet.',
+    swatch: 'dashed-ring' as const,
+    colour: 'var(--color-warn)',
+  },
+]
+
+const LEGEND_NOTE = 'a ring marks a query match · a bigger circle has more edges'
+
+const EDGE_GROUPS = [
+  {
+    kinds: ['parent', 'contains'],
+    label: 'parent / contains',
+    help: 'This folder is inside that one — the ancestor walk `collect.py` performs, drawn.',
+  },
+  {
+    kinds: ['excepts'],
+    label: 'excepts',
+    help: 'A claim narrowing a central rule with `Excepts R7`.',
+  },
+  {
+    kinds: ['cites'],
+    label: 'cites',
+    help: 'The review, ticket or ADR a claim came from. Two folders citing one ADR are connected here and nowhere else.',
+  },
+  {
+    kinds: ['links', 'see'],
+    label: 'links / see',
+    help: 'An authored `[[link]]` in a claim, or a `see:` in the frontmatter. The only edges a human writes.',
+  },
+]
 
 /**
  * Everything about a node that a hover can answer, so the picture is readable without clicking.
@@ -564,93 +507,9 @@ function nodeTitle(node: GraphNode): string {
   return lines.join('\n')
 }
 
-const EDGE_TITLE: Record<GraphEdgeKind, string> = {
-  parent: 'is inside — the ancestor walk retrieval performs',
-  contains: 'keeps this claim',
-  describes: 'this claim is about that file',
-  excepts: 'this claim narrows that central rule',
-  cites: 'this claim came out of that review, ticket or ADR',
-  links: 'a [[link]] written inside the claim',
-  see: 'a `see:` link in the folder’s frontmatter',
-}
-
 function edgeTitle(edge: GraphEdge): string {
   const detail = edge.detail ? `\n${edge.detail}` : ''
   return `${edge.kind} — ${EDGE_TITLE[edge.kind]}${detail}`
-}
-
-/** Roughly half a long label at 10px — past this from an edge, centring clips it. */
-const LABEL_REACH = 110
-
-function anchorFor(x: number): 'start' | 'middle' | 'end' {
-  if (x < LABEL_REACH) return 'start'
-  if (x > WIDTH - LABEL_REACH) return 'end'
-  return 'middle'
-}
-
-function Legend() {
-  const kinds = Object.keys(KIND_COLOR) as GraphNodeKind[]
-  return (
-    <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-      {kinds.map((kind) => (
-        <li key={kind} className="flex items-center gap-1.5" title={KIND_HELP[kind]}>
-          <span
-            className="inline-block h-2.5 w-2.5 rounded-full"
-            style={{
-              backgroundColor: kind === 'unresolved' ? 'transparent' : KIND_COLOR[kind],
-              border: kind === 'unresolved' ? `1.5px dashed ${KIND_COLOR.unresolved}` : undefined,
-            }}
-          />
-          {kind}
-        </li>
-      ))}
-      {/* Three markers sit on top of the colours and each means a different kind of trouble, so
-          each needs saying. A new mark with no key reads as a rendering artefact. */}
-      <li
-        className="flex items-center gap-1.5"
-        title="A mechanical defect `whetstone sidecars check` fails on — uncited, oversized, notes left behind by a rename. On a folder, something inside it."
-      >
-        <span className="inline-block h-1.5 w-1.5 rounded-full bg-bad" />
-        has a defect
-      </li>
-      <li
-        className="flex items-center gap-1.5"
-        title="Something with the code in front of it found this claim no longer holds. Still injected into every review that touches its folder — correction is a human's call."
-      >
-        <span
-          className="inline-block h-2.5 w-2.5 rounded-full border"
-          style={{ borderColor: KIND_COLOR.unresolved }}
-        />
-        contradicted
-      </li>
-      <li
-        className="flex items-center gap-1.5"
-        title="On a rung retrieval withholds: agent-authored or bootstrap-decomposed, and nothing independent has agreed with it yet."
-      >
-        <span className="inline-block h-2.5 w-2.5 rounded-full border border-dashed border-warn" />
-        unconfirmed
-      </li>
-      <li className="ml-auto">a ring marks a query match · a bigger circle has more edges</li>
-    </ul>
-  )
-}
-
-/** The legend, and what the dashes on an edge mean. */
-function EdgeLegend() {
-  return (
-    <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-      <li title="This folder is inside that one — the ancestor walk `collect.py` performs, drawn.">
-        — parent / contains
-      </li>
-      <li title="A claim narrowing a central rule with `Excepts R7`.">–– excepts</li>
-      <li title="The review, ticket or ADR a claim came from. Two folders citing one ADR are connected here and nowhere else.">
-        ·· cites
-      </li>
-      <li title="An authored `[[link]]` in a claim, or a `see:` in the frontmatter. The only edges a human writes.">
-        – – links / see
-      </li>
-    </ul>
-  )
 }
 
 function Results({
