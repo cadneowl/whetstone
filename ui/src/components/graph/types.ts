@@ -65,6 +65,15 @@ export interface GraphPalette {
   anchors: string[]
   edge: Record<string, { opacity: number; dash?: string }>
   edgeHelp: Record<string, string>
+  /**
+   * What an edge of this kind means read forwards and backwards.
+   *
+   * An edge in a picture is a line with a dash pattern, and a legend that says `contains` answers
+   * nothing about the pair you are looking at: which of the two holds the other. The neighbour list
+   * needs both readings — *lives in* `patterns/rust.md` and *holds* six rules are the same edge kind
+   * from the two ends, and only one of them is the sentence a reader wants at a time.
+   */
+  edgeRelation: Record<string, { out: string; in: string }>
 }
 
 /** A node's colour, or the muted default when a graph grows a kind its palette has not learnt. */
@@ -81,4 +90,11 @@ export function edgeStyleOf(
   kind: string,
 ): { opacity: number; dash?: string } {
   return palette.edge[kind] ?? { opacity: 0.4 }
+}
+
+/** How to read an edge of this kind from one of its ends, or its bare name when unlearnt. */
+export function relationOf(palette: GraphPalette, kind: string, outgoing: boolean): string {
+  const pair = palette.edgeRelation[kind]
+  if (!pair) return kind
+  return outgoing ? pair.out : pair.in
 }

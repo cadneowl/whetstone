@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { CROWDED, tooManyToRead } from '@/components/graph/Canvas'
-import { colourOf, edgeStyleOf, hollowColour, type GraphPalette } from '@/components/graph/types'
+import {
+  colourOf,
+  edgeStyleOf,
+  hollowColour,
+  relationOf,
+  type GraphPalette,
+} from '@/components/graph/types'
 
 /**
  * The kind-agnostic half of the graph canvas.
@@ -17,6 +23,7 @@ const PALETTE: GraphPalette = {
   anchors: ['file'],
   edge: { links: { opacity: 0.85, dash: '5 3' } },
   edgeHelp: { links: 'a link an author wrote' },
+  edgeRelation: { links: { out: 'links to', in: 'linked from' } },
 }
 
 describe('palette lookups', () => {
@@ -30,6 +37,14 @@ describe('palette lookups', () => {
     // keep an unknown kind *drawn* rather than invisible, which is what a reader would misread.
     expect(colourOf(PALETTE, 'invented')).toBe('var(--color-muted)')
     expect(edgeStyleOf(PALETTE, 'invented')).toEqual({ opacity: 0.4 })
+    expect(relationOf(PALETTE, 'invented', true)).toBe('invented')
+  })
+
+  it('reads a known edge from either end', () => {
+    // The two readings are different sentences, and the neighbour list under the picture needs the
+    // one that matches which end the reader is standing at.
+    expect(relationOf(PALETTE, 'links', true)).toBe('links to')
+    expect(relationOf(PALETTE, 'links', false)).toBe('linked from')
   })
 
   it('resolves the hollow colour through the kind that names it', () => {

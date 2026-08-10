@@ -7,10 +7,11 @@ import {
   type ShapeNode,
   type ShapeNodeKind,
 } from '@/api/client'
-import { Canvas, HEIGHT, tooManyToRead, WIDTH } from '@/components/graph/Canvas'
+import { Canvas, tooManyToRead } from '@/components/graph/Canvas'
 import { EdgeLegend, Legend } from '@/components/graph/Legend'
+import { Neighbours } from '@/components/graph/Neighbours'
 import type { GraphPalette, Ring } from '@/components/graph/types'
-import { layout } from '@/components/graphLayout'
+import { boxFor, layout } from '@/components/graphLayout'
 import { clampHops } from '@/components/graphNav'
 import { Badge, ErrorNote } from '@/components/primitives'
 
@@ -74,13 +75,25 @@ export function SkillGraph({ skillId }: { skillId: string }) {
 
   const nodes = useMemo(() => data?.result.nodes ?? [], [data])
   const edges = useMemo(() => data?.result.edges ?? [], [data])
-  const positions = useMemo(
-    () => layout(nodes, edges, { width: WIDTH, height: HEIGHT }),
-    [nodes, edges],
-  )
+  // Sized to the result rather than fixed: a node's radius is in layout units, so the only way to
+  // give three hundred dots room to be told apart is to draw them in a bigger box. See `boxFor`.
+  const box = useMemo(() => boxFor(nodes.length), [nodes.length])
+  const positions = useMemo(() => layout(nodes, edges, box), [nodes, edges, box])
   const matched = useMemo(() => new Set(data?.result.matched ?? []), [data])
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes])
   const focused = selected ? (byId.get(selected) ?? null) : null
+  // Which files the Guidance tab below actually renders, so "read it in the guidance" is only
+  // offered when there is something on the page to jump to. Wiki pages are retrieved per changed
+  // path and are not part of that prose, so a link to one would land nowhere.
+  const rendered = useMemo(
+    () =>
+      new Set(
+        nodes
+          .filter((node) => node.kind === 'file' && node.delivery !== 'retrieved')
+          .map((node) => node.path),
+      ),
+    [nodes],
+  )
 
   if (error) return <ErrorNote error={error} />
   if (!data && isLoading) return <p className="text-sm text-muted">Reading the folder…</p>
@@ -218,6 +231,7 @@ export function SkillGraph({ skillId }: { skillId: string }) {
         nodes={nodes}
         edges={edges}
         positions={positions}
+        box={box}
         matched={matched}
         selected={selected}
         palette={PALETTE}
@@ -229,6 +243,22 @@ export function SkillGraph({ skillId }: { skillId: string }) {
         onSelect={(id) => navigate({ gnode: id }, { replace: true })}
         onFocus={(node) => navigate({ gq: focusQuery(node), gnode: node.id })}
       />
+      {/* Directly under the picture, and that placement is the whole point of it. This card used to
+          sit below the result list, which is a hundred rows tall on the query anybody runs first —
+          so clicking a dot scrolled nothing, changed nothing visible, and read as a graph where
+          clicking does nothing at all. */}
+      {focused && (
+        <Detail
+          node={focused}
+          edges={edges}
+          labels={(id) => byId.get(id)?.label ?? id}
+          kinds={(id) => byId.get(id)?.kind ?? 'file'}
+          anchor={guidanceAnchor(focused, rendered)}
+          onQuery={(text) => navigate({ gq: text, gnode: null })}
+          onSelect={(id) => navigate({ gnode: id }, { replace: true })}
+          onFocus={() => navigate({ gq: focusQuery(focused), gnode: focused.id })}
+        />
+      )}
       <Legend palette={PALETTE} marks={MARKS} note={LEGEND_NOTE} />
       <EdgeLegend palette={PALETTE} groups={EDGE_GROUPS} />
       <Results
@@ -240,13 +270,6 @@ export function SkillGraph({ skillId }: { skillId: string }) {
         selected={selected}
         onSelect={(id) => navigate({ gnode: id }, { replace: true })}
       />
-      {focused && (
-        <Detail
-          node={focused}
-          onQuery={(text) => navigate({ gq: text, gnode: null })}
-          onFocus={() => navigate({ gq: focusQuery(focused), gnode: focused.id })}
-        />
-      )}
     </section>
   )
 }
@@ -304,6 +327,16 @@ const EDGE_TITLE: Record<ShapeEdgeKind, string> = {
   links: 'a link an author wrote, and the only path an agent has to a page',
 }
 
+/** The same six edges as sentences, read from each end — see `GraphPalette.edgeRelation`. */
+const EDGE_RELATION: Record<ShapeEdgeKind, { out: string; in: string }> = {
+  contains: { out: 'holds', in: 'lives in' },
+  states: { out: 'states', in: 'stated in' },
+  refers: { out: 'names', in: 'named by' },
+  cites: { out: 'came out of', in: 'produced' },
+  tested_by: { out: 'tested by', in: 'tests' },
+  links: { out: 'links to', in: 'linked from' },
+}
+
 const PALETTE: GraphPalette = {
   colour: KIND_COLOR,
   help: KIND_HELP,
@@ -319,6 +352,7 @@ const PALETTE: GraphPalette = {
   anchors: ['file', 'skill'],
   edge: EDGE_STYLE,
   edgeHelp: EDGE_TITLE,
+  edgeRelation: EDGE_RELATION,
 }
 
 /**
@@ -532,19 +566,48 @@ function Results({
 }
 
 /**
- * One selected node in full — and the queries that node makes worth asking.
+ * Where in the prose below this node actually is, or null when the prose does not contain it.
  *
- * The buttons are the investigation half. A rule is most interesting as *the rules that name it* and
- * *the cases that test it*; a review as *everything that came out of it*. All are one edge away and
- * none is a question a text box invites you to type.
+ * `Guidance.tsx` emits `#rule-R7` for every bullet carrying a rule id and `#file-<path>` for each
+ * page it renders, so a rule and a file both have somewhere to land. A wiki page has not — it is
+ * retrieved per changed path and is not part of that tab's prose — and offering a link that scrolls
+ * nowhere is worse than offering none, which is why the caller passes in what is rendered rather
+ * than this guessing.
+ */
+function guidanceAnchor(node: ShapeNode, rendered: Set<string>): string | null {
+  if (!rendered.has(node.path)) return null
+  if (node.kind === 'rule' && node.rule) return `#rule-${node.rule}`
+  return `#file-${node.path}`
+}
+
+/**
+ * One selected node in full — what it says, what it is attached to, and the queries it makes worth
+ * asking.
+ *
+ * Three jobs, and the first two were the missing ones. *What it says* is the node's own text, which
+ * for a rule is the instruction itself — the answer to "what is R1", asked by everyone who has ever
+ * clicked a dot labelled `R1`. *What it is attached to* is `Neighbours`: the graph's whole subject
+ * matter, previously legible only by tracing lines out of a cluster by eye. The buttons are the
+ * third: a rule is most interesting as *the rules that name it* and *the cases that test it*, a
+ * review as *everything that came out of it*.
  */
 function Detail({
   node,
+  edges,
+  labels,
+  kinds,
+  anchor,
   onQuery,
+  onSelect,
   onFocus,
 }: {
   node: ShapeNode
+  edges: ShapeEdge[]
+  labels: (id: string) => string
+  kinds: (id: string) => string
+  anchor: string | null
   onQuery: (query: string) => void
+  onSelect: (id: string) => void
   onFocus: () => void
 }) {
   return (
@@ -562,6 +625,17 @@ function Detail({
         >
           Centre here
         </button>
+        {/* The picture is above the prose it describes, and until this there was no way from one to
+            the other — you read that a rule was broken, then went hunting for it by eye. */}
+        {anchor && (
+          <a
+            href={anchor}
+            title="Jump to it in the guidance rendered below this picture"
+            className="rounded border border-line bg-canvas px-2 py-0.5 text-xs hover:border-accent"
+          >
+            Read it in the guidance ↓
+          </a>
+        )}
         {node.kind === 'file' && node.delivery && (
           <span className="text-xs text-muted" title={DELIVERY_HELP[node.delivery]}>
             {node.delivery}
@@ -623,6 +697,14 @@ function Detail({
           </Ask>
         )}
       </div>
+      <Neighbours
+        id={node.id}
+        labels={labels}
+        kinds={kinds}
+        edges={edges}
+        palette={PALETTE}
+        onSelect={onSelect}
+      />
     </div>
   )
 }

@@ -32,11 +32,20 @@ export function Guidance({ detail }: { detail: SkillDetail }) {
         />
       ))
 
+  // `id` per file, matching the `#rule-R7` anchors the bullets already carry. The graph above this
+  // panel draws a dot per file and per rule, and until both had somewhere to land, "which page is
+  // that" was answered by scrolling and guessing.
   return (
     <div className="space-y-3">
-      {render(skill.body, 'body')}
+      <section id="file-SKILL.md" className="space-y-3">
+        {render(skill.body, 'body')}
+      </section>
       {skill.pages.map((page) => (
-        <section key={page.path} className="space-y-3 border-t border-line pt-3">
+        <section
+          key={page.path}
+          id={`file-${page.path}`}
+          className="space-y-3 border-t border-line pt-3"
+        >
           <p className="font-mono text-xs text-muted">{page.path}</p>
           {render(page.text, page.path)}
         </section>
