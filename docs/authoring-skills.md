@@ -135,14 +135,29 @@ another across files, the review a rule came from, the eval case linked to it th
 the links between pages. Query it with the same field syntax the guidance search uses — `rule:R7`,
 `file:patterns`, `kind:directive`, `issue:true`.
 
-It also reports what is mechanically wrong. Six of these are true whatever the runtime:
+### Guidance with no rule id is not a defect
+
+A skill may carry generic guidance that no ticket justified and no case pins down, and plenty of the
+best guidance is exactly that. The graph draws it in a **lighter green** and counts it — *"1,074
+guidance with no direct reference"* — and never flags it.
+
+What is true of it is narrower than a fault, and worth knowing: nothing traces it to a review, no
+case is linked to it, and **no warning fires if a draft deletes it**. A numbered rule (`- **R7 —
+…**`) gets all three. So numbering is how you buy protection for the guidance you care most about —
+not a rule you are failing to follow.
+
+(This was a defect code once. On a real 15-file skill it reported 1,128 defects, 1,074 of them one
+per unnumbered bullet, which buried the 36 broken links that actually wanted fixing.)
+
+### And what it does report
+
+Five codes, true whatever the runtime:
 
 | | means |
 |---|---|
 | `no-evidence` | no eval case is linked to this rule — nothing goes red if it is removed |
 | `evidence-archived` | every case linked to it is archived |
 | `unreferenced` | a `meta.yaml` provenance entry whose rule the prose no longer mentions |
-| `untraceable` | an instruction with **no rule id**. It reaches the model like any other, and nothing can provenance it, no case can be linked to it, and no warning fires when a draft deletes it |
 | `dangling` | a link naming no page in this skill |
 | `unpaged` | a link to a real `.md` that is **not** a guidance page — under `eval_cases/`, `wiki/` or a step folder. `read_skill_file` refuses it (§7) |
 

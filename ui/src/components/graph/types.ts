@@ -46,6 +46,14 @@ export interface Ring {
 export interface GraphPalette {
   colour: Record<string, string>
   help: Record<string, string>
+  /**
+   * What to call a kind in the legend, where its internal name would read badly.
+   *
+   * `directive` is the case that forced it: the node kind is a fine identifier and a poor label —
+   * the thing it names is just guidance nobody has attached a rule id to, and "directive" makes it
+   * sound like a category of problem. Falls back to the kind itself.
+   */
+  label?: Record<string, string>
   hollow: string
   /**
    * Kinds that keep their label however many nodes are on screen — the map a reader orients by.

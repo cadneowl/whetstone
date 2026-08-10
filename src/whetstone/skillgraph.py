@@ -113,10 +113,22 @@ CODES: dict[str, Mode | None] = {
     "no-evidence": None,
     "evidence-archived": None,
     "unreferenced": None,
-    "untraceable": None,
     "dangling": None,
     "unpaged": None,
 }
+
+# Guidance with no rule id is **not** on that list, and the omission is the point.
+#
+# It was, and it was wrong. A real 15-file skill came back reporting 1,128 defects, 1,074 of them
+# one per unnumbered bullet — drowning the 36 dangling links and 5 stale provenance entries that
+# genuinely wanted fixing, and told an author their whole folder was broken. A skill may perfectly
+# well carry generic guidance that no ticket justified and no case pins down; plenty of the best
+# guidance is exactly that. What is true of it is narrower and is a *fact*, not a fault: nothing can
+# trace it to a review, no case is linked to it, and no warning fires if a draft deletes it.
+#
+# So it is counted (`counts["directive"]`), drawn in its own lighter colour, and never marked. The
+# comment above `_bullets` argues that over-reporting is what teaches people to ignore a badge; this
+# is that argument applied to the badge it was written next to.
 
 
 class ShapeNode(BaseModel):
@@ -297,9 +309,9 @@ def _bullets(text: str) -> set[int]:
     marker.
 
     Fences are tracked because `guidance._items` splits a block on `^[-*]\\s` without knowing it is
-    inside one, so a markdown example listing `- do this` would otherwise be reported as an
-    untraceable rule. Over-reporting is the failure mode that teaches people to ignore a badge, so
-    the scan pays for the fence state rather than accepting it.
+    inside one, so a markdown example listing `- do this` would otherwise be counted as a piece of
+    this skill's own guidance. That count is read as a fact about the folder, so padding it with
+    sample code would make it quietly wrong.
     """
     out: set[int] = set()
     fenced = False
@@ -359,9 +371,10 @@ def _block_nodes(
     section and is *not* a node: nobody navigates to a paragraph, and a graph with one dot per
     paragraph is the document again, drawn worse.
 
-    The distinction between the two dot kinds is not cosmetic. `dead_rules` walks provenance by id,
-    `removed_rules` warns by id, and the Guidance tab anchors provenance by id — so an instruction
-    with no id is outside all three, and `untraceable` is what that costs.
+    The distinction between the two dot kinds is worth drawing but is **not** a quality judgement.
+    `dead_rules` walks provenance by id, `removed_rules` warns by id, and the Guidance tab anchors
+    provenance by id — so guidance with no id sits outside all three, and that is a fact about what
+    can be traced rather than a defect in the guidance. See the note under `CODES`.
     """
     edges: list[ShapeEdge] = []
     for chunk in chunks:
@@ -406,8 +419,8 @@ def _block_kind(
     """Which kind of dot a block earns, or none at all.
 
     A wiki block is never a directive. The wiki is repo context retrieved per change — facts about
-    the codebase rather than instructions to the reviewer — so calling one an untraceable rule would
-    report a defect for a file behaving exactly as designed.
+    the codebase rather than instructions to the reviewer — so counting one as this skill's guidance
+    would attribute somebody's generated summary to the author.
     """
     if chunk.rule:
         return "rule"
@@ -789,17 +802,31 @@ def annotate_defects(graph: SkillGraph, skill: Skill, *, dropped: list[str]) -> 
         if node is not None:
             mark(node, verdict.verdict, verdict.evidence)
 
+    # A broken link belongs to the file that *wrote* it, and an `unresolved` node cannot say which
+    # file that is: it has no path of its own (the path it names does not exist), and one node is
+    # shared by every file linking the same missing target. So the rollup goes through the edges.
+    #
+    # Without this the two most actionable codes were the only two that did not reach a file, so a
+    # collapsed `SKILL.md` showed nothing while containing a link to a page that is not there —
+    # exactly the case the rollup exists for.
+    linkers: dict[str, list[ShapeNode]] = {}
+    for edge in graph.edges:
+        target = by_id.get(edge.target)
+        if edge.kind == "links" and target is not None and target.kind == "unresolved":
+            owner = files.get(edge.source.removeprefix("file:"))
+            if owner is not None:
+                linkers.setdefault(edge.target, []).append(owner)
+
+    # Deliberately no branch for `directive` — see the note under `CODES`. Unnumbered guidance is
+    # counted, not marked.
     for node in graph.nodes:
-        if node.kind == "directive":
-            mark(
-                node,
-                "untraceable",
-                "an instruction with no rule id: no provenance can name it, no eval case can be "
-                "linked to it, and nothing warns when a draft removes it. Give it one "
-                "(`- **R7 — …**`)",
-            )
-        elif node.kind == "unresolved":
-            mark(node, node.reason or "dangling", _unresolved_message(node))
+        if node.kind != "unresolved":
+            continue
+        code = node.reason or "dangling"
+        mark(node, code, _unresolved_message(node))
+        for owner in linkers.get(node.id, []):
+            if CODES.get(code) in (None, graph.mode) and code not in owner.issues:
+                owner.issues.append(code)
 
     graph.counts["defects"] = sum(1 for n in graph.nodes if n.issues)
     return graph

@@ -1099,6 +1099,16 @@ graph's digest, and a reviewer Whetstone does not build a prompt for gets neithe
 Turning on `agent:` fixes one of these and can introduce the other, which is exactly the fact the
 panel exists to surface.
 
+**Amended immediately on first contact with a real skill.** `untraceable` — guidance carrying no
+rule id — shipped as a defect code and was wrong. A 15-file skill came back reporting 1,128 defects,
+1,074 of them one per unnumbered bullet, which buried the 36 dangling links and 5 stale provenance
+entries that genuinely wanted fixing and told the author their whole folder was broken. A skill may
+carry generic guidance that no ticket justified, and plenty of the best guidance is exactly that. What
+is true of it is narrower and is a fact rather than a fault: nothing traces it to a review, no case is
+linked to it, and no warning fires if a draft deletes it. So it is counted, drawn in its own lighter
+green, and never marked — which is the "over-reporting is what teaches people to ignore a badge"
+argument this ADR already made, applied to the one code that violated it.
+
 **Consequences.** `deadrules` exports three former privates. `whetstone.toml` grows an empty-by-default
 `[[models]]`. The sidecar graph's SVG moved into `components/graph/` and both graphs now share it. The
 skill graph's URL params are namespaced (`gq`, `ghops`, `gnode`) because the tab strip preserves query

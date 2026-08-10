@@ -110,14 +110,14 @@ def test_a_bullet_with_no_rule_id_is_a_directive_and_prose_is_not_a_node() -> No
     assert "Tests may panic freely." in directives
     assert "Prefer `thiserror` over hand-written `Display`." in directives
     assert not any("Read [the rust patterns]" in text for text in directives), (
-        "a lead-in paragraph is prose, not an untraceable rule"
+        "a lead-in paragraph is prose, not a piece of guidance in its own right"
     )
 
 
 def test_a_bullet_inside_a_fenced_example_is_not_a_directive() -> None:
     """`guidance._items` splits a block on `^[-*]\\s` without knowing it is inside a fence, so a
-    markdown example would otherwise be reported as an untraceable rule. Over-reporting is what
-    teaches people to ignore a badge."""
+    markdown example would otherwise be counted as a piece of this skill's guidance — inflating a
+    number that is read as a fact about the folder."""
     body = "# R\n\nWrite rules like this:\n\n```markdown\n- **R9 — a rule.** Do the thing.\n```\n"
     graph = sg.build(_skill(body=body, pages=[]))
 
@@ -126,7 +126,7 @@ def test_a_bullet_inside_a_fenced_example_is_not_a_directive() -> None:
 
 def test_a_wiki_block_is_never_a_directive() -> None:
     """The wiki is repo context retrieved per change — facts about the codebase, not instructions —
-    so calling one an untraceable rule would report a defect for a file behaving as designed."""
+    so counting one would attribute somebody's generated summary to the skill's author."""
     wiki = SkillWiki(pages={"p": WikiPage(id="p", title="P", text="- payments owns the ledger\n")})
     graph = sg.build(_skill(body="# R\n\n- **R1 — a rule.**\n", pages=[], wiki=wiki))
 
@@ -406,13 +406,52 @@ def test_an_unknown_mode_reports_neither() -> None:
 def test_a_defect_marks_the_node_and_the_file_but_the_message_only_the_node() -> None:
     """The code marks both, so a collapsed file still shows there is trouble inside it. The message
     goes only where the defect is, so opening a file does not restate every rule's problem."""
-    skill = _skill()
+    body_md = "# R\n\n- **R1 — x.** See [gone](references/gone.md).\n"
+    skill = _skill(body=body_md, pages=[])
 
     graph = sg.annotate_defects(sg.build(skill), skill, dropped=[])
     body = next(n for n in _by_kind(graph, "file") if n.path == "SKILL.md")
+    hollow = _by_kind(graph, "unresolved")[0]
 
-    assert "untraceable" in body.issues
-    assert body.issue_messages == []
+    assert "dangling" in body.issues, "the code rolls up to the file"
+    assert body.issue_messages == [], "but the sentence stays where the defect is"
+    assert hollow.issue_messages, "which is on the node itself"
+
+
+def test_a_broken_link_reaches_the_file_that_wrote_it() -> None:
+    """The rollup has to go through the edges, and nothing else could do it.
+
+    An `unresolved` node has no path of its own — the path it names does not exist — and one node is
+    shared by every file linking the same missing target. So `dangling` and `unpaged`, the two most
+    actionable codes, were the only two that never reached a file: a collapsed `SKILL.md` showed
+    nothing while containing a link to a page that is not there.
+    """
+    pages = [GuidancePage(path="references/a.md", text="- x. See [gone](../references/gone.md).")]
+    skill = _skill(body="# R\n\n- **R1 — x.** See [gone](references/gone.md).\n", pages=pages)
+
+    graph = sg.annotate_defects(sg.build(skill), skill, dropped=[])
+    files = {n.path: n for n in _by_kind(graph, "file")}
+
+    assert "dangling" in files["SKILL.md"].issues
+    assert "dangling" in files["references/a.md"].issues, "both linkers, not just the first"
+    assert files["SKILL.md"].issue_messages == [], "the sentence stays on the broken node"
+
+
+def test_guidance_with_no_rule_id_is_counted_and_never_flagged() -> None:
+    """A skill may carry generic guidance that no ticket justified, and plenty of the best guidance
+    is exactly that. This was a defect code once: on a real 15-file skill it reported 1,128 defects,
+    1,074 of them one per unnumbered bullet, burying the 36 broken links that wanted fixing.
+
+    So it is counted, drawn in its own lighter colour, and not marked.
+    """
+    skill = _skill(body="# R\n\n- Prefer small functions.\n- Log at the boundary.\n", pages=[])
+
+    graph = sg.annotate_defects(sg.build(skill), skill, dropped=[])
+
+    assert graph.counts["directive"] == 2, "counted, so a screen can state the number"
+    assert "untraceable" not in sg.CODES, "and it is not a code any node can carry"
+    assert all(not n.issues for n in graph.nodes), "nothing about this skill is wrong"
+    assert graph.counts["defects"] == 0
 
 
 # --- determinism ------------------------------------------------------------------------------
@@ -606,5 +645,5 @@ def test_every_code_the_floor_emits_is_declared_with_a_mode() -> None:
         emitted.update(code for n in graph.nodes for code in n.issues)
 
     assert emitted <= set(sg.CODES)
-    wanted = {"dropped", "unreachable", "untraceable", "unreferenced", "dangling", "unpaged"}
+    wanted = {"dropped", "unreachable", "unreferenced", "dangling", "unpaged"}
     assert wanted <= emitted

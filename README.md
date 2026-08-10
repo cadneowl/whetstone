@@ -439,11 +439,13 @@ rule that says *"unless R3 applies"* is coupled to a rule three files away, `met
 the review it came from, an eval case is linked to that rule through the same review, and a link
 points at a page that may since have been renamed. The **Guidance** tab draws all of it as a graph
 and lets you query it — `rule:R7` and one hop out is the file it lives in, the review it came from and
-the cases that test it; `kind:directive` is every instruction with no id, which nothing can
-provenance, no case can be linked to, and no warning fires for when a draft deletes it. It reports
-what is mechanically wrong the way `whetstone sidecars check` does for notes: a rule no case is linked
-to, a link naming no page, and — depending on how the skill is *run* — a page the byte cap drops from
-every review, or one nothing links to so an agent never fetches it. Those last two are true in exactly
+the cases that test it. Generic guidance with no rule id is drawn in a lighter green and **counted,
+never flagged** — a skill may perfectly well carry advice no ticket justified, and the only thing
+that is true of it is that nothing traces it to a review and no warning fires if a draft deletes it.
+What it does report is what is mechanically wrong, the way `whetstone sidecars check` does for notes:
+a rule no case is linked to, provenance whose rule is gone, a link naming no page, and — depending on
+how the skill is *run* — a page the byte cap drops from every review, or one nothing links to so an
+agent never fetches it. Those last two are true in exactly
 one runtime each, so the header says which it read. Same answers on the command line with
 `whetstone skills shape --skill <dir> -q '…'`. **Read-only and off the scoring path**: no hash moves
 because a picture exists.
