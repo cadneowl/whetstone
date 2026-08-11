@@ -9,10 +9,11 @@ import {
   type GraphNodeKind,
   type SidecarFile,
 } from '@/api/client'
-import { Canvas, HEIGHT, tooManyToRead, WIDTH } from '@/components/graph/Canvas'
+import { Canvas, tooManyToRead } from '@/components/graph/Canvas'
 import { EdgeLegend, Legend } from '@/components/graph/Legend'
+import { Neighbours } from '@/components/graph/Neighbours'
 import type { GraphPalette, Ring } from '@/components/graph/types'
-import { layout } from '@/components/graphLayout'
+import { boxFor, layout } from '@/components/graphLayout'
 import {
   clampHops,
   crumbsFor,
@@ -79,10 +80,10 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
 
   const nodes = useMemo(() => data?.result.nodes ?? [], [data])
   const edges = useMemo(() => data?.result.edges ?? [], [data])
-  const positions = useMemo(
-    () => layout(nodes, edges, { width: WIDTH, height: HEIGHT }),
-    [nodes, edges],
-  )
+  // Sized to the result rather than fixed — see `boxFor`. Same reasoning as the guidance graph's:
+  // a node's radius is in layout units, so a bigger box is the only thing that gives more dots room.
+  const box = useMemo(() => boxFor(nodes.length), [nodes.length])
+  const positions = useMemo(() => layout(nodes, edges, box), [nodes, edges, box])
   const matched = useMemo(() => new Set(data?.result.matched ?? []), [data])
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes])
   const focused = selected ? (byId.get(selected) ?? null) : null
@@ -242,6 +243,7 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             nodes={nodes}
             edges={edges}
             positions={positions}
+            box={box}
             matched={matched}
             selected={selected}
             palette={PALETTE}
@@ -253,6 +255,21 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             onSelect={(id) => navigate({ node: id }, { replace: true })}
             onFocus={(node) => navigate({ q: focusQuery(node), node: node.id })}
           />
+          {/* Directly under the picture, for the reason the guidance graph's card is: below the
+              result list it was a hundred rows away, so clicking a dot changed nothing a reader
+              could see and the graph read as one where clicking does nothing. */}
+          {focused && (
+            <Detail
+              node={focused}
+              skillId={skillId}
+              edges={edges}
+              labels={(id) => byId.get(id)?.label ?? id}
+              kinds={(id) => byId.get(id)?.kind ?? 'folder'}
+              onQuery={(text) => navigate({ q: text, node: null })}
+              onSelect={(id) => navigate({ node: id }, { replace: true })}
+              onFocus={() => navigate({ q: focusQuery(focused), node: focused.id })}
+            />
+          )}
           <Legend palette={PALETTE} marks={MARKS} note={LEGEND_NOTE} />
           <EdgeLegend palette={PALETTE} groups={EDGE_GROUPS} />
           <Results
@@ -275,15 +292,6 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             onSelect={(id) => navigate({ node: id }, { replace: true })}
           />
         </>
-      )}
-
-      {focused && (
-        <Detail
-          node={focused}
-          skillId={skillId}
-          onQuery={(text) => navigate({ q: text, node: null })}
-          onFocus={() => navigate({ q: focusQuery(focused), node: focused.id })}
-        />
       )}
     </section>
   )
@@ -399,6 +407,17 @@ const EDGE_TITLE: Record<GraphEdgeKind, string> = {
   see: 'a `see:` link in the folder’s frontmatter',
 }
 
+/** The same seven edges as sentences, read from each end — see `GraphPalette.edgeRelation`. */
+const EDGE_RELATION: Record<GraphEdgeKind, { out: string; in: string }> = {
+  parent: { out: 'is inside', in: 'holds' },
+  contains: { out: 'keeps', in: 'kept in' },
+  describes: { out: 'is about', in: 'described by' },
+  excepts: { out: 'narrows', in: 'narrowed by' },
+  cites: { out: 'came out of', in: 'produced' },
+  links: { out: 'links to', in: 'linked from' },
+  see: { out: 'see', in: 'seen from' },
+}
+
 /** Everything `graph/Canvas` needs to know about this graph's vocabulary. */
 const PALETTE: GraphPalette = {
   colour: KIND_COLOR,
@@ -408,6 +427,7 @@ const PALETTE: GraphPalette = {
   anchors: ['folder'],
   edge: EDGE_STYLE,
   edgeHelp: EDGE_TITLE,
+  edgeRelation: EDGE_RELATION,
 }
 
 /**
@@ -728,12 +748,20 @@ function Semantic({
 function Detail({
   node,
   skillId,
+  edges,
+  labels,
+  kinds,
   onQuery,
+  onSelect,
   onFocus,
 }: {
   node: GraphNode
   skillId: string
+  edges: GraphEdge[]
+  labels: (id: string) => string
+  kinds: (id: string) => string
   onQuery: (query: string) => void
+  onSelect: (id: string) => void
   onFocus: () => void
 }) {
   return (
@@ -859,6 +887,14 @@ function Detail({
           </Ask>
         )}
       </div>
+      <Neighbours
+        id={node.id}
+        labels={labels}
+        kinds={kinds}
+        edges={edges}
+        palette={PALETTE}
+        onSelect={onSelect}
+      />
       {node.sidecar && <FilePanel skillId={skillId} path={node.sidecar} line={node.line} />}
     </div>
   )
