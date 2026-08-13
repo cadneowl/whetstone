@@ -22,6 +22,23 @@ if len(sys.argv) > 3 and sys.argv[3] == "index":
 """
 
 
+# A generator that groups its pages into sub-folders, as openwiki does.
+NESTED_GENERATOR = """\
+import sys, pathlib
+out = pathlib.Path(sys.argv[1])
+nested = out / "pages" / "architecture"
+nested.mkdir(parents=True, exist_ok=True)
+(nested / "overview.md").write_text("# Overview\\n\\nshape", encoding="utf-8")
+(out / "pages" / "top.md").write_text("# Top\\n\\nflat", encoding="utf-8")
+(out / "index.yaml").write_text(
+    "pages:\\n"
+    "  - page: architecture/overview\\n    paths: ['src/**']\\n"
+    "  - page: top\\n    paths: ['*.toml']\\n",
+    encoding="utf-8",
+)
+"""
+
+
 def _generator(tmp_path: Path) -> Path:
     path = tmp_path / "gen.py"
     path.write_text(GENERATOR, encoding="utf-8")
@@ -69,6 +86,119 @@ def test_generated_wiki_round_trips_through_the_loader(tmp_path: Path) -> None:
         path.write_text(content, encoding="utf-8")
     wiki = load_wiki(written / "wiki")
     assert wiki.pages["auth"].title == "Auth"
+
+
+def _nested_spec(tmp_path: Path) -> StepSpec:
+    generator = tmp_path / "nested.py"
+    generator.write_text(NESTED_GENERATOR, encoding="utf-8")
+    directory = tmp_path / "update"
+    directory.mkdir(exist_ok=True)
+    return StepSpec(
+        kind="update",
+        skill_id="rust-errors",
+        directory=directory,
+        run=[sys.executable, str(generator), "{{out_dir}}"],
+    )
+
+
+def test_a_page_in_a_subfolder_keeps_its_subfolder(tmp_path: Path) -> None:
+    """`load_wiki` reads `architecture/overview` from a sub-folder, so the commit must write one."""
+    result = refresh_wiki(_nested_spec(tmp_path), repo=tmp_path)
+    assert result.pages == 2
+    assert "skills/rust-errors/wiki/pages/architecture/overview.md" in result.files
+    assert "skills/rust-errors/wiki/pages/top.md" in result.files
+
+
+def test_collected_paths_are_posix_on_every_platform(tmp_path: Path) -> None:
+    """These keys are git paths. A `Path` interpolated on Windows commits a backslashed filename."""
+    result = refresh_wiki(_nested_spec(tmp_path), repo=tmp_path)
+    assert not any("\\" in key for key in result.files)
+
+
+def test_a_nested_wiki_round_trips_through_the_loader(tmp_path: Path) -> None:
+    """The bug this covers surfaced a run later, as a WikiError about a page not on disk."""
+    result = refresh_wiki(_nested_spec(tmp_path), repo=tmp_path)
+    written = tmp_path / "out"
+    for relative, content in result.files.items():
+        path = written / relative.split("skills/rust-errors/")[1]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    wiki = load_wiki(written / "wiki")
+    assert wiki.pages["architecture/overview"].title == "Overview"
+
+
+def test_a_generator_writing_only_nested_pages_is_not_told_it_wrote_none(tmp_path: Path) -> None:
+    nested_only = tmp_path / "nested_only.py"
+    nested_only.write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[1])\n"
+        "(out / 'pages' / 'sub').mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'pages' / 'sub' / 'p.md').write_text('# P\\n\\nx', encoding='utf-8')\n"
+        "(out / 'index.yaml').write_text(\"pages:\\n  - page: sub/p\\n    paths: ['**']\\n\","
+        " encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    directory = tmp_path / "update"
+    directory.mkdir(exist_ok=True)
+    spec = StepSpec(
+        kind="update",
+        skill_id="s",
+        directory=directory,
+        run=[sys.executable, str(nested_only), "{{out_dir}}"],
+    )
+    result = refresh_wiki(spec, repo=tmp_path)
+    assert result.pages == 1
+    assert "skills/s/wiki/pages/sub/p.md" in result.files
+
+
+def test_a_page_whose_suffix_is_not_exactly_md_is_not_a_page(tmp_path: Path) -> None:
+    """`load_wiki` reconstructs `<id>.md` exactly, so collecting `.MD` commits an unreadable file.
+
+    A glob would have decided this differently on Windows than on Linux — the same generator output
+    producing two different commits, which is the bug this replaced rather than the one it fixed.
+    """
+    shouty = tmp_path / "shouty.py"
+    shouty.write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[1])\n"
+        "(out / 'pages').mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'pages' / 'OVERVIEW.MD').write_text('# Overview\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    directory = tmp_path / "update"
+    directory.mkdir(exist_ok=True)
+    spec = StepSpec(
+        kind="update",
+        skill_id="s",
+        directory=directory,
+        run=[sys.executable, str(shouty), "{{out_dir}}"],
+    )
+    with pytest.raises(StepError, match="wrote no pages"):
+        refresh_wiki(spec, repo=tmp_path)
+
+
+def test_an_unloadable_generated_wiki_is_a_step_error_not_a_traceback(tmp_path: Path) -> None:
+    """Both callers catch `StepError`; a bare `WikiError` reaches the operator as a traceback."""
+    bad_index = tmp_path / "bad_index.py"
+    bad_index.write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[1])\n"
+        "(out / 'pages').mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'pages' / 'p.md').write_text('# P\\n', encoding='utf-8')\n"
+        "(out / 'index.yaml').write_text("
+        "\"pages:\\n  - page: ../../escape\\n    paths: ['**']\\n\", encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    directory = tmp_path / "update"
+    directory.mkdir(exist_ok=True)
+    spec = StepSpec(
+        kind="update",
+        skill_id="s",
+        directory=directory,
+        run=[sys.executable, str(bad_index), "{{out_dir}}"],
+    )
+    with pytest.raises(StepError, match="cannot be loaded"):
+        refresh_wiki(spec, repo=tmp_path)
 
 
 def test_unchanged_output_reports_no_change(tmp_path: Path) -> None:

@@ -395,6 +395,8 @@ wiki/pages/health.md
 ```
 
 Every indexed page needs its file on disk — an index row naming a missing page is a hard load error.
+A page id is its path under `pages/` without the `.md`, so `architecture/overview` lives in a
+sub-folder; it cannot climb out of `pages/` with `..`, a leading `/`, a backslash or a colon.
 
 Three reasons `{{wiki}}` can come back empty, and the message says which:
 

@@ -35,6 +35,7 @@ from whetstone.wiki import (
     PAGES_DIR,
     WIKI_DIR,
     SkillWiki,
+    WikiError,
     load_wiki,
     wiki_digest,
 )
@@ -81,14 +82,22 @@ def refresh_wiki(
         _invoke(spec, repo=repo, out_dir=out_dir)
         # Before anything about indexing: a generator that produced nothing at all should be told
         # that, not lectured about a mapping for pages it never wrote.
-        if not list((out_dir / PAGES_DIR).glob("*.md")):
+        if not _pages(out_dir):
             raise StepError(
                 f"{spec.directory}: the generator wrote no pages to {out_dir}. It ran and exited "
                 f"cleanly, so check that it was pointed at the right repository and that its "
                 f"output-directory argument is {{{{out_dir}}}}"
             )
         _ensure_index(spec, out_dir)
-        produced = load_wiki(out_dir)
+        try:
+            produced = load_wiki(out_dir)
+        except WikiError as exc:
+            # Everything wrong with a step is a `StepError` — that is what both callers catch, and
+            # what turns a bad generator into a message instead of a traceback. An unusable index is
+            # the generator's output being wrong, so it is reported the same way as the rest of it.
+            raise StepError(
+                f"{spec.directory}: the generator's wiki cannot be loaded: {exc}"
+            ) from exc
         if produced.is_empty():
             raise StepError(
                 f"{spec.directory}: the generator wrote pages to {out_dir}, but the index names "
@@ -159,12 +168,40 @@ def _ensure_index(spec: StepSpec, out_dir: Path) -> None:
     )
 
 
+def _pages(out_dir: Path) -> list[Path]:
+    """Every page the generator wrote, sub-folders included.
+
+    Recursive because the read path already is: `load_wiki` resolves a page id containing a slash,
+    so `architecture/overview` reads `pages/architecture/overview.md`. A generator that groups its
+    output into folders — openwiki does — is therefore writing something Whetstone can already read,
+    and a non-recursive glob here dropped exactly those pages at commit time. The cost landed a
+    whole run later, as a `WikiError` from a reviewer whose context had silently gone missing.
+
+    The suffix is tested here rather than left to a glob pattern because pathlib case-folds a
+    pattern through `os.path.normcase`: `glob("*.md")` matches `OVERVIEW.MD` on Windows and not on
+    Linux, so the same generator output produced two different commits depending on who ran the
+    refresh. Tested exactly, and case-sensitively on every platform, because `.md` is precisely the
+    suffix `load_wiki` reconstructs from a page id — accepting `OVERVIEW.MD` here would commit a
+    file that the loader then cannot find, which trades one host-dependent bug for another.
+    """
+    pages_dir = out_dir / PAGES_DIR
+    if not pages_dir.is_dir():
+        return []
+    found = [p for p in pages_dir.rglob("*") if p.name.endswith(".md") and p.is_file()]
+    # Sorted by the posix-relative name, not by `Path`, so the order does not depend on the
+    # separator the host platform compares with.
+    return sorted(found, key=lambda p: p.relative_to(pages_dir).as_posix())
+
+
 def _collect(out_dir: Path, skill_id: str, skills_root: str) -> dict[str, str]:
     """The generated wiki as repo-relative path → contents, ready to commit."""
     base = f"{skills_root}/{skill_id}/{WIKI_DIR}"
     files = {f"{base}/{INDEX_FILE}": (out_dir / INDEX_FILE).read_text(encoding="utf-8")}
     pages_dir = out_dir / PAGES_DIR
-    if pages_dir.is_dir():
-        for page in sorted(pages_dir.glob("*.md")):
-            files[f"{base}/{PAGES_DIR}/{page.name}"] = page.read_text(encoding="utf-8")
+    for page in _pages(out_dir):
+        # `as_posix`, because these keys are repo-relative git paths on every platform.
+        # Interpolating the `Path` instead commits `pages/architecture\overview.md` — one file with
+        # a backslash in its name — when the refresh happens to be run on Windows.
+        relative = page.relative_to(pages_dir).as_posix()
+        files[f"{base}/{PAGES_DIR}/{relative}"] = page.read_text(encoding="utf-8")
     return files

@@ -223,7 +223,7 @@ def load_wiki(directory: str | Path) -> SkillWiki:
     for entry in entries:
         if entry.page in pages:
             continue  # two index rows may point at one page; different globs, same content
-        path = root / PAGES_DIR / f"{entry.page}.md"
+        path = _page_path(root, entry.page, index_path)
         if not path.is_file():
             raise WikiError(
                 f"{index_path}: page {entry.page!r} is indexed but "
@@ -255,6 +255,35 @@ def wiki_digest(wiki: SkillWiki) -> str:
         h.update(b"\0")
         h.update(wiki.pages[page_id].text.encode("utf-8"))
     return h.hexdigest()
+
+
+def _page_path(root: Path, page: str, index_path: Path) -> Path:
+    """Where a page id lives under `pages/`, refusing an id that would resolve outside it.
+
+    A slash is legitimate: `architecture/overview` is `pages/architecture/overview.md`, which is how
+    a generator that groups its output by subject is read. `..` and a leading slash are not — they
+    name a file outside the wiki, and this path is opened and its contents go into a reviewer's
+    prompt and into `skill_hash`. A backslash or a colon is refused for a duller reason: each is a
+    separator or reserved on one platform and an ordinary filename character on the other, so an id
+    containing one names two different files depending on where the run happened.
+
+    Checked twice, because the two checks catch different things. The rules above are a property of
+    the id and produce a message naming the rule it broke; resolving the result then catches the
+    case no rule about the id can see, which is a symlink under `pages/` pointing out of the wiki.
+    """
+    parts = page.split("/")
+    if page.startswith("/") or ":" in page or "\\" in page or ".." in parts:
+        raise WikiError(
+            f"{index_path}: page id {page!r} must be a path inside {PAGES_DIR}/ — a name, or names "
+            f"joined by '/', with no '..', no leading '/', and no backslash or colon"
+        )
+    path = root.joinpath(PAGES_DIR, *parts[:-1], f"{parts[-1]}.md")
+    if not path.resolve().is_relative_to((root / PAGES_DIR).resolve()):
+        raise WikiError(
+            f"{index_path}: page {page!r} resolves to {path.resolve()}, which is outside "
+            f"{PAGES_DIR}/ — a page reached through a symlink is not this skill's context"
+        )
+    return path
 
 
 def _title(text: str, fallback: str) -> str:

@@ -146,6 +146,50 @@ def test_indexed_page_that_is_not_on_disk_is_an_error(tmp_path: Path) -> None:
         load_wiki(tmp_path / "wiki")
 
 
+def test_a_page_id_may_name_a_subfolder(tmp_path: Path) -> None:
+    wiki = tmp_path / "wiki"
+    (wiki / "pages" / "architecture").mkdir(parents=True)
+    (wiki / "index.yaml").write_text(
+        "pages:\n  - page: architecture/overview\n    paths: ['src/**']\n", encoding="utf-8"
+    )
+    (wiki / "pages" / "architecture" / "overview.md").write_text("# Overview\n", encoding="utf-8")
+    loaded = load_wiki(wiki)
+    assert loaded.pages["architecture/overview"].title == "Overview"
+
+
+@pytest.mark.parametrize(
+    "page", ["../secrets", "/etc/passwd", "a/../../b", "C:/windows/x", "api:v2", "a\\b"]
+)
+def test_a_page_id_escaping_the_wiki_is_an_error(tmp_path: Path, page: str) -> None:
+    """This path gets opened and its contents reach a reviewer's prompt and `skill_hash`."""
+    _write_wiki(tmp_path, f"pages:\n  - page: {page!r}\n    paths: ['**']\n", {})
+    with pytest.raises(WikiError, match="must be a path inside"):
+        load_wiki(tmp_path / "wiki")
+
+
+def test_the_page_id_error_names_every_rule_it_enforces(tmp_path: Path) -> None:
+    """An id rejected for a rule the message never mentions sends the author looking elsewhere."""
+    _write_wiki(tmp_path, "pages:\n  - page: 'api:v2'\n    paths: ['**']\n", {})
+    with pytest.raises(WikiError) as caught:
+        load_wiki(tmp_path / "wiki")
+    for rule in ["..", "/", "backslash", "colon"]:
+        assert rule in str(caught.value)
+
+
+def test_a_page_reached_through_a_symlink_out_of_the_wiki_is_an_error(tmp_path: Path) -> None:
+    """No id-shaped rule can see this one: every segment is ordinary, the target is not."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "passwd.md").write_text("# Secrets\n", encoding="utf-8")
+    _write_wiki(tmp_path, "pages:\n  - page: escape/passwd\n    paths: ['**']\n", {})
+    try:
+        (tmp_path / "wiki" / "pages" / "escape").symlink_to(outside, target_is_directory=True)
+    except OSError:  # Windows without developer mode; the rule is still enforced where it can be
+        pytest.skip("this platform does not allow creating a symlink unprivileged")
+    with pytest.raises(WikiError, match="which is outside"):
+        load_wiki(tmp_path / "wiki")
+
+
 def test_entry_without_a_page_key_is_an_error(tmp_path: Path) -> None:
     _write_wiki(tmp_path, "pages:\n  - paths: ['**']\n", {})
     with pytest.raises(WikiError, match="needs a 'page:' key"):
