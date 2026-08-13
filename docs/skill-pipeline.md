@@ -886,6 +886,12 @@ pages/<name>.md    one markdown file per subject; the first `# heading` becomes 
 index.yaml         which source paths each page describes
 ```
 
+Sub-folders are fine. A generator that groups its output writes `pages/architecture/overview.md`
+and the index names it `page: architecture/overview` — the id is the path under `pages/`, minus the
+`.md`. It may not climb out of `pages/`: an id containing `..`, a leading `/`, a backslash or a
+colon — or one that resolves outside `pages/` through a symlink — is a load error rather than a read
+of whatever file it lands on.
+
 `index.yaml`:
 
 ```yaml

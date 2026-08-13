@@ -224,6 +224,9 @@ timeout_s: 900
 #   pages/<name>.md    one markdown file per subject. The first `# heading` becomes its title.
 #   index.yaml         which source paths each page describes (see below).
 #
+# Sub-folders are fine: a generator that groups its output writes pages/architecture/overview.md and
+# the page is named `architecture/overview` — the id is its path under pages/, minus the .md.
+#
 # If your generator writes index.yaml itself, delete the `index:` block below — the tool that knows
 # which files a page describes is the right place for that mapping to live. If it only writes
 # pages, declare the mapping here and Whetstone will write index.yaml for you.
