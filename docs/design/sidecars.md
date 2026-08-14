@@ -968,6 +968,27 @@ Three constraints keep it that way, and they are the design:
   tree with no claims — all of them return the lexical results plus a sentence saying why there
   are no others. An embedding endpoint being down may cost the extra rows and may never cost the
   search.
+- **Incomplete coverage is not a failure, and is never reported as one.** The query box ranks the
+  claims whose vectors are already cached and embeds only the query, so a request cannot hang on an
+  embedding endpoint or trip the 20-second client timeout. What it has not read it *counts*, in
+  `searched`/`total`, and the console renders that as an offer to finish rather than as a warning.
+
+The last bullet replaced a fixed 600-claim cap, and the way that cap failed is worth recording
+because both halves of it were silent. It made a large tree permanently unsearchable past an
+arbitrary line — no number of repeat searches ever advanced it, and the advice it printed
+("narrow the query first") was the only thing that worked. And it announced itself in the *status*
+field, which is the field the console reads as **"meaning search off"**: a working search over the
+first 600 claims rendered as a broken one, and the panel discarded the hits the server had already
+computed and returned. One string carrying both "the endpoint is down" and "there is more to read"
+made those two states indistinguishable at the only place it mattered.
+
+Finishing the pass is a job (`meaning`), not something a search does behind your back. It goes
+through the same plan-then-confirm contract as every other spend — how many embeddings, on which
+backend, whether it bills — and reports progress in claims, with a cancel that works. Cancelling is
+cheap by construction: each batch is written to the cache before the next begins, so stopping costs
+the remainder and a re-launch resumes rather than restarts. The vectors land in one directory named
+once (`graph.vectors_dir`), because a warm-up writing where the search does not read would be the
+worst available outcome — it would look like it worked.
 
 The similarity threshold is two cuts, not one: an absolute floor so that a query the corpus cannot
 answer comes back **empty** — that emptiness is the answer that sends someone to write the note —

@@ -48,7 +48,7 @@ from whetstone.explain import explain_gate, explain_run
 from whetstone.improve import propose, same_place
 from whetstone.jobs import Cancelled, Job, JobBusy, JobHandle, JobLines, JobStore, LogLine
 from whetstone.judge.spec import load_judge
-from whetstone.llm.embedding import build_embedder
+from whetstone.llm.embedding import build_embedder, uncached, warm
 from whetstone.llm.factory import (
     PRESETS,
     Backend,
@@ -2459,6 +2459,233 @@ def launch_index(
         }
 
     return _launch(jobs, "index", skill.id, work, plan, config=config)
+
+
+# --- meaning search ---------------------------------------------------------------------------
+
+MeaningScope = Literal["guidance", "sidecars"]
+
+
+class MeaningRequest(BaseModel):
+    """Embed a corpus so the console's search boxes can rank it by meaning.
+
+    `scope` names which box: `guidance` is the skill's own `SKILL.md`, companion pages and wiki;
+    `sidecars` is the `.agents/` notes in the tree its role binds to. Two scopes rather than one
+    "embed everything" because they are separately useful and separately expensive — a monorepo's
+    claims outnumber a skill's rules by a wide margin, and an operator who wants to search their
+    guidance should not be made to pay for the tree first.
+
+    `provider`/`model` name an *embedding* backend, defaulting to `[drift]` — the same resolution
+    the drift probe and the index build use. Unlike those two, naming a *different* model here is
+    refused rather than honoured; see `_meaning_backend`.
+    """
+
+    skill_id: str
+    scope: MeaningScope = "guidance"
+    provider: str = ""
+    model: str = ""
+
+
+def _meaning_backend(config: Config, request: MeaningRequest) -> tuple[str, Backend]:
+    """The embedding backend this pass may use — which is the one the search boxes read, or none.
+
+    Every other embedding launch takes a per-launch model happily, because what it produces stands
+    on its own: a drift report is about the model that measured it, and a case index pins the model
+    it was built with. This one produces a *cache that something else reads*, and the reader is not
+    configurable — both search boxes build their embedder from `[drift] embed_model`
+    (`skills.py:_embedder`). `CachedEmbedder` namespaces vectors by model, so a pass run under any
+    other name fills `vectors/<other-model>/` while the search goes on reading
+    `vectors/<drift-model>/`: the job completes, logs that meaning search now covers everything,
+    and the coverage panel still reads 0 with the same button offering the same work forever.
+
+    That is precisely the outcome `graph.vectors_dir` and `docs/design/sidecars.md` §16.1 call the
+    worst available one — work that looks like it succeeded and changed nothing. Unifying the
+    directory was not enough on its own, because the model is a segment inside it. So the mismatch
+    is refused at the door, where it can still be explained, rather than left to be discovered by
+    an operator wondering why the number never moves.
+    """
+    provider, backend = _embedding_backend(config, request.provider, request.model)
+    configured = config.drift.embed_model
+    if backend.model != configured:
+        raise Unprocessable(
+            f"meaning search reads vectors built with {configured!r} (from [drift] embed_model), "
+            f"so a pass run with {backend.model!r} would fill a cache nothing queries — the job "
+            f"would finish green and the search would be exactly as cold as before. Launch this "
+            f"one on the console default, or change [drift] embed_model if {backend.model!r} is "
+            f"the model this deployment should search with."
+        )
+    return provider, backend
+
+
+def _meaning_corpus(
+    config: Config, root: Path, store: Any, request: MeaningRequest
+) -> tuple[Skill, list[str], str]:
+    """The skill, the exact strings its search embeds, and the noun for them.
+
+    The strings come from the same helpers the search itself ranks over — `guidance.embed_texts`
+    and `graph.claim_texts` — never rebuilt here. The cache keys on the exact text, so a warm-up
+    that assembled it differently would fill the cache with entries no query asks for and leave a
+    corpus reported as ready while every search over it still came back empty.
+    """
+    skill = _skill(root, request.skill_id)
+    if request.scope == "guidance":
+        from whetstone.guidance import embed_texts
+
+        return skill, embed_texts(skill), "guidance block"
+
+    from whetstone.sidecars import SidecarError
+    from whetstone.sidecars.graph import build_cached, claim_texts
+
+    if skill.sidecar.is_empty():
+        raise Unprocessable(
+            f"{skill.id} declares no `sidecar:` block in SKILL.md, so there are no claims to "
+            f"embed. Use scope=guidance to search this skill's own rules by meaning."
+        )
+    _, source_root = _sweep_setup(config, root, request.skill_id)
+    try:
+        graph = build_cached(store.root, source_root, skill.sidecar.role)
+    except (SidecarError, OSError) as exc:
+        raise Unprocessable(f"cannot read the notes under {source_root}: {exc}") from exc
+    return skill, claim_texts(graph), "claim"
+
+
+def _meaning_plan(
+    backend: Backend, skill: Skill, texts: list[str], unit: str, embedder: Any
+) -> Plan:
+    """Price a pass over `texts` against the cache the search reads.
+
+    Takes the corpus rather than resolving it, so the launch route can build a plan from the texts
+    it already has. For `scope="sidecars"` that resolution is a reviewer binding plus a walk of
+    somebody's monorepo, and doing it twice inside one POST — once to plan, once to run — made the
+    launch request itself slow for no benefit.
+    """
+    todo = uncached(embedder, texts)
+    plan = plan_calls(
+        "meaning",
+        backend,
+        calls=len(todo),
+        basis=(
+            f"{len(todo)} of {len(texts)} {unit}(s) still to embed, one call each "
+            f"(vectors are cached by content, so this is paid once)"
+        ),
+        details=[
+            "embeddings only — no reviewer runs, no judge, and nothing in the gate path",
+            "nothing is written but a vector cache: no hash changes and no gate evidence is "
+            "retracted, so this can be cancelled halfway and resumed with nothing lost",
+        ],
+    )
+    if not texts:
+        plan.warnings.append(
+            f"{skill.id} has no {unit}s to embed — there is nothing for a meaning search to rank"
+        )
+    elif not todo:
+        plan.warnings.append(
+            f"every {unit} is already embedded; meaning search over this skill is complete and "
+            f"this launch would call nothing"
+        )
+    return plan
+
+
+@router.post("/meaning/plan", response_model=Plan)
+def plan_meaning_job(
+    request: MeaningRequest, config: ConfigDep, root: SkillsRootDep, store: StoreDep
+) -> Plan:
+    from whetstone.sidecars.graph import vectors_dir
+
+    provider, backend = _meaning_backend(config, request)
+    skill, texts, unit = _meaning_corpus(config, root, store, request)
+    # Priced against the cache the search reads, so the number is what this launch will actually
+    # spend rather than the size of the corpus. Re-warming an already-warm skill costs nothing and
+    # the plan should say so, not quote a number that would frighten someone out of a free click.
+    embedder = build_embedder(
+        provider, model=backend.model, cache_dir=vectors_dir(store.root)
+    )
+    return _meaning_plan(backend, skill, texts, unit, embedder)
+
+
+@router.post("/meaning", response_model=Job, dependencies=[Writable])
+def launch_meaning(
+    request: MeaningRequest,
+    config: ConfigDep,
+    root: SkillsRootDep,
+    store: StoreDep,
+    jobs: JobsDep,
+) -> Job:
+    """Embed a corpus so meaning search covers all of it, with a bar that moves while it does.
+
+    This is the half of meaning search that takes time, given a place to happen where it can be
+    watched and stopped. The search box itself never embeds a corpus: it ranks what is already on
+    disk and reports the coverage (`llm/semantic.rank`), because an interactive request that waited
+    on an embedding endpoint would hit its 20-second timeout on any corpus worth searching. What
+    the box could not do, this does — and the operator sees a count rather than a spinner.
+
+    Deliberately resumable by being interruptible. Every batch that completes is on disk before the
+    next one starts, so cancelling costs the remainder and nothing else, and re-launching picks up
+    exactly where it stopped. That is why the plan can describe stopping halfway as free.
+    """
+    from whetstone.sidecars.graph import vectors_dir
+
+    provider, backend = _meaning_backend(config, request)
+    skill, texts, unit = _meaning_corpus(config, root, store, request)
+    # The corpus is resolved once and the plan built from it — for a source tree that resolution is
+    # a reviewer binding plus a full walk, and this route used to do it twice before queueing.
+    planning = build_embedder(
+        provider, model=backend.model, cache_dir=vectors_dir(store.root)
+    )
+    plan = _meaning_plan(backend, skill, texts, unit, planning)
+
+    def work(handle: JobHandle) -> dict[str, Any]:
+        handle.progress(0, 1, f"checking what {skill.id} already has")
+        embedder = build_embedder(
+            provider,
+            model=backend.model,
+            cache_dir=vectors_dir(store.root),
+            # Generous next to the search's 20s: nothing is waiting on this but a progress bar, and
+            # a local runner under load can take a while over a batch of 32. The failure this
+            # avoids is a long pass dying near the end on one slow request.
+            timeout=120.0,
+        )
+
+        def on_progress(done: int, total: int) -> None:
+            # Raises `Cancelled` out of the middle of `warm`, which is how a cancel lands between
+            # batches rather than after the whole corpus.
+            handle.check()
+            handle.progress(done, total, f"{done:,} of {total:,} {unit}s embedded")
+
+        embedded = warm(embedder, texts, on_progress=on_progress)
+        # Did it actually land? `CachedEmbedder._write` swallows `OSError` on purpose — a cache that
+        # cannot write is meant to be slower rather than broken — which is right for every other
+        # caller and exactly wrong for this one, whose entire product *is* the written cache. A
+        # read-only store or a full disk would otherwise finish this job green, log that the corpus
+        # is covered, leave the search as cold as it started, and re-spend every call next time.
+        # This is the one guarantee the feature sells, so it is the one thing checked rather than
+        # assumed.
+        missing = uncached(embedder, texts)
+        if missing:
+            raise RuntimeError(
+                f"embedded {embedded:,} {unit}(s) but {len(missing):,} did not reach the cache at "
+                f"{vectors_dir(store.root)} — meaning search reads from there, so it is no warmer "
+                f"than before. Check the directory is writable and has space; nothing else is "
+                f"wrong and re-running costs only what is still missing."
+            )
+        handle.progress(len(texts), len(texts), "done")
+        handle.log(
+            LogLine(
+                text=(
+                    f"  embedded {embedded:,} {unit}(s) with {backend.model}; meaning search now "
+                    f"covers all {len(texts):,}"
+                ),
+                tone="ok",
+            )
+        )
+        return {
+            "embedded": embedded,
+            "total": len(texts),
+            "scope": request.scope,
+            "model": backend.model,
+        }
+
+    return _launch(jobs, "meaning", skill.id, work, plan, config=config)
 
 
 def _review_change(config: Config, request: ReviewRequest) -> tuple[Any, Any, str, str, str]:

@@ -485,12 +485,12 @@ def _embedder(config: Config, store: StoreDep) -> tuple[Any | None, str]:
         )
     try:
         from whetstone.llm.embedding import build_embedder
-        from whetstone.sidecars.graph import CACHE_DIR
+        from whetstone.sidecars.graph import vectors_dir
 
         return build_embedder(
             config.drift.embed_provider,
             model=config.drift.embed_model,
-            cache_dir=Path(store.root) / CACHE_DIR / "vectors",
+            cache_dir=vectors_dir(store.root),
             timeout=20.0,
         ), ""
     except (ValueError, OSError) as exc:
@@ -506,7 +506,10 @@ def _semantic_for(
     embedder, problem = _embedder(config, store)
     if embedder is None:
         return SemanticResult(status=problem)
-    return semantic_hits(graph, q, embedder)
+    # `cached_only`: a query box may not wait on an embedding endpoint. What is not embedded yet is
+    # reported as coverage and embedded by the `meaning` job, which has a progress bar and a cancel
+    # button — see `ui/routers/jobs.launch_meaning`.
+    return semantic_hits(graph, q, embedder, cached_only=True)
 
 
 @router.get("/{skill_id}/guidance/search", response_model=GuidanceSearchResult)
@@ -537,7 +540,11 @@ def search_guidance(
     skill = _load_one(root, skill_id)
     wanted = semantic and wants_meaning(q)
     embedder, problem = _embedder(config, store) if wanted else (None, "")
-    result = search(skill, q, embedder=embedder, limit=max(1, min(limit, 200)))
+    # See `_semantic_for` for why this is `cached_only`: the same rule, for the same reason, on the
+    # box next door.
+    result = search(
+        skill, q, embedder=embedder, limit=max(1, min(limit, 200)), cached_only=True
+    )
     if embedder is None and problem:
         # Reported rather than swallowed: "this skill says nothing like that" and "nothing here can
         # answer that kind of question" are different facts, and only one is about the guidance.

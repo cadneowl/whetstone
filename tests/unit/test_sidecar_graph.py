@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from whetstone.llm.embedding import CachedEmbedder, warm
 from whetstone.sidecars import read_sidecar
 from whetstone.sidecars.claims import parse
 from whetstone.sidecars.collect import SidecarError
@@ -30,6 +31,7 @@ from whetstone.sidecars.graph import (
     build,
     build_cached,
     cache_path,
+    claim_texts,
     load_cache,
     query,
     refs_of,
@@ -652,11 +654,79 @@ def test_an_empty_query_embeds_nothing(prose: Path) -> None:
     assert embedder.calls == 0
 
 
-def test_the_embed_cap_is_reported_rather_than_silent(prose: Path) -> None:
+def test_a_cold_corpus_is_counted_rather_than_called_a_failure(
+    prose: Path, tmp_path: Path
+) -> None:
+    """The bug this whole path was rebuilt around.
+
+    A corpus nobody has embedded yet is not a broken search — it is a search with work outstanding,
+    and the difference has to survive to the screen. A fixed cap used to report it in `status`,
+    which is the field the console reads as *"meaning search off"*: a query over a large tree came
+    back with a warning that made a working feature look dead, and the console dropped the hits it
+    had already been given.
+    """
+    embedder = CachedEmbedder(FakeEmbedder(), tmp_path)
     result = semantic_hits(
-        graph_of(prose), "ledger", FakeEmbedder(), min_score=0.0, band=1.0, embed_limit=1
+        graph_of(prose), "ledger", embedder, min_score=0.0, band=1.0, cached_only=True
     )
-    assert "searched the first 1 claims by meaning" in result.status
+    assert result.status == "", "nothing failed, so nothing may read as a failure"
+    assert result.hits == []
+    assert result.searched == 0
+    assert result.total > 0, "and the size of the outstanding work is reported, not hidden"
+    assert result.partial
+
+
+def test_warming_the_cache_makes_the_whole_corpus_searchable(
+    prose: Path, tmp_path: Path
+) -> None:
+    """The fix the count is there to offer, end to end: warm, then search, then find.
+
+    Pinned because the two halves are joined by a string — the exact text each claim is embedded
+    *as*. `warm` fills the cache from `claim_texts` and the search looks it up from `_embed_text`;
+    if those ever diverge the cache fills with entries no query asks for, every search stays empty,
+    and the coverage line would cheerfully report the corpus as complete.
+    """
+    graph = graph_of(prose)
+    embedder = CachedEmbedder(FakeEmbedder(), tmp_path)
+    warm(embedder, claim_texts(graph))
+
+    result = semantic_hits(graph, "ledger", embedder, min_score=0.0, band=1.0, cached_only=True)
+    assert result.searched == result.total > 0
+    assert not result.partial
+    assert result.hits, "and a warm corpus answers the query it was warmed for"
+    # The same answer the uncapped path gives: warming changes what is *available* to rank, never
+    # how it ranks.
+    cold = semantic_hits(graph, "ledger", FakeEmbedder(), min_score=0.0, band=1.0)
+    assert [h.id for h in result.hits] == [h.id for h in cold.hits]
+
+
+def test_a_partly_warm_corpus_searches_what_it_has_and_counts_the_rest(
+    prose: Path, tmp_path: Path
+) -> None:
+    graph = graph_of(prose)
+    texts = claim_texts(graph)
+    embedder = CachedEmbedder(FakeEmbedder(), tmp_path)
+    warm(embedder, texts[:1])
+
+    result = semantic_hits(graph, "ledger", embedder, min_score=0.0, band=1.0, cached_only=True)
+    assert result.searched == 1
+    assert result.total == len(texts)
+    assert result.partial
+    assert result.status == "", "a half-read corpus is a chore, not an error"
+
+
+def test_an_embedder_that_keeps_nothing_searches_everything(prose: Path) -> None:
+    """`cached_only` is a latency guard, and must never become an off switch.
+
+    With no cache there is nothing to warm and no pass that could ever make progress, so reading
+    the empty cache as "nothing is ready" would leave meaning search permanently silent on a
+    deployment whose vectors simply are not persisted.
+    """
+    result = semantic_hits(
+        graph_of(prose), "ledger", FakeEmbedder(), min_score=0.0, band=1.0, cached_only=True
+    )
+    assert result.hits
+    assert result.searched == result.total > 0
 
 
 def graph_of(root: Path) -> Any:

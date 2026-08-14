@@ -925,6 +925,38 @@ def test_there_is_one_semantic_ranking_policy() -> None:
         assert "rank(" in source, f"{module} no longer ranks through llm/semantic.rank"
 
 
+def test_neither_search_box_embeds_a_corpus_inside_a_request() -> None:
+    """§16.1: the query boxes rank what is cached and never wait on an embedding endpoint.
+
+    This is the invariant whose loss is invisible in every test that mocks an embedder. Drop
+    `cached_only` from either route and everything goes on passing — a fake embedder answers
+    instantly — while a real deployment gets a request that embeds the whole corpus inline, against
+    an embedder built with a 20-second timeout, on the one code path a person is sitting and waiting
+    for. The cap that used to bound it is gone on purpose; this is what replaced it.
+
+    Asserted at the routes rather than in `rank`, because `rank` is right to default the other way:
+    the CLI and any future batch caller *should* embed what they need and wait for it.
+    """
+    routes = _read("src", "whetstone", "ui", "routers", "skills.py")
+    assert routes.count("cached_only=True") == 2, (
+        "both console search routes must rank cached vectors only — see `llm/semantic.rank`"
+    )
+    for call in ("semantic_hits(graph, q, embedder", "search(\n        skill, q"):
+        assert call in routes, f"the search call moved; re-check that {call!r} is still cached-only"
+
+
+def test_the_warm_up_and_the_search_cannot_disagree_about_where_vectors_live() -> None:
+    """One directory, named once. A pass that filled a directory the search does not read would
+    show a progress bar, complete successfully, and change nothing an operator could see."""
+    for parts in (
+        ("src", "whetstone", "ui", "routers", "skills.py"),
+        ("src", "whetstone", "ui", "routers", "jobs.py"),
+    ):
+        source = _read(*parts)
+        assert "vectors_dir(" in source, f"{'/'.join(parts)} builds its own vector path"
+        assert '/ "vectors"' not in source, f"{'/'.join(parts)} spells the vector path itself"
+
+
 def test_the_guidance_search_covers_every_file_the_reviewer_is_given() -> None:
     """The README says it searches `SKILL.md`, its companion pages and its wiki.
 

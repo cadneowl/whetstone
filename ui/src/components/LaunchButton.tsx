@@ -332,9 +332,8 @@ function PlanBanner({ plan, practice = false }: { plan: Plan; practice?: boolean
       {refused ? (
         <p className="text-bad">
           Practice mode is on and this backend is not free, so this will be refused — nothing will
-          run and nothing will be charged. Point{' '}
-          <code className="font-mono">WHETSTONE_LLM</code> at a local backend, or turn off{' '}
-          <code className="font-mono">[ui] practice_mode</code>.
+          run and nothing will be charged. Point <code className="font-mono">WHETSTONE_LLM</code> at
+          a local backend, or turn off <code className="font-mono">[ui] practice_mode</code>.
         </p>
       ) : (
         <p className="text-warn">
@@ -591,7 +590,9 @@ export function summaryOf(r: Record<string, unknown>): JobSummary | null {
   const s = raw as Record<string, unknown>
   if (typeof s.headline !== 'string' || !s.headline) return null
   const list = (key: string) =>
-    Array.isArray(s[key]) ? (s[key] as unknown[]).filter((x): x is string => typeof x === 'string') : []
+    Array.isArray(s[key])
+      ? (s[key] as unknown[]).filter((x): x is string => typeof x === 'string')
+      : []
   return {
     verdict: typeof s.verdict === 'string' ? s.verdict : '',
     headline: s.headline,
@@ -679,7 +680,8 @@ function JobResult({ job }: { job: Job }) {
         <GateDelta r={r} />
         {fixed.length > 0 && (
           <p className="mt-0.5 text-good">
-            fixed {fixed.length} targeted case(s): <span className="font-mono">{fixed.join(', ')}</span>
+            fixed {fixed.length} targeted case(s):{' '}
+            <span className="font-mono">{fixed.join(', ')}</span>
           </p>
         )}
         {regressed.length > 0 && (
@@ -818,6 +820,18 @@ function JobResult({ job }: { job: Job }) {
       <p className="mt-2 text-xs text-muted">
         {String(r.note)}
         {Boolean(r.changed) && ' — staged; the skill needs a fresh gate.'}
+      </p>
+    )
+  }
+  if (job.kind === 'meaning') {
+    const embedded = Number(r.embedded ?? 0)
+    return (
+      <p className="mt-2 text-xs text-muted">
+        {embedded === 0
+          ? 'Everything was already embedded — nothing was called.'
+          : `Embedded ${embedded.toLocaleString()} of ${Number(r.total ?? 0).toLocaleString()}`}{' '}
+        with <span className="font-mono">{String(r.model)}</span> — meaning search now covers this{' '}
+        {r.scope === 'sidecars' ? "tree's notes" : "skill's guidance"} in full.
       </p>
     )
   }

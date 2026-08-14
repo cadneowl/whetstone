@@ -13,6 +13,9 @@ from whetstone.llm.embedding import (
     EmbeddingError,
     OpenAIEmbeddingClient,
     build_embedder,
+    persists,
+    uncached,
+    warm,
 )
 
 
@@ -135,3 +138,112 @@ def test_build_embedder_wraps_in_a_cache_when_given_a_directory(tmp_path: Path) 
     embedder = build_embedder("ollama", model="nomic-embed-text", cache_dir=tmp_path)
     assert isinstance(embedder, CachedEmbedder)
     assert embedder.model == "nomic-embed-text"
+
+
+# --- what a search asks the cache, and what a warm-up pass does to it ---------------------------
+
+
+def test_uncached_names_only_what_is_not_on_disk(tmp_path: Path) -> None:
+    cached = CachedEmbedder(CountingEmbedder(), tmp_path)
+    cached.embed(["aa"])
+    assert uncached(cached, ["aa", "bbb"]) == ["bbb"]
+
+
+def test_uncached_deduplicates_because_the_cache_keys_on_content(tmp_path: Path) -> None:
+    """A corpus that repeats a sentence costs one embedding, and the price quoted must say so."""
+    cached = CachedEmbedder(CountingEmbedder(), tmp_path)
+    assert uncached(cached, ["aa", "aa", "bbb"]) == ["aa", "bbb"]
+
+
+def test_an_embedder_with_no_cache_owes_for_everything() -> None:
+    """The honest answer when pricing a pass: nothing here is free. See `persists` for the other
+    question, which has a different answer for the same embedder."""
+    assert uncached(CountingEmbedder(), ["aa", "bbb"]) == ["aa", "bbb"]
+    assert not persists(CountingEmbedder())
+
+
+def test_warm_embeds_only_the_missing_and_reports_as_it_goes(tmp_path: Path) -> None:
+    inner = CountingEmbedder()
+    cached = CachedEmbedder(inner, tmp_path)
+    cached.embed(["aa"])
+    seen: list[tuple[int, int]] = []
+
+    embedded = warm(cached, ["aa", "bbb", "cccc"], on_progress=lambda d, t: seen.append((d, t)))
+
+    assert embedded == 2, "the one already on disk was not paid for twice"
+    assert inner.calls == [["aa"], ["bbb", "cccc"]]
+    # Starts at zero so a bar can be drawn before the first batch lands, and ends at the total so
+    # it cannot finish showing less than it did.
+    assert seen[0] == (0, 2)
+    assert seen[-1] == (2, 2)
+
+
+def test_warm_batches_so_progress_moves_and_a_stop_lands_between_them(tmp_path: Path) -> None:
+    inner = CountingEmbedder()
+    cached = CachedEmbedder(inner, tmp_path)
+    seen: list[tuple[int, int]] = []
+    warm(cached, ["a", "bb", "ccc", "dddd"], on_progress=lambda d, t: seen.append((d, t)), batch=2)
+    assert seen == [(0, 4), (2, 4), (4, 4)]
+    assert inner.calls == [["a", "bb"], ["ccc", "dddd"]]
+
+
+def test_an_empty_cache_file_is_not_counted_as_held(tmp_path: Path) -> None:
+    """What a crash mid-write leaves. Free to catch with the `stat` `holds` already does, and the
+    one shape of corruption that would otherwise make `warm` skip a unit forever."""
+    inner = CountingEmbedder()
+    cached = CachedEmbedder(inner, tmp_path)
+    cached.embed(["aa"])
+    [vector_file] = list((tmp_path / "fake-embed").glob("*.json"))
+    vector_file.write_text("", encoding="utf-8")
+    assert uncached(cached, ["aa"]) == ["aa"], "so a warm-up pass will repair it"
+
+
+def test_a_malformed_cache_entry_repairs_itself_on_the_next_search(tmp_path: Path) -> None:
+    """`holds` is a weaker test than `_read` and this is the gap, bounded and self-correcting.
+
+    Pinned because the failure it *would* be is nasty: an entry that reads as held but parses as a
+    miss puts one synchronous endpoint call on the interactive search path, which is what
+    `cached_only` exists to prevent. It happens once — the re-embed rewrites the file — and this
+    fails if that ever stops being true.
+    """
+    inner = CountingEmbedder()
+    cached = CachedEmbedder(inner, tmp_path)
+    cached.embed(["aa"])
+    [vector_file] = list((tmp_path / "fake-embed").glob("*.json"))
+    vector_file.write_text("{not json", encoding="utf-8")
+
+    inner.calls.clear()
+    assert cached.embed(["aa"]) == [[2.0]], "the miss is served by calling the endpoint"
+    assert inner.calls == [["aa"]]
+    # And the bad file is gone, so the next search is served from disk.
+    inner.calls.clear()
+    assert cached.embed(["aa"]) == [[2.0]]
+    assert inner.calls == []
+
+
+def test_a_cancelled_pass_keeps_everything_it_had_already_embedded(tmp_path: Path) -> None:
+    """How a cancel lands: `on_progress` raises, which is what a cancelled job's does.
+
+    The guarantee being pinned is that stopping is cheap rather than wasteful — every batch is on
+    disk before the next starts, so the next launch resumes instead of starting over. That is what
+    lets the console describe cancelling as free.
+    """
+
+    class Stop(RuntimeError):
+        pass
+
+    inner = CountingEmbedder()
+    cached = CachedEmbedder(inner, tmp_path)
+
+    def halt(done: int, _total: int) -> None:
+        if done >= 2:
+            raise Stop
+
+    with pytest.raises(Stop):
+        warm(cached, ["a", "bb", "ccc", "dddd"], on_progress=halt, batch=2)
+
+    assert uncached(cached, ["a", "bb", "ccc", "dddd"]) == ["ccc", "dddd"]
+    # And resuming pays only for the remainder.
+    inner.calls.clear()
+    assert warm(cached, ["a", "bb", "ccc", "dddd"]) == 2
+    assert inner.calls == [["ccc", "dddd"]]

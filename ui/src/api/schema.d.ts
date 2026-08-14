@@ -676,6 +676,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/jobs/meaning": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Launch Meaning
+         * @description Embed a corpus so meaning search covers all of it, with a bar that moves while it does.
+         *
+         *     This is the half of meaning search that takes time, given a place to happen where it can be
+         *     watched and stopped. The search box itself never embeds a corpus: it ranks what is already on
+         *     disk and reports the coverage (`llm/semantic.rank`), because an interactive request that waited
+         *     on an embedding endpoint would hit its 20-second timeout on any corpus worth searching. What
+         *     the box could not do, this does — and the operator sees a count rather than a spinner.
+         *
+         *     Deliberately resumable by being interruptible. Every batch that completes is on disk before the
+         *     next one starts, so cancelling costs the remainder and nothing else, and re-launching picks up
+         *     exactly where it stopped. That is why the plan can describe stopping halfway as free.
+         */
+        post: operations["launch_meaning_api_jobs_meaning_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/meaning/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Plan Meaning Job */
+        post: operations["plan_meaning_job_api_jobs_meaning_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/jobs/review": {
         parameters: {
             query?: never;
@@ -3618,10 +3665,20 @@ export interface components {
              */
             semantic: components["schemas"]["GuidanceChunk"][];
             /**
+             * Semantic Searched
+             * @default 0
+             */
+            semantic_searched: number;
+            /**
              * Semantic Status
              * @default
              */
             semantic_status: string;
+            /**
+             * Semantic Total
+             * @default 0
+             */
+            semantic_total: number;
             /**
              * Total Matched
              * @default 0
@@ -3929,7 +3986,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize" | "index" | "sidecar-sweep" | "task-eval" | "task-gate";
+            kind: "eval" | "gate" | "improve" | "update" | "review" | "judge-eval" | "baseline" | "drift" | "synthesize" | "index" | "meaning" | "sidecar-sweep" | "task-eval" | "task-gate";
             /** Log */
             log?: components["schemas"]["LogLine"][];
             /**
@@ -4088,6 +4145,40 @@ export interface components {
              * @enum {string}
              */
             tone: "plain" | "said" | "verdict" | "ok" | "bad";
+        };
+        /**
+         * MeaningRequest
+         * @description Embed a corpus so the console's search boxes can rank it by meaning.
+         *
+         *     `scope` names which box: `guidance` is the skill's own `SKILL.md`, companion pages and wiki;
+         *     `sidecars` is the `.agents/` notes in the tree its role binds to. Two scopes rather than one
+         *     "embed everything" because they are separately useful and separately expensive — a monorepo's
+         *     claims outnumber a skill's rules by a wide margin, and an operator who wants to search their
+         *     guidance should not be made to pay for the tree first.
+         *
+         *     `provider`/`model` name an *embedding* backend, defaulting to `[drift]` — the same resolution
+         *     the drift probe and the index build use, because the deployment has one embedding backend and
+         *     the vectors this writes are the ones the search reads.
+         */
+        MeaningRequest: {
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default
+             */
+            provider: string;
+            /**
+             * Scope
+             * @default guidance
+             * @enum {string}
+             */
+            scope: "guidance" | "sidecars";
+            /** Skill Id */
+            skill_id: string;
         };
         /** MetaRequest */
         MetaRequest: {
@@ -4750,10 +4841,20 @@ export interface components {
              */
             semantic: string[];
             /**
+             * Semantic Searched
+             * @default 0
+             */
+            semantic_searched: number;
+            /**
              * Semantic Status
              * @default
              */
             semantic_status: string;
+            /**
+             * Semantic Total
+             * @default 0
+             */
+            semantic_total: number;
             /**
              * Total Matched
              * @default 0
@@ -5935,7 +6036,9 @@ export interface components {
              *       "query": "",
              *       "scores": {},
              *       "semantic": [],
+             *       "semantic_searched": 0,
              *       "semantic_status": "",
+             *       "semantic_total": 0,
              *       "total_matched": 0,
              *       "truncated": false
              *     }
@@ -8529,6 +8632,72 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["JudgeEvalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    launch_meaning_api_jobs_meaning_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeaningRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    plan_meaning_job_api_jobs_meaning_plan_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MeaningRequest"];
             };
         };
         responses: {

@@ -419,7 +419,11 @@ set, *"who is allowed to write money rows"* finds the claim that says `PaymentSe
 the only writer to `payments_ledger`, which contains none of those words. Those hits arrive *below*
 the exact matches, scored and labelled, and can never reorder or hide one — so the deterministic
 half of the answer is the same as it was before an embedder existed, and is still there when the
-embedder is down. **And the note itself**: selecting a claim opens its whole `.agents/` file with
+embedder is down. A search never waits on the embedding endpoint: it ranks the claims already
+embedded and says how many it has read (*"has read 1,240 of 3,200 claims"*), with a button that
+embeds the rest as a watchable job — progress in claims, cancel at any point, and the remainder
+resumed rather than restarted next time, because every batch is cached before the next begins.
+**And the note itself**: selecting a claim opens its whole `.agents/` file with
 that line marked, so the rung, the `confirmed_at_tree` stamp, the folder's other claims and the
 prose between them are one click away rather than a checkout away.
 
@@ -432,7 +436,9 @@ box over every file the reviewer is given: exact matches in document order (`rul
 set — blocks that *mean* something close underneath, scored and labelled. *"errors we quietly
 ignore"* finds **R2 — no swallowed errors**, which contains none of those words. The meaning half
 is additive: it can never reorder or hide an exact match, and an embedding endpoint that is down
-costs those rows and nothing else.
+costs those rows and nothing else. As on the sidecar graph, the meaning half reports how much of
+the skill it has read and offers to finish — a large skill is covered completely, one watchable
+pass at a time, rather than silently cut off at a fixed number of blocks.
 
 **And the shape of it.** A skill is a folder, and the folder already carries edges nothing drew: a
 rule that says *"unless R3 applies"* is coupled to a rule three files away, `meta.yaml` ties a rule to

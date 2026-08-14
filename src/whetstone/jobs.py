@@ -46,6 +46,13 @@ JobKind = Literal[
     "drift",
     "synthesize",
     "index",
+    # Embedding a skill's guidance blocks or a tree's claims so the console's search boxes can rank
+    # them by meaning. Its own kind rather than a variant of "index": that one builds the committed
+    # case index, which folds into `skill_hash` and retracts gate evidence when rebuilt. This writes
+    # nothing but a vector cache, changes no hash, and can be cancelled halfway with no consequence
+    # beyond having less of the corpus warm — filing the two together would put a disposable
+    # convenience next to an action that invalidates a gate.
+    "meaning",
     # The maintainer sweep over a source tree's `.agents/` claims (`docs/design/sidecars.md` §8).
     # Its own kind because it is the only job that spends against a *repository* rather than a
     # corpus: nothing about the skill's cases changes, and a job list that filed it under "eval"

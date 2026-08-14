@@ -10,10 +10,13 @@ so a result can be pointed at on the page it came from.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from whetstone.domain.skill import GuidancePage, Skill
-from whetstone.guidance import chunks_of, search
+from whetstone.guidance import chunks_of, embed_texts, search
+from whetstone.llm.embedding import CachedEmbedder, warm
 from whetstone.wiki import SkillWiki, WikiPage
 
 BODY = """# Rust error handling
@@ -268,6 +271,32 @@ def test_a_dead_embedder_costs_the_extra_rows_and_not_the_search(skill: Skill) -
 def test_no_embedder_is_simply_the_substring_search(skill: Skill) -> None:
     result = search(skill, "unwrap")
     assert result.semantic == [] and result.semantic_status == ""
+
+
+def test_a_cold_skill_reports_coverage_and_keeps_its_exact_answer(
+    skill: Skill, tmp_path: Path
+) -> None:
+    """What the console shows before anything has been embedded: the substring half, intact, plus
+    a count of the work outstanding — and emphatically not a failure message."""
+    embedder = CachedEmbedder(TopicEmbedder(), tmp_path)
+    result = search(skill, "unwrap", embedder=embedder, cached_only=True)
+
+    assert result.total_matched >= 1, "the exact half is untouched by any of this"
+    assert result.semantic == []
+    assert result.semantic_status == ""
+    assert result.semantic_searched == 0
+    assert result.semantic_total == len(chunks_of(skill))
+
+
+def test_a_warmed_skill_searches_every_block_it_has(skill: Skill, tmp_path: Path) -> None:
+    embedder = CachedEmbedder(TopicEmbedder(), tmp_path)
+    warm(embedder, embed_texts(skill))
+
+    result = search(skill, "silent discard", embedder=embedder, cached_only=True)
+    assert result.semantic_searched == result.semantic_total == len(chunks_of(skill))
+    assert any(chunk.rule == "R2" for chunk in result.semantic), (
+        "and the meaning hit the cap used to make unreachable now arrives"
+    )
 
 
 def test_an_empty_query_embeds_nothing(skill: Skill) -> None:
