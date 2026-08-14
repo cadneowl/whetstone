@@ -55,7 +55,14 @@ def stub_pull(monkeypatch: pytest.MonkeyPatch) -> list[datetime]:
 
     monkeypatch.setattr("whetstone.watch.stream_corpus", fake_pull)
     monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
-    monkeypatch.setattr("whetstone.watch.Watcher._issues", lambda self: None)
+    # Mirrors the real precondition rather than answering None flat. `Scope.defects` now records
+    # what the tracker *resolved to* instead of what the config asked for — so a stub that returns
+    # None for a config naming a tracker states something that cannot happen, and the tests about
+    # widening scope would be asserting against a premise production never produces.
+    monkeypatch.setattr(
+        "whetstone.watch.Watcher._issues",
+        lambda self: object() if self._config.watch.tracker_url else None,
+    )
     return asked
 
 
@@ -515,3 +522,101 @@ def test_a_sweep_mines_merged_history_only_unless_told_otherwise(
     Watcher(_config(tmp_path, include_open=True)).sweep(now=AT)
 
     assert asked == [False, True]
+
+
+def test_the_watcher_hands_the_tracker_email_settings_to_the_connector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both keys reach the connector, which is where the indirection is actually resolved.
+
+    Worth a test of its own because the tempting place to resolve an env var is right here, in the
+    caller that needed it — and `corpus pull` builds the same connector from a different set of
+    flags. A fix applied at one call site leaves the other reading a setting it does not
+    understand, which surfaces as "the schedule works and the manual pull does not", or the
+    reverse, and neither points at the config key that is being dropped.
+    """
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "whetstone.providers.jira.provider.JiraConnector.from_config",
+        classmethod(lambda _cls, config: seen.append(config)),
+    )
+    config = _config(
+        tmp_path,
+        tracker_url="https://jira.example.com",
+        tracker_project="PAY",
+        tracker_email="me@acme.com",
+        tracker_email_env="JIRA_EMAIL",
+    )
+    Watcher(config)._issues()
+
+    assert seen == [
+        {
+            "base_url": "https://jira.example.com",
+            "token_env": "JIRA_TOKEN",
+            "email": "me@acme.com",
+            "email_env": "JIRA_EMAIL",
+        }
+    ]
+
+
+def test_a_broken_tracker_costs_the_defect_signal_and_not_the_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The merge-request walk is the half that works; a tracker refusal may not take it down.
+
+    `_issues` is resolved once for the whole sweep, so a `ValueError` out of it used to abort
+    `stream_corpus` as well — a `[watch]` block naming a variable the watcher's service unit does
+    not export would mine nothing, on every sweep, forever, from a GitLab config with nothing wrong
+    with it.
+    """
+    walked: list[str] = []
+    monkeypatch.setattr(
+        "whetstone.watch.stream_corpus",
+        lambda _c, project, *a, **k: walked.append(project) or [],
+    )
+    monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+
+    config = _config(
+        tmp_path,
+        tracker_url="https://jira.example.com",
+        tracker_project="PAY",
+        tracker_email_env="JIRA_EMAIL",
+    )
+    sweep = Watcher(config).sweep(now=AT)
+
+    assert walked == ["acme/payments"], "the merge-request walk still ran"
+    assert "$JIRA_EMAIL" in sweep.error, "and the reason the defects did not is reported"
+
+
+def test_a_sweep_that_could_not_reach_its_tracker_does_not_claim_it_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watermark must record the narrower scope, or the window is lost permanently.
+
+    A mark says *everything up to here has been covered* — of what was being asked for. Let a sweep
+    skip defects while the scope goes on claiming `defects=True` and the mark is earned over a
+    window nothing looked at; repairing the variable afterwards widens nothing, rewinds nothing,
+    and every defect resolved in that window stays unreachable. So a repaired tracker has to widen
+    the scope on the next sweep exactly as first pairing one does.
+    """
+    monkeypatch.setattr("whetstone.watch.stream_corpus", lambda *a, **k: [])
+    monkeypatch.setattr("whetstone.watch.Watcher._reviews", lambda self: object())
+    monkeypatch.setattr("whetstone.watch.stream_defects", lambda *a, **k: [])
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+
+    path = tmp_path / "watch.json"
+    config = _config(
+        tmp_path,
+        tracker_url="https://jira.example.com",
+        tracker_project="PAY",
+        tracker_email_env="JIRA_EMAIL",
+    )
+    Watcher(config, state_path=path).sweep(now=AT)
+
+    # The variable is exported and the tracker now builds: the scope widens, so the mark is given
+    # up and the window is re-covered rather than written off.
+    monkeypatch.setenv("JIRA_EMAIL", "me@acme.com")
+    assert Watcher(config, state_path=path).sweep(now=AT + timedelta(hours=1)).rewound == [
+        "acme/payments"
+    ]

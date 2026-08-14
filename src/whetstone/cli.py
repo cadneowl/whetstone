@@ -1268,6 +1268,10 @@ def corpus_pull(
         str | None,
         typer.Option(help="Jira Cloud account email (omit for a Server/DC bearer token)"),
     ] = None,
+    jira_email_env: Annotated[
+        str | None,
+        typer.Option(help="Environment variable holding that email, instead of passing it here"),
+    ] = None,
     jira_token_env: Annotated[str, typer.Option()] = "JIRA_TOKEN",
     max_defect_files: Annotated[
         int, typer.Option(min=0, help="Max candidates to sample from one defect fix")
@@ -1287,8 +1291,38 @@ def corpus_pull(
     # the end means the operator waits out a full history crawl to be told they mistyped a flag.
     if bool(jira_url) != bool(jira_project):
         raise typer.BadParameter("--jira-url and --jira-project must be given together")
+    if (jira_email or jira_email_env) and not jira_url:
+        # The same rule, for the settings that only mean something once a tracker is paired. Left
+        # unchecked these are accepted, ignored, and never mentioned again — which is the exact
+        # "named a setting that got dropped" failure the email indirection exists to prevent.
+        raise typer.BadParameter(
+            "--jira-email/--jira-email-env only apply with --jira-url and --jira-project"
+        )
 
     connector = GitLabConnector.from_config({"base_url": base_url, "token_env": token_env})
+    # Built here rather than beside its first use, for the reason stated directly above: resolving
+    # the account email is a nanosecond of environment lookup that can refuse, and refusing it after
+    # a forty-minute backfill has drained is indefensible when it could be refused at second zero.
+    # Nothing here touches the network — `from_config` assembles a client and sends nothing.
+    tracker = None
+    # Bound here rather than re-narrowed at the walk: the pairing rule above is what guarantees
+    # these arrive together, and carrying the guarantee forward as a plain `str` keeps the defect
+    # walk from having to restate a check that has already been made and refused on.
+    defect_project = jira_project or ""
+    if jira_url and jira_project:
+        try:
+            tracker = JiraConnector.from_config(
+                {
+                    "base_url": jira_url,
+                    "token_env": jira_token_env,
+                    "email": jira_email or "",
+                    "email_env": jira_email_env or "",
+                }
+            )
+        except ValueError as exc:
+            # Raised as a bad parameter rather than caught below: it *is* one, and the walk that
+            # `summarise` reports on has not started, so there is nothing yet to summarise.
+            raise typer.BadParameter(str(exc)) from exc
     skills = load_skills(skills_root) if skills_root else []
 
     skipped: list[str] = []
@@ -1372,17 +1406,14 @@ def corpus_pull(
             )
         )
 
-        if jira_url and jira_project:
-            tracker = JiraConnector.from_config(
-                {"base_url": jira_url, "token_env": jira_token_env, "email": jira_email or ""}
-            )
+        if tracker is not None:
             from_defects = keep(
                 stream_defects(
-                    connector, tracker, project, jira_project, since, skills,
+                    connector, tracker, project, defect_project, since, skills,
                     max_files=max_defect_files, on_skip=note_skip, on_progress=show("issue"),
                 )
             )
-            typer.echo(f"{from_defects} candidate(s) from resolved {jira_project} defects")
+            typer.echo(f"{from_defects} candidate(s) from resolved {defect_project} defects")
     except KeyboardInterrupt:
         # The likeliest way a long backfill ends. Not an error — the queue is exactly as valid as
         # it would have been had the window been narrower.

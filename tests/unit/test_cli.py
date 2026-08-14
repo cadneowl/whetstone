@@ -326,6 +326,60 @@ def test_defect_candidates_join_the_queue(
     assert (out / "acme-payments-812-t0" / "candidate.json").is_file()
 
 
+def test_the_account_email_can_come_from_the_environment(
+    tmp_path: Path, stub_pull: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`corpus pull` reaches the same indirection the watcher does — the point of resolving it in
+    `from_config` rather than in either caller."""
+    seen: list[dict[str, object]] = []
+    monkeypatch.setenv("JIRA_EMAIL", "me@acme.com")
+    monkeypatch.setattr(
+        "whetstone.cli.JiraConnector.from_config", lambda config: seen.append(config) or object()
+    )
+    monkeypatch.setattr("whetstone.cli.stream_defects", lambda *a, **k: iter([]))
+
+    result = _pull(
+        tmp_path / "c",
+        "--jira-url", "https://acme.atlassian.net",
+        "--jira-project", "PAY",
+        "--jira-email-env", "JIRA_EMAIL",
+    )
+    assert result.exit_code == 0, result.output
+    assert seen[0]["email_env"] == "JIRA_EMAIL"
+
+
+def test_an_unresolvable_email_is_refused_before_the_crawl_not_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule this command already states about `--jira-url`/`--jira-project`, applied to the
+    setting added beside them: a backfill can run for forty minutes, and being told at the end that
+    an environment variable was unset is the one failure mode that whole guard exists to prevent."""
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.setattr(
+        "whetstone.cli.stream_corpus",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("the crawl must not start")),
+    )
+
+    result = _pull(
+        tmp_path / "c",
+        "--jira-url", "https://acme.atlassian.net",
+        "--jira-project", "PAY",
+        "--jira-email-env", "JIRA_EMAIL",
+    )
+    assert result.exit_code != 0
+    assert "$JIRA_EMAIL" in result.output
+
+
+def test_an_email_flag_without_a_tracker_is_refused_rather_than_ignored(
+    tmp_path: Path, stub_pull: None
+) -> None:
+    """Accepting a setting and dropping it silently is the failure this indirection was added to
+    stop; it would be poor form to introduce a fresh instance of it in the same change."""
+    result = _pull(tmp_path / "c", "--jira-email-env", "JIRA_EMAIL")
+    assert result.exit_code != 0
+    assert "only apply with --jira-url" in result.output
+
+
 def test_without_jira_flags_nothing_tracker_shaped_happens(
     tmp_path: Path, stub_pull: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

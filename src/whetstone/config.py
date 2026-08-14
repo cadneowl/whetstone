@@ -261,7 +261,17 @@ class WatchConfig(BaseModel):
     tracker_url: str = ""
     tracker_project: str = ""
     tracker_token_env: str = "JIRA_TOKEN"
+    # The Jira Cloud account the API token authenticates as. Two ways to give it, because the value
+    # is personal and this file is usually shared: `tracker_email` is the literal address, and
+    # `tracker_email_env` names an environment variable holding it — the same indirection
+    # `tracker_token_env` already provides for the secret beside it. A literal wins when both are
+    # set, so a machine-specific override never has to be deleted to be ignored.
+    #
+    # Leave both empty on Server/Data Center, where the token is a bearer and there is no email:
+    # `providers.jira.client.auth_header` picks the scheme by whether one is present, which is why
+    # an email that fails to resolve is refused rather than shrugged off.
     tracker_email: str = ""
+    tracker_email_env: str = ""
 
 
 class Config(BaseModel):
