@@ -1044,6 +1044,7 @@ token from the environment variable named by `--token-env`.
 | `--jira-url TEXT` | *(none)* | Jira base URL. Enables the escaped-defect signal. |
 | `--jira-project TEXT` | *(none)* | Jira project key, e.g. `PAY`. Required with `--jira-url`. |
 | `--jira-email TEXT` | *(none)* | Cloud account email (Basic auth). Omit for a Server/DC bearer token. |
+| `--jira-email-env TEXT` | *(none)* | Env var holding that email, instead of passing it here. Named-but-unset is refused, not ignored. |
 | `--jira-token-env TEXT` | `JIRA_TOKEN` | Env var holding the Jira token. |
 | `--max-defect-files INT` | `3` | Cap on candidates sampled from one defect fix. |
 
@@ -1490,7 +1491,20 @@ include_open = false        # also mine merge requests still open — `corpus pu
 # requests that fixed them — cases review demonstrably missed.
 tracker_url = "https://jira.example.com"
 tracker_project = "PAY"
+tracker_token_env = "JIRA_TOKEN"   # env var holding the API token, never the token itself
+
+# Jira Cloud only: the account that token authenticates as. Give it literally, or name an
+# environment variable holding it — the address is personal and this file usually is not.
+tracker_email = "you@example.com"
+# tracker_email_env = "JIRA_EMAIL"
 ```
+
+**Leave the email out entirely on Server/Data Center.** Its presence is what selects the
+authentication scheme — an email means Cloud Basic, no email means a Server/DC bearer token — so
+this is one setting where "unset" is a real answer rather than a missing one. The corollary is why
+naming `tracker_email_env` and leaving the variable unset is refused instead of ignored: silently
+falling back to a bearer token against Cloud produces a 401 that looks exactly like a bad token,
+and the next hour goes into rotating a credential that was fine.
 
 Off by default: a tool that reaches out to a forge on a timer should do so because someone asked it
 to. ***Pull now*** — on the triage screen, the inbox and the status page — sweeps immediately

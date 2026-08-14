@@ -33,6 +33,68 @@ def test_server_uses_a_bearer_token() -> None:
     assert auth_header("pat")["Authorization"] == "Bearer pat"
 
 
+# --- resolving the account email -----------------------------------------------
+#
+# The email decides the auth *scheme* (see the two tests above), which makes "where does it come
+# from" a question with teeth: every way of getting it wrong ends in a 401 that accuses the token.
+
+
+def _auth(config: dict[str, object]) -> str:
+    connector = JiraConnector.from_config({"base_url": BASE, **config})
+    header: str = connector._http._client.headers["Authorization"]
+    return header
+
+
+def test_the_email_can_come_from_an_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The config file is shared and the address is personal — the same reason the token beside it
+    has always been named rather than written."""
+    monkeypatch.setenv("JIRA_TOKEN", "api-token")
+    monkeypatch.setenv("JIRA_EMAIL", "me@acme.com")
+    decoded = base64.b64decode(_auth({"email_env": "JIRA_EMAIL"}).removeprefix("Basic ")).decode()
+    assert decoded == "me@acme.com:api-token"
+
+
+def test_a_literal_email_wins_over_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """So a machine-specific override never has to be deleted to be ignored."""
+    monkeypatch.setenv("JIRA_TOKEN", "api-token")
+    monkeypatch.setenv("JIRA_EMAIL", "ignored@acme.com")
+    decoded = base64.b64decode(
+        _auth({"email": "literal@acme.com", "email_env": "JIRA_EMAIL"}).removeprefix("Basic ")
+    ).decode()
+    assert decoded == "literal@acme.com:api-token"
+
+
+def test_neither_setting_is_still_a_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Server/DC is the case where *no email* is the correct answer, not a missing one."""
+    monkeypatch.setenv("JIRA_TOKEN", "pat")
+    assert _auth({}) == "Bearer pat"
+
+
+def test_a_named_but_unset_email_variable_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure this whole indirection could otherwise introduce, and the reason it is loud.
+
+    Falling back to "no email" here does not degrade to a lesser feature — it silently switches
+    Cloud Basic to Server/DC Bearer, so Jira Cloud answers 401 and the obvious diagnosis is a bad
+    token. An operator can lose an afternoon rotating a credential that was never wrong.
+    """
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    with pytest.raises(ValueError) as caught:
+        _auth({"email_env": "JIRA_EMAIL"})
+    message = str(caught.value)
+    assert "$JIRA_EMAIL" in message, "it must name the variable that is missing"
+    assert "401" in message, "and say why an empty one is not simply ignored"
+
+
+def test_an_empty_email_variable_is_refused_like_an_unset_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIRA_EMAIL", "   ")
+    with pytest.raises(ValueError, match=r"\$JIRA_EMAIL"):
+        _auth({"email_env": "JIRA_EMAIL"})
+
+
 # --- pagination ----------------------------------------------------------------
 
 

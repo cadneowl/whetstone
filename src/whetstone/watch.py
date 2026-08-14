@@ -260,14 +260,19 @@ class Watcher:
         started = now or datetime.now(UTC)
         backfill = as_utc(since) if since is not None else None
         watch = self._config.watch
+        # Resolved before the scope, because the scope has to describe what this sweep can actually
+        # mine rather than what the config asks for. A tracker that will not configure means no
+        # defects are covered, and the mark must say so — see `_tracker`.
+        issues, tracker_problem = self._tracker()
         # Read once for the whole sweep, and written down again wherever a mark moves — see the
         # advance below.
-        scope = self._scope()
+        scope = self._scope(defects=issues is not None)
         with self._lock:
             self._state.polling = True
         clock = datetime.now(UTC)
 
         sweep = Sweep(at=started, projects=list(watch.projects), backfill_from=backfill)
+        sweep.error = tracker_problem
         skipped: list[str] = []
 
         def note_skip(mr: MergeRequestRef, exc: ConnectorError) -> None:
@@ -281,7 +286,6 @@ class Watcher:
                 )
             skills = load_skills(self._config.skills_root)
             connector = self._reviews()
-            issues = self._issues()
             for project in watch.projects:
                 if backfill is not None:
                     since = backfill
@@ -381,12 +385,19 @@ class Watcher:
             self._state.scope[project] = scope
             return floor, rewind
 
-    def _scope(self) -> Scope:
-        """What a sweep would mine right now. Mirrors `sweep`'s own walks and `_issues`."""
+    def _scope(self, *, defects: bool | None = None) -> Scope:
+        """What a sweep would mine right now. Mirrors `sweep`'s own walks and `_issues`.
+
+        `defects` is passed by `sweep` as what the tracker *resolved to*, not what the config asks
+        for: the two differ when a tracker is configured and cannot be built, and the mark has to
+        record the narrower of them. Defaulting to the config keeps this answerable without
+        building a connector, which is what every other caller wants.
+        """
         watch = self._config.watch
+        configured = bool(watch.tracker_url and watch.tracker_project)
         return Scope(
             open=watch.include_open,
-            defects=bool(watch.tracker_url and watch.tracker_project),
+            defects=configured if defects is None else defects,
             lookback_days=watch.lookback_days,
         )
 
@@ -428,6 +439,31 @@ class Watcher:
             {"base_url": watch.gitlab_url, "token_env": watch.token_env}
         )
 
+    def _tracker(self) -> tuple[IssueConnector | None, str]:
+        """The tracker connector, or None and the reason there is none.
+
+        **A tracker that will not configure costs the defect signal and nothing beside it.** The
+        connector is resolved once for the whole sweep, so a refusal raised out of `_issues` aborted
+        the merge-request walk with it: a `[watch]` block naming an environment variable the
+        watcher's service unit does not export would mine zero candidates, on every sweep, forever,
+        from a GitLab configuration with nothing whatever wrong with it. The defect pairing is the
+        optional half of a sweep and may not take the working half down.
+
+        **And the mark must not claim what this returns None for.** `Scope` exists because a
+        watermark is a claim with a silent precondition — *everything up to here has been covered*,
+        of what we were asking for. A sweep that skipped defects while the scope went on saying
+        `defects=True` would earn a mark over a window it never looked at, and fixing the variable
+        afterwards would widen nothing, rewind nothing, and leave every defect resolved in that
+        window permanently unreachable. So the caller passes this outcome into `_scope`, and a
+        repaired configuration widens the scope on the next sweep exactly as first pairing a tracker
+        does.
+        """
+        try:
+            return self._issues(), ""
+        except ValueError as exc:
+            # Already a sentence written for whoever edits the TOML; see `_email`.
+            return None, str(exc)
+
     def _issues(self) -> IssueConnector | None:
         watch = self._config.watch
         if not watch.tracker_url or not watch.tracker_project:
@@ -439,6 +475,7 @@ class Watcher:
                 "base_url": watch.tracker_url,
                 "token_env": watch.tracker_token_env,
                 "email": watch.tracker_email,
+                "email_env": watch.tracker_email_env,
             }
         )
 

@@ -25,6 +25,41 @@ FIELDS = "summary,description,issuetype,priority,labels,components,resolution,re
 _PROJECT_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
+def _email(config: dict[str, Any]) -> str:
+    """The Jira Cloud account email — literal, or from the environment it was told to read.
+
+    **Resolved here, not by the caller.** Two places build a connector — the watcher's periodic
+    sweep and `corpus pull` — and an indirection implemented at either one of them leaves the other
+    reading a config key it does not understand. That is not hypothetical: it is the shape of every
+    settings bug where the background job works and the manual command does not, or the reverse.
+    `token_env` is already resolved on this line for the same reason, and this joins it.
+
+    **An email that was promised and did not arrive is refused, never shrugged off.** Everywhere
+    else in this codebase a missing optional value costs a feature; here it silently changes the
+    authentication *scheme*. `client.auth_header` sends Basic when an email is present and Bearer
+    when it is not, so an unset variable does not produce "no email" — it produces a bearer token
+    sent to Jira Cloud, which answers 401 as though the token were wrong. The operator then goes
+    and rotates a perfectly good token. Naming a variable and leaving it unset is unambiguously a
+    mistake, so it is reported as one, in the terms that make it fixable.
+    """
+    literal = str(config.get("email", "")).strip()
+    if literal:
+        return literal
+    name = str(config.get("email_env", "")).strip()
+    if not name:
+        return ""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ValueError(
+            f"the Jira account email was configured to come from ${name}, which is unset or "
+            f"empty. This cannot be treated as 'no email': an absent email switches "
+            f"authentication from Cloud Basic to Server/Data Center Bearer, so a Cloud instance "
+            f"would answer 401 and look like a bad token. Set ${name}, give the address literally "
+            f"as `tracker_email`, or drop the setting if this is a Server/Data Center instance."
+        )
+    return value
+
+
 class JiraConnector:
     """Jira implementation of `IssueConnector` (REST v3 on Cloud, v2 on Server/Data Center)."""
 
@@ -52,7 +87,7 @@ class JiraConnector:
             JiraHttp(
                 base_url,
                 os.environ.get(token_env, ""),
-                email=str(config.get("email", "")),
+                email=_email(config),
             ),
             base_url=base_url,
             search_path=str(config.get("search_path", DEFAULT_SEARCH_PATH)),
