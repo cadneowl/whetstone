@@ -14,6 +14,7 @@ import { EdgeLegend, Legend } from '@/components/graph/Legend'
 import { Neighbours } from '@/components/graph/Neighbours'
 import type { GraphPalette, Ring } from '@/components/graph/types'
 import { boxFor, layout } from '@/components/graphLayout'
+import { MeaningCoverage } from '@/components/MeaningCoverage'
 import {
   clampHops,
   crumbsFor,
@@ -287,6 +288,9 @@ export function SidecarGraph({ skillId }: { skillId: string }) {
             ids={data.result.semantic}
             scores={data.result.scores}
             status={data.result.semantic_status}
+            searched={data.result.semantic_searched}
+            total={data.result.semantic_total}
+            skillId={skillId}
             asked={query.length > 0}
             selected={selected}
             onSelect={(id) => navigate({ node: id }, { replace: true })}
@@ -670,12 +674,19 @@ function Results({
  * Silent when nothing was asked. Loud when something was asked and the embedder could not answer:
  * "no semantic results" and "no embedding model configured" are different facts about this tree,
  * and only one of them is about the notes.
+ *
+ * A third fact, which used to be told as if it were the second: a tree whose claims have not all
+ * been embedded yet. That is coverage, not failure — `MeaningCoverage` renders it as an offer to
+ * finish, and the rows found so far stay on screen rather than being dropped behind a warning.
  */
 function Semantic({
   nodes,
   ids,
   scores,
   status,
+  searched,
+  total,
+  skillId,
   asked,
   selected,
   onSelect,
@@ -684,56 +695,65 @@ function Semantic({
   ids: string[]
   scores: Record<string, number>
   status: string
+  searched: number
+  total: number
+  skillId: string
   asked: boolean
   selected: string | null
   onSelect: (id: string) => void
 }) {
   if (!asked) return null
-  if (status) {
-    return (
-      <p className="text-sm text-muted">
-        <span className="text-warn">Meaning search off.</span> {status}
-      </p>
-    )
-  }
-  if (ids.length === 0) return null
 
+  const coverage = (
+    <MeaningCoverage
+      skillId={skillId}
+      scope="sidecars"
+      status={status}
+      searched={searched}
+      total={total}
+      unit="claim"
+    />
+  )
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const rows = ids.map((id) => byId.get(id)).filter((node): node is GraphNode => !!node)
+  if (rows.length === 0) return coverage
   return (
-    <div>
-      <p className="mb-1.5 text-sm text-muted">
-        Also close in meaning — {rows.length} claim{rows.length === 1 ? '' : 's'} that contain none
-        of what you typed.{' '}
-        <span title="Cosine similarity against a local embedding model. Additive only: it can add rows below the exact matches and can never reorder or hide one.">
-          Scored, not matched.
-        </span>
-      </p>
-      <ul className="space-y-1">
-        {rows.map((node) => (
-          <li key={node.id}>
-            <button
-              type="button"
-              onClick={() => onSelect(node.id)}
-              className={`w-full rounded border border-dashed px-2.5 py-1.5 text-left text-sm ${
-                node.id === selected ? 'border-accent bg-accent/5' : 'border-line'
-              }`}
-            >
-              <span className="flex flex-wrap items-baseline gap-x-2">
-                <span className="tabular font-mono text-xs text-muted">
-                  {(scores[node.id] ?? 0).toFixed(2)}
+    <div className="space-y-2">
+      <div>
+        <p className="mb-1.5 text-sm text-muted">
+          Also close in meaning — {rows.length} claim{rows.length === 1 ? '' : 's'} that contain
+          none of what you typed.{' '}
+          <span title="Cosine similarity against a local embedding model. Additive only: it can add rows below the exact matches and can never reorder or hide one.">
+            Scored, not matched.
+          </span>
+        </p>
+        <ul className="space-y-1">
+          {rows.map((node) => (
+            <li key={node.id}>
+              <button
+                type="button"
+                onClick={() => onSelect(node.id)}
+                className={`w-full rounded border border-dashed px-2.5 py-1.5 text-left text-sm ${
+                  node.id === selected ? 'border-accent bg-accent/5' : 'border-line'
+                }`}
+              >
+                <span className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="tabular font-mono text-xs text-muted">
+                    {(scores[node.id] ?? 0).toFixed(2)}
+                  </span>
+                  <span className="flex-1">{node.label}</span>
+                  {node.sidecar && (
+                    <code className="font-mono text-xs text-muted">
+                      {node.sidecar}:{node.line}
+                    </code>
+                  )}
                 </span>
-                <span className="flex-1">{node.label}</span>
-                {node.sidecar && (
-                  <code className="font-mono text-xs text-muted">
-                    {node.sidecar}:{node.line}
-                  </code>
-                )}
-              </span>
-            </button>
-          </li>
-        ))}
-      </ul>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+      {coverage}
     </div>
   )
 }

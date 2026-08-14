@@ -13,6 +13,12 @@ via `resolve_backend`, so ``--provider ollama`` means the same host here as ever
 Vectors are cached on disk keyed by content hash + model. A drift probe re-embeds the same case
 diffs every quarter; the corpus barely changes between probes, so the cache turns "re-run the
 probe" from hundreds of embedding calls into a handful.
+
+That cache is also what makes the console's meaning search answerable at interactive speed, and it
+is why this module exposes the two questions a *search* has to ask of it rather than of the
+endpoint: `uncached` says what a corpus would still cost, and `warm` pays it in batches while
+something watches. A search itself never calls either — it ranks what is already on disk (see
+`llm/semantic.rank`), so a cold corpus costs a search coverage and never a timeout.
 """
 
 from __future__ import annotations
@@ -147,6 +153,27 @@ class CachedEmbedder:
                 self._write(texts[i], vector)
         return [v for v in vectors if v is not None]
 
+    def holds(self, text: str) -> bool:
+        """Whether this text's vector is already on disk — asked without calling the endpoint.
+
+        A `stat`, not a read. The caller is sizing work ("how much of this corpus is embedded?")
+        over every unit at once, and parsing thousands of vectors to answer a question about their
+        existence would make the cheap question cost as much as the expensive one.
+
+        **This is deliberately a weaker test than `_read`'s**, and the gap is worth naming. An empty
+        file is rejected here because that is what a crash mid-write leaves and it costs nothing to
+        catch; a file that is present, non-empty and *malformed* still reports as held, while
+        `_read` will call it a miss. The consequence is bounded and self-correcting: a search
+        including that unit re-embeds it inline once, `_write` replaces the bad file, and every
+        search after it is served from disk. What must not happen — and does not — is the reverse,
+        where `holds` under-reports and a warm corpus is re-embedded wholesale.
+        """
+        path = self._path(text)
+        try:
+            return path.stat().st_size > 0
+        except OSError:
+            return False
+
     def _path(self, text: str) -> Path:
         return self._dir / f"{hashlib.sha256(text.encode('utf-8')).hexdigest()}.json"
 
@@ -208,3 +235,64 @@ def build_embedder(
         **({"timeout": timeout} if timeout is not None else {}),
     )
     return CachedEmbedder(client, cache_dir) if cache_dir else client
+
+
+def persists(embedder: Embedder) -> bool:
+    """Whether this embedder keeps its vectors — whether *"already embedded"* is a question at all.
+
+    Asked by anything offering to rank only what is on disk. For an embedder with no cache the
+    honest answer to "what is already embedded?" is not *nothing*, it is *the question does not
+    apply*: nothing persists, so no warm-up could ever change the answer, and a search that read
+    the empty set as "search nothing" would be permanently empty rather than merely cold. Callers
+    use this to degrade to searching everything instead, which is the only behaviour that can work.
+    """
+    return isinstance(embedder, CachedEmbedder)
+
+
+def uncached(embedder: Embedder, texts: Sequence[str]) -> list[str]:
+    """The texts this embedder would have to call the endpoint for, in first-seen order.
+
+    Deduplicated, because the cache keys on content: a corpus that repeats a sentence in two files
+    costs one embedding, and a caller pricing the work should be told the price it will pay rather
+    than the number of units it holds.
+
+    An embedder with no cache has to call for every text, which is the honest answer for a bare
+    `OpenAIEmbeddingClient` — it says *none of this is free*, and a caller sizing a warm-up pass
+    should hear that instead of a cheerful zero.
+    """
+    seen: dict[str, None] = dict.fromkeys(texts)
+    if not isinstance(embedder, CachedEmbedder):
+        return list(seen)
+    return [text for text in seen if not embedder.holds(text)]
+
+
+def warm(
+    embedder: Embedder,
+    texts: Sequence[str],
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+    batch: int = _BATCH,
+) -> int:
+    """Fill the cache for `texts`, reporting progress. Returns how many were newly embedded.
+
+    This is the expensive half of meaning search, made watchable. A search ranks whatever is already
+    on disk and never blocks on the endpoint; this is what puts things on disk, and it is called
+    from a job thread so an operator can see a count move and stop it.
+
+    Batched rather than handed over whole for two reasons that pull the same way: `on_progress` can
+    only report between calls, and a failed request retries whole — so a large batch is both a
+    longer silence and a bigger thing to lose. `on_progress` is free to raise (a cancelled job
+    does exactly that), which abandons the pass with everything embedded so far still cached.
+    Nothing is wasted by stopping: the next run starts from what this one finished.
+    """
+    todo = uncached(embedder, texts)
+    if on_progress is not None:
+        on_progress(0, len(todo))
+    done = 0
+    for start in range(0, len(todo), batch):
+        chunk = todo[start : start + batch]
+        embedder.embed(chunk)
+        done += len(chunk)
+        if on_progress is not None:
+            on_progress(done, len(todo))
+    return done

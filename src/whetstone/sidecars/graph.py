@@ -54,7 +54,6 @@ from pydantic import BaseModel
 
 from whetstone.llm.semantic import (
     DEFAULT_BAND,
-    DEFAULT_EMBED_LIMIT,
     DEFAULT_MIN_SCORE,
     SemanticResult,
     free_text,
@@ -253,6 +252,12 @@ class QueryResult(BaseModel):
     # were asked for. Never an exception: an embedding endpoint that is down must cost the extra
     # results and not the search.
     semantic_status: str = ""
+    # How much of the tree that meaning answer covers — claims compared, of claims there are. Not
+    # folded into `semantic_status`, because "the endpoint is down" and "half this tree has never
+    # been embedded" are a failure and a chore, and the second is the console's cue to offer the
+    # warm-up rather than to say the search is off.
+    semantic_searched: int = 0
+    semantic_total: int = 0
     nodes: list[Node] = []
     edges: list[Edge] = []
     total_matched: int = 0
@@ -876,6 +881,8 @@ def query(
         semantic=close,
         scores={hit.id: hit.score for hit in (semantic.hits if semantic else []) if hit.id in keep},
         semantic_status=semantic.status if semantic else "",
+        semantic_searched=semantic.searched if semantic else 0,
+        semantic_total=semantic.total if semantic else 0,
         nodes=nodes,
         edges=edges,
         total_matched=len(matched),
@@ -972,7 +979,7 @@ def semantic_hits(
     min_score: float = DEFAULT_MIN_SCORE,
     band: float = DEFAULT_BAND,
     limit: int = 8,
-    embed_limit: int = DEFAULT_EMBED_LIMIT,
+    cached_only: bool = False,
 ) -> SemanticResult:
     """Claims whose meaning is near `text`, best first. Never raises.
 
@@ -992,6 +999,11 @@ def semantic_hits(
     net cast around it — see `llm.semantic.free_text`. That matters more here than in a flat result
     list, because a semantic hit is expanded by `hops` like any other seed: six noise hits at two
     hops is the whole graph, drawn in answer to a question about one node.
+
+    `cached_only` is passed by the console's query box and not by the CLI; see `llm.semantic.rank`.
+    A monorepo's `.agents/` tree is the largest corpus either search box faces, so it is the one
+    where the difference between ranking what is on disk and waiting for an endpoint decides
+    whether the request returns at all.
     """
     items = [
         (node.id, _embed_text(node))
@@ -1006,8 +1018,22 @@ def semantic_hits(
         min_score=min_score,
         band=band,
         limit=limit,
-        embed_limit=embed_limit,
+        cached_only=cached_only,
     )
+
+
+def claim_texts(graph: SidecarGraph) -> list[str]:
+    """Every claim as it is embedded — what a warm-up pass over this tree has to cover.
+
+    Shares `_embed_text` with `semantic_hits` rather than rebuilding the string, because the cache
+    keys on the exact text: a warm-up that assembled it even slightly differently would fill the
+    cache with entries no search ever asks for, and report a corpus as ready that is still cold.
+    """
+    return [
+        _embed_text(node)
+        for node in graph.nodes
+        if node.kind == "claim" and node.text.strip()
+    ]
 
 
 def _embed_text(node: Node) -> str:
@@ -1041,6 +1067,18 @@ def _adjacency(graph: SidecarGraph) -> dict[str, list[str]]:
 # --- cache ------------------------------------------------------------------------------------
 
 CACHE_DIR = "sidecar-graphs"
+
+
+def vectors_dir(store_dir: str | Path) -> Path:
+    """Where the console's meaning-search vectors live, for both search boxes.
+
+    One directory, named once. The guidance search and this graph's query box embed different text
+    but share a model and a cache, and — far more importantly — the *warm-up job* has to write
+    where the *search* reads. Two expressions of this path would mean an operator watching a
+    progress bar fill a directory nothing queries, which is the worst possible version of this
+    feature: it would look like it worked.
+    """
+    return Path(store_dir) / CACHE_DIR / "vectors"
 
 
 def cache_path(store_dir: str | Path, source_root: str | Path, role: str) -> Path:

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useGuidanceSearch, type GuidanceChunk } from '@/api/client'
+import { MeaningCoverage } from '@/components/MeaningCoverage'
 import { ErrorNote } from '@/components/primitives'
 
 /**
@@ -39,7 +40,7 @@ export function GuidanceSearch({ skillId }: { skillId: string }) {
       {active && data && (
         <div className="mt-2 space-y-3">
           <Exact result={data} />
-          <Close result={data} />
+          <Close result={data} skillId={skillId} />
         </div>
       )}
     </section>
@@ -87,29 +88,44 @@ function Exact({ result }: { result: Result }) {
   )
 }
 
-function Close({ result }: { result: Result }) {
-  if (result.semantic_status) {
-    return (
-      <p className="text-sm text-muted">
-        <span className="text-warn">Meaning search off.</span> {result.semantic_status}
-      </p>
-    )
-  }
-  if (result.semantic.length === 0) return null
+/**
+ * The meaning half: what was close, then how much of the skill was actually read.
+ *
+ * The rows come first and are rendered whenever there are any — including when coverage is partial,
+ * which is the bug this replaced. A single `semantic_status` string used to carry both "the
+ * embedder is unreachable" and "600 of your 3,200 blocks were searched", and an early return on it
+ * threw away hits the server had already computed and returned. A partial answer is still an
+ * answer; it just has a footer.
+ */
+function Close({ result, skillId }: { result: Result; skillId: string }) {
+  const coverage = (
+    <MeaningCoverage
+      skillId={skillId}
+      scope="guidance"
+      status={result.semantic_status}
+      searched={result.semantic_searched}
+      total={result.semantic_total}
+      unit="guidance block"
+    />
+  )
+  if (result.semantic.length === 0) return coverage
   return (
-    <div>
-      <p className="mb-1.5 text-sm text-muted">
-        Also close in meaning — {result.semantic.length} block
-        {result.semantic.length === 1 ? '' : 's'} that contain none of what you typed.{' '}
-        <span title="Cosine similarity against a local embedding model. Additive only: it can add rows below the exact matches and can never reorder or hide one.">
-          Scored, not matched.
-        </span>
-      </p>
-      <ul className="space-y-1">
-        {result.semantic.map((chunk) => (
-          <Row key={chunk.id} chunk={chunk} score={result.scores[chunk.id]} />
-        ))}
-      </ul>
+    <div className="space-y-2">
+      <div>
+        <p className="mb-1.5 text-sm text-muted">
+          Also close in meaning — {result.semantic.length} block
+          {result.semantic.length === 1 ? '' : 's'} that contain none of what you typed.{' '}
+          <span title="Cosine similarity against a local embedding model. Additive only: it can add rows below the exact matches and can never reorder or hide one.">
+            Scored, not matched.
+          </span>
+        </p>
+        <ul className="space-y-1">
+          {result.semantic.map((chunk) => (
+            <Row key={chunk.id} chunk={chunk} score={result.scores[chunk.id]} />
+          ))}
+        </ul>
+      </div>
+      {coverage}
     </div>
   )
 }

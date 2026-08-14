@@ -81,6 +81,11 @@ class GuidanceSearchResult(BaseModel):
     semantic: list[GuidanceChunk] = []
     scores: dict[str, float] = {}
     semantic_status: str = ""
+    # Blocks whose meaning was compared, of blocks there were to compare. A cold corpus makes the
+    # first of these smaller than the second; see `llm.semantic.SemanticResult`. Kept apart from
+    # `semantic_status` so a partial answer cannot be rendered as a broken one.
+    semantic_searched: int = 0
+    semantic_total: int = 0
     total_matched: int = 0
     truncated: bool = False
     # How much there was to search, so an empty result can say "nothing matched" rather than read
@@ -219,6 +224,7 @@ def search(
     *,
     embedder: Any | None = None,
     limit: int = DEFAULT_LIMIT,
+    cached_only: bool = False,
 ) -> GuidanceSearchResult:
     """Blocks of this skill's guidance matching `query`, exactly and then by meaning.
 
@@ -230,6 +236,10 @@ def search(
     `embedder` is optional and additive. Without one the answer is exactly the substring search;
     with one, blocks that mean something close arrive in a separate list, and an embedder that
     fails costs those rows and nothing else.
+
+    `cached_only` ranks just the blocks already embedded and reports the coverage rather than
+    waiting on the endpoint — what the console's box passes, and what keeps a large skill's first
+    search fast instead of impossible. See `llm.semantic.rank`.
     """
     chunks = chunks_of(skill)
     terms = _terms(query)
@@ -239,9 +249,11 @@ def search(
     semantic: list[GuidanceChunk] = []
     scores: dict[str, float] = {}
     status = ""
+    searched = total = 0
     if embedder is not None and query.strip():
-        found = _semantic(chunks, query, embedder)
+        found = _semantic(chunks, query, embedder, cached_only=cached_only)
         status = found.status
+        searched, total = found.searched, found.total
         # Every lexical match, not just the ones the limit kept. Excluding only what is on screen
         # would move the overflow into a list headed *"contains none of what you typed"* — about
         # blocks that contain exactly what you typed, which is the one claim that list makes.
@@ -260,6 +272,8 @@ def search(
         semantic=semantic,
         scores=scores,
         semantic_status=status,
+        semantic_searched=searched,
+        semantic_total=total,
         total_matched=len(matched),
         truncated=len(matched) > len(kept),
         chunks=len(chunks),
@@ -277,13 +291,26 @@ def wants_meaning(query: str) -> bool:
     return bool(free_text(_terms(query)).strip())
 
 
-def _semantic(chunks: list[GuidanceChunk], query: str, embedder: Any) -> SemanticResult:
+def _semantic(
+    chunks: list[GuidanceChunk], query: str, embedder: Any, *, cached_only: bool = False
+) -> SemanticResult:
     return rank(
         free_text(_terms(query)),
         [(c.id, _embed_text(c)) for c in chunks],
         embedder,
         unit="guidance block",
+        cached_only=cached_only,
     )
+
+
+def embed_texts(skill: Skill) -> list[str]:
+    """Every guidance block as it is embedded — what a warm-up pass over this skill has to cover.
+
+    Shares `_embed_text` with the search for the reason that function is documented as stable: the
+    vector cache keys on the exact string, so a warm-up that built it differently would fill the
+    cache with entries no search asks for and leave the corpus reported as ready while still cold.
+    """
+    return [_embed_text(chunk) for chunk in chunks_of(skill)]
 
 
 def _embed_text(chunk: GuidanceChunk) -> str:

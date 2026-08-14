@@ -123,8 +123,13 @@ export type JobRequest = {
   skill_id?: string
   trials?: number | null
   sample?: number | null
-  /** eval only: what to score — the working tree, the guidance draft, or the promoted cases. */
-  scope?: 'working' | 'draft' | 'promoted'
+  /**
+   * What a launch is aimed at, per kind. eval: the working tree, the guidance draft, or the
+   * promoted cases. meaning: which corpus to embed — this skill's own guidance, or the `.agents/`
+   * notes in the tree its role binds to. One field because each route validates its own shape
+   * server-side, exactly as the rest of this union works.
+   */
+  scope?: 'working' | 'draft' | 'promoted' | 'guidance' | 'sidecars'
   /**
    * Backend for this one launch, overriding the console default. Empty/absent = the header pick.
    * A known provider only (never a base URL); the server resolves and validates it. Applies to
@@ -1050,6 +1055,18 @@ function onJobSettled(client: ReturnType<typeof useQueryClient>, job: Job) {
     // position currently on screen would match an exact one.
     void client.invalidateQueries({ queryKey: keys.sidecarGraph(job.skill_id, '', 0).slice(0, 2) })
     void client.invalidateQueries({ queryKey: keys.claims(job.skill_id) })
+  }
+  // An embedding pass changes what either search box can find — and nothing else. Both are keyed on
+  // the query text, so these are prefixes: the position on screen is the one that has to refill, and
+  // an exact key would match whichever query happened to be typed when the job was launched.
+  //
+  // Invalidating both regardless of scope is deliberate. The two corpora are separate but the vector
+  // cache is one directory, the guidance and the notes of a skill overlap in wording often enough,
+  // and a stale panel here costs a refetch of a query that never touches the network for vectors it
+  // already has. Guessing wrong in the other direction costs the operator the result they waited for.
+  if (job.kind === 'meaning') {
+    void client.invalidateQueries({ queryKey: keys.guidanceSearch(job.skill_id, '').slice(0, 2) })
+    void client.invalidateQueries({ queryKey: keys.sidecarGraph(job.skill_id, '', 0).slice(0, 2) })
   }
   // Synthesis writes candidates into the triage queue.
   if (job.kind === 'synthesize') {
