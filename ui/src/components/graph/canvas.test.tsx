@@ -90,6 +90,81 @@ describe('clicking a dot', () => {
   })
 })
 
+describe('clicking a dot in a real browser, where dragging captures the pointer', () => {
+  // In a browser every press on a dot starts a capture-backed drag gesture, and pointer capture
+  // retargets the `click` that follows at the svg — so the `<g>`'s own onClick never fires and, for
+  // months, clicking a dot did nothing. The selection is therefore decided on pointer-up, and this
+  // block is that path pinned, with the geometry jsdom does not implement stubbed in.
+  function withGeometry(container: HTMLElement) {
+    const element = container.querySelector('svg') as SVGSVGElement
+    Object.assign(element, {
+      getScreenCTM: () => ({ inverse: () => ({}) }),
+      setPointerCapture: () => {},
+      releasePointerCapture: () => {},
+    })
+    vi.stubGlobal(
+      'DOMPoint',
+      class {
+        constructor(
+          public x: number,
+          public y: number,
+        ) {}
+        matrixTransform() {
+          return { x: this.x, y: this.y }
+        }
+      },
+    )
+    return element
+  }
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('selects on press-and-release, with no click event ever reaching the dot', () => {
+    const { onSelect, groupFor, container } = draw()
+    const svg = withGeometry(container)
+    const dot = groupFor('R1')!
+    fireEvent.pointerDown(dot, { button: 0, clientX: 200, clientY: 100, pointerId: 1 })
+    fireEvent.pointerUp(svg, { clientX: 200, clientY: 100, pointerId: 1 })
+    expect(onSelect).toHaveBeenCalledTimes(1)
+    expect(onSelect).toHaveBeenCalledWith('R1')
+    // The click the browser retargets after a capture must not answer the same press again —
+    // whether it lands on the svg or, in an environment that does not retarget, on the dot.
+    fireEvent.click(dot)
+    expect(onSelect).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not select at the end of a drag, and does not move a dot during a click', () => {
+    const { onSelect, groupFor, container } = draw()
+    const svg = withGeometry(container)
+    const dot = groupFor('R1')!
+    fireEvent.pointerDown(dot, { button: 0, clientX: 200, clientY: 100, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 260, clientY: 100, pointerId: 1 })
+    fireEvent.pointerUp(svg, { clientX: 260, clientY: 100, pointerId: 1 })
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(groupFor('R1')!.getAttribute('transform')).toBe('translate(260 100)')
+
+    // A tremble within the slop is still a click, and the dot has not moved to show for it.
+    fireEvent.pointerDown(dot, { button: 0, clientX: 260, clientY: 100, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 262, clientY: 100, pointerId: 1 })
+    fireEvent.pointerUp(svg, { clientX: 262, clientY: 100, pointerId: 1 })
+    expect(onSelect).toHaveBeenCalledWith('R1')
+    expect(groupFor('R1')!.getAttribute('transform')).toBe('translate(260 100)')
+  })
+
+  it('treats a second quick press on the same dot as the double click that centres', () => {
+    const { onSelect, onFocus, groupFor, container } = draw()
+    const svg = withGeometry(container)
+    const dot = groupFor('R1')!
+    for (let press = 0; press < 2; press += 1) {
+      fireEvent.pointerDown(dot, { button: 0, clientX: 200, clientY: 100, pointerId: 1 })
+      fireEvent.pointerUp(svg, { clientX: 200, clientY: 100, pointerId: 1 })
+    }
+    expect(onFocus).toHaveBeenCalledWith(expect.objectContaining({ id: 'R1' }))
+    // The first press selected; the second centred rather than toggling the selection back off.
+    expect(onSelect).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('what a selection does to the picture', () => {
   it('keeps the neighbourhood lit and dims only the strangers', () => {
     // Dimming everything but the node — which is what this used to do — hides the answer along with
@@ -166,6 +241,18 @@ describe('the zoom controls', () => {
     // 1.4³ clears the 2.5× threshold.
     for (let i = 0; i < 3; i += 1) fireEvent.click(screen.getByLabelText('Zoom in'))
     expect(named()).toContain('X7')
+  })
+})
+
+describe('the size of a label', () => {
+  it('holds at ten on-screen pixels however big the layout box is', () => {
+    // `boxFor` grows the box with the node count and the svg scales it down to fit the panel, so a
+    // fixed "10px" shrank on screen as the graph grew — about four actual pixels at the 400-node
+    // cap, which is not a label. Twice the box must mean twice the layout units: same size on
+    // screen.
+    const { container } = draw({ box: { width: 1800, height: 920 } })
+    const text = container.querySelector('text')!
+    expect(text.style.fontSize).toBe('20px')
   })
 })
 
