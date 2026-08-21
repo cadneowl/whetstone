@@ -8,8 +8,10 @@ import {
   type SkillHealth,
   type UncoveredMr,
 } from '@/api/client'
+import { ContradictionBadge } from '@/components/ContradictionBadge'
 import { FitPanel } from '@/components/FitPanel'
 import { LaunchButton } from '@/components/LaunchButton'
+import { ClaimRow } from '@/components/LocalContext'
 import { Badge, Empty, ErrorNote, Loading, score, when } from '@/components/primitives'
 import { mergeRequestOf } from '@/routes/triageFilters'
 
@@ -31,6 +33,7 @@ export function HealthPanel({ skillId }: { skillId: string }) {
   return (
     <div className="max-w-3xl space-y-5">
       <ScoreSection health={data} />
+      <ContradictionsSection skillId={skillId} health={data} />
       <CompositionSection skillId={skillId} health={data} />
       <RetirementSection skillId={skillId} retirements={data.retirements ?? []} />
       <DiscriminationSection skillId={skillId} health={data} />
@@ -123,6 +126,122 @@ function ScoreSection({ health }: { health: SkillHealth }) {
           at all. A gap the holdout is too small to resolve reads here as what it is, along with
           how many more graduated cases would make it readable. */}
       {h && h.holdout_cases > 0 && <p className="mt-2 text-xs text-muted">{h.reading}.</p>}
+    </Section>
+  )
+}
+
+/**
+ * Evidence disagreeing with itself, both kinds, always rendered — green is a claim, not an absence.
+ *
+ * Zero means the case pairs were checked and the sidecar ledger was read (or there is no sidecar
+ * to read); a section that only appeared when something was wrong could not say that. The
+ * resolving surfaces live elsewhere — the archive buttons on the Eval cases tab, the disputed
+ * queue on the Sidecar tab — so each finding links to where it is acted on rather than growing a
+ * third set of buttons here.
+ */
+function ContradictionsSection({ skillId, health }: { skillId: string; health: SkillHealth }) {
+  const { cases, claims, has_sidecar, sidecar_error } = health.contradictions
+  const total = cases.length + claims.length
+  return (
+    <Section
+      title={total > 0 ? `Contradictions (${total})` : 'Contradictions'}
+      intro="Whether the evidence disagrees with itself: pairs of eval cases no wording can both satisfy, and sidecar claims a reviewer with the code in front of it said were wrong."
+    >
+      {total === 0 ? (
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          {/* A ledger that failed to read forfeits the green pill: half the question was not
+              answered, and "none" over an unread ledger is the green-by-failure this section's
+              whole design forbids. */}
+          {sidecar_error ? (
+            <>
+              <Badge tone="warn" title={sidecar_error}>
+                sidecar ledger unreadable
+              </Badge>
+              <span className="text-xs text-muted">
+                no contradicting cases · whether any claims are disputed could not be checked
+              </span>
+            </>
+          ) : (
+            <>
+              <Badge tone="good">none</Badge>
+              <span className="text-xs text-muted">
+                no contradicting cases ·{' '}
+                {has_sidecar
+                  ? 'no disputed sidecar claims'
+                  : 'no sidecar declared, so no claims to dispute'}
+              </span>
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {sidecar_error && (
+            <p className="text-xs text-warn">
+              The claim ledger could not be read, so the sidecar half is unknown: {sidecar_error}
+            </p>
+          )}
+          {cases.length > 0 && (
+            <div>
+              <p className="mb-1.5 flex flex-wrap items-baseline gap-x-3 text-xs">
+                <span className="font-semibold text-warn">
+                  {cases.length} case pair{cases.length === 1 ? '' : 's'} that may contradict each
+                  other
+                </span>
+                <Link
+                  to={`/skills/${encodeURIComponent(skillId)}?tab=cases`}
+                  className="text-muted underline hover:text-accent"
+                >
+                  resolve on the Eval cases tab →
+                </Link>
+              </p>
+              <ul className="space-y-1.5">
+                {cases.map((pair) => (
+                  <li
+                    key={`${pair.left}|${pair.right}`}
+                    className="flex flex-wrap items-baseline gap-x-3 gap-y-1"
+                  >
+                    <Link
+                      to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(pair.left)}`}
+                      className="font-mono text-xs hover:text-accent"
+                    >
+                      {pair.left}
+                    </Link>
+                    <span className="text-xs text-muted">vs</span>
+                    <Link
+                      to={`/skills/${encodeURIComponent(skillId)}/cases/${encodeURIComponent(pair.right)}`}
+                      className="font-mono text-xs hover:text-accent"
+                    >
+                      {pair.right}
+                    </Link>
+                    <ContradictionBadge pair={pair} />
+                    <span className="text-xs text-muted">{pair.why}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {claims.length > 0 && (
+            <div>
+              <p className="mb-1.5 flex flex-wrap items-baseline gap-x-3 text-xs">
+                <span className="font-semibold text-warn">
+                  {claims.length} disputed sidecar claim{claims.length === 1 ? '' : 's'}
+                </span>
+                <Link
+                  to={`/skills/${encodeURIComponent(skillId)}?tab=sidecar`}
+                  className="text-muted underline hover:text-accent"
+                >
+                  review on the Sidecar tab →
+                </Link>
+              </p>
+              <ul className="space-y-2">
+                {claims.map((claim) => (
+                  <ClaimRow key={`${claim.path}|${claim.claim}`} claim={claim} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </Section>
   )
 }

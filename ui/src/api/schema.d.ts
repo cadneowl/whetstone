@@ -2609,6 +2609,40 @@ export interface components {
             why: string;
         };
         /**
+         * ContradictionReport
+         * @description Everything on this skill the evidence says disagrees with itself, in one payload.
+         *
+         *     Two unrelated detectors share a section because the operator's question — "does anything here
+         *     contradict anything?" — is one question, and a green answer must mean both halves were looked
+         *     at. `cases` is `curation.contradictions`: pairs of active eval cases that look mutually
+         *     unsatisfiable, resolved by archiving one on the Eval cases tab. `claims` is the sidecar
+         *     ledger's disputed rows for this skill's role: claims a consuming run or maintenance sweep,
+         *     with the code in front of it, said were wrong — resolved on the Sidecar tab, or from
+         *     `whetstone sidecars claims --disputed`.
+         */
+        ContradictionReport: {
+            /**
+             * Cases
+             * @default []
+             */
+            cases: components["schemas"]["Contradiction"][];
+            /**
+             * Claims
+             * @default []
+             */
+            claims: components["schemas"]["ClaimHistory"][];
+            /**
+             * Has Sidecar
+             * @default false
+             */
+            has_sidecar: boolean;
+            /**
+             * Sidecar Error
+             * @default
+             */
+            sidecar_error: string;
+        };
+        /**
          * DeadRule
          * @description One rule the evidence no longer stands behind, and the case for saying so.
          */
@@ -4157,8 +4191,8 @@ export interface components {
          *     guidance should not be made to pay for the tree first.
          *
          *     `provider`/`model` name an *embedding* backend, defaulting to `[drift]` — the same resolution
-         *     the drift probe and the index build use, because the deployment has one embedding backend and
-         *     the vectors this writes are the ones the search reads.
+         *     the drift probe and the index build use. Unlike those two, naming a *different* model here is
+         *     refused rather than honoured; see `_meaning_backend`.
          */
         MeaningRequest: {
             /**
@@ -6515,6 +6549,15 @@ export interface components {
         SkillHealth: {
             cadence: components["schemas"]["CadenceSection"];
             composition: components["schemas"]["Composition"];
+            /**
+             * @default {
+             *       "cases": [],
+             *       "claims": [],
+             *       "has_sidecar": false,
+             *       "sidecar_error": ""
+             *     }
+             */
+            contradictions: components["schemas"]["ContradictionReport"];
             /**
              * Dead Rules
              * @default []

@@ -9,9 +9,11 @@ from fastapi.testclient import TestClient
 from helpers import make_record
 
 from whetstone.core.gate import GateConfig, GateResult
+from whetstone.domain.run import ClaimVerdict
 from whetstone.domain.score import CaseScore, Confusion, SkillScore
 from whetstone.gates import GateRecord, GateStore, new_gate_id
 from whetstone.runs import RunStore
+from whetstone.sidecars.confirm import Ledger
 
 AT = datetime(2026, 7, 20, 9, 0, tzinfo=UTC)
 BRANCH = "whetstone/skill/rust-errors"
@@ -71,6 +73,116 @@ def test_health_before_any_run_admits_what_it_does_not_know(client: TestClient) 
         assert pending in body and body[pending] is None
     # The cadence clocks always exist; with no runs at all they simply owe nothing.
     assert body["cadence"]["due"] == []
+
+
+def test_health_calls_zero_contradictions_a_verified_green(client: TestClient) -> None:
+    """The section is always present: green must mean "both halves were checked and found clean",
+    which a section that only appears when something is wrong cannot say."""
+    report = _health(client)["contradictions"]
+    assert report["cases"] == []
+    assert report["claims"] == []
+    # The fixture skill declares no sidecar, and the payload says so rather than implying a claim
+    # ledger was read and found clean.
+    assert report["has_sidecar"] is False
+    assert report["sidecar_error"] == ""
+
+
+def test_health_reports_a_contradicting_case_pair(
+    client: TestClient, skills_root: Path
+) -> None:
+    """The same pair the Eval cases tab lists, so the two surfaces cannot disagree."""
+    # Point the no-flag case at the catch case's file with nearly its words — the wording signal,
+    # which is the one a corpus with no run history can still produce.
+    (skills_root / "rust-errors" / "eval_cases" / "unwrap-in-test" / "case.yaml").write_text(
+        """id: unwrap-in-test
+kind: should_not_flag
+expect:
+  - id: e1
+    must: not_appear
+    where:
+      path: src/handlers/charge.rs
+    semantic: "unwrap on the DB result cannot panic on a normal error path here"
+""",
+        encoding="utf-8",
+    )
+
+    report = _health(client)["contradictions"]
+
+    [pair] = report["cases"]
+    assert {pair["left"], pair["right"]} == {"unwrap-in-handler", "unwrap-in-test"}
+    assert pair["from_history"] is False
+    assert "wording alone" in pair["why"]
+
+
+def test_health_lists_this_roles_disputed_sidecar_claims(
+    client: TestClient, skills_root: Path, store: RunStore
+) -> None:
+    skill_md = skills_root / "rust-errors" / "SKILL.md"
+    skill_md.write_text(
+        skill_md.read_text(encoding="utf-8").replace(
+            "triggers:", "sidecar:\n  role: hub\ntriggers:", 1
+        ),
+        encoding="utf-8",
+    )
+    Ledger(store.root).record(
+        [
+            ClaimVerdict(
+                path="payments/.agents/context.md",
+                claim="charges use optimistic locking",
+                status="contradicted",
+                evidence="the retry loop takes a row lock first",
+            ),
+            # A dispute against another role's file is that role's news, not this skill's.
+            ClaimVerdict(
+                path="payments/.agents/perf.md",
+                claim="the cache is warm",
+                status="contradicted",
+                evidence="cold on every deploy",
+            ),
+            # Confirmed claims are healthy, not disputed.
+            ClaimVerdict(
+                path="payments/.agents/hub.md",
+                claim="the ledger is append-only",
+                status="confirmed",
+                evidence="no update statement touches it",
+            ),
+        ],
+        skill_id="rust-errors",
+    )
+
+    report = _health(client)["contradictions"]
+
+    assert report["has_sidecar"] is True
+    [claim] = report["claims"]
+    assert claim["path"] == "payments/.agents/context.md"
+    assert claim["claim"] == "charges use optimistic locking"
+    assert claim["contradicted"] == 1
+    assert claim["disputed"] is True
+    assert "row lock" in claim["last_evidence"]
+
+
+def test_an_unreadable_ledger_is_reported_not_dressed_up_as_green(
+    client: TestClient, skills_root: Path, store: RunStore
+) -> None:
+    """Green-by-failure must not render as green-by-verification — the field exists for this."""
+    skill_md = skills_root / "rust-errors" / "SKILL.md"
+    skill_md.write_text(
+        skill_md.read_text(encoding="utf-8").replace(
+            "triggers:", "sidecar:\n  role: hub\ntriggers:", 1
+        ),
+        encoding="utf-8",
+    )
+    # Bytes that are not UTF-8: `read_text` raises, which is the ValueError half of the guard.
+    # (A missing or empty ledger is not an error — `entries` answers [] for those.)
+    ledger = Path(store.root) / "sidecar_claims.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(b"\xff\xfe not a ledger")
+
+    report = _health(client)["contradictions"]
+
+    assert report["has_sidecar"] is True
+    assert report["claims"] == []
+    assert "could not read the claim ledger" in report["sidecar_error"]
 
 
 def test_health_reports_the_corpus_composition(client: TestClient) -> None:

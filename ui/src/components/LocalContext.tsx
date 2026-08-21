@@ -560,7 +560,10 @@ function ClaimLedger({ skillId, enabled }: { skillId: string; enabled: boolean }
   )
 }
 
-function ClaimRow({ claim }: { claim: ClaimHistory }) {
+/** One claim's ledger history. Exported for the health panel's disputed list, which must render
+ * the same row the Sidecar tab does — two hand-rolled renderings of one `ClaimHistory` had
+ * already drifted on which counts they showed. */
+export function ClaimRow({ claim }: { claim: ClaimHistory }) {
   return (
     <li
       className={`rounded border px-2.5 py-1.5 text-sm ${
