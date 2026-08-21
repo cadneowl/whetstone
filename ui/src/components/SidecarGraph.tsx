@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   useSidecarFile,
@@ -784,8 +784,16 @@ function Detail({
   onSelect: (id: string) => void
   onFocus: () => void
 }) {
+  const card = useRef<HTMLDivElement | null>(null)
+  // The click this card answers may have happened a full screen away — a dot at the top of a 78vh
+  // graph, or a result row a hundred entries below it. Unless the answer is brought into view, the
+  // click still reads as doing nothing, which is exactly the misreading this card exists to end.
+  // `nearest` so an already-visible card causes no movement at all.
+  useEffect(() => {
+    card.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+  }, [node.id])
   return (
-    <div className="rounded-lg border border-accent/40 bg-accent/5 px-4 py-3 text-sm">
+    <div ref={card} className="rounded-lg border border-accent/40 bg-accent/5 px-4 py-3 text-sm">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="font-mono text-xs" style={{ color: KIND_COLOR[node.kind] }}>
           {node.kind}

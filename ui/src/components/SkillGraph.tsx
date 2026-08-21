@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   useSkillShape,
@@ -492,6 +492,19 @@ function Results({
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const rows = matched.map((id) => byId.get(id)).filter((node): node is ShapeNode => !!node)
 
+  // Clicking a dot highlights its row here, and on the query everyone runs first that row is deep
+  // inside the list's own scroll. Scrolled by hand rather than `scrollIntoView`, which would also
+  // scroll the page — and the page is busy scrolling to the detail card, which must win.
+  const reveal = useCallback((row: HTMLLIElement | null) => {
+    const list = row?.parentElement
+    if (!row || !list) return
+    const top = row.offsetTop - list.offsetTop
+    const bottom = top + row.offsetHeight
+    if (top < list.scrollTop) list.scrollTop = top
+    else if (bottom > list.scrollTop + list.clientHeight)
+      list.scrollTop = bottom - list.clientHeight
+  }, [])
+
   if (rows.length === 0) {
     return (
       <p className="text-sm text-muted">
@@ -524,7 +537,7 @@ function Results({
       </p>
       <ul className="max-h-72 space-y-1 overflow-y-auto pr-1">
         {rows.map((node) => (
-          <li key={node.id}>
+          <li key={node.id} ref={node.id === selected ? reveal : undefined}>
             <button
               type="button"
               onClick={() => onSelect(node.id)}
@@ -610,8 +623,16 @@ function Detail({
   onSelect: (id: string) => void
   onFocus: () => void
 }) {
+  const card = useRef<HTMLDivElement | null>(null)
+  // The click this card answers may have happened a full screen away — a dot at the top of a 78vh
+  // graph, or a result row a hundred entries below it. Unless the answer is brought into view, the
+  // click still reads as doing nothing, which is exactly the misreading this card exists to end.
+  // `nearest` so an already-visible card causes no movement at all.
+  useEffect(() => {
+    card.current?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+  }, [node.id])
   return (
-    <div className="rounded-lg border border-accent/40 bg-accent/5 px-4 py-3 text-sm">
+    <div ref={card} className="rounded-lg border border-accent/40 bg-accent/5 px-4 py-3 text-sm">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <span className="font-mono text-xs" style={{ color: KIND_COLOR[node.kind] }}>
           {node.kind}

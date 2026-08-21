@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { radiusFor } from '@/components/graphLayout'
+import { BASE_WIDTH, radiusFor } from '@/components/graphLayout'
 import {
   colourOf,
   edgeStyleOf,
@@ -48,6 +48,10 @@ const WHEEL_SENSITIVITY = 0.0016
 /** A pointer that travelled less than this never meant to pan, so the click still counts. */
 const CLICK_SLOP = 3
 
+/** Two clicks on one dot within this are a double click. The browser's own event cannot be used —
+ * see the note on `answered` — so its conventional threshold is reproduced here. */
+const DOUBLE_MS = 400
+
 /** Roughly half a long label at 10px — past this from an edge, centring clips it. */
 const LABEL_REACH = 110
 
@@ -90,9 +94,13 @@ export function tooManyToRead(nodes: number, edges: number): boolean {
  */
 const RING_CEILING = 0.6
 
-export function anchorFor(x: number, width: number): 'start' | 'middle' | 'end' {
-  if (x < LABEL_REACH) return 'start'
-  if (x > width - LABEL_REACH) return 'end'
+export function anchorFor(
+  x: number,
+  width: number,
+  reach: number = LABEL_REACH,
+): 'start' | 'middle' | 'end' {
+  if (x < reach) return 'start'
+  if (x > width - reach) return 'end'
   return 'middle'
 }
 
@@ -170,9 +178,18 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
   // make dragging a three-hundred-node picture stutter.
   const gesture = useRef<
     | { kind: 'pan'; from: Point; view: View; travelled: number }
-    | { kind: 'node'; id: string; offset: Point }
+    | { kind: 'node'; node: N; offset: Point; client: Point; travelled: number }
     | null
   >(null)
+  // Clicks on a dot are decided in `onPointerUp`, not by the browser's `click` event. Dragging
+  // needs pointer capture, and capture retargets the `click` and `dblclick` that follow at the
+  // *capturing* element — the svg — so the `<g>`'s own handlers never hear a click that began with
+  // a captured pointer. The `<g>` handlers survive as the fallback for environments with no
+  // geometry, where no gesture ever starts (jsdom has no `getScreenCTM`); this flag stops an
+  // environment that delivers both from answering one press twice.
+  const answered = useRef(false)
+  // The last click's dot and moment, for telling a second click from a new one.
+  const lastClick = useRef<{ id: string; at: number } | null>(null)
 
   // A new picture is a new question, so the way you were looking at the old one is not carried
   // over.
@@ -251,6 +268,13 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
   const focus = hovered ?? selected
   const near = focus ? (neighbours.get(focus) ?? new Set<string>()) : null
 
+  // `boxFor` grows the layout box with the node count while the panel on screen does not, so a
+  // length in layout units shrinks on screen as the graph grows — at the 400-node cap a "10px"
+  // label drew at about four actual pixels, which is not a label. Text is for the reader, not the
+  // layout: scaling it by the box holds it at ten on-screen pixels at any node count, and dividing
+  // by the zoom (at the `<text>` itself) holds it there while the reader leans in.
+  const labelScale = box.width / BASE_WIDTH
+
   const roomy = nodes.length <= 14 || view.k >= LABEL_ZOOM
   const crowded = nodes.length > LABEL_LIMIT
   const labelled = (node: N) =>
@@ -277,6 +301,7 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
 
   function onNodePointerDown(event: React.PointerEvent<SVGGElement>, node: N) {
     if (event.button !== 0) return
+    answered.current = false
     const point = inLayout(event, view)
     const here = positionOf(node.id)
     if (!point || !here) return
@@ -284,8 +309,10 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
     svg.current?.setPointerCapture(event.pointerId)
     gesture.current = {
       kind: 'node',
-      id: node.id,
+      node,
       offset: { x: here.x - point.x, y: here.y - point.y },
+      client: { x: event.clientX, y: event.clientY },
+      travelled: 0,
     }
     setHolding(true)
   }
@@ -309,8 +336,15 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
     }
     const point = inLayout(event, view)
     if (!point) return
+    active.travelled = Math.max(
+      active.travelled,
+      Math.hypot(event.clientX - active.client.x, event.clientY - active.client.y),
+    )
+    // A press that has not travelled is still a click in the making, and a click must not nudge
+    // the dot it lands on.
+    if (active.travelled <= CLICK_SLOP) return
     const next = { x: point.x + active.offset.x, y: point.y + active.offset.y }
-    setMoved((current) => new Map(current).set(active.id, next))
+    setMoved((current) => new Map(current).set(active.node.id, next))
   }
 
   function onPointerUp(event: React.PointerEvent<SVGSVGElement>) {
@@ -318,10 +352,32 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
     gesture.current = null
     setHolding(false)
     svg.current?.releasePointerCapture?.(event.pointerId)
-    // A pan that went nowhere was a click on the background, and clicking the background clears the
-    // selection. Distinguished by distance rather than by time, because a slow careful click is
-    // still a click and a fast flick is still a pan.
-    if (active?.kind === 'pan' && active.travelled <= CLICK_SLOP) onSelect(null)
+    if (!active) return
+    if (active.kind === 'pan') {
+      // A pan that went nowhere was a click on the background, and clicking the background clears
+      // the selection. Distinguished by distance rather than by time, because a slow careful click
+      // is still a click and a fast flick is still a pan.
+      if (active.travelled <= CLICK_SLOP) onSelect(null)
+      return
+    }
+    answered.current = true
+    if (active.travelled > CLICK_SLOP) return
+    const id = active.node.id
+    const previous = lastClick.current
+    lastClick.current = { id, at: event.timeStamp }
+    if (previous?.id === id && event.timeStamp - previous.at <= DOUBLE_MS) {
+      lastClick.current = null
+      onFocus(active.node)
+      return
+    }
+    onSelect(id === selected ? null : id)
+  }
+
+  /** A cancelled pointer decided nothing — it must neither drop a dot nor count as a click. */
+  function onPointerCancel(event: React.PointerEvent<SVGSVGElement>) {
+    gesture.current = null
+    setHolding(false)
+    svg.current?.releasePointerCapture?.(event.pointerId)
   }
 
   const rearranged = !isWhole(view) || moved.size > 0
@@ -388,7 +444,7 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerCancel={onPointerCancel}
       >
         <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
           {edgeLayer}
@@ -413,10 +469,12 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
                 }
                 onClick={(event) => {
                   event.stopPropagation()
+                  if (answered.current) return
                   onSelect(node.id === selected ? null : node.id)
                 }}
                 onDoubleClick={(event) => {
                   event.stopPropagation()
+                  if (answered.current) return
                   onFocus(node)
                 }}
               >
@@ -486,9 +544,9 @@ export function Canvas<N extends GraphViewNode, E extends GraphViewEdge>({
                     // Centred except near an edge, where half a centred label falls outside the SVG and
                     // is clipped — which is worse than an off-centre one, because the half that survives
                     // reads as the whole label.
-                    textAnchor={anchorFor(point.x, box.width)}
+                    textAnchor={anchorFor(point.x, box.width, LABEL_REACH * labelScale)}
                     className="fill-ink"
-                    style={{ fontSize: 10 / view.k, pointerEvents: 'none' }}
+                    style={{ fontSize: (10 * labelScale) / view.k, pointerEvents: 'none' }}
                   >
                     {node.label.length > 34 ? `${node.label.slice(0, 33)}…` : node.label}
                   </text>
