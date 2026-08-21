@@ -28,6 +28,7 @@ from pydantic import BaseModel, computed_field
 
 from whetstone.domain.run import ClaimStatus, ClaimVerdict
 from whetstone.sidecars.claims import Claim, parse
+from whetstone.sidecars.collect import CONTEXT_FILE
 
 LEDGER_FILE = "sidecar_claims.jsonl"
 
@@ -284,3 +285,19 @@ class ClaimHistory(BaseModel):
         different conclusions about which claims are the ones somebody has to look at.
         """
         return self.contradicted > 0
+
+
+def role_claim_histories(directory: str | Path, role: str) -> list[ClaimHistory]:
+    """The ledger's rows for the files this role reads.
+
+    Filtered to the *files* rather than to the entries one skill recorded, because `context.md` is
+    shared between roles on purpose — and so is the news that one of its claims is wrong. This is
+    the one filter every surface selects claims by (the skill page's disputed count, the claims
+    list, the graph's verdict rings, the health panel), held together here rather than by four
+    hand-copied suffix tuples, so two screens cannot quietly select different claim sets for one
+    role.
+
+    Raises what `summary` raises; how a broken ledger is reported is each surface's decision.
+    """
+    suffixes = (f"/{CONTEXT_FILE}", f"/{role}.md")
+    return [h for h in Ledger(directory).summary() if h.path.endswith(suffixes)]

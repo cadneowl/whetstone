@@ -11,6 +11,7 @@ import {
   type PendingCase,
   type SkillDetail as Detail,
 } from '@/api/client'
+import { ContradictionBadge } from '@/components/ContradictionBadge'
 import { Guidance } from '@/components/Guidance'
 import { GuidanceEditor } from '@/components/GuidanceEditor'
 import { GuidanceSearch } from '@/components/GuidanceSearch'
@@ -638,19 +639,7 @@ function ContradictionList({ skillId, pairs }: { skillId: string; pairs: Contrad
             className="rounded-lg border border-warn/40 bg-surface px-3 py-2 text-sm"
           >
             <p className="text-xs text-muted">
-              {pair.from_history ? (
-                <Badge tone="warn" title={`Measured across ${pair.runs} run(s)`}>
-                  measured
-                </Badge>
-              ) : (
-                <Badge
-                  tone="neutral"
-                  title="Flagged on wording alone — no run has scored them together yet"
-                >
-                  wording only
-                </Badge>
-              )}{' '}
-              {pair.why}
+              <ContradictionBadge pair={pair} /> {pair.why}
             </p>
             {[
               { id: pair.left, semantic: pair.left_semantic },

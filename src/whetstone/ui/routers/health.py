@@ -22,7 +22,13 @@ from whetstone import fit, staging
 from whetstone.cadence import CadenceSection, CadenceStore, clocks, last_anchor_at
 from whetstone.caseindex import stale_cases
 from whetstone.config import Config
-from whetstone.curation import Discrimination, discrimination, retirement_proposals, tier_counts
+from whetstone.curation import (
+    Contradiction,
+    Discrimination,
+    discrimination,
+    retirement_proposals,
+    tier_counts,
+)
 from whetstone.deadrules import DeadRule, dead_rules
 from whetstone.domain.run import RunRecord
 from whetstone.domain.score import HoldoutReport
@@ -33,7 +39,8 @@ from whetstone.inbox import Retirement
 from whetstone.reviewer.llm_reviewer import render_pages
 from whetstone.reviews import ReviewStore
 from whetstone.runs import RunStore
-from whetstone.service import precision_evidence, review_mode
+from whetstone.service import case_contradictions, precision_evidence, review_mode
+from whetstone.sidecars.confirm import ClaimHistory, role_claim_histories
 from whetstone.steps import StepSpec, load_step
 from whetstone.ui.deps import (
     CadenceDep,
@@ -129,6 +136,28 @@ class IndexSection(BaseModel):
     stale: list[str] = []
 
 
+class ContradictionReport(BaseModel):
+    """Everything on this skill the evidence says disagrees with itself, in one payload.
+
+    Two unrelated detectors share a section because the operator's question — "does anything here
+    contradict anything?" — is one question, and a green answer must mean both halves were looked
+    at. `cases` is `curation.contradictions`: pairs of active eval cases that look mutually
+    unsatisfiable, resolved by archiving one on the Eval cases tab. `claims` is the sidecar
+    ledger's disputed rows for this skill's role: claims a consuming run or maintenance sweep,
+    with the code in front of it, said were wrong — resolved on the Sidecar tab, or from
+    `whetstone sidecars claims --disputed`.
+    """
+
+    cases: list[Contradiction] = []
+    claims: list[ClaimHistory] = []
+    # Whether the claims half can exist at all. A skill with no `sidecar:` block has no claims to
+    # dispute, and the panel says so rather than implying a ledger was checked and found clean.
+    has_sidecar: bool = False
+    # A ledger that failed to read, spelled out — green-by-failure must not render as
+    # green-by-verification.
+    sidecar_error: str = ""
+
+
 class SkillHealth(BaseModel):
     skill_id: str
     version: int
@@ -155,6 +184,9 @@ class SkillHealth(BaseModel):
     # Computed from the staged skill like every curation view: a distill on the branch that
     # already dropped a rule must stop the nagging immediately.
     dead_rules: list[DeadRule] = []
+    # Case pairs and sidecar claims the evidence says disagree — always present, so zero renders
+    # as a verified green rather than a missing section.
+    contradictions: ContradictionReport = ContradictionReport()
 
 
 @router.get("/{skill_id}/health", response_model=SkillHealth)
@@ -209,7 +241,28 @@ def get_health(
         index=_index_section(curated),
         cadence=_cadence_section(store, drift, cadence, skill, probe),
         dead_rules=dead_rules(curated),
+        contradictions=_contradiction_report(store, skill),
     )
+
+
+def _contradiction_report(store: RunStore, skill: Skill) -> ContradictionReport:
+    """Both detectors' findings, joined.
+
+    The same computations the Eval cases tab and the Sidecar tab already show — same window, same
+    ledger filter — so this panel and those tabs can never disagree about the same skill. From the
+    unstaged skill for the same reason: the Eval cases tab's contradiction list is computed from
+    it, and one skill must not read as contradictory on one tab and clean on another.
+    """
+    report = ContradictionReport(cases=case_contradictions(store, skill))
+    spec = skill.sidecar
+    if spec.is_empty():
+        return report
+    report.has_sidecar = True
+    try:
+        report.claims = [h for h in role_claim_histories(store.root, spec.role) if h.disputed]
+    except (OSError, ValueError) as exc:
+        report.sidecar_error = f"could not read the claim ledger: {exc}"
+    return report
 
 
 @router.get("/{skill_id}/fit", response_model=FitReport)

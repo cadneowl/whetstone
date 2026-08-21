@@ -20,7 +20,7 @@ from whetstone.core.loader import (
     load_skill,
     load_skills,
 )
-from whetstone.curation import CurationError, contradictions, retier_yaml
+from whetstone.curation import CurationError, retier_yaml
 from whetstone.domain.enums import Severity
 from whetstone.domain.eval_model import CaseTier, EvalKind
 from whetstone.domain.run import RunRecord, skill_hash
@@ -36,6 +36,7 @@ from whetstone.service import (
     SidecarStatus,
     SkillDetail,
     SkillSummary,
+    case_contradictions,
     case_detail,
     review_mode,
     skill_detail,
@@ -43,7 +44,7 @@ from whetstone.service import (
     step_runtimes,
 )
 from whetstone.sharpening import DEFAULT_WINDOW, SharpeningReport, sharpening_report
-from whetstone.sidecars.confirm import ClaimHistory
+from whetstone.sidecars.confirm import ClaimHistory, role_claim_histories
 from whetstone.sidecars.graph import DEFAULT_QUERY_LIMIT, SidecarGraph, SidecarGraphView
 from whetstone.skillgraph import DEFAULT_QUERY_LIMIT as SHAPE_QUERY_LIMIT
 from whetstone.skillgraph import SkillGraphView
@@ -106,9 +107,7 @@ def get_skill(
         case.holdout = partition_for(case.id, fraction, pinned) == "holdout"
     # One query for the whole corpus. Asking per case put a connection and a glob of the runs
     # directory between every pair of booleans, on the screen people open most.
-    detail.contradictions = contradictions(
-        skill, store.pass_history(skill.id, runs=_CONTRADICTION_WINDOW)
-    )
+    detail.contradictions = case_contradictions(store, skill)
     # Counted, not listed. The tab strip needs the number on every tab, and listing this skill's
     # reviews to get it would validate every record on disk — each carrying its whole diff — for
     # three integers. The Reviews tab fetches the records themselves, once it is opened.
@@ -140,7 +139,6 @@ def _sidecar_status(
     from whetstone.sidecars import installed_state
     from whetstone.sidecars.claims import parse
     from whetstone.sidecars.collect import AGENTS_DIR, CONTEXT_FILE
-    from whetstone.sidecars.confirm import Ledger
 
     spec = skill.sidecar
     if spec.is_empty():
@@ -204,20 +202,12 @@ def _sidecar_status(
         # Only the files this role would ever read. Filtering by skill id instead would hide a
         # contradiction another skill found in a `context.md` that this one also reads — the
         # role-agnostic file is shared on purpose, and so is the news that it is wrong.
-        suffixes = (f"/{CONTEXT_FILE}", f"/{spec.role}.md")
         status.disputed = sum(
-            1
-            for history in Ledger(store.root).summary()
-            if history.disputed and history.path.endswith(suffixes)
+            1 for history in role_claim_histories(store.root, spec.role) if history.disputed
         )
     except (OSError, ValueError):
         status.disputed = 0
     return status
-
-
-# How far back the pair evidence looks. Wide enough to span several guidance versions — the claim
-# is "every version so far bought one by losing the other", which needs more than the last edit.
-_CONTRADICTION_WINDOW = 20
 
 
 def _promoted_but_unmerged(
@@ -292,15 +282,11 @@ def get_claims(skill_id: str, root: SkillsRootDep, store: StoreDep) -> list[Clai
     `context.md` is shared between roles on purpose — and so is the news that one of its claims is
     wrong.
     """
-    from whetstone.sidecars.collect import CONTEXT_FILE
-    from whetstone.sidecars.confirm import Ledger
-
     skill = _load_one(root, skill_id)
     if skill.sidecar.is_empty():
         return []
-    suffixes = (f"/{CONTEXT_FILE}", f"/{skill.sidecar.role}.md")
     try:
-        return [h for h in Ledger(store.root).summary() if h.path.endswith(suffixes)]
+        return role_claim_histories(store.root, skill.sidecar.role)
     except (OSError, ValueError):
         return []
 
@@ -432,13 +418,10 @@ def _annotate(store: StoreDep, role: str, graph: SidecarGraph) -> None:
     reason `get_claims` is: `context.md` is shared between roles on purpose, and so is the news
     that one of its claims is wrong.
     """
-    from whetstone.sidecars.collect import CONTEXT_FILE
-    from whetstone.sidecars.confirm import Ledger
     from whetstone.sidecars.graph import annotate_verdicts
 
-    suffixes = (f"/{CONTEXT_FILE}", f"/{role}.md")
     try:
-        histories = [h for h in Ledger(store.root).summary() if h.path.endswith(suffixes)]
+        histories = role_claim_histories(store.root, role)
     except (OSError, ValueError):
         return
     annotate_verdicts(graph, histories)

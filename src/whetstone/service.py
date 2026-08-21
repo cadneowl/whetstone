@@ -36,7 +36,7 @@ from whetstone.corpus.builder import (
     write_candidate,
 )
 from whetstone.corpus.model import CandidateCase
-from whetstone.curation import Contradiction, discrimination
+from whetstone.curation import Contradiction, contradictions, discrimination
 from whetstone.deadrules import RULE_RE, dead_rules
 from whetstone.domain.change import CodeChange
 from whetstone.domain.eval_model import (
@@ -1239,6 +1239,21 @@ class SkillDetail(BaseModel):
     # runs is current — none of which appeared on any screen, so a skill whose local context was
     # silently resolving to nothing looked identical to one with no local context to read.
     sidecar: SidecarStatus | None = None
+
+
+# How far back the pair evidence looks. Wide enough to span several guidance versions — the claim
+# is "every version so far bought one by losing the other", which needs more than the last edit.
+CONTRADICTION_WINDOW = 20
+
+
+def case_contradictions(store: RunStore, skill: Skill) -> list[Contradiction]:
+    """The mutually-unsatisfiable case pairs, as every surface lists them.
+
+    One computation and one window, called by the skill detail (the Eval cases tab) and the health
+    panel both — held together by this function rather than by discipline, so the two screens
+    cannot quietly come to list different pairs for the same skill.
+    """
+    return contradictions(skill, store.pass_history(skill.id, runs=CONTRADICTION_WINDOW))
 
 
 class BaselineVerdict(BaseModel):
